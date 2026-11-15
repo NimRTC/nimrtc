@@ -399,6 +399,65 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //       SRTP backend family; mirrors the DTLS seam's
     //       dtls_plugin.hpp)
     //
+    // Remote-desktop plan A6 / A10 / A3 bump: +4 public headers
+    // (136 -> 140) for the capture layer's cursor seam, the shared
+    // capture -> frame-stream adapter, and the Windows display-capture
+    // backend:
+    //     - video_capture/cursor_compositor.hpp (the pluggable cursor
+    //       layer: ICursorSource / ICursorCompositor)
+    //     - video_capture/capture_source_adapter.hpp (the shared
+    //       capture -> VideoSourceFrame adapter)
+    //     - video_capture/dxgi_desktop_dup.hpp (the Windows DXGI
+    //       Desktop Duplication device and its factory)
+    //     - video_capture/win_cursor_source.hpp (the Windows cursor
+    //       source: GetCursorInfo + GetIconInfo pointer extraction)
+    //
+    // Remote-desktop plan A3 bump: +1 public header (140 -> 141) for
+    // the Windows Graphics Capture backend:
+    //     - video_capture/wgc_capture.hpp (the Windows Graphics
+    //       Capture device and its factory)
+    //
+    // Remote-desktop plan A5 bump: +3 public headers (141 -> 144) for
+    // the Linux capture backends:
+    //     - video_capture/x11_capture.hpp (the X11 XGetImage display
+    //       capture device and its factory)
+    //     - video_capture/x11_cursor_source.hpp (the X11 cursor
+    //       source: XFixesGetCursorImage pointer extraction)
+    //     - video_capture/portal_capture.hpp (the XDG Desktop Portal +
+    //       PipeWire capture device and its factory)
+    //
+    // Remote-desktop plan A4 bump: +1 public header (144 -> 145) for
+    // the macOS ScreenCaptureKit capture backend:
+    //     - video_capture/screen_capture_kit.hpp (the ScreenCaptureKit
+    //       capture device and its factory)
+    //
+    // Logged baseline values from the alpha.1 dry run:
+    //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
+    //     missing_markers=0.
+    // Bump this constant in the same PR that intentionally adds/removes
+    // a public header.
+    //
+    // v1.3.0 (M1, remote-desktop): +11 headers on top of main's 137 --
+    // the GPU device registry
+    // (src/core/include/nimrtc/core/gpu_device_registry.hpp) and the
+    // ten capture-layer headers:
+    //     - video_capture/capture_source_adapter.hpp
+    //     - video_capture/cursor_compositor.hpp
+    //     - video_capture/dirty_rect_diff.hpp
+    //     - video_capture/dxgi_desktop_dup.hpp
+    //     - video_capture/portal_capture.hpp
+    //     - video_capture/screen_capture_kit.hpp
+    //     - video_capture/wgc_capture.hpp
+    //     - video_capture/win_cursor_source.hpp
+    //     - video_capture/x11_capture.hpp
+    //     - video_capture/x11_cursor_source.hpp
+    //
+    // NOTE: the count is 148 and not 137 + 11 = 148 by coincidence --
+    // it is simply the number of public headers the merged tree
+    // actually has.  main moved the dtls / raw_udp / sctp / transport /
+    // web_transport headers under src/modules/ (Phase 4 §4.1), which
+    // relocated 33 headers without adding or removing any, so the
+    // merged tree's count is main's count plus this branch's additions.
     // v1.2.0 bump: +0 public *headers* for the scheduler's real C ABI
     //   (architecture remediation plan D5 / ADR-026) — the `extern "C"`
     //   surface an embedded / FFI host can actually include and link:
@@ -549,11 +608,32 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   - rd_input_inject/key_map.hpp (the platform-neutral key
     //     layout and its translation into the OS virtual-key numbers)
     //
+    // Remote-desktop plan M1C bump: +10 public headers (188 -> 198) for
+    // the platform capture layer that landed from `main`
+    // (`src/modules/video_capture/`):
+    //   - video_capture/capture_source_adapter.hpp (the adapter that
+    //     turns a platform capture source into the capture seam)
+    //   - video_capture/dirty_rect_diff.hpp (the dirty-rect tracker)
+    //   - video_capture/dxgi_desktop_dup.hpp (the DXGI desktop
+    //     duplication source)
+    //   - video_capture/portal_capture.hpp (the Wayland / xdg-desktop-
+    //     portal source)
+    //   - video_capture/screen_capture_kit.hpp (the macOS
+    //     ScreenCaptureKit source)
+    //   - video_capture/wgc_capture.hpp (the Windows Graphics Capture
+    //     source)
+    //   - video_capture/win_cursor_source.hpp (the Windows cursor
+    //     source)
+    //   - video_capture/x11_capture.hpp (the X11 source)
+    //   - video_capture/x11_cursor_source.hpp (the X11 cursor source)
+    //   - video_capture/cursor_compositor.hpp (the cursor compositor
+    //     that merges the cursor into the captured surface)
+    //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 188;
+    constexpr std::size_t kBaselineHeaderCount = 198;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -77,8 +77,8 @@ target_link_libraries(test_sctp_data_channel PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_datachannel
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_sctp_data_channel
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

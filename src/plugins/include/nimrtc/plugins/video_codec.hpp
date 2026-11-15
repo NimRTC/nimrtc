@@ -68,6 +68,61 @@
 namespace nimrtc::plugins {
 
 // ---------------------------------------------------------------------------
+// Backend selection policy (remote-desktop plan B2 / RD-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Which class of encoder the host insists on.
+ *
+ * Hardware-first is the *default* (RD-1): the engine picks a hardware
+ * encoder whenever one exists and supports the requested configuration,
+ * and the software path is the fallback.  The override exists for the
+ * two cases the default cannot serve:
+ *
+ *   - a host that **must** have hardware (a fanless embedded box whose
+ *     CPU budget does not allow a software encode) and therefore needs
+ *     to be told *at startup* when the demand cannot be met, rather
+ *     than discovering it as a CPU saturation weeks later;
+ *   - a **test** that needs a reproducible encoder, and therefore must
+ *     not depend on which GPU happens to be in the machine.
+ *
+ * The policy travels with `VideoCodecConfig` because the *selection*
+ * happens inside the codec module (which owns the backend table), and
+ * the engine is the one that knows the host's intent.
+ */
+enum class NIMRTC_API_STABLE CodecBackend : std::uint8_t {
+    /** Hardware when available, software otherwise.  The default. */
+    kAuto     = 0,
+    /** Hardware only.  Selection *fails* when no hardware encoder for
+     *  the requested codec is available — it never silently falls back
+     *  to software. */
+    kHardware = 1,
+    /** Software only.  Selection never picks a hardware encoder. */
+    kSoftware = 2,
+};
+
+/** Human-readable backend-policy name (for logs and config parsing). */
+inline NIMRTC_API_STABLE std::string_view codec_backend_name(
+        CodecBackend p) noexcept {
+    switch (p) {
+        case CodecBackend::kHardware: return "hardware";
+        case CodecBackend::kSoftware: return "software";
+        default:                     return "auto";
+    }
+}
+
+/** Parse a backend policy from its configuration spelling
+ *  ("auto" / "hardware" / "software").  Returns false for an unknown
+ *  spelling — the caller reports the bad value rather than guessing. */
+inline NIMRTC_API_STABLE bool codec_backend_from_string(
+        std::string_view s, CodecBackend& out) noexcept {
+    if (s == "auto")     { out = CodecBackend::kAuto;     return true; }
+    if (s == "hardware") { out = CodecBackend::kHardware; return true; }
+    if (s == "software") { out = CodecBackend::kSoftware; return true; }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // Pixel format / codec kind — re-exported from video_frame so plugin code
 // can stay in the `nimrtc::plugins` namespace.
 // ---------------------------------------------------------------------------
@@ -197,6 +252,72 @@ inline NIMRTC_API_STABLE std::string_view video_codec_backend_preference_name(
 // Video codec configuration
 // ---------------------------------------------------------------------------
 
+// Content hint (remote-desktop plan B7 / RD-3)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief What kind of picture the encoder is looking at.
+ *
+ * A screen capture is *not* a camera pointed at a monitor (RD-3): it
+ * has flat regions, sharp edges, text and very little motion, and a
+ * camera-style encoder setting (high QP on detail, motion estimation
+ * everywhere, a fixed quantiser) spends most of its bitrate on noise
+ * the viewer does not care about.
+ *
+ * The hint is what lets the encoder switch to screen-content coding:
+ * intra block copy, a palette / text mode, a higher quantiser on flat
+ * regions, and a lower motion search depth.  It is also what the SDP
+ * carries (`a=content-hint:` media-level attribute, plus the
+ * `x-google-content-hint` fmtp parameter for H.264), so the *sender*
+ * can tune the encoder and the *receiver* can know what to expect.
+ *
+ * The values mirror the WebRTC `RTCContentHint` vocabulary so a
+ * WebRTC-compatible peer understands the SDP attribute unchanged.
+ */
+enum class NIMRTC_API_STABLE ContentHint : std::uint8_t {
+    /** No hint — the encoder uses its default (camera-style) tuning. */
+    kUnspecified = 0,
+    /** The picture has motion; favour temporal prediction. */
+    kMotion      = 1,
+    /** The picture has fine detail (a camera, a document scan). */
+    kDetail      = 2,
+    /** The picture is text (a terminal, an editor, a spreadsheet). */
+    kText        = 3,
+};
+
+/** Human-readable content-hint name (for logs and SDP). */
+inline NIMRTC_API_STABLE std::string_view content_hint_name(ContentHint h) noexcept {
+    switch (h) {
+        case ContentHint::kMotion: return "motion";
+        case ContentHint::kDetail: return "detail";
+        case ContentHint::kText:   return "text";
+        default:                   return "";
+    }
+}
+
+/** The `a=content-hint:` SDP attribute value for a hint.
+ *  Empty for `kUnspecified` — the attribute is then omitted entirely. */
+inline NIMRTC_API_STABLE std::string_view content_hint_sdp_value(
+        ContentHint h) noexcept {
+    return content_hint_name(h);
+}
+
+// ---------------------------------------------------------------------------
+// Colour description (remote-desktop plan C5)
+// ---------------------------------------------------------------------------
+//
+// The seam has **one** vocabulary for the colour description, and it is
+// the `VideoColor*` one below (`VideoColorRange`, `VideoColorMatrix`,
+// `VideoColorDescription`): it is the form that carries the *plumbing*
+// the pipeline needs — `known()` ("did anybody say?") and
+// `agrees_with()` ("do the two ends agree?").
+//
+// The shorter spellings (`ColorRange`, `ColorMatrix`,
+// `ColorDescription`) are kept as aliases *after* the definitions, so a
+// plug-in that prefers them still compiles; they are the same types, not
+// a second set.
+
+
 /** Video codec configuration (passed at open() time). Mirrors the
  *  concrete module's `EncoderConfig` / `DecoderConfig`. */
 struct NIMRTC_API_STABLE VideoCodecConfig {
@@ -263,6 +384,34 @@ struct NIMRTC_API_STABLE VideoCodecConfig {
      * its own GPU frames sets this explicitly.
      */
     GpuContext gpu_context;
+
+    // ---- Remote-desktop additions (plan B2 / B7 / C5) --------------------
+    //
+    // These ride along with the open-time configuration so the codec
+    // module can honour them while it builds the backend: the backend
+    // *selection* needs the policy (B2), and the encoder's tuning needs
+    // the content hint (B7) and the colour description (C5).
+
+    /** Which class of encoder the host insists on (B2).
+     *
+     *  The same question as `backend_preference` above, spelled with
+     *  the codec module's own vocabulary.  The two are kept in step by
+     *  the engine when it fills the config; the module reads whichever
+     *  it knows. */
+    CodecBackend backend_policy = CodecBackend::kAuto;
+
+    /** What kind of picture the encoder is looking at (B7).
+     *
+     *  The same question as the content hint in `VideoEncoderParams`
+     *  above — the open-time value is what the backend is *built*
+     *  for, the live one is what it is *tuned* for. */
+    ContentHint content_hint = ContentHint::kUnspecified;
+
+    /** The luma/chroma range of the picture (C5). */
+    ColorRange color_range = ColorRange::kUnspecified;
+
+    /** The YUV↔RGB matrix of the picture (C5). */
+    ColorMatrix color_matrix = ColorMatrix::kUnspecified;
 };
 
 // ---------------------------------------------------------------------------
@@ -331,6 +480,39 @@ struct NIMRTC_API_STABLE VideoColorDescription {
         return true;
     }
 };
+
+// ---- The shorter spellings (the same types, not a second set) -------------
+//
+// `plugins::ColorRange` and friends are what a plug-in that was written
+// against the shorter vocabulary expects; they are aliases of the
+// `VideoColor*` types above, so the two spellings cannot drift.
+
+using NIMRTC_API_STABLE ColorRange  = VideoColorRange;
+using NIMRTC_API_STABLE ColorMatrix = VideoColorMatrix;
+using NIMRTC_API_STABLE ColorDescription = VideoColorDescription;
+
+/** Human-readable colour-range name (for logs and SDP). */
+inline NIMRTC_API_STABLE std::string_view color_range_name(
+        ColorRange r) noexcept {
+    switch (r) {
+        case ColorRange::kLimited: return "limited";
+        case ColorRange::kFull:    return "full";
+        case ColorRange::kUnknown: break;
+    }
+    return "";
+}
+
+/** Human-readable colour-matrix name (for logs and SDP). */
+inline NIMRTC_API_STABLE std::string_view color_matrix_name(
+        ColorMatrix m) noexcept {
+    switch (m) {
+        case ColorMatrix::kBt601:  return "bt601";
+        case ColorMatrix::kBt709:  return "bt709";
+        case ColorMatrix::kBt2020: return "bt2020";
+        case ColorMatrix::kUnknown: break;
+    }
+    return "";
+}
 
 // ---------------------------------------------------------------------------
 // Encoder parameter set (remote-desktop plan B12)
@@ -416,13 +598,12 @@ struct NIMRTC_API_STABLE VideoEncoderParams {
      *  different coding tools (remote-desktop plan B7 / RD-3).
      *
      *  `kUnspecified` means "the engine has no opinion", which is the
-     *  correct value for a camera stream. */
-    enum class ContentHint : std::uint8_t {
-        kUnspecified = 0,  ///< no opinion (camera content)
-        kMotion     = 1,  ///< camera-like: spend the budget on motion
-        kDetail     = 2,  ///< screen content: preserve fine detail / text
-        kText       = 3,  ///< screen content dominated by text
-    };
+     *  correct value for a camera stream.
+     *
+     *  It is the *same* type as the seam-level `plugins::ContentHint`
+     *  above — the nested spelling is an alias, not a second enum, so a
+     *  value written with one spelling can be read with the other. */
+    using ContentHint = ::nimrtc::plugins::ContentHint;
 
     /** The content hint for this stream. */
     ContentHint content_hint = ContentHint::kUnspecified;
@@ -582,6 +763,55 @@ struct NIMRTC_API_STABLE VideoCodecStats {
     std::uint64_t encode_latency_us_total = 0;
     /** The largest single encode duration seen, in microseconds. */
     std::uint64_t encode_latency_us_max = 0;
+
+
+    // ---- Telemetry (remote-desktop plan B15) -------------------------------
+    //
+    // The numbers that make a live session *explainable*: which backend
+    // is actually running, whether the frames took the zero-copy path
+    // or were staged through the CPU, what the encoder is actually
+    // producing, and how long it takes.
+
+    /** The backend identifier that produced this codec ("nvenc", "h264",
+     *  "qsv", ...).  Empty when the codec does not know. */
+    std::string backend_id;
+
+    /** True iff this codec instance runs on a hardware encoder. */
+    bool hardware = false;
+
+    /** True iff the *last* frame took the zero-copy path (the GPU handle
+     *  went straight into the encoder).  False means the frame was
+     *  staged through the CPU. */
+    bool zero_copy = false;
+
+    /** The bitrate the encoder was *asked* for, in bits per second. */
+    std::uint32_t configured_bitrate_bps = 0;
+
+    /** The bitrate the encoder actually produced, in bits per second,
+     *  averaged over the session.  0 until enough frames have been
+     *  encoded to make the average meaningful. */
+    std::uint32_t actual_bitrate_bps = 0;
+
+    /** The average encode latency, in microseconds. */
+    std::uint32_t avg_encode_latency_us = 0;
+
+    /** The number of frames that took the zero-copy path.
+     *
+     *  The counterpart of `frames_encoded_zero_copy` above: the two
+     *  count the same frames from two sides — the codec's own
+     *  statement and the engine's own accounting.  They are kept
+     *  apart because they are read by different consumers (the
+     *  benchmark reads the codec's, the engine's telemetry reads its
+     *  own), and a disagreement between them is a *finding*, not
+     *  noise. */
+    std::uint64_t zero_copy_frames = 0;
+
+    /** The number of frames that had to be staged through the CPU. */
+    std::uint64_t staged_frames = 0;
+
+    /** How many frames the encoder had to skip because its input queue
+     *  was full (the encoder is behind the capture). */
+    std::uint64_t queue_drops = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -1026,6 +1256,37 @@ public:
      *  Used by PLI / FIR feedback handlers. No-op for decoder-only
      *  implementations. */
     virtual Status force_keyframe() noexcept = 0;
+
+    /**
+     * @brief Push the encoder's live parameter set (plan B12).
+     *
+     * The single entry point through which the engine tells the encoder
+     * what to do: geometry, rate, quantiser, content hint, colour
+     * description and region of interest.  The encoder is *passive* —
+     * it never asks the bandwidth estimator anything, and the engine
+     * never pokes at codec internals.
+     *
+     * The default implementation folds the parameters back into
+     * `update_config()` so that a codec which only understands the
+     * open-time config still honours the bitrate / GOP / geometry
+     * changes.  A codec with real support for the extra knobs
+     * (content hint, QP, ROI) overrides this.
+     *
+     * @return kOk when the parameters were accepted.
+     */
+    virtual Status set_params(const VideoEncoderParams& params) noexcept {
+        // The default path maps the parameter set onto the config the
+        // codec already understands.  The fields that have no config
+        // counterpart (qp, content_hint, colour description, ROI) are
+        // silently dropped — a codec that cares overrides this.
+        VideoCodecConfig cfg = config();
+        if (params.width  != 0) cfg.width  = params.width;
+        if (params.height != 0) cfg.height = params.height;
+        if (params.fps    != 0) cfg.fps    = params.fps;
+        cfg.bitrate_bps       = params.bitrate_bps;
+        cfg.keyframe_interval = params.keyframe_interval;
+        return update_config(cfg);
+    }
 
     // ---- Zero-copy (HW surface) path --------------------------------------
     //

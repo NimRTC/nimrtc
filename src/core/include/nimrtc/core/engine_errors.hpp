@@ -106,24 +106,36 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoReceiverPluginMissing = 0
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSenderOpenFailed    = 0x1A26;
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSenderPluginMissing = 0x1A27;
 
+/** The capture device could not be opened (remote-desktop plan A10).
+ *
+ *  Reported when `EngineConfig::video_capture_name` names a factory
+ *  that exists, but the device itself refuses to open — a permission
+ *  denial on macOS, a missing device on Linux, a display that went
+ *  away on Windows. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCaptureOpenFailed    = 0x1A28;
+
+/** No capture factory is registered under the configured id.
+ *
+ *  Distinct from `kVideoCaptureOpenFailed`: this one means "you asked
+ *  for a plug-in that does not exist", the other means "the plug-in
+ *  exists but the device would not open". */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCapturePluginMissing = 0x1A29;
+
+/** The user (or the OS) refused the screen capture.
+ *
+ *  Distinct from `kVideoCaptureOpenFailed`: that one means "the device
+ *  would not open" (a display that went away, a missing portal), this
+ *  one means "the permission was not granted" — the macOS Screen
+ *  Recording prompt was answered with "no", or the portal's picker was
+ *  dismissed (remote-desktop plan A4).
+ *
+ *  The distinction matters to the host: this one is fixable by the
+ *  *user*, and the host should say so rather than reporting a broken
+ *  device. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCapturePermissionDenied = 0x1A2A;
+
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecOpenFailed    = 0x1A30;
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecPluginMissing = 0x1A31;
-
-/** The capture-device plugin could not be opened (remote-desktop plan A1).
- *
- *  Reported when `EngineConfig::video_capture_name` names a registered
- *  factory whose `open()` fails — the device could not be acquired, the
- *  requested format was refused, or the platform denied access. */
-inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCaptureOpenFailed = 0x1A40;
-
-/** The capture-device plugin id in `EngineConfig::video_capture_name` is
- *  not registered in the registry's video-capture slot.
- *
- *  A hard failure: the user asked for a capture device by name and the
- *  name does not resolve.  Silently falling back to "no capture device"
- *  would turn a typo into a session that quietly never produces a
- *  frame. */
-inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCapturePluginMissing = 0x1A41;
 
 /** The peer offered a video codec NimRTC cannot decode (C9).
  *

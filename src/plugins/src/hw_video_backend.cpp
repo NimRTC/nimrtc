@@ -52,7 +52,15 @@ const B* first_match(const std::vector<B>& all,
                      VideoCodecKind kind,
                      std::string_view preferred_id,
                      VideoCodecBackendPreference preference) noexcept {
-    // 1. Explicit preferred id (must be available and eligible)
+    // The preference filters the *eligible* set.  `kAuto` keeps
+    // everything, `kHardware` keeps only the hardware backends,
+    // `kSoftware` only the software ones.
+    //
+    // (`CodecBackend` and `VideoCodecBackendPreference` are the same
+    // question with two spellings; the seam keeps the longer one and
+    // the engine fills it from `EngineConfig::video_codec_backend`.)
+    //
+    // 1. Explicit preferred id (must be available AND eligible)
     if (!preferred_id.empty()) {
         for (const auto& b : all) {
             if (b.id != preferred_id) continue;

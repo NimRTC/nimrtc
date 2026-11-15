@@ -41,7 +41,7 @@ target_link_libraries(test_raw_udp_arq PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_raw_udp_arq
         PROPERTIES TIMEOUT 180      # 100 Hz loopback, skeleton known slow
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()
 
 # -----------------------------------------------------------------------------

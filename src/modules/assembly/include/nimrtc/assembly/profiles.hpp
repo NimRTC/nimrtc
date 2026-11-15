@@ -654,6 +654,35 @@ inline const Profile kProfileAgentLowLatency = Profile{
 //     high-frequency control → media on webrtc-classic, control on a
 //     separate raw-udp-arq stack; transport-strategies.md §2.3, the
 //     Selector's §5.3 rule 1b).
+
+// kProfileRemoteDesktop — remote-desktop session (remote-desktop plan K3)
+// ---------------------------------------------------------------------------
+// Design notes (matches profiles/remote-desktop.json):
+//   - The transport strategy is `teleop-ultra-low-latency`: the media
+//     plane and the *control* plane (keyboard / mouse) are separate
+//     stacks with independent congestion control, so a saturated video
+//     path cannot starve the input events.  This is the plan's G2.
+//   - `datachannel_enabled = true`: the control plane rides the DataChannel
+//     until the side-stack is wired (the plan's G1).
+//   - `timeline_enabled = true`: the `ref_frame` binding ("what the operator
+//     saw when they clicked") is a product requirement, not a nicety.
+//   - The `video` section is the heart of the profile:
+//       * `codec_backend = "auto"` — hardware first (plan B2).  A
+//         software encode of a 4K desktop does not fit the CPU budget.
+//       * `codec_preference = ["av1", "h265", "h264"]` — the screen-content
+//         preference table (plan B8).  It is *configuration*, not a
+//         hard-coded branch.
+//       * `content_type = "screen"` — the encoder is told it is looking
+//         at screen content, not at a camera (plan B7).
+//       * `resolution_floor = [1280, 720]` — the ladder never crosses
+//         it (plan D2).  The floor is configuration because the right
+//         value depends on the machine class: 1080p on a
+//         hardware-encoding box, 720p on a software-only one.
+//       * `ladder_mode = "quality"` — screen content spends its budget
+//         on legibility, not on frame rate.
+//       * `color_range = "full"`, `color_matrix = "bt709"` — what a
+//         desktop compositor actually produces (plan C5).  Getting this
+//         wrong looks like "the codec is broken".
 // ---------------------------------------------------------------------------
 inline const Profile kProfileRemoteDesktop = Profile{
     .name                 = "remote-desktop",
@@ -671,6 +700,8 @@ inline const Profile kProfileRemoteDesktop = Profile{
         .enabled  = true,
         .strategy = SchedulerConfig::Strategy::kStrictPriority,
         .control_weight     = 10,
+
+        .control_weight     = 20,   // input events preempt the video stream
         .audio_weight       = 8,
         .video_weight       = 4,
         .best_effort_weight = 1,
@@ -679,6 +710,8 @@ inline const Profile kProfileRemoteDesktop = Profile{
         .impl   = "aimd",
         .params = {
             .initial_bitrate_bps = 2'000'000,
+
+            .initial_bitrate_bps = 4'000'000,
             .max_bitrate_bps     = 20'000'000,
         },
     },
@@ -706,6 +739,19 @@ inline const Profile kProfileRemoteDesktop = Profile{
     .video_stream_weights = {
         {"default", 3},
         {"camera",  1},
+
+    .transport           = detail::ts_teleop_ultra_low_latency(),
+    .video = {
+        .codec_name       = "",
+        .codec_preference = {"av1", "h265", "h264"},
+        .codec_backend    = "auto",
+        .content_type     = VideoContentType::kScreen,
+        .ladder_mode      = VideoLadderMode::kQuality,
+        .resolution_floor_width  = 1280,
+        .resolution_floor_height = 720,
+        .pixel_format     = "i420",
+        .color_range      = "full",
+        .color_matrix     = "bt709",
     },
 };
 

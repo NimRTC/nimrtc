@@ -42,6 +42,15 @@ plugins::Status CodecPluginAdapter::open() noexcept {
         decoder_.reset();
         return s;
     }
+    // ---- Telemetry (remote-desktop plan B15) ------------------------------
+    //
+    // This adapter is the *software* path: it is not a hardware
+    // encoder, and every frame it encodes goes through the CPU.  The
+    // backend id says so, so a host can tell "software" from
+    // "hardware" without inspecting the plug-in name.
+    stats_.backend_id             = "h264-software";
+    stats_.hardware               = false;
+    stats_.configured_bitrate_bps = cfg_.bitrate_bps;
     return plugins::kOk;
 }
 
@@ -143,6 +152,9 @@ plugins::Status CodecPluginAdapter::encode(const plugins::VideoFrame& raw,
 
     stats_.frames_encoded++;
     stats_.bytes_encoded += pos;
+    stats_.keyframes_encoded++;
+    stats_.staged_frames++;
+    stats_.zero_copy = false;
     return plugins::kOk;
 }
 
@@ -327,7 +339,6 @@ plugins::Status CodecPluginAdapter::update_config(plugins::VideoCodecConfig cfg)
 plugins::VideoCodecStats CodecPluginAdapter::stats() const noexcept {
     return stats_;
 }
-
 std::uint8_t CodecPluginAdapter::payload_type() const noexcept {
     return cfg_.payload_type != 0 ? cfg_.payload_type : std::uint8_t{102};
 }
@@ -383,6 +394,18 @@ plugins::IVideoCodec* H264PluginFactory::create(plugins::VideoCodecConfig cfg) c
                 std::string{"h264: selected decoder backend '"} + id_str +
                 "' (" + be_str + ")");
         }
+    }
+
+    // A `hardware` policy that could not be honoured (plan B2) must
+    // NOT fall back to the software stub: the host said "hardware
+    // only", and a silent software fallback shows up much later as a
+    // CPU saturation the host never asked for.  Returning nullptr
+    // makes the engine report the failure at open() time.
+    if (!encoder && cfg.backend_policy == plugins::CodecBackend::kHardware) {
+        core::log::Logger::instance().error(
+            "h264: the backend policy is 'hardware', but no hardware "
+            "H.264 encoder is available (the software path was NOT used)");
+        return nullptr;
     }
 
     if (!encoder && !decoder) {

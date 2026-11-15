@@ -45,6 +45,17 @@ inline constexpr NIMRTC_API_STABLE Status kErrCorrupt      = 0x1004;
 inline constexpr NIMRTC_API_STABLE Status kErrUnsupported   = 0x1005;
 inline constexpr NIMRTC_API_STABLE Status kErrHardwareError = 0x1006;  // GPU SDK / driver failure
 inline constexpr NIMRTC_API_STABLE Status kErrClosed        = 0x1007;  // peer closed / reset / FIN
+/** The user (or the OS) refused the operation.
+ *
+ *  Distinct from `kErrHardwareError` because the remedy is different:
+ *  a hardware error is the host's problem, a permission denial is the
+ *  *user's* — and only the user can fix it.  A remote-desktop host
+ *  that shows "grant screen recording access" is far more useful than
+ *  one that shows "device error".
+ *
+ *  The macOS ScreenCaptureKit backend is the first producer (remote-
+ *  desktop plan A4). */
+inline constexpr NIMRTC_API_STABLE Status kErrPermissionDenied = 0x1008;
 inline constexpr NIMRTC_API_STABLE Status kErrInternal      = 0x1FFF;
 
 /** Human-readable status message, may be nullptr. */
@@ -58,6 +69,7 @@ inline const char* status_string(Status s) noexcept {
         case kErrUnsupported:   return "unsupported operation";
         case kErrHardwareError: return "hardware/driver error";
         case kErrClosed:        return "closed";
+        case kErrPermissionDenied: return "permission denied";
         default:                return "unknown error";
     }
 }

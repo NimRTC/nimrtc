@@ -150,9 +150,10 @@ resolve_video_source(std::string_view id) noexcept {
  *
  *  Used by the engine to satisfy `EngineConfig::video_capture_name`
  *  (empty = no capture device) — the capture-*device* seam of the
- *  remote-desktop plan (A1).  It is distinct from the source seam: a
- *  capture device enumerates devices, negotiates a format and reports
- *  dirty-rect metadata, while a source is a plain frame stream. */
+ *  remote-desktop plan (A1 / A10).  It is distinct from the source
+ *  seam above: a source produces frames, a capture produces frames
+ *  *from a device* (enumeration, format negotiation, region selection,
+ *  dirty-rect metadata), while a source is a plain frame stream. */
 [[nodiscard]] inline const plugins::IVideoCaptureFactory*
 resolve_video_capture(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_video_capture(id);

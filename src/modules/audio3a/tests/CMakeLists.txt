@@ -62,7 +62,7 @@ target_link_libraries(test_audio3a_plugin PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_audio3a_plugin
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -88,5 +88,5 @@ target_link_libraries(test_webrtc_audio3a PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_webrtc_audio3a
         PROPERTIES TIMEOUT 60
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

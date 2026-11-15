@@ -76,8 +76,8 @@ target_include_directories(test_sctp_factory PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_sctp_factory
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_dcep
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

@@ -1,0 +1,1661 @@
+// modules/video_capture/src/platform/wgc_capture.cpp
+// ----------------------------------------------------------------------------
+// The Windows Graphics Capture device (remote-desktop plan A3).
+//
+// This is the *window* (and cursor-faithful display) capture path on
+// Windows.  It is a thin adapter over the portable capture layer: it
+// fills the shared bounded queue with BGRA frames and it does nothing
+// else.  All the shared machinery (the queue, the drop policy, the
+// format negotiation, the cursor layer, the capture -> frame-stream
+// adapter) lives in the portable layer and is shared with the macOS
+// and Linux backends.
+//
+// The one thing WGC does that DXGI does not is composite the pointer
+// into the frame itself, so the backend reports
+// `cursor_composited = true` and the engine skips the cursor layer on
+// this path.
+//
+// See include/nimrtc/video_capture/wgc_capture.hpp for the contract.
+// ----------------------------------------------------------------------------
+
+#include <nimrtc/video_capture/wgc_capture.hpp>
+
+#include <algorithm>
+#include <cstring>
+#include <iterator>
+#include <mutex>
+#include <thread>
+#include <utility>
+
+#if defined(_WIN32)
+#  define NIMRTC_WGC_CAPTURE 1
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  include <inspectable.h>
+#  include <roapi.h>
+#  include <winstring.h>
+#  include <windows.graphics.capture.interop.h>
+#  include <d3d11.h>
+#  include <dxgi1_2.h>
+#  include <windows.graphics.directx.direct3d11.interop.h>
+
+// The C++/WinRT projection.  These headers ship with the Windows SDK
+// (they are on MSVC's default include path as <winrt/...>), so they
+// add no build-time dependency beyond the SDK itself.
+#  include <winrt/base.h>
+#  include <winrt/Windows.Foundation.h>
+#  include <winrt/Windows.Graphics.Capture.h>
+#  include <winrt/Windows.Graphics.DirectX.h>
+#  include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#endif
+
+#include <nimrtc/core/log.hpp>
+#include <nimrtc/core/registry.hpp>
+#include <nimrtc/video_capture/capture_queue.hpp>
+
+namespace nimrtc::video_capture {
+
+#if defined(NIMRTC_WGC_CAPTURE)
+
+namespace {
+
+using namespace winrt::Windows::Graphics::Capture;
+using namespace winrt::Windows::Graphics::DirectX;
+using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
+
+/** The number of buffers the frame pool holds.  Two is the smallest
+ *  number that keeps the compositor from stalling on the consumer. */
+constexpr int kPoolBufferCount = 2;
+
+/** The class name of the WGC capture item's activation factory. */
+constexpr wchar_t kCaptureItemClass[] =
+    L"Windows.Graphics.Capture.GraphicsCaptureItem";
+
+/** The class name of the WGC frame pool's activation factory. */
+constexpr wchar_t kFramePoolClass[] =
+    L"Windows.Graphics.Capture.Direct3D11CaptureFramePool";
+
+/**
+ * @brief The WGC frame pool's activation factory, fetched fresh.
+ *
+ * The C++/WinRT projection's `CreateFreeThreaded` goes through a
+ * *process-global* cache of the activation factory
+ * (`winrt::impl::factory_cache_entry`).  That cache outlives every
+ * apartment: it is a static in the process, not in the apartment.
+ *
+ * The capture thread, on the other hand, enters and leaves an apartment
+ * *per session*, and leaving it unloads the module that hosts the
+ * factory (`GraphicsCapture.dll`).  The cached pointer then dangles,
+ * and the *next* session's `CreateFreeThreaded` calls through it and
+ * dies with an access violation -- an access violation in the *second*
+ * session, in a call that has nothing wrong with it.
+ *
+ * So the factory is fetched by hand here, once per session, and the
+ * projection's cache is never consulted.  A fresh lookup costs one
+ * `RoGetActivationFactory` call per session, and buys a backend that
+ * can be opened and closed as often as the host likes.
+ */
+winrt::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2
+fetch_frame_pool_statics() {
+    using Statics2 =
+        winrt::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2;
+    return winrt::get_activation_factory<Statics2>(kFramePoolClass);
+}
+
+/**
+ * @brief Keep the WGC capture module loaded for the life of the process.
+ *
+ * The capture thread enters and leaves a COM apartment per session, and
+ * leaving an apartment unloads the modules that the apartment brought
+ * in -- including `GraphicsCapture.dll`.  That module starts a worker
+ * thread of its own, and the worker does not necessarily stop when the
+ * apartment goes: the teardown of the two races, and the loser is a
+ * callback that runs against an unloaded module.
+ *
+ * The upstream Windows capture samples hit exactly this (see
+ * robmikh/Win32CaptureSample#99: "Crash on RoUninitialize ... unless
+ * first sleeping for a while"), and the fix they landed on is to hold
+ * the module loaded.
+ *
+ * So the module is loaded once, here, and never released.  A library
+ * that pins a system module for its own lifetime is a small thing to
+ * ask; the alternative is a process that dies with an access violation
+ * the second time a host opens a capture.
+ */
+void pin_capture_module() {
+    static const HMODULE pinned = [] {
+        // The name differs between the Windows releases: the capture
+        // stack lives in `GraphicsCapture.dll` on the modern ones and
+        // in `Windows.Graphics.Capture.dll` on the older ones.  Either
+        // one being loaded is enough to keep the capture code mapped.
+        HMODULE module = ::LoadLibraryW(L"GraphicsCapture.dll");
+        if (module == nullptr) {
+            module = ::LoadLibraryW(L"Windows.Graphics.Capture.dll");
+        }
+        return module;
+    }();
+    (void)pinned;
+}
+
+/** Convert a wide string to a narrow one (best effort ??the display
+ *  name is a diagnostic, not an identity). */
+std::string wide_to_narrow(const wchar_t* w) {
+    if (w == nullptr || *w == 0) return {};
+    const int needed = ::WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0,
+                                             nullptr, nullptr);
+    if (needed <= 1) return {};
+    std::string out(static_cast<std::size_t>(needed - 1), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), needed, nullptr,
+                          nullptr);
+    return out;
+}
+
+/** One display, and the handle WGC needs to capture it. */
+struct MonitorEntry {
+    plugins::CaptureDevice device;
+    HMONITOR handle = nullptr;
+};
+
+/**
+ * @brief Enumerate the displays, as WGC sees them.
+ *
+ * WGC has no enumeration of its own ??a capture item is created for a
+ * monitor handle or a window handle.  The monitor list therefore comes
+ * from `EnumDisplayMonitors`, which is the Win32 way of saying "the
+ * displays".
+ */
+void enumerate_monitors(std::vector<MonitorEntry>& out) {
+    struct Ctx {
+        std::vector<MonitorEntry>* out;
+    } ctx{&out};
+
+    ::EnumDisplayMonitors(
+        nullptr, nullptr,
+        [](HMONITOR mon, HDC, LPRECT, LPARAM param) -> BOOL {
+            auto* c = reinterpret_cast<Ctx*>(param);
+
+            MONITORINFOEXW info{};
+            info.cbSize = sizeof(info);
+            if (::GetMonitorInfoW(mon, &info) == 0) return TRUE;
+
+            MonitorEntry e;
+            e.handle = mon;
+            e.device.id = std::string{"wgc:monitor:"} +
+                          std::to_string(static_cast<unsigned long>(
+                              c->out->size()));
+            e.device.name = wide_to_narrow(info.szDevice);
+            if (e.device.name.empty()) e.device.name = e.device.id;
+            e.device.kind = plugins::CaptureDeviceKind::kScreen;
+
+            // The monitor's rectangle is in virtual-desktop
+            // coordinates; its size is what the frame will be.
+            e.device.max_width = static_cast<std::uint32_t>(
+                std::max(0L, info.rcMonitor.right - info.rcMonitor.left));
+            e.device.max_height = static_cast<std::uint32_t>(
+                std::max(0L, info.rcMonitor.bottom - info.rcMonitor.top));
+            e.device.max_fps = 60;
+            c->out->push_back(std::move(e));
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&ctx));
+}
+
+/** Enumerate the top-level windows, which are WGC's window targets.
+ *
+ * Only windows that are *visible* and have a *title* are offered: a
+ * window without a title is almost always a helper window, and a
+ * hidden one is not capturable anyway. */
+void enumerate_windows(std::vector<plugins::CaptureDevice>& out) {
+    struct Ctx {
+        std::vector<plugins::CaptureDevice>* out;
+    } ctx{&out};
+
+    ::EnumWindows(
+        [](HWND hwnd, LPARAM param) -> BOOL {
+            auto* c = reinterpret_cast<Ctx*>(param);
+            if (::IsWindowVisible(hwnd) == FALSE) return TRUE;
+
+            wchar_t title[256]{};
+            const int len = ::GetWindowTextW(hwnd, title,
+                                             static_cast<int>(std::size(title)));
+            if (len <= 0) return TRUE;
+
+            RECT rect{};
+            if (::GetWindowRect(hwnd, &rect) == FALSE) return TRUE;
+            const LONG w = rect.right - rect.left;
+            const LONG h = rect.bottom - rect.top;
+            if (w <= 0 || h <= 0) return TRUE;
+
+            plugins::CaptureDevice d;
+            d.id = std::string{"wgc:window:"} +
+                   std::to_string(reinterpret_cast<std::uintptr_t>(hwnd));
+            d.name = wide_to_narrow(title);
+            if (d.name.empty()) d.name = d.id;
+            d.kind = plugins::CaptureDeviceKind::kWindow;
+            d.max_width  = static_cast<std::uint32_t>(w);
+            d.max_height = static_cast<std::uint32_t>(h);
+            d.max_fps = 60;
+            c->out->push_back(std::move(d));
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&ctx));
+}
+
+/** The size of a window, in pixels. */
+bool window_size(HWND hwnd, UINT& width, UINT& height) {
+    RECT rect{};
+    if (::GetWindowRect(hwnd, &rect) == FALSE) return false;
+    const LONG w = rect.right - rect.left;
+    const LONG h = rect.bottom - rect.top;
+    if (w <= 0 || h <= 0) return false;
+    width  = static_cast<UINT>(w);
+    height = static_cast<UINT>(h);
+    return true;
+}
+
+/** The HWND a `"wgc:window:<handle>"` id names, or nullptr. */
+HWND window_from_id(const std::string& id) {
+    const std::string prefix = "wgc:window:";
+    if (id.rfind(prefix, 0) != 0) return nullptr;
+    const std::string suffix = id.substr(prefix.size());
+    if (suffix.empty()) return nullptr;
+    std::uintptr_t raw = 0;
+    try {
+        raw = static_cast<std::uintptr_t>(std::stoull(suffix));
+    } catch (...) {
+        return nullptr;
+    }
+    HWND hwnd = reinterpret_cast<HWND>(raw);
+    if (::IsWindow(hwnd) == FALSE) return nullptr;
+    return hwnd;
+}
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// The shared apartment
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief A COM apartment that outlives the objects it owns.
+ *
+ * WinRT needs an apartment, and *leaving* one is an ordered operation:
+ * every WinRT object created in the apartment has to be released
+ * *before* the apartment goes away, because the runtime may call back
+ * into the apartment to perform the release.  A release that happens
+ * after `CoUninitialize()` runs against a runtime the thread no longer
+ * has ??undefined behaviour, which shows up as an access violation
+ * inside the COM machinery rather than as a clean error.
+ *
+ * The frame-arrival handler makes this hard, because of *when* it
+ * runs.  It runs on a WinRT thread-pool thread, which has no apartment
+ * of its own: it borrows the runtime the capture thread's apartment
+ * provides.  And the capture thread cannot know that every dispatched
+ * handler has *finished*: unsubscribing stops new events, but an
+ * invocation that was already dispatched still starts ??possibly after
+ * the capture thread has already torn its apartment down.
+ *
+ * So the apartment outlives the capture thread, and the *count* here
+ * is what says when it may go.  The capture thread holds one reference
+ * for as long as it lives; every handler that might still touch a
+ * WinRT object holds one too.  The apartment is torn down when the
+ * last reference goes.
+ *
+ * ## The apartment is always left by the thread that entered it
+ *
+ * `CoUninitialize` has to be called on the thread that called
+ * `CoInitializeEx`.  A handler runs on a WinRT thread-pool thread,
+ * which never entered an apartment of its own, so a handler can never
+ * be the one to leave it.
+ *
+ * That is why the count and the teardown are separated: `release()`
+ * only *marks* the apartment as ready to go, and the thread that
+ * entered it does the leaving.  The capture thread waits for the
+ * count to reach zero before it returns ??and it is the capture thread
+ * that calls `CoUninitialize`.
+ *
+ * A handler that finds the apartment already gone does nothing at all:
+ * there is no runtime left to call into, and touching the pool would be
+ * the very crash this fixes.
+ */
+class SharedApartment {
+public:
+    /** Enter the apartment.  Must be called on the thread that will
+     *  own it (the capture thread). */
+    void initialize() noexcept {
+        const HRESULT hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        initialized_ = SUCCEEDED(hr);
+    }
+
+    /** True iff the apartment was entered successfully. */
+    [[nodiscard]] bool ok() const noexcept { return initialized_; }
+
+    /** Take a reference to the apartment.
+     *
+     *  The caller must hold one for as long as it might touch a WinRT
+     *  object.
+     *
+     *  @return true iff the reference was taken.  False means the
+     *          apartment is already gone, and the caller must not
+     *          touch any WinRT object. */
+    [[nodiscard]] bool acquire() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (closing_ || count_.load(std::memory_order_relaxed) == 0) {
+            return false;
+        }
+        count_.fetch_add(1, std::memory_order_acq_rel);
+        return true;
+    }
+
+    /** Stop handing out references and wait for the ones already
+     *  handed out to be given back.
+     *
+     *  Called by the thread that entered the apartment, before it
+     *  leaves.  After this returns, no new reference can be taken --
+     *  which is what closes the window in which a handler that was
+     *  dispatched but had not yet started could touch an apartment
+     *  that was on its way out.
+     *
+     *  The caller gives up its *own* reference as part of this: the
+     *  thread that entered the apartment is one of the parties that
+     *  might still touch a WinRT object, and it cannot keep its
+     *  reference while waiting for the others to go. */
+    void quiesce() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            closing_ = true;
+            if (count_.load(std::memory_order_relaxed) > 0) {
+                count_.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        }
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (count_.load(std::memory_order_relaxed) == 0) return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    /** Drop a reference.
+     *
+     *  This does *not* leave the apartment: only the thread that
+     *  entered it may do that.  It merely says that one fewer party
+     *  might still touch a WinRT object. */
+    void release() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (count_.load(std::memory_order_relaxed) == 0) return;
+        count_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    /** Leave the apartment.  Must be called on the thread that called
+     *  `initialize()`. */
+    void leave() noexcept {
+        if (initialized_) {
+            initialized_ = false;
+            ::CoUninitialize();
+        }
+    }
+
+    SharedApartment() = default;
+    SharedApartment(const SharedApartment&)            = delete;
+    SharedApartment& operator=(const SharedApartment&) = delete;
+
+private:
+    std::mutex mutex_;
+    std::atomic<int> count_{1};
+    bool initialized_ = false;
+    bool closing_ = false;
+};
+
+// ---------------------------------------------------------------------------
+// The platform state (PIMPL)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The WGC objects the device owns, plus the capture thread.
+ *
+ * Kept out of the public header so that the header stays free of the
+ * Windows SDK (and so that the class exists on every platform).
+ *
+ * The WinRT objects are held here rather than in the public header, so
+ * the C++/WinRT types never leak into it.
+ *
+ * ## Why the state is shared
+ *
+ * The frame-arrival handler runs on a WinRT thread-pool thread, and it
+ * can still be running while the owner tears the device down.  The
+ * handler therefore holds its own `shared_ptr` to this object, which
+ * keeps the object ??and every buffer, counter and callback the handler
+ * touches ??alive for exactly as long as the handler needs it.  If the
+ * state were owned by a bare pointer, the handler would read freed
+ * memory the moment `close()` released it.
+ *
+ * For the same reason *everything the handler touches lives here* and
+ * not on the owning device: the owning device may be destroyed while
+ * the handler is still running, and the handler must not depend on it.
+ */
+class WgcCaptureState {
+public:
+    /** The D3D11 device and its immediate context.  Created *without*
+     *  `D3D11_CREATE_DEVICE_SINGLETHREADED`, because the readback runs
+     *  on the frame-arrival thread while the capture thread owns the
+     *  session. */
+    ID3D11Device* device_ = nullptr;
+    ID3D11DeviceContext* context_ = nullptr;
+
+    /** The staging texture the GPU->CPU readback goes through. */
+    ID3D11Texture2D* staging_ = nullptr;
+    UINT staging_width_  = 0;
+    UINT staging_height_ = 0;
+
+    /** The source size ??the size of the surface the compositor
+     *  delivers.  The frame pool is created at this size so that the
+     *  consumer sees the source's pixels and not a resampling of them;
+     *  a requested region is cropped out of the readback afterwards. */
+    UINT source_width_  = 0;
+    UINT source_height_ = 0;
+
+    /** What to capture.  Exactly one of the two is set. */
+    HMONITOR monitor_ = nullptr;
+    HWND window_ = nullptr;
+
+    /** The frame pool.  It is a `shared_ptr` because the frame-arrival
+     *  handler runs on a WinRT thread-pool thread and the capture
+     *  thread tears the pool down: the shared ownership keeps the pool
+     *  alive for a handler that is already running. */
+    std::shared_ptr<Direct3D11CaptureFramePool> pool_;
+
+    /** The apartment the WinRT objects live in.
+     *
+     *  It is *shared* rather than owned by the capture thread, because
+     *  a frame-arrival handler may still be running ??or may still
+     *  start ??after the capture thread has returned.  The handler
+     *  takes a reference for as long as it might touch a WinRT object,
+     *  and the apartment is torn down when the last reference goes.
+     *
+     *  Without this, a handler that was dispatched but had not yet
+     *  started would call into a WinRT runtime whose apartment the
+     *  capture thread had already left: an access violation rather than
+     *  a clean failure. */
+    SharedApartment apartment;
+
+    /** The bounded frame queue the capture thread fills. */
+    CaptureQueue queue_{2};
+
+    /** The capture thread. */
+    std::thread thread_;
+
+    /** Set to false to ask the capture thread to stop. */
+    std::atomic<bool> running_{false};
+
+    /**
+     * @brief True iff the capture is still supposed to run.
+     *
+     * The capture thread checks this between the *slow* steps of its
+     * setup.  `open()` returns as soon as the thread is started, so a
+     * host that opens and immediately closes tears the device down
+     * while the setup is still running.  Without this check the thread
+     * would carry on and create the capture session, subscribe to the
+     * frame event and start the capture against a device that is
+     * already being torn down.
+     */
+    [[nodiscard]] bool still_running() const noexcept {
+        return running_.load(std::memory_order_acquire);
+    }
+
+    /** The number of frame-arrival handlers currently running.  The
+     *  teardown waits for it to reach zero before the D3D objects are
+     *  released. */
+    std::atomic<int> in_flight_{0};
+
+    /** Serialises the frame-arrival handlers against each other *and*
+     * against the teardown.
+     *
+     * A free-threaded frame pool may raise `FrameArrived` on more than
+     * one thread-pool thread at the same time, and the handler owns
+     * exclusive use of the readback buffers and of the dirty-rect
+     * detector while it runs.  Without this lock two handlers would
+     * read back into the same buffer and corrupt each other's frame.
+     *
+     * It also orders the handler's read of `pool_` against the
+     * teardown's reset of it: copying a `shared_ptr` while another
+     * thread assigns to it is a data race, and a torn pointer is a
+     * crash. */
+    std::mutex handler_mutex_;
+
+    // ---- Everything the frame-arrival handler touches --------------------
+    //
+    // The handler runs on a thread the device does not own, so it may
+    // still be running when the device is destroyed.  Every piece of
+    // state it reads or writes therefore belongs to *this* object,
+    // which the handler keeps alive through its own `shared_ptr`.
+
+    /** The negotiated configuration.  The handler needs the region and
+     *  the cursor preference. */
+    plugins::CaptureConfig cfg;
+
+    /** The delivery callback.  Guarded by `cb_mutex_` so that it can
+     *  be installed while the capture is already running. */
+    plugins::CaptureFrameCallback cb;
+    std::mutex cb_mutex_;
+
+    /** The pixel buffer the readback fills (the whole surface). */
+    std::vector<std::uint8_t> scratch;
+
+    /** The cropped buffer, used when a sub-region was requested. */
+    std::vector<std::uint8_t> region_scratch;
+
+    /** The changed-region detector (remote-desktop plan A7).  WGC reports
+     *  no damage, so the region is computed by comparing the frame with
+     *  the previous one. */
+    DirtyRectDetector dirty_detector{4};
+
+    /** The frame sequence counter.  Only the frame-arrival thread
+     *  touches it. */
+    std::atomic<std::uint32_t> frame_index{0};
+
+    /** The counters.  They are written by the frame-arrival thread and
+     *  read by the engine's tick thread, so they are atomic. */
+    std::atomic<std::uint64_t> frames_captured{0};
+    std::atomic<std::uint64_t> frames_dropped{0};
+    std::atomic<std::uint64_t> device_errors{0};
+    std::atomic<std::uint64_t> bytes_copied{0};
+
+    ~WgcCaptureState() {
+        // The state is destroyed only once the last `shared_ptr` to it
+        // is gone: the device has dropped its reference and every
+        // frame-arrival handler has finished.
+        stop_thread();
+        // The D3D objects are *not* released here.  They were created
+        // inside the capture thread's COM apartment, and an
+        // `ID3D11DeviceContext` is an apartment-bound object: releasing
+        // it from a thread that never entered the apartment is
+        // undefined behaviour.  The corruption does not show up where
+        // it happens -- it shows up in the *next* session, as an access
+        // violation inside the OS call that creates the frame pool.
+        // The capture thread releases them, inside the apartment it
+        // owns; see the `ApartmentGuard` in `capture_loop`.
+    }
+
+    void stop_thread() noexcept {
+        running_.store(false, std::memory_order_release);
+        if (thread_.joinable()) thread_.join();
+    }
+
+    /**
+     * @brief Release the D3D objects.
+     *
+     * Called by the capture thread, inside the apartment that created
+     * them.  An `ID3D11DeviceContext` is apartment-bound, so releasing
+     * it from anywhere else is undefined behaviour -- and the damage
+     * shows up somewhere else entirely (in the *next* session's frame
+     * pool creation), which is what makes it so hard to diagnose.
+     *
+     * The handler mutex is held while the pointers are dropped, so a
+     * frame-arrival handler cannot be reading them while they go.
+     */
+    void release_d3d() noexcept {
+        std::lock_guard<std::mutex> lock(handler_mutex_);
+        if (staging_ != nullptr) {
+            staging_->Release();
+            staging_ = nullptr;
+        }
+        if (device_ != nullptr) {
+            device_->Release();
+            device_ = nullptr;
+        }
+        if (context_ != nullptr) {
+            context_->Release();
+            context_ = nullptr;
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// WgcCapture
+// ---------------------------------------------------------------------------
+
+WgcCapture::WgcCapture(plugins::CaptureConfig cfg) noexcept
+    : cfg_(std::move(cfg)) {}
+
+WgcCapture::~WgcCapture() {
+    close();
+}
+
+bool WgcCapture::available() noexcept {
+    return true;
+}
+
+plugins::Status WgcCapture::open() noexcept {
+    if (open_) return plugins::kOk;
+
+    // ---- Resolve the device ------------------------------------------------
+    //
+    // WGC has no enumeration of its own: a capture item is created for a
+    // monitor handle or a window handle.  The ids below are the ones
+    // `enumerate_devices()` produces.
+    auto state = std::make_shared<WgcCaptureState>();
+
+    if (!cfg_.device_id.empty()) {
+        HWND window = window_from_id(cfg_.device_id);
+        if (window != nullptr) {
+            state->window_ = window;
+        } else {
+            std::vector<MonitorEntry> monitors;
+            enumerate_monitors(monitors);
+            bool found = false;
+            for (const auto& m : monitors) {
+                if (m.device.id != cfg_.device_id) continue;
+                state->monitor_ = m.handle;
+                found = true;
+                break;
+            }
+            if (!found) {
+                core::log::Logger::instance().error(
+                    "wgc: '" + cfg_.device_id + "' is not a WGC device id");
+                return plugins::kErrInvalidParam;
+            }
+        }
+    } else {
+        // The default is the primary display: a monitor capture needs
+        // no consent, so it is the one that always works.
+        std::vector<MonitorEntry> monitors;
+        enumerate_monitors(monitors);
+        if (monitors.empty()) {
+            core::log::Logger::instance().error("wgc: no display to capture");
+            return plugins::kErrHardwareError;
+        }
+        state->monitor_ = monitors.front().handle;
+        cfg_.device_id = monitors.front().device.id;
+    }
+
+    // ---- The source size ---------------------------------------------------
+    //
+    // The pool is created at the *source* size, so that the pixels the
+    // consumer sees are the source's pixels; a requested region is
+    // cropped out of the readback rather than scaled by the compositor.
+    if (state->window_ != nullptr) {
+        if (!window_size(state->window_, state->source_width_,
+                         state->source_height_)) {
+            return plugins::kErrInvalidParam;
+        }
+    } else {
+        MONITORINFOEXW mi{};
+        mi.cbSize = sizeof(mi);
+        if (::GetMonitorInfoW(state->monitor_, &mi) == 0) {
+            return plugins::kErrHardwareError;
+        }
+        state->source_width_ = static_cast<UINT>(
+            std::max(0L, mi.rcMonitor.right - mi.rcMonitor.left));
+        state->source_height_ = static_cast<UINT>(
+            std::max(0L, mi.rcMonitor.bottom - mi.rcMonitor.top));
+    }
+    if (state->source_width_ == 0 || state->source_height_ == 0) {
+        return plugins::kErrInvalidParam;
+    }
+
+    // ---- Negotiate the format ----------------------------------------------
+    cfg_.format.width  = state->source_width_;
+    cfg_.format.height = state->source_height_;
+    if (cfg_.format.fps == 0) cfg_.format.fps = 60;
+    cfg_.format.tag = "bgra";
+    cfg_.format.zero_copy = false;
+    // WGC does *not* report per-frame changed regions: the compositor
+    // hands over a whole surface every time.  The backend therefore
+    // *computes* them, from the portable pixel-diff ??so the frames it
+    // delivers do carry the metadata, and the flag reports true.
+    cfg_.format.has_dirty_rects = true;
+
+    description_ = (state->window_ != nullptr) ? "window" : "display";
+
+    // ---- Configure the queue ------------------------------------------------
+    state->queue_.set_drop_policy(cfg_.drop_policy);
+    if (cfg_.queue_depth > 0) state->queue_.set_depth(cfg_.queue_depth);
+
+    // The negotiated configuration and the delivery callback belong to
+    // the *state*, because the frame-arrival handler reads them from
+    // the thread-pool thread ??a thread that must not depend on the
+    // owning device, which may be gone by then.
+    state->cfg = cfg_;
+    {
+        std::lock_guard<std::mutex> lock(state->cb_mutex_);
+        state->cb = cb_;
+    }
+
+    const std::size_t bytes = static_cast<std::size_t>(state->source_width_) *
+                              static_cast<std::size_t>(state->source_height_) *
+                              4u;
+    state->scratch.assign(bytes, 0u);
+
+    state->frame_index.store(0, std::memory_order_relaxed);
+    state_ = std::move(state);
+    state_->running_.store(true, std::memory_order_release);
+    // The capture thread and the frame-arrival handler both keep the
+    // state alive on their own; the device holds a reference only so
+    // that it can shut them down.
+    state_->thread_ = std::thread([s = state_]() { capture_loop(s); });
+
+    open_ = true;
+    return plugins::kOk;
+}
+
+void WgcCapture::close() noexcept {
+    if (!open_) return;
+    open_ = false;
+    if (state_) {
+        // Ask the capture thread to stop and wait for it, so the WGC
+        // objects are not released underneath it.
+        //
+        // The capture thread does the *whole* teardown: it owns the
+        // apartment, so it is the only thread that may release the
+        // WinRT objects.  This call therefore does not touch the pool,
+        // the session or the device -- it only asks the capture thread
+        // to stop and waits for it to finish.
+        state_->stop_thread();
+        // A frame-arrival handler may still be running on the WinRT
+        // thread-pool thread.  Wait for it: it uses the D3D objects
+        // the capture thread is about to release.
+        //
+        // The capture thread waits for the same counter *inside* the
+        // apartment, before it releases anything; this wait is the
+        // belt-and-braces half, for the case where the capture thread
+        // has already returned and a handler that had not yet started
+        // begins now.
+        while (state_->in_flight_.load(std::memory_order_acquire) > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        //
+        // The pool is deliberately *not* released here.
+        //
+        // The pool is a WinRT object, and a WinRT object has to be
+        // released inside a COM apartment.  This thread has no
+        // apartment, so releasing it here would be an access violation
+        // rather than a clean failure.  The capture thread releases it
+        // instead, on its own thread, inside its own apartment -- see
+        // the `ApartmentGuard` in `capture_loop`.
+        //
+        // The D3D objects are deliberately *not* released here either.
+        //
+        // A free-threaded frame pool may already have dispatched a
+        // handler invocation to the thread pool at the moment the
+        // capture thread unsubscribes: unsubscribing stops new
+        // events, but an invocation that was already dispatched still
+        // starts ??and it starts *after* this point.  Releasing the
+        // device here would leave that late handler reading freed
+        // memory.
+        //
+        // The objects belong to the state, and every handler holds a
+        // `shared_ptr` to it, so they are released when the state is
+        // destroyed ??that is, after the last handler has finished.
+    }
+    state_.reset();
+}
+
+void WgcCapture::set_frame_callback(plugins::CaptureFrameCallback cb) noexcept {
+    cb_ = std::move(cb);
+    if (!state_) return;
+    std::lock_guard<std::mutex> lock(state_->cb_mutex_);
+    state_->cb = cb_;
+}
+
+std::vector<plugins::CaptureDevice>
+WgcCapture::enumerate_devices() const noexcept {
+    std::vector<plugins::CaptureDevice> devices;
+    std::vector<MonitorEntry> monitors;
+    enumerate_monitors(monitors);
+    for (auto& m : monitors) devices.push_back(std::move(m.device));
+    enumerate_windows(devices);
+    return devices;
+}
+
+std::vector<plugins::CaptureFormat>
+WgcCapture::supported_formats(const std::string& device_id) const noexcept {
+    std::vector<plugins::CaptureDevice> devices;
+    devices = enumerate_devices();
+
+    std::vector<plugins::CaptureFormat> out;
+    for (const auto& d : devices) {
+        if (!device_id.empty() && d.id != device_id) continue;
+        plugins::CaptureFormat f;
+        f.width  = d.max_width;
+        f.height = d.max_height;
+        f.fps    = d.max_fps;
+        f.tag    = "bgra";
+        f.zero_copy = false;
+        // The changed region comes from the portable pixel-diff.
+        f.has_dirty_rects = true;
+        out.push_back(std::move(f));
+    }
+    return out;
+}
+
+plugins::CaptureCapabilities
+WgcCapture::capabilities() const noexcept {
+    plugins::CaptureCapabilities c;
+    // The frame arrives as a GPU texture, so the CPU path needs a
+    // readback: this is not the zero-copy path.
+    c.zero_copy = false;
+    // The backend *delivers* per-frame dirty-rectangle metadata: the
+    // changed region comes from the portable pixel-diff, because WGC
+    // itself hands over a whole surface every time.
+    c.dirty_rects = true;
+    // This is the whole point of WGC: the OS composites the pointer
+    // into the frame, so the cursor layer is not needed on this path.
+    c.cursor_composited = true;
+    // The backend crops a region out of the readback itself.
+    c.region_selection = true;
+    // The backend enumerates displays and windows.
+    c.enumeration = true;
+    c.max_pixels = 0;
+    c.backend = "wgc-capture";
+    return c;
+}
+
+void WgcCapture::capture_loop(
+        std::shared_ptr<WgcCaptureState> state) noexcept {
+    if (!state) return;
+
+    // WinRT needs an apartment.  MTA is the right one here: the frame
+    // arrives on a thread-pool thread, and the capture thread only
+    // drives the session.
+    //
+    // The apartment is *shared* rather than owned by this thread: a
+    // frame-arrival handler may still be running ??or may still start ??    // after this function returns, and it needs the apartment to be
+    // alive.  See `SharedApartment`.
+    //
+    // The capture module is pinned before the apartment is entered, so
+    // that it is already mapped when the apartment is left again.
+    // See `pin_capture_module`.
+    pin_capture_module();
+
+    state->apartment.initialize();
+    if (!state->apartment.ok()) {
+        core::log::Logger::instance().error("wgc: CoInitializeEx failed");
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    // ---- The apartment guard ----------------------------------------------
+    //
+    // WinRT needs an apartment, and leaving one is an *ordered* operation:
+    // every WinRT object this thread created has to be released *before*
+    // the apartment goes away.  A WinRT object releases its reference to
+    // the runtime when it is destroyed, and the runtime may call back
+    // into the apartment to do it -- so a release that happens after
+    // `CoUninitialize()` runs against a runtime the thread no longer
+    // has.  That is undefined behaviour, and it shows up as an access
+    // violation inside the COM machinery rather than as a clean error.
+    //
+    // The guard makes the ordering *unconditional*.  It is declared
+    // here, before any WinRT object exists, and its destructor runs
+    // when the function returns -- which is *after* the frame has
+    // unwound and destroyed every local WinRT smart pointer.  So the
+    // apartment is always left last, on every path, including the error
+    // paths below.
+    //
+    // The guard also drops the state's references to the frame pool
+    // and to the D3D objects.
+    //
+    // The pool was created *here*, and the local `pool` handle is
+    // destroyed before the guard runs, so the state is the only thing
+    // still holding it: resetting it inside the guard is what makes the
+    // last reference to the pool go away *inside* the apartment.  The
+    // reset is taken under the handler mutex, so it cannot race with a
+    // frame-arrival handler that is copying the same `shared_ptr`.
+    //
+    // The D3D objects are released here for the same reason, and it
+    // matters even more: an `ID3D11DeviceContext` is apartment-bound,
+    // so releasing it from a thread that never entered the apartment
+    // is undefined behaviour.  The corruption does not show up where
+    // it happens -- it shows up in the *next* session, as an access
+    // violation inside the OS call that creates the frame pool.  So
+    // the objects are released here, on the thread that created them,
+    // inside the apartment that created them.
+    struct ApartmentGuard {
+        std::shared_ptr<WgcCaptureState> state;
+        ~ApartmentGuard() {
+            if (state) {
+                // Wait for every handler that might still touch a
+                // WinRT object to finish, and only then leave the
+                // apartment.
+                //
+                // The wait is here, and not in `close()`, because only
+                // this thread may leave the apartment: `CoUninitialize`
+                // has to be called by the thread that called
+                // `CoInitializeEx`, and this is that thread.
+                //
+                // The wait comes *first*: a handler that is running
+                // right now may be reading the frame pool, and the
+                // pool must not be released underneath it.
+                state->apartment.quiesce();
+            }
+            if (state) {
+                // The pool is a WinRT object, so the last reference to
+                // it has to go while the apartment is still alive.  The
+                // local `pool` handle was destroyed before this guard
+                // ran, so the state is the only thing still holding it.
+                //
+                // The reset is taken under the handler mutex, so it
+                // cannot race with a frame-arrival handler that is
+                // copying the same `shared_ptr`.
+                std::lock_guard<std::mutex> lock(state->handler_mutex_);
+                state->pool_.reset();
+            }
+            if (state) {
+                // The D3D objects go while the apartment is still
+                // alive, and after every handler has finished: a
+                // handler that is still running uses them.
+                state->release_d3d();
+            }
+            if (state) {
+                // Only now -- with every handler finished, the pool
+                // released and the device gone -- may the apartment go
+                // away.
+                state->apartment.leave();
+            }
+        }
+    } apartment_guard{state};
+
+    // ---- The D3D11 device --------------------------------------------------
+    //
+    // Created *without* D3D11_CREATE_DEVICE_SINGLETHREADED: the
+    // readback happens on the frame-arrival thread while this thread
+    // owns the session.
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1,
+                                        D3D_FEATURE_LEVEL_11_0,
+                                        D3D_FEATURE_LEVEL_10_1,
+                                        D3D_FEATURE_LEVEL_10_0};
+    HRESULT hr = E_FAIL;
+    {
+        // The pointers are published under the handler mutex, so that
+        // the handler cannot read them while they are being written.
+        // The device creation itself is *not* done under the lock: it
+        // is slow, and no handler can be running yet (the frame pool
+        // does not exist yet, so no frame can have arrived).
+        std::lock_guard<std::mutex> lock(state->handler_mutex_);
+        hr = D3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
+            static_cast<UINT>(sizeof(levels) / sizeof(levels[0])),
+            D3D11_SDK_VERSION, &state->device_, nullptr, &state->context_);
+    }
+    if (FAILED(hr) || state->device_ == nullptr) {
+        core::log::Logger::instance().error("wgc: D3D11CreateDevice failed");
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    // ---- The teardown may have started while the device was created ----
+    //
+    // `D3D11CreateDevice` is slow, and `close()` may have run on the
+    // calling thread while it was in progress.  Carrying on would
+    // create the capture session, subscribe to the frame event and
+    // start the capture against a device that is already being torn
+    // down -- which is the race this check closes.
+    if (!state->still_running()) return;
+
+    // ---- The WinRT Direct3D11 device ---------------------------------------
+    IDXGIDevice* dxgi_device = nullptr;
+    if (FAILED(state->device_->QueryInterface(
+            __uuidof(IDXGIDevice),
+            reinterpret_cast<void**>(&dxgi_device))) ||
+        dxgi_device == nullptr) {
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    IInspectable* raw_device = nullptr;
+    const HRESULT dev_hr =
+        ::CreateDirect3D11DeviceFromDXGIDevice(dxgi_device, &raw_device);
+    dxgi_device->Release();
+    if (FAILED(dev_hr) || raw_device == nullptr) {
+        core::log::Logger::instance().error(
+            "wgc: CreateDirect3D11DeviceFromDXGIDevice failed");
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    winrt::Windows::Foundation::IInspectable inspectable(
+        raw_device, winrt::take_ownership_from_abi);
+    auto rt_device = inspectable.as<IDirect3DDevice>();
+
+    // ---- The frame pool ----------------------------------------------------
+    //
+    // CreateFreeThreaded needs no DispatcherQueue on this thread, which
+    // matters because a *library* must not impose a message loop on its
+    // host.  Its cost is that the FrameArrived event is raised on a
+    // thread-pool thread ??which the multithreaded D3D11 device above
+    // already accommodates.
+    const UINT src_w = state->source_width_;
+    const UINT src_h = state->source_height_;
+
+    std::shared_ptr<Direct3D11CaptureFramePool> pool;
+    try {
+        // The factory is fetched by hand rather than through the
+        // projection's `CreateFreeThreaded`, because the projection
+        // caches the factory in a process-global static that outlives
+        // this thread's apartment -- and leaving the apartment unloads
+        // the module that hosts the factory.  See
+        // `fetch_frame_pool_statics`.
+        auto statics = fetch_frame_pool_statics();
+        pool = std::make_shared<Direct3D11CaptureFramePool>(
+            statics.CreateFreeThreaded(
+                rt_device, DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                kPoolBufferCount,
+                winrt::Windows::Graphics::SizeInt32{
+                    static_cast<int32_t>(src_w), static_cast<int32_t>(src_h)}));
+    } catch (const winrt::hresult_error&) {
+        core::log::Logger::instance().error(
+            "wgc: the frame pool could not be created (this build of "
+            "Windows may not support free-threaded capture)");
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+    {
+        // Publish the pool under the handler mutex: the handler reads
+        // it, and copying a `shared_ptr` while another thread assigns
+        // to it is a data race.
+        std::lock_guard<std::mutex> lock(state->handler_mutex_);
+        state->pool_ = pool;
+    }
+
+    // ---- The teardown may have started while the pool was created ----
+    //
+    // Creating the pool is slow, and `close()` may have run on the
+    // calling thread while it was in progress.  The pool is a WinRT
+    // object, and publishing it now -- against a device that is being
+    // torn down -- is what the check prevents.
+    if (!state->still_running()) return;
+
+    // ---- The capture item --------------------------------------------------
+    //
+    // The interop factory is obtained through RoGetActivationFactory:
+    // it is the *only* way to create a capture item for a monitor or a
+    // window, and it is what makes the window path possible at all.
+    IGraphicsCaptureItemInterop* interop = nullptr;
+    HSTRING hcls = nullptr;
+    ::WindowsCreateString(kCaptureItemClass,
+                          static_cast<UINT32>(std::size(kCaptureItemClass) - 1),
+                          &hcls);
+    const HRESULT factory_hr = ::RoGetActivationFactory(
+        hcls, __uuidof(IGraphicsCaptureItemInterop),
+        reinterpret_cast<void**>(&interop));
+    ::WindowsDeleteString(hcls);
+    if (FAILED(factory_hr) || interop == nullptr) {
+        core::log::Logger::instance().error(
+            "wgc: the GraphicsCaptureItem factory is not available");
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    GraphicsCaptureItem item = nullptr;
+    HRESULT item_hr = E_FAIL;
+    if (state->window_ != nullptr) {
+        item_hr = interop->CreateForWindow(
+            state->window_, winrt::guid_of<GraphicsCaptureItem>(),
+            winrt::put_abi(item));
+    } else {
+        item_hr = interop->CreateForMonitor(
+            state->monitor_, winrt::guid_of<GraphicsCaptureItem>(),
+            winrt::put_abi(item));
+    }
+    interop->Release();
+
+    if (FAILED(item_hr) || item == nullptr) {
+        core::log::Logger::instance().error(
+            "wgc: the capture item could not be created (the user may not "
+            "have granted the capture capability)");
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    // ---- The session --------------------------------------------------------
+    GraphicsCaptureSession session = nullptr;
+    try {
+        session = pool->CreateCaptureSession(item);
+    } catch (const winrt::hresult_error&) {
+        core::log::Logger::instance().error(
+            "wgc: the capture session could not be created");
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    // The pointer is composited by the OS into the captured surface ??    // this is the reason to choose WGC over DXGI.
+    try {
+        session.IsCursorCaptureEnabled(state->cfg.want_cursor);
+    } catch (const winrt::hresult_error&) {
+        // The interface is optional; an older Windows simply keeps the
+        // default (cursor off).
+    }
+
+    // Windows 11 24H2 and later draw a border around a captured window.
+    // A remote-desktop client does not want that in the stream.
+    if (auto s3 = session.try_as<IGraphicsCaptureSession3>()) {
+        try {
+            s3.IsBorderRequired(false);
+        } catch (const winrt::hresult_error&) {
+            // Best effort.
+        }
+    }
+
+    // ---- The staging texture ------------------------------------------------
+    {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width            = src_w;
+        desc.Height           = src_h;
+        desc.MipLevels         = 1;
+        desc.ArraySize         = 1;
+        desc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage            = D3D11_USAGE_STAGING;
+        desc.BindFlags        = 0;
+        desc.CPUAccessFlags   = D3D11_CPU_ACCESS_READ;
+        std::lock_guard<std::mutex> lock(state->handler_mutex_);
+        if (FAILED(state->device_->CreateTexture2D(&desc, nullptr,
+                                                    &state->staging_))) {
+            core::log::Logger::instance().error(
+                "wgc: the staging texture could not be created");
+            state->device_errors.fetch_add(1, std::memory_order_relaxed);
+            state->running_.store(false, std::memory_order_release);
+            return;
+        }
+        state->staging_width_  = desc.Width;
+        state->staging_height_ = desc.Height;
+    }
+
+    // ---- The frame subscription ----------------------------------------------
+    //
+    // The handler runs on a WinRT thread-pool thread.  It does the
+    // readback and the push; it must not block.
+    //
+    // The handler captures the *state*, never the owning device: it may
+    // still be running when the device is destroyed, and it must not
+    // touch freed memory.  The state it captures keeps itself alive for
+    // as long as the handler runs.
+    auto handler = [state](Direct3D11CaptureFramePool const&,
+                            winrt::Windows::Foundation::IInspectable const&) {
+        WgcCapture::on_frame_arrived(state);
+    };
+    winrt::event_token token{};
+    try {
+        token = pool->FrameArrived(handler);
+    } catch (const winrt::hresult_error&) {
+        core::log::Logger::instance().error(
+            "wgc: the FrameArrived subscription failed");
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    // ---- Start -----------------------------------------------------------------
+    try {
+        session.StartCapture();
+    } catch (const winrt::hresult_error&) {
+        core::log::Logger::instance().error("wgc: StartCapture failed");
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        pool->FrameArrived(token);
+        state->running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    // ---- Wait --------------------------------------------------------------------
+    //
+    // The capture thread's job is done once the session is started: the
+    // frames arrive on the thread-pool thread.  It waits here so that
+    // `close()` can join it and the objects stay alive for as long as
+    // the session runs.
+    while (state->running_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    // ---- Stop the handlers, then wait for them ------------------------------
+    //
+    // Unsubscribing is what guarantees that *no new* handler can start
+    // after this point: `close()` therefore only has to wait for the
+    // handlers that are already running.
+    //
+    // The order is: unsubscribe first, *then* wait.  A handler that
+    // starts in the window between the two sees `running_ == false` and
+    // returns without touching anything ??but the wait must come after
+    // the unsubscribe, or a handler could start *after* the wait
+    // returned and then run against objects this thread is about to
+    // release.
+    pool->FrameArrived(token);
+
+    // ---- Stop the session -------------------------------------------------
+    //
+    // The session is closed *before* the handlers are waited for, and
+    // that order matters.
+    //
+    // A running session keeps the compositor delivering frames, and
+    // every one of them dispatches a handler.  So the wait below would
+    // never finish while the session is still running: a handler that
+    // is dispatched between the unsubscribe and the wait would keep
+    // the in-flight count above zero for as long as the compositor
+    // had something to deliver.
+    //
+    // Closing the session first stops the delivery, so the wait is
+    // waiting for the handlers that are *already* running -- which is
+    // what it is for.
+    try {
+        session.Close();
+    } catch (const winrt::hresult_error&) {
+        // Best effort.
+    }
+
+    // Wait for the running handlers to finish.
+    //
+    // This is the step that makes the teardown below safe.  A
+    // frame-arrival handler runs on a WinRT thread-pool thread, which
+    // has **no COM apartment of its own**: it borrows the runtime this
+    // thread's apartment provides.  So the handlers must be *done*
+    // before this thread releases the WinRT objects and leaves the
+    // apartment ??a handler that is still running when the apartment
+    // goes away touches a runtime that is no longer there, which is an
+    // access violation inside the COM machinery rather than a clean
+    // error.
+    //
+    // (`close()` waits for the same counter too, but it does so *after*
+    // joining this thread ??which is too late, because by then the
+    // apartment has already been torn down.  The wait has to happen
+    // here, inside the apartment's lifetime.)
+    while (state->in_flight_.load(std::memory_order_acquire) > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void WgcCapture::on_frame_arrived(
+        const std::shared_ptr<WgcCaptureState>& state) noexcept {
+    if (!state) return;
+
+    // The in-flight counter is incremented *before* any other access to
+    // the state, so that `close()` cannot conclude that no handler is
+    // running while this one is about to touch the D3D objects.
+    state->in_flight_.fetch_add(1, std::memory_order_acq_rel);
+    struct InFlightGuard {
+        std::atomic<int>* counter;
+        ~InFlightGuard() { counter->fetch_sub(1, std::memory_order_acq_rel); }
+    } guard{&state->in_flight_};
+
+    // Hold the apartment for as long as this handler might touch a
+    // WinRT object.
+    //
+    // The handler runs on a WinRT thread-pool thread, which has no
+    // apartment of its own: it borrows the runtime the capture thread's
+    // apartment provides.  Taking a reference *before* anything else
+    // means the apartment cannot be torn down while this handler is
+    // running -- and, just as importantly, it means the apartment
+    // cannot be torn down before this handler has even *started*, which
+    // is the window that used to crash: the capture thread unsubscribes,
+    // sees that no handler is running, and leaves the apartment, while a
+    // handler that had already been dispatched to the thread pool is
+    // only now waking up.
+    const bool apartment_held = state->apartment.acquire();
+    struct ApartmentGuard {
+        SharedApartment* apartment;
+        bool held;
+        ~ApartmentGuard() { if (held) apartment->release(); }
+    } apartment_guard{&state->apartment, apartment_held};
+
+    // The apartment is gone: the capture thread has already torn it
+    // down, so there is no runtime left to call into.  Touching the
+    // pool now would be an access violation rather than a clean
+    // failure, so the handler simply does nothing.
+    if (!apartment_held) return;
+
+    // Only one handler at a time may use the readback buffers and the
+    // dirty-rect detector: a free-threaded frame pool may raise
+    // `FrameArrived` on several thread-pool threads at once.  The lock
+    // also orders the read of `pool_` below against the teardown's
+    // reset of it.
+    std::lock_guard<std::mutex> handler_lock(state->handler_mutex_);
+
+    // The capture is being torn down: do not start any work.  This is
+    // checked *after* the in-flight counter was raised, so that
+    // `close()` ??which clears `running_` and then waits for the
+    // in-flight count to reach zero ??cannot conclude that no handler
+    // is running while this one is still inside the critical section.
+    if (!state->running_.load(std::memory_order_acquire)) return;
+
+    // Keep the pool alive for the duration of this handler, even if the
+    // capture thread tears it down concurrently.
+    std::shared_ptr<Direct3D11CaptureFramePool> pool = state->pool_;
+    if (!pool) return;
+
+    if (!state->device_ || !state->context_) return;
+
+    Direct3D11CaptureFrame frame = nullptr;
+    try {
+        frame = pool->TryGetNextFrame();
+    } catch (const winrt::hresult_error&) {
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (!frame) return;
+
+    // ---- The surface -> the D3D11 texture ----------------------------------------
+    ID3D11Texture2D* texture = nullptr;
+    {
+        auto surface = frame.Surface();
+        ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess*
+            access = nullptr;
+        const HRESULT qi = winrt::get_unknown(surface)->QueryInterface(
+            __uuidof(::Windows::Graphics::DirectX::Direct3D11::
+                         IDirect3DDxgiInterfaceAccess),
+            reinterpret_cast<void**>(&access));
+        if (FAILED(qi) || access == nullptr) {
+            state->device_errors.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        const HRESULT gi = access->GetInterface(
+            __uuidof(ID3D11Texture2D),
+            reinterpret_cast<void**>(&texture));
+        access->Release();
+        if (FAILED(gi) || texture == nullptr) {
+            state->device_errors.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+
+    // ---- The readback ------------------------------------------------------------
+    //
+    // The staging texture is sized for the *source*; if the compositor
+    // handed over a differently sized surface (a window that was
+    // resized), the staging texture has to follow.
+    if (desc.Width != state->staging_width_ ||
+        desc.Height != state->staging_height_) {
+        D3D11_TEXTURE2D_DESC sdesc{};
+        sdesc.Width            = desc.Width;
+        sdesc.Height           = desc.Height;
+        sdesc.MipLevels         = 1;
+        sdesc.ArraySize         = 1;
+        sdesc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sdesc.SampleDesc.Count = 1;
+        sdesc.Usage            = D3D11_USAGE_STAGING;
+        sdesc.BindFlags        = 0;
+        sdesc.CPUAccessFlags   = D3D11_CPU_ACCESS_READ;
+        ID3D11Texture2D* fresh = nullptr;
+        if (FAILED(state->device_->CreateTexture2D(&sdesc, nullptr,
+                                                    &fresh))) {
+            texture->Release();
+            state->device_errors.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (state->staging_ != nullptr) state->staging_->Release();
+        state->staging_ = fresh;
+        state->staging_width_  = desc.Width;
+        state->staging_height_ = desc.Height;
+    }
+
+    state->context_->CopyResource(state->staging_, texture);
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    const HRESULT map_hr = state->context_->Map(
+        state->staging_, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(map_hr)) {
+        texture->Release();
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // The mapped rows are padded; the scratch buffer is packed.  This
+    // is the one memcpy the CPU path needs.
+    const std::size_t row_bytes = static_cast<std::size_t>(desc.Width) * 4u;
+    const std::size_t needed =
+        row_bytes * static_cast<std::size_t>(desc.Height);
+    if (state->scratch.size() < needed) state->scratch.assign(needed, 0u);
+    for (UINT row = 0; row < desc.Height; ++row) {
+        std::memcpy(state->scratch.data() +
+                        static_cast<std::size_t>(row) * row_bytes,
+                    static_cast<const std::uint8_t*>(mapped.pData) +
+                        static_cast<std::size_t>(row) * mapped.RowPitch,
+                    row_bytes);
+    }
+    state->context_->Unmap(state->staging_, 0);
+    texture->Release();
+    state->bytes_copied.fetch_add(static_cast<std::uint64_t>(needed),
+                                  std::memory_order_relaxed);
+
+    // ---- The dirty rectangles ------------------------------------------------------
+    //
+    // WGC does not report them: the compositor hands over a whole
+    // surface every time.  The changed region is therefore computed
+    // by comparing the frame with the previous one (remote-desktop
+    // plan A7) ??which is done *after* the region crop, because the
+    // consumer's frame is the region.
+    plugins::CaptureDirtyRects dirty;
+
+    // ---- Crop to the requested region ------------------------------------------------
+    const bool has_region = state->cfg.region.width != 0 &&
+                            state->cfg.region.height != 0;
+    const std::uint8_t* pixels = state->scratch.data();
+    std::uint32_t frame_w = desc.Width;
+    std::uint32_t frame_h = desc.Height;
+    std::int32_t stride = static_cast<std::int32_t>(row_bytes);
+
+    if (has_region) {
+        const std::uint32_t rx = std::min(state->cfg.region.x, desc.Width);
+        const std::uint32_t ry = std::min(state->cfg.region.y, desc.Height);
+        const std::uint32_t rw =
+            std::min(state->cfg.region.width, desc.Width - rx);
+        const std::uint32_t rh =
+            std::min(state->cfg.region.height, desc.Height - ry);
+        if (rw == 0 || rh == 0) return;
+
+        const std::size_t region_row = static_cast<std::size_t>(rw) * 4u;
+        const std::size_t region_bytes =
+            region_row * static_cast<std::size_t>(rh);
+        if (state->region_scratch.size() != region_bytes) {
+            state->region_scratch.assign(region_bytes, 0u);
+        }
+        for (std::uint32_t row = 0; row < rh; ++row) {
+            std::memcpy(state->region_scratch.data() +
+                            static_cast<std::size_t>(row) * region_row,
+                        state->scratch.data() +
+                            (static_cast<std::size_t>(ry + row) * desc.Width +
+                             rx) * 4u,
+                        region_row);
+        }
+        pixels = state->region_scratch.data();
+        frame_w = rw;
+        frame_h = rh;
+        stride = static_cast<std::int32_t>(region_row);
+    }
+
+    // ---- Queue the frame ---------------------------------------------------------------
+    const std::int64_t ts = static_cast<std::int64_t>(::GetTickCount64() * 1000);
+    const std::uint32_t seq = state->frame_index.fetch_add(1);
+    const std::size_t frame_bytes = static_cast<std::size_t>(stride) *
+                                   static_cast<std::size_t>(frame_h);
+
+    // An unchanged frame is not worth queuing: the consumer would
+    // encode the same picture again and spend the user's bandwidth on
+    // it (plan A7).
+    const bool identical = state->dirty_detector.compare(
+        pixels, frame_bytes, stride, frame_w, frame_h, 4, dirty);
+    if (identical) {
+        return;
+    }
+
+    // The captured-frame counter is bumped *before* the frame is queued.
+    //
+    // The order matters, and it is not a detail: the queue hands the
+    // frame to a consumer that may be running on another thread, and
+    // that consumer's very next act is often to read `stats()`.  If the
+    // counter were bumped *after* the push, the consumer could pop the
+    // frame, read a counter that still says zero, and conclude that the
+    // device had captured nothing ??while a frame was sitting in its
+    // hand.  Bumping first makes the counter a *lower bound* on the
+    // frames that exist, which is the only ordering a reader can rely
+    // on.
+    //
+    // The count is *not* rolled back if the queue refuses the frame.
+    // The counter counts the frames the device produced, and a frame
+    // the queue refuses was still produced: the queue is what refused
+    // to deliver it, and that refusal is already reported separately
+    // in `frames_dropped`.  A decrement would make the counter go
+    // backwards, which would break every reader that treats it as a
+    // monotonic count.
+    state->frames_captured.fetch_add(1, std::memory_order_relaxed);
+
+    const auto outcome = state->queue_.push(
+        pixels, frame_bytes, stride, frame_w, frame_h, ts, seq, dirty);
+    switch (outcome) {
+        case CaptureQueue::PushResult::kQueued:
+            break;
+        case CaptureQueue::PushResult::kDroppedOldest:
+            state->frames_dropped.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case CaptureQueue::PushResult::kRejected:
+            // The queue refused the frame, so it was never delivered.
+            // The device still captured it, so `frames_captured` keeps
+            // it; the refusal shows up in `frames_dropped`.
+            state->frames_dropped.fetch_add(1, std::memory_order_relaxed);
+            break;
+    }
+
+    // The callback is copied out under its lock: the consumer may
+    // replace it at any moment, and the handler must not call a
+    // half-installed one.
+    plugins::CaptureFrameCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(state->cb_mutex_);
+        cb = state->cb;
+    }
+    if (cb) {
+        plugins::CaptureFrame view;
+        view.pixels = pixels;
+        view.size = frame_bytes;
+        view.stride = stride;
+        view.width = frame_w;
+        view.height = frame_h;
+        view.capture_ts_us = ts;
+        view.frame_seq = seq;
+        view.dirty = dirty;
+        view.has_gpu_handle = false;
+        cb(view);
+    }
+}
+
+plugins::Status WgcCapture::pop_frame(plugins::CaptureFrame& out) noexcept {
+    if (!open_ || !state_) return plugins::kErrNotReady;
+    // The frame-arrival thread filled the queue; the engine's tick
+    // thread only takes what is already there.  It never waits.
+    if (!state_->queue_.pop(out)) {
+        return plugins::kErrNotReady;
+    }
+    return plugins::kOk;
+}
+
+plugins::CaptureStats WgcCapture::stats() const noexcept {
+    plugins::CaptureStats s;
+    if (!state_) return s;
+    s.frames_captured = state_->frames_captured.load(std::memory_order_relaxed);
+    s.frames_dropped  = state_->frames_dropped.load(std::memory_order_relaxed);
+    s.device_errors   = state_->device_errors.load(std::memory_order_relaxed);
+    s.bytes_copied    = state_->bytes_copied.load(std::memory_order_relaxed);
+    return s;
+}
+
+#else // !NIMRTC_WGC_CAPTURE
+
+// ---------------------------------------------------------------------------
+// The non-Windows stub
+// ---------------------------------------------------------------------------
+
+class WgcCaptureState {};
+
+void WgcCapture::set_frame_callback(
+        plugins::CaptureFrameCallback cb) noexcept {
+    cb_ = std::move(cb);
+}
+
+WgcCapture::WgcCapture(plugins::CaptureConfig cfg) noexcept
+    : cfg_(std::move(cfg)) {}
+
+WgcCapture::~WgcCapture() = default;
+
+bool WgcCapture::available() noexcept {
+    return false;
+}
+
+plugins::Status WgcCapture::open() noexcept {
+    // WGC is a Windows API.  On any other host this device simply does
+    // not exist, and saying so is clearer than pretending.
+    return plugins::kErrUnsupported;
+}
+
+void WgcCapture::close() noexcept {}
+
+std::vector<plugins::CaptureDevice>
+WgcCapture::enumerate_devices() const noexcept {
+    return {};
+}
+
+std::vector<plugins::CaptureFormat>
+WgcCapture::supported_formats(const std::string&) const noexcept {
+    return {};
+}
+
+plugins::CaptureCapabilities WgcCapture::capabilities() const noexcept {
+    plugins::CaptureCapabilities c;
+    // The stub reports the *same* static design flags as the real
+    // backend: the platform's capabilities are a property of the
+    // backend, not of the host it runs on.  A query must not answer
+    // differently depending on where it is asked from.
+    c.zero_copy = false;
+    c.dirty_rects = true;
+    c.cursor_composited = true;
+    c.region_selection = true;
+    c.enumeration = true;
+    c.max_pixels = 0;
+    c.backend = "wgc-capture";
+    return c;
+}
+
+void WgcCapture::capture_loop(
+        std::shared_ptr<WgcCaptureState>) noexcept {}
+
+void WgcCapture::on_frame_arrived(
+        const std::shared_ptr<WgcCaptureState>&) noexcept {}
+
+plugins::Status WgcCapture::pop_frame(plugins::CaptureFrame&) noexcept {
+    return plugins::kErrUnsupported;
+}
+
+plugins::CaptureStats WgcCapture::stats() const noexcept {
+    return plugins::CaptureStats{};
+}
+
+#endif // NIMRTC_WGC_CAPTURE
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+void register_wgc_capture() noexcept {
+#if defined(NIMRTC_WGC_CAPTURE)
+    static const WgcCaptureFactory kFactory{};
+    core::PluginRegistry::instance().register_video_capture(kFactory.id(),
+                                                            &kFactory);
+#endif
+}
+
+} // namespace nimrtc::video_capture

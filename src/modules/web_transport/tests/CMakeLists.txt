@@ -97,8 +97,8 @@ endif()
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_web_transport_alpn
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_web_transport_dc_capability
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

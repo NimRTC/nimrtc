@@ -65,37 +65,37 @@ inline constexpr std::size_t kNackFciSizeN(std::size_t n) noexcept { return n * 
 inline constexpr std::int64_t kFirMinIntervalUs = 250'000;
 
 // RTCP payload type for PSFB (RFC 4585 §6): 206.
-inline constexpr std::uint8_t kPsfbPt = 206;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kPsfbPt = 206;
 // RTCP payload type for RTPFB (RFC 4585 §6.2): 205.
-inline constexpr std::uint8_t kRtpfbPt = 205;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kRtpfbPt = 205;
 
 // RTCP payload type for APP (RFC 3550 §6.1): 204.
 NIMRTC_API_STABLE inline constexpr std::uint8_t kAppPt = 204;
 
 // FCI kinds (the value in the FMT field for each feedback type).
-inline constexpr std::uint8_t kFmtPli     = 1;
-inline constexpr std::uint8_t kFmtFir     = 4;
-inline constexpr std::uint8_t kFmtSli     = 2;
-inline constexpr std::uint8_t kFmtNack    = 1;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kFmtPli     = 1;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kFmtFir     = 4;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kFmtSli     = 2;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kFmtNack    = 1;
 
 // ---------------------------------------------------------------------------
 // Data structures
 // ---------------------------------------------------------------------------
 
 /** Picture Loss Indication (RFC 4585 §6.3.1). */
-struct PliPacket {
+struct NIMRTC_API_STABLE PliPacket {
     std::uint32_t sender_ssrc = 0;   // SSRC of the feedback sender (the receiver)
     std::uint32_t media_ssrc  = 0;   // SSRC of the media source needing a key frame
 };
 
 /** One Full Intra Request entry (RFC 5104 §4.3.1.1). */
-struct FirEntry {
+struct NIMRTC_API_STABLE FirEntry {
     std::uint32_t ssrc       = 0;    // which stream to refresh
     std::uint8_t  seq_nr     = 0;    // sequence number (coalescing key)
 };
 
 /** Full Intra Request packet — one or more entries in a single feedback. */
-struct FirPacket {
+struct NIMRTC_API_STABLE FirPacket {
     std::uint32_t            sender_ssrc = 0;
     std::vector<FirEntry>    entries;
 };
@@ -104,27 +104,27 @@ struct FirPacket {
  *  RFC packs (first:13, number:13, picture_id:6) into 4 bytes; this module
  *  stores them as plain integers so the wire format we emit/parse is one
  *  8-byte entry — see note below the SLI builder for the bit-layout decision. */
-struct SliEntry {
+struct NIMRTC_API_STABLE SliEntry {
     std::uint16_t first      = 0;    // first macroblock index
     std::uint16_t number     = 0;    // number of macroblocks lost
     std::uint32_t picture_id = 0;    // 6-bit picture id (RFC); full 32 stored
 };
 
 /** Slice Loss Indication packet. */
-struct SliPacket {
+struct NIMRTC_API_STABLE SliPacket {
     std::uint32_t            sender_ssrc = 0;
     std::uint32_t            media_ssrc  = 0;
     std::vector<SliEntry>    entries;
 };
 
 /** One NACK FCI entry (RFC 4585 §6.2.1). */
-struct NackEntry {
+struct NIMRTC_API_STABLE NackEntry {
     std::uint16_t pid        = 0;    // first lost packet sequence number
     std::uint16_t blp        = 0;    // bitmask of subsequent losses (PID+1 .. PID+16)
 };
 
 /** Generic NACK packet. */
-struct NackPacket {
+struct NIMRTC_API_STABLE NackPacket {
     std::uint32_t            sender_ssrc = 0;
     std::uint32_t            media_ssrc  = 0;
     std::vector<NackEntry>   entries;
@@ -244,6 +244,7 @@ NIMRTC_API_STABLE bool is_region_refresh(core::ByteSpan input) noexcept;
 // is less than the wire size of the packet the function writes nothing and
 // returns 0. Callers should pre-size the buffer using kPliPacketSize +
 // entries * kXxxEntrySize.
+
 
 NIMRTC_API_STABLE std::size_t build_pli (core::MutableByteSpan output, const PliPacket&  p) noexcept;
 NIMRTC_API_STABLE std::size_t build_fir (core::MutableByteSpan output, const FirPacket&  p) noexcept;

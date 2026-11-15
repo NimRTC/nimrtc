@@ -49,6 +49,7 @@
 
 #include <nimrtc/plugins/video_capture.hpp>
 #include <nimrtc/video_capture/capture_queue.hpp>
+#include <nimrtc/video_capture/capture_source_adapter.hpp>
 
 namespace nimrtc::video_capture {
 
@@ -180,6 +181,12 @@ public:
     [[nodiscard]] plugins::IVideoCapture* create(
         plugins::CaptureConfig cfg) const override {
         return new SyntheticCapture(std::move(cfg));
+    }
+
+    [[nodiscard]] plugins::IVideoSource* create_source(
+        plugins::IVideoCapture* device,
+        plugins::VideoSourceConfig cfg) const override {
+        return make_capture_source(device, std::move(cfg));
     }
 };
 

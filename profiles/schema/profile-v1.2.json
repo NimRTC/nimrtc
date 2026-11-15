@@ -3,69 +3,119 @@
   "$id": "https://nimrtc.org/schema/profile-v1.2.json",
   "title": "NimRTC Profile Schema v1.2",
   "description": "Scenario assembly profile (v1.2 — adds the video-scene keys per the remote-desktop plan K4). Strictly ADDITIVE on top of v1.1: every v1.1 profile loads unchanged under this schema; v1.2 profiles add the four optional top-level keys `video_codec_preference`, `video_resolution_floor`, `video_ladder_mode` and `video_content_type`. The C++ loader (src/modules/assembly/src/assembly.cpp) reads them into the matching `assembly::Profile` fields; a key that is absent leaves the engine default in place (codec preference \"h264\", resolution floor \"720p\", ladder mode \"quality\", content type \"camera\"). The ladder mode vocabulary and the per-profile defaults are tabulated in docs/plan/video-pipeline-v2-plan.md §B.7.3 (OD-3(a)); the content-type vocabulary follows ADR-022 (screen content as a content type).",
-
   "type": "object",
-  "required": ["name"],
+  "required": [
+    "name"
+  ],
   "additionalProperties": true,
-
   "properties": {
-    "name": { "type": "string" },
-
-    "transport_name": { "type": "string" },
-    "sdp_name":       { "type": "string" },
-    "rtp_name":       { "type": "string" },
-    "jb_name":        { "type": "string" },
-    "audio3a_name":   { "type": "string" },
-    "codec_name":     { "type": "string" },
-    "bwe_name":       { "type": "string" },
-    "scheduler_name": { "type": "string" },
-
-    "timeline_enabled":    { "type": "boolean" },
-    "datachannel_enabled": { "type": "boolean" },
-
-    "audio_sample_rate_hz": { "type": "integer", "minimum": 0 },
-    "audio_channels":       { "type": "integer", "minimum": 0, "maximum": 2 },
-    "audio_payload_type":   { "type": "integer", "minimum": 0, "maximum": 127 },
-
-    "bwe": { "type": "object" },
-    "jitter_buffer": { "type": "object" },
-    "scheduler": { "type": "object" },
-
+    "name": {
+      "type": "string"
+    },
+    "transport_name": {
+      "type": "string"
+    },
+    "sdp_name": {
+      "type": "string"
+    },
+    "rtp_name": {
+      "type": "string"
+    },
+    "jb_name": {
+      "type": "string"
+    },
+    "audio3a_name": {
+      "type": "string"
+    },
+    "codec_name": {
+      "type": "string"
+    },
+    "bwe_name": {
+      "type": "string"
+    },
+    "scheduler_name": {
+      "type": "string"
+    },
+    "timeline_enabled": {
+      "type": "boolean"
+    },
+    "datachannel_enabled": {
+      "type": "boolean"
+    },
+    "audio_sample_rate_hz": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "audio_channels": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "audio_payload_type": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 127
+    },
+    "bwe": {
+      "type": "object"
+    },
+    "jitter_buffer": {
+      "type": "object"
+    },
+    "scheduler": {
+      "type": "object"
+    },
     "video_codec_preference": {
       "type": "string",
-      "enum": ["h264", "h265", "av1", "vp8", "vp9"],
+      "enum": [
+        "h264",
+        "h265",
+        "av1",
+        "vp8",
+        "vp9"
+      ],
       "description": "v1.2 additive — preferred video codec for this scene. A preference, not a requirement: the negotiated codec is the one both peers support. For a screen-content scene it drives the encoder's screen-coding tools (remote-desktop plan B8; ADR-021 for the bundling posture). Omitted = engine default \"h264\"."
     },
-
     "video_resolution_floor": {
       "type": "string",
-      "enum": ["360p", "480p", "720p", "1080p", "1440p", "2160p"],
+      "enum": [
+        "360p",
+        "480p",
+        "720p",
+        "1080p",
+        "1440p",
+        "2160p"
+      ],
       "description": "v1.2 additive — the adaptation ladder's resolution floor: the lowest resolution the ladder may step down to. Configurable per scene / machine class, because a scene that reads text cannot fall below the floor without destroying the product (remote-desktop plan D2). Omitted = engine default \"720p\"."
     },
-
     "video_ladder_mode": {
       "type": "string",
-      "enum": ["quality", "smoothness"],
+      "enum": [
+        "quality",
+        "smoothness"
+      ],
       "description": "v1.2 additive — the ladder's adaptation mode: \"quality\" (quality-first — spend the budget on resolution / fidelity) or \"smoothness\" (smoothness-first — spend it on frame rate). The per-profile defaults are tabulated in docs/plan/video-pipeline-v2-plan.md §B.7.3 (OD-3(a)); the engine default is quality-first. Omitted = engine default \"quality\"."
     },
-
     "video_content_type": {
       "type": "string",
-      "enum": ["camera", "screen"],
+      "enum": [
+        "camera",
+        "screen"
+      ],
       "description": "v1.2 additive — the content type of the video source. \"screen\" selects the screen-coding tools, the content hint and the ROI handling; a screen capture is NOT \"a camera with a huge resolution\" (ADR-022; remote-desktop plan RD-3). Omitted = engine default \"camera\"."
     },
-
     "video_stream_weights": {
       "type": "object",
-      "description": "v1.2 additive \u2014 the declared per-stream bandwidth shares (remote-desktop plan D5). The session's bandwidth estimate is divided between the video streams by weight; the rule itself lives in exactly one place (src/engine/src/bandwidth_allocation.hpp) and is shared with the audio path. The key is the stream's stable id (\"default\", \"screen\", \"camera\", ...) \u2014 the same id NimRTCEngine::add_video_stream() takes \u2014 and the value is the stream's relative weight. A weight of 0 means \"this stream takes nothing from the pool\"; the default weight is 1 (an even split). The map is declarative, not constructive: a declaration for a stream the session never creates is inert, not an error. The runtime override (NimRTCEngine::set_video_stream_weight()) always wins over the declaration. Omitted = every stream splits the pool evenly.",
-      "propertyNames": { "minLength": 1 },
+      "description": "v1.2 additive — the declared per-stream bandwidth shares (remote-desktop plan D5). The session's bandwidth estimate is divided between the video streams by weight; the rule itself lives in exactly one place (src/engine/src/bandwidth_allocation.hpp) and is shared with the audio path. The key is the stream's stable id (\"default\", \"screen\", \"camera\", ...) — the same id NimRTCEngine::add_video_stream() takes — and the value is the stream's relative weight. A weight of 0 means \"this stream takes nothing from the pool\"; the default weight is 1 (an even split). The map is declarative, not constructive: a declaration for a stream the session never creates is inert, not an error. The runtime override (NimRTCEngine::set_video_stream_weight()) always wins over the declaration. Omitted = every stream splits the pool evenly.",
+      "propertyNames": {
+        "minLength": 1
+      },
       "additionalProperties": {
         "type": "integer",
         "minimum": 0,
         "maximum": 255
       }
     },
-
     "transport": {
       "type": "object",
       "description": "v1.1 additive block — declares the transport strategy and the (media_stack, control_stack) pair. See docs/plan/transport-strategies.md §2 for the five named strategies.",
@@ -82,7 +132,6 @@
           ],
           "description": "Use-case strategy id. Empty string (or omitted) = engine compile-time default ('browser-call')."
         },
-
         "media": {
           "type": "object",
           "description": "Media-plane stack declaration.",
@@ -90,7 +139,11 @@
           "properties": {
             "stack": {
               "type": "string",
-              "enum": ["webrtc-classic", "raw-udp-arq", "webrtc-quic"],
+              "enum": [
+                "webrtc-classic",
+                "raw-udp-arq",
+                "webrtc-quic"
+              ],
               "description": "Media-stack factory id. 'webrtc-classic' = libjuice + wolfSSL + usrsctp (default); 'raw-udp-arq' = bare UDP + ARQ (no SCTP, no browser interop); 'webrtc-quic' = v1.x WebTransport (not in v0.12.0)."
             },
             "max_p99_ms": {
@@ -100,7 +153,6 @@
             }
           }
         },
-
         "control": {
           "type": "object",
           "description": "Control-plane stack declaration. When `enabled` is false, control traffic rides the media stack's DataChannel (SCTP).",
@@ -112,14 +164,29 @@
             },
             "stack": {
               "type": "string",
-              "enum": ["webrtc-classic", "raw-udp-arq", "webrtc-quic"],
+              "enum": [
+                "webrtc-classic",
+                "raw-udp-arq",
+                "webrtc-quic"
+              ],
               "description": "Control-stack factory id. Only meaningful when `enabled` is true."
             },
-            "max_p99_ms":  { "type": "integer", "minimum": 0 },
-            "freq_hz":     { "type": "integer", "minimum": 1, "description": "Expected control-message rate in Hz." },
+            "max_p99_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "freq_hz": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Expected control-message rate in Hz."
+            },
             "reliability": {
               "type": "string",
-              "enum": ["reliable_ordered", "partial_reliable", "unreliable"],
+              "enum": [
+                "reliable_ordered",
+                "partial_reliable",
+                "unreliable"
+              ],
               "description": "Reliability model for the control plane."
             },
             "ttl_ms": {
@@ -128,6 +195,122 @@
               "description": "Time-to-live for partial_reliable messages (ms)."
             }
           }
+        }
+      },
+      "$ref": "profile-v1.1.json#/properties/transport"
+    },
+    "video": {
+      "type": "object",
+      "description": "v1.2 additive block — describes the *shape* of the outgoing video stream. A camera stream leaves this block empty (the default) and behaves exactly as it did in v1.1. A screen stream fills it in.",
+      "additionalProperties": false,
+      "properties": {
+        "codec_name": {
+          "type": "string",
+          "description": "Pin one codec (e.g. \"h264\", \"h265\", \"av1\"). Empty = pick from `codec_preference`."
+        },
+        "codec_preference": {
+          "type": "array",
+          "description": "Ordered codec preference table. The encoder walks it in order and takes the first codec that is actually available on this machine AND permitted by `codec_backend`. The screen-content table is [\"av1\", \"h265\", \"h264\"] — AV1's intra-frame coding dominates on flat, sharp-edged text; H.265 is the safe hardware fallback; H.264 is the universal fallback.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "h264",
+              "h265",
+              "av1",
+              "vp8",
+              "vp9"
+            ]
+          }
+        },
+        "codec_backend": {
+          "type": "string",
+          "description": "Backend policy for the video encoder. 'auto' = hardware first, software as a fallback (remote-desktop plan B2). The authoritative parser is the codec seam's `codec_backend_from_string`; this schema lists the accepted spellings but does not enforce the runtime availability.",
+          "enum": [
+            "auto",
+            "hardware",
+            "software"
+          ]
+        },
+        "content_type": {
+          "type": "string",
+          "description": "What the encoder is looking at. 'screen' enables the screen-content coding tools (no temporal prediction on flat regions, sharper intra). 'motion' is a camera. 'text' is pure text/scroll.",
+          "enum": [
+            "unspecified",
+            "motion",
+            "screen",
+            "text"
+          ]
+        },
+        "ladder_mode": {
+          "type": "string",
+          "description": "How the resolution ladder spends its budget. 'quality' keeps the resolution high and lets the frame rate drop (correct for screen content: legibility first). 'smoothness' is the opposite (correct for a camera). 'fixed' disables the ladder.",
+          "enum": [
+            "fixed",
+            "smoothness",
+            "quality"
+          ]
+        },
+        "resolution_floor": {
+          "description": "The ladder never crosses below this resolution. Configurable because the right value depends on the machine class: 1080p on a hardware-encoding box, 720p on a software-only one. Written as [width, height]; an object form {width, height} is also accepted by the loader.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "width": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "height": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        "pixel_format": {
+          "type": "string",
+          "description": "The pixel format the encoder is fed with, before its own internal conversion.",
+          "enum": [
+            "i420",
+            "nv12",
+            "yuy2",
+            "rgba",
+            "bgra",
+            "argb",
+            "abgr"
+          ]
+        },
+        "color_range": {
+          "type": "string",
+          "description": "The colour range of the source. A desktop compositor produces FULL range; a camera usually produces LIMITED. Getting this wrong looks like 'the codec is broken' (washed-out blacks or crushed highlights).",
+          "enum": [
+            "",
+            "full",
+            "limited"
+          ]
+        },
+        "color_matrix": {
+          "type": "string",
+          "description": "The YUV matrix of the source. bt709 is the correct default for sRGB desktop content.",
+          "enum": [
+            "",
+            "bt709",
+            "bt470bg",
+            "smpte170m",
+            "fcc",
+            "bt2020"
+          ]
         }
       }
     }

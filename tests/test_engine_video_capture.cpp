@@ -29,6 +29,7 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/plugins/video_capture.hpp>
+#include <nimrtc/video_capture/capture_source_adapter.hpp>
 
 #include <gtest/gtest.h>
 
@@ -64,6 +65,17 @@ public:
     np::Status open() noexcept override {
         if (calls_) ++calls_->opened;
         opened_ = true;
+        // A capture device reports the layout it negotiated.  The
+        // engine's capture path hands the device to the capture
+        // module's shared adapter, and the adapter refuses to drive a
+        // device whose pixel layout it cannot name -- guessing a
+        // layout would produce garbage pixels instead of an error.
+        // Every real backend (DXGI, WGC, ScreenCaptureKit, PipeWire,
+        // X11) reports "bgra"; so does this stub.
+        cfg_.format.width = 320;
+        cfg_.format.height = 240;
+        cfg_.format.fps = 30;
+        cfg_.format.tag = "bgra";
         return np::kOk;
     }
     void close() noexcept override {
@@ -110,6 +122,12 @@ public:
     }
     np::IVideoCapture* create(np::CaptureConfig cfg) const override {
         return new StubCaptureDevice(std::move(cfg), calls_);
+    }
+
+    np::IVideoSource* create_source(np::IVideoCapture* device,
+                                    np::VideoSourceConfig cfg) const override {
+        return nimrtc::video_capture::make_capture_source(device,
+                                                           std::move(cfg));
     }
 
 private:

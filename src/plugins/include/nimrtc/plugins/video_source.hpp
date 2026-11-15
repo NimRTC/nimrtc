@@ -226,6 +226,40 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
      *
      *  @see `plugins::VideoColorDescription` */
     VideoColorDescription color;
+
+    // -- Zero-copy surface (remote-desktop plan B10) -------------------------
+    //
+    // The GPU half of the frame.  When the surface's backend is not
+    // `kNone` the picture lives in GPU memory: `plane_y/u/v` may be
+    // null, and the *encoder* is expected to consume the surface
+    // directly (`IVideoCodec::encode_zero_copy`) rather than through a
+    // CPU staging copy.
+    //
+    // The handle is borrowed from the producer and is valid for the
+    // duration of the callback, exactly like `plane_y/u/v`.  A consumer
+    // that wants to keep it past the callback must copy it.
+    //
+    // `GpuHandle::device` identifies the GPU device the surface belongs
+    // to — the encoder session is opened against one device, so the
+    // producer and the consumer must agree on it.
+    //
+    // It is a *view* of the three flat fields above, not a second copy:
+    // the flat form is what the whole `video_frame` module uses, so it
+    // is the one the seam keeps.
+    [[nodiscard]] GpuHandle gpu_surface() const noexcept {
+        GpuHandle h;
+        h.backend             = gpu_backend;
+        h.handle              = gpu_handle;
+        h.native_pitch_bytes  = gpu_pitch_bytes;
+        return h;
+    }
+
+    /** Set the GPU half from one handle (the inverse of `gpu_surface()`). */
+    void set_gpu_surface(const GpuHandle& h) noexcept {
+        gpu_backend     = h.backend;
+        gpu_handle      = h.handle;
+        gpu_pitch_bytes = h.native_pitch_bytes;
+    }
 };
 
 // ---------------------------------------------------------------------------

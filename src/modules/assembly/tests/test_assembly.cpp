@@ -77,6 +77,9 @@ TEST_F(AssemblyTest, AllBuiltinProfilesRegistered) {
 
     // Expected: 10 built-in profiles (6 v1.0 + 3 v1.1 from PROFILE-1
     // + 1 v1.2 remote-desktop scene profile).
+
+    // Expected: 10 built-in profiles (6 v1.0 + 3 v1.1 from PROFILE-1 +
+    // 1 v1.2 remote-desktop profile).
     EXPECT_EQ(names.size(), 10u);
 
     // Each known name must be present.
@@ -394,6 +397,18 @@ static void expect_profiles_equal(
     EXPECT_EQ(a.video_ladder_mode,      b.video_ladder_mode);
     EXPECT_EQ(a.video_content_type,     b.video_content_type);
     EXPECT_EQ(a.video_stream_weights,   b.video_stream_weights);
+
+    // v1.2 additive: `video` block.
+    EXPECT_EQ(a.video.codec_name,           b.video.codec_name);
+    EXPECT_EQ(a.video.codec_preference,     b.video.codec_preference);
+    EXPECT_EQ(a.video.codec_backend,        b.video.codec_backend);
+    EXPECT_EQ(a.video.content_type,         b.video.content_type);
+    EXPECT_EQ(a.video.ladder_mode,          b.video.ladder_mode);
+    EXPECT_EQ(a.video.resolution_floor_width,  b.video.resolution_floor_width);
+    EXPECT_EQ(a.video.resolution_floor_height, b.video.resolution_floor_height);
+    EXPECT_EQ(a.video.pixel_format,         b.video.pixel_format);
+    EXPECT_EQ(a.video.color_range,          b.video.color_range);
+    EXPECT_EQ(a.video.color_matrix,         b.video.color_matrix);
 }
 
 TEST_F(AssemblyTest, JsonRoundTripBuiltInProfiles) {
@@ -780,6 +795,8 @@ TEST_F(AssemblyTest, BuiltInProfileTransportStrategy) {
         {"relay",                 "sfu-relay",                false},
         {"relay-agent",           "sfu-relay",                true },  // composite
         {"remote-desktop",        "agent-gateway",            true },
+
+        {"remote-desktop",        "teleop-ultra-low-latency", true },
     };
     for (const auto& e : expected) {
         SCOPED_TRACE("Profile: " + std::string{e.profile_name});
@@ -796,7 +813,152 @@ TEST_F(AssemblyTest, BuiltInProfileTransportStrategy) {
 }
 
 // =============================================================================
-// 7. The transport bridge (architecture remediation plan §4.2 / D2)
+// 7. v1.2 additive: the `video` block (remote-desktop plan K3 / K4)
+// =============================================================================
+
+TEST_F(AssemblyTest, VideoSectionDefaultsToACameraLikePicture) {
+    // A profile without a `video` block behaves exactly as it did in
+    // v1.1: no content type, no codec preference, no resolution floor.
+    const nimrtc::assembly::Profile p;
+    EXPECT_EQ(p.video.content_type,
+              nimrtc::assembly::VideoContentType::kUnspecified);
+    EXPECT_EQ(p.video.ladder_mode,
+              nimrtc::assembly::VideoLadderMode::kFixed);
+    EXPECT_TRUE(p.video.codec_preference.empty());
+    EXPECT_EQ(p.video.resolution_floor_width, 0u);
+    EXPECT_EQ(p.video.resolution_floor_height, 0u);
+}
+
+TEST_F(AssemblyTest, JsonParseVideoBlock) {
+    std::string json_str = R"({
+      "name": "screen",
+      "video": {
+        "codec_name": "",
+        "codec_preference": ["av1", "h265", "h264"],
+        "codec_backend": "auto",
+        "content_type": "screen",
+        "ladder_mode": "quality",
+        "resolution_floor": [1280, 720],
+        "pixel_format": "i420",
+        "color_range": "full",
+        "color_matrix": "bt709"
+      }
+    })";
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_video_block.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << json_str;
+    }
+
+    auto p = nimrtc::assembly::profile_from_json_file(tmp.string());
+    EXPECT_EQ(p.video.codec_preference,
+              (std::vector<std::string>{"av1", "h265", "h264"}));
+    EXPECT_EQ(p.video.codec_backend, "auto");
+    EXPECT_EQ(p.video.content_type,
+              nimrtc::assembly::VideoContentType::kScreen);
+    EXPECT_EQ(p.video.ladder_mode,
+              nimrtc::assembly::VideoLadderMode::kQuality);
+    EXPECT_EQ(p.video.resolution_floor_width, 1280u);
+    EXPECT_EQ(p.video.resolution_floor_height, 720u);
+    EXPECT_EQ(p.video.pixel_format, "i420");
+    EXPECT_EQ(p.video.color_range, "full");
+    EXPECT_EQ(p.video.color_matrix, "bt709");
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, JsonParseVideoBlockRejectsAnUnknownContentType) {
+    // An unknown enum value is a *configuration* error: the loader
+    // reports it rather than guessing.
+    std::string json_str = R"({
+      "name": "bad",
+      "video": { "content_type": "hologram" }
+    })";
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_bad_video.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << json_str;
+    }
+
+    EXPECT_THROW(nimrtc::assembly::profile_from_json_file(tmp.string()),
+                 std::runtime_error);
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, JsonSerialiseVideoBlockRoundTrip) {
+    nimrtc::assembly::Profile p;
+    p.name = "roundtrip_video";
+    p.video.codec_preference = {"av1", "h264"};
+    p.video.codec_backend = "hardware";
+    p.video.content_type = nimrtc::assembly::VideoContentType::kText;
+    p.video.ladder_mode = nimrtc::assembly::VideoLadderMode::kSmoothness;
+    p.video.resolution_floor_width = 640;
+    p.video.resolution_floor_height = 480;
+    p.video.pixel_format = "nv12";
+    p.video.color_range = "limited";
+    p.video.color_matrix = "bt601";
+
+    std::string s = nimrtc::assembly::profile_to_json_string(p);
+    EXPECT_NE(s.find("\"content_type\": \"text\""), std::string::npos);
+    EXPECT_NE(s.find("\"ladder_mode\": \"smoothness\""), std::string::npos);
+    EXPECT_NE(s.find("\"codec_backend\": \"hardware\""), std::string::npos);
+
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_video_roundtrip.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << s;
+    }
+    auto loaded = nimrtc::assembly::profile_from_json_file(tmp.string());
+    expect_profiles_equal(p, loaded);
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, JsonSerialiseWithoutVideoOmitsBlock) {
+    // A Profile with a default-constructed `video` section must
+    // serialise WITHOUT a `video` block — this preserves the v1.1
+    // round-trip byte-for-byte for the legacy profiles.
+    nimrtc::assembly::Profile p;
+    p.name = "no_video";
+    p.transport_name = "ice";
+
+    std::string s = nimrtc::assembly::profile_to_json_string(p);
+    EXPECT_EQ(s.find("\"video\""), std::string::npos)
+        << "Default video block must not appear in JSON output: " << s;
+}
+
+TEST_F(AssemblyTest, RemoteDesktopProfileDeclaresScreenContent) {
+    const auto* p = nimrtc::assembly::ProfileRegistry::instance()
+                        .find("remote-desktop");
+    ASSERT_NE(p, nullptr);
+
+    // The screen-content shape of the stream (plan B7 / B8 / D2 / C5).
+    EXPECT_EQ(p->video.content_type,
+              nimrtc::assembly::VideoContentType::kScreen);
+    EXPECT_EQ(p->video.ladder_mode,
+              nimrtc::assembly::VideoLadderMode::kQuality);
+    EXPECT_EQ(p->video.codec_preference,
+              (std::vector<std::string>{"av1", "h265", "h264"}));
+    EXPECT_EQ(p->video.codec_backend, "auto");
+    EXPECT_EQ(p->video.resolution_floor_width, 1280u);
+    EXPECT_EQ(p->video.resolution_floor_height, 720u);
+    EXPECT_EQ(p->video.color_range, "full");
+    EXPECT_EQ(p->video.color_matrix, "bt709");
+
+    // The transport: a separate control stack with its own congestion
+    // control (plan G2), and the timeline + DataChannel on (G1).
+    EXPECT_EQ(p->transport.strategy, "teleop-ultra-low-latency");
+    EXPECT_TRUE(p->transport.control.enabled);
+    EXPECT_TRUE(p->timeline_enabled);
+    EXPECT_TRUE(p->datachannel_enabled);
+
+    // The control plane must preempt the video stream.
+    EXPECT_GT(p->scheduler.control_weight, p->scheduler.video_weight);
+}
+
+// =============================================================================
+// 8. The transport bridge (architecture remediation plan §4.2 / D2)
 //
 // `assembly::TransportSection` is the assembly-layer shape; the transport
 // layer consumes the mirror `nimrtc::ProfileTransportInput`.  The bridge

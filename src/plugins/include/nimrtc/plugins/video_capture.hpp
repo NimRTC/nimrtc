@@ -80,6 +80,17 @@
 // plugin-seam header (it re-exports `nimrtc::video_frame`'s types), so
 // including it here creates no concrete-module dependency.
 #include "nimrtc/plugins/video_codec.hpp"
+// `IVideoSource` / `VideoSourceConfig` are the *source* seam the capture
+// device is presented through.  A capture plug-in does not have to know
+// about them -- but the *factory* does, because the factory is what
+// hands the engine a source it can drive (see
+// `IVideoCaptureFactory::create_source`).
+#include "nimrtc/plugins/video_source.hpp"
+// `GpuHandle` is the zero-copy currency (plan B10).  It lives in the
+// video_frame module, which `nimrtc::plugins` already re-exports
+// (see video_codec.hpp) — but video_capture.hpp must not depend on
+// video_codec.hpp's *contents*, only on the shared type.
+#include <nimrtc/video_frame/frame.hpp>
 
 #ifndef NIMRTC_PLUGINS_VIDEO_CAPTURE_HPP
 #define NIMRTC_PLUGINS_VIDEO_CAPTURE_HPP
@@ -95,6 +106,17 @@
 #include <vector>
 
 namespace nimrtc::plugins {
+
+// ---------------------------------------------------------------------------
+// Shared type aliases
+// ---------------------------------------------------------------------------
+
+// `GpuHandle` is the zero-copy currency (remote-desktop plan B10): it
+// names a GPU surface and the device it lives on.  It is defined in the
+// video_frame module (the single source of truth) and re-exported here
+// so a capture plug-in can name it without pulling in the codec seam.
+using NIMRTC_API_STABLE GpuHandle  = video_frame::GpuHandle;
+using NIMRTC_API_STABLE GpuBackend = video_frame::GpuBackend;
 
 // ---------------------------------------------------------------------------
 // Device identity
@@ -369,6 +391,47 @@ struct NIMRTC_API_STABLE CaptureConfig {
      *  Honoured only if the device can do it — check
      *  `CaptureCapabilities::cursor_composited`. */
     bool want_cursor = true;
+
+    /**
+     * @brief Whether the caller wants the zero-copy path (plan B10).
+     *
+     * A zero-copy device hands the captured picture to the consumer as
+     * a **GPU surface** instead of CPU pixels: the hardware encoder
+     * takes the native handle directly, and no GPU→CPU readback happens.
+     *
+     * The request is a *request*, not a command: the device reports what
+     * it actually did through `CaptureFormat::zero_copy` and through the
+     * `gpu_surface` field of every frame it delivers.  A device that
+     * cannot do it (no hardware encoder on the other end, a cursor layer
+     * that needs CPU pixels, a backend without a GPU surface) falls
+     * back to the CPU path and says so.
+     *
+     * Two consequences a host must know about:
+     *
+     *   - the device can no longer composite the pointer into the frame
+     *     (there are no CPU pixels to draw into), so a host that wants
+     *     both has to pick one;
+     *   - the frames that arrive carry no pixel bytes, so a consumer
+     *     that does not support the zero-copy path cannot use them.
+     */
+    bool want_zero_copy = false;
+
+    /** The captured surface's origin in the platform's *global* pointer
+     *  coordinate space.
+     *
+     *  A pointer is reported in the platform's global space — the
+     *  virtual desktop on Windows, the root window on X11 — while a
+     *  captured frame is one *surface* within that space, and a surface
+     *  is not necessarily at the global origin (a second monitor sits
+     *  to the right of the first).  The device fills these two fields
+     *  in when it opens, so the cursor layer can translate the pointer
+     *  into the frame's own coordinates.
+     *
+     *  Both are zero for a capture that starts at the global origin,
+     *  and for a device whose surface *is* the global space.
+     */
+    std::int32_t surface_origin_x = 0;
+    std::int32_t surface_origin_y = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -438,6 +501,19 @@ struct NIMRTC_API_STABLE CaptureFrame {
     /** The changed region(s) in this frame. */
     CaptureDirtyRects dirty;
 
+    /** The colour description of the picture (remote-desktop plan C5).
+     *
+     *  A desktop compositor produces **full-range BT.709**; a camera
+     *  produces **limited-range BT.601**.  The device states what it
+     *  actually produces, and the adapter converts the pixels with that
+     *  description — so the encoder receives a picture whose luma and
+     *  chroma scaling it can trust.
+     *
+     *  The default (`known() == false`) means "the device did not say",
+     *  and the portable layer resolves that to the desktop default (full
+     *  range, BT.709). */
+    VideoColorDescription color;
+
     /** True iff this frame carries a GPU handle that a zero-copy
      *  encoder can consume directly. */
     bool has_gpu_handle = false;
@@ -472,20 +548,42 @@ struct NIMRTC_API_STABLE CaptureFrame {
      *  implicit layout). */
     std::uint32_t gpu_pitch_bytes = 0;
 
-    /** The colour description of the captured picture
-     *  (remote-desktop plan C5).
-     *
-     *  A desktop compositor delivers **full-range** pixels; a camera in
-     *  the default studio setup delivers **limited-range** ones.  The
-     *  device knows which it is producing, and saying so is what lets
-     *  the encoder code the picture correctly and the renderer interpret
-     *  it the same way.  Getting it wrong shifts the contrast, and the
-     *  symptom looks like a broken codec.
-     *
-     *  The default (`known() == false`) means "the device does not
-     *  say" — which is honest and harmless: the consumer then falls
-     *  back to its own default. */
-    VideoColorDescription color;
+    // ---- The zero-copy surface, as one handle -----------------------------
+    //
+    // The GPU half of a captured frame.  When it is set the frame's
+    // pixels live in GPU memory and `pixels` may be null: the surface
+    // *is* the picture, and no CPU readback has happened (or needs to).
+    //
+    // The handle is **borrowed**, not owned: it belongs to the capture
+    // device and stays valid until the device's next frame.  The
+    // consumer that wants to keep the surface past the current call
+    // must copy it (or ask the device for a persistent surface); the
+    // zero-copy path hands it straight to the hardware encoder within
+    // the call, which is the whole point of the path.
+    //
+    // The `device` token in the handle identifies the GPU device the
+    // surface belongs to — an encoder session is opened against one
+    // device, so producer and consumer must agree.
+    //
+    // It is a *view* of the three flat fields above, not a second copy:
+    // the flat form is what the whole `video_frame` module uses (and
+    // what `VideoSourceFrame` uses), so it is the one the seam keeps.
+    // A producer fills the flat fields; a consumer that prefers the
+    // single-handle shape reads this.
+    [[nodiscard]] GpuHandle gpu_surface() const noexcept {
+        GpuHandle h;
+        h.backend             = gpu_backend;
+        h.handle              = gpu_handle;
+        h.native_pitch_bytes  = gpu_pitch_bytes;
+        return h;
+    }
+
+    /** Set the GPU half from one handle (the inverse of `gpu_surface()`). */
+    void set_gpu_surface(const GpuHandle& h) noexcept {
+        gpu_backend     = h.backend;
+        gpu_handle      = h.handle;
+        gpu_pitch_bytes = h.native_pitch_bytes;
+    }
 };
 
 /**
@@ -726,6 +824,36 @@ public:
     /** Create a capture instance. The returned instance is in
      *  kConstructed state; the caller calls `open()`. */
     [[nodiscard]] virtual IVideoCapture* create(CaptureConfig cfg) const = 0;
+
+    /**
+     * @brief Create the *source* that presents @p device as a frame stream.
+     *
+     * The engine's video path speaks `IVideoSource` — a plain stream of
+     * `VideoSourceFrame`s — while a capture device is a *device*: it
+     * enumerates, negotiates a format and fills a bounded queue.  The
+     * piece that bridges the two is a *concrete* adapter, and it lives
+     * in the capture module.
+     *
+     * The engine must not name that adapter: it reaches it through this
+     * seam instead.  That keeps the engine free of any concrete
+     * module include (ADR-025's Layering Invariant 4) while still
+     * letting the capture module own the conversion from the device's
+     * layout into the source's layout.
+     *
+     * The returned source does **not** own @p device: the caller keeps
+     * the device alive for at least as long as the source is used, so
+     * that one device can back more than one stream.
+     *
+     * @param device The device to present.  Must not be null.
+     * @param cfg    The source configuration.  `cfg.format` is the
+     *               *output* pixel format; the adapter fills the
+     *               dimensions in from the device's negotiated format.
+     * @return A new source, or null when one could not be created.  The
+     *         caller owns it.
+     */
+    [[nodiscard]] virtual IVideoSource* create_source(
+        IVideoCapture* device,
+        VideoSourceConfig cfg) const = 0;
 };
 
 } // namespace nimrtc::plugins

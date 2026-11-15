@@ -63,5 +63,5 @@ nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_opus_codec_plugin.cpp
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_opus
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

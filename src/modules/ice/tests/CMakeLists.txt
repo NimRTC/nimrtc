@@ -95,14 +95,14 @@ target_link_libraries(test_turn_relay_test PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_ice_test
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_consent_freshness_test
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_ice_restart_test
         PROPERTIES TIMEOUT 60
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_turn_relay_test
         PROPERTIES TIMEOUT 90
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

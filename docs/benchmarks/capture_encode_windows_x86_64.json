@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "benchmark": "capture_encode",
-  "generated_at": "2026-11-14T02:56:12Z",
+  "generated_at": "2026-11-15T03:17:22Z",
   "plan": "docs/plan/remote-desktop-plan.md",
   "plan_item": "J5",
   "budget_section": "B.6",
@@ -87,7 +87,60 @@
       },
       "encode_speedup": 7.217391304347826,
       "total_speedup": 3.6879345603271982
-    }
+    },
+    "platform_capture": [
+      {
+        "backend": "windows-dxgi",
+        "opened": true,
+        "width": 1920,
+        "height": 1080,
+        "fps": 64.238194,
+        "fps_per_megapixel": 30.979067,
+        "frames": 129,
+        "seconds": 2.008151,
+        "frames_zero_copy": 0,
+        "frames_cpu_staged": 129,
+        "bytes_copied": 1069977600,
+        "note": null
+      },
+      {
+        "backend": "windows-wgc",
+        "opened": true,
+        "width": 1920,
+        "height": 1080,
+        "fps": 49.80137,
+        "fps_per_megapixel": 24.016864,
+        "frames": 100,
+        "seconds": 2.007977,
+        "frames_zero_copy": 0,
+        "frames_cpu_staged": 100,
+        "bytes_copied": 829440000,
+        "note": null
+      }
+    ],
+    "zero_copy": [
+      {
+        "backend": "windows-dxgi",
+        "opened": true,
+        "gpu_frames_received": 60,
+        "frames_zero_copy": 60,
+        "frames_cpu_staged": 0,
+        "bytes_copied": 0,
+        "zero_copy": true,
+        "note": null
+      },
+      {
+        "backend": "windows-wgc",
+        "opened": true,
+        "gpu_frames_received": 61,
+        "frames_zero_copy": 61,
+        "frames_cpu_staged": 0,
+        "bytes_copied": 0,
+        "zero_copy": true,
+        "note": null
+      }
+    ],
+    "zero_copy_proved": true
   },
   "capture": [
     {
@@ -807,5 +860,90 @@
     "The per-stage numbers are the engine's own J1 instrumentation (Stats::video_stage_capture / _convert / _encode / _packetize), measured around the real capture -> convert -> encode -> packetize chain.",
     "The budget check compares the 1080p numbers against the plan's \u00a7B.6 table. It is a report, not a gate: \u00a7B.6 is written for a 4-core x86-64 @ 3 GHz reference machine.",
     "The hardware path's convert budget is zero in \u00a7B.6 because the conversion is folded into the capture path there. This machine has no zero-copy capture device, so the convert cost is real and is reported rather than judged."
-  ]
+  ],
+  "platform_capture": [
+    {
+      "backend": "windows-dxgi",
+      "opened": true,
+      "width": 1920,
+      "height": 1080,
+      "frames": 129,
+      "seconds": 2.008151,
+      "fps": 64.238194,
+      "megapixels": 2.0736,
+      "fps_per_megapixel": 30.979067,
+      "frame_mean_us": 15567.062791,
+      "frames_zero_copy": 0,
+      "frames_cpu_staged": 129,
+      "bytes_copied": 1069977600,
+      "frames_dropped": 0
+    },
+    {
+      "backend": "windows-wgc",
+      "opened": true,
+      "width": 1920,
+      "height": 1080,
+      "frames": 100,
+      "seconds": 2.007977,
+      "fps": 49.80137,
+      "megapixels": 2.0736,
+      "fps_per_megapixel": 24.016864,
+      "frame_mean_us": 20079.769,
+      "frames_zero_copy": 0,
+      "frames_cpu_staged": 100,
+      "bytes_copied": 829440000,
+      "frames_dropped": 0
+    }
+  ],
+  "zero_copy": [
+    {
+      "backend": "windows-dxgi",
+      "opened": true,
+      "gpu_frames_received": 60,
+      "frames_zero_copy": 60,
+      "frames_cpu_staged": 0,
+      "bytes_copied": 0,
+      "zero_copy": true
+    },
+    {
+      "backend": "windows-wgc",
+      "opened": true,
+      "gpu_frames_received": 61,
+      "frames_zero_copy": 61,
+      "frames_cpu_staged": 0,
+      "bytes_copied": 0,
+      "zero_copy": true
+    }
+  ],
+  "platform_capture_machine": {
+    "os": "Windows",
+    "os_release": "10",
+    "os_version": "10.0.26100",
+    "machine": "AMD64",
+    "python": "3.9.1",
+    "cpu_model": "12th Gen Intel(R) Core(TM) i5-12400F",
+    "cpu_cores_physical": 6,
+    "cpu_cores_logical": 12,
+    "gpus": [
+      {
+        "vendor": "nvidia",
+        "name": "NVIDIA GeForce RTX 3060",
+        "driver_version": "616.92",
+        "memory_total_mib": 12288
+      },
+      {
+        "vendor": "unknown",
+        "name": "Virtual Desktop Monitor",
+        "driver_version": null,
+        "memory_total_mib": null
+      },
+      {
+        "vendor": "unknown",
+        "name": "Todesk Virtual Display Adapter",
+        "driver_version": null,
+        "memory_total_mib": null
+      }
+    ],
+    "gpu_encoder_present": true
+  }
 }

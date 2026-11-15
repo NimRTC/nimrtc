@@ -472,7 +472,7 @@ the platform legs that only run on their own hardware, the measurement
 artefacts that need a real link, and the non-NVIDIA hardware encoder
 bodies that are registered seams.
 
-The whole test suite is green: **1986 / 1986 ctest cases pass** (the CI
+The whole test suite is green: **1989 / 1989 ctest cases pass** (the CI
 configuration, `build/ci-msvc`), and the signalling example's own suite
 reports **94 / 94 checks** (the ctest skips are environment-gated — no
 WebRTC APM, no NVIDIA device, no usrsctp).
@@ -602,6 +602,67 @@ machine; and the HEVC software decoder is deliberately absent
    > without asking the codec; because the plug-in contract says the
    > device does **not** keep a CPU copy when the callback is attached,
    > every frame was dropped and the session had **no picture at all**.
+   >
+   > **The report tells the two apart.**  The measurement window opens
+   > when the seam goes live (the first GPU frame is encoded), so the
+   > *steady state* is measured on its own and the *startup transient* --
+   > the frames the device staged to the host before the codec existed --
+   > is reported on its own lines.  A run in which the seam **never**
+   > goes live (a software encoder, or a capture device with no GPU
+   > support) says so in the heading rather than labelling the whole
+   > run "steady state": there was never a steady state to measure.
+
+**Landed 2026-11-15 (the seam's own hardening).**  Four defects the
+seam's first cut had, all found by running it on real hardware:
+
+- **The composite codec forwarded the *capability* but not the *call*.**
+  `HwCompositeCodec::supports_zero_copy_encode()` answered `true` (it
+  forwards that to the encoder), but the composite did **not** override
+  `encode_zero_copy()`, so it inherited the interface's default
+  `kErrUnsupported`.  That is the worst of both worlds: the engine
+  believed the seam was live, wired the capture callback, and was told
+  "unsupported" for every frame -- and because the capture device keeps
+  no CPU mirror once the callback is attached, every frame was lost.
+  The composite now forwards `encode_zero_copy()` to the encoder and
+  `decode_zero_copy()` to the decoder, exactly the way it already
+  forwards `encode()` and `decode()`.
+- **The device-local copy was *recorded*, not *executed*.**  The
+  `CopySubresourceRegion` sits in the context's command buffer until
+  the GPU runs it, and two consumers need the copy to have **happened**:
+  DXGI, which is not allowed to recycle a texture whose copy is still
+  in flight, and the hardware encoder, which registers the destination
+  as its input surface and waits for the writes to it.  Neither can see
+  the other's work on its own.  `wcap::copy_texture_on_device()` now
+  **flushes** the immediate context after recording the copy, so the
+  command is submitted to the GPU queue before the destination texture is
+  handed to the encoder.  A flush is a GPU-side submit -- the pixels never
+  enter host memory, so `bytes_copied` stays at zero.
+- **The shared D3D11 device was used from two threads without protection.**
+  The capture device copies the desktop into the device on **its own
+  thread**, and a hardware encoder that registers the copied surface as
+  its input uses the **same** device on the encoder's thread (the driver
+  inserts its own GPU work on the device's immediate context to read the
+  registered surface).  A D3D11 *immediate* context is not thread-safe:
+  two threads using it concurrently is undefined behaviour, and on the
+  reference host it showed up as a hard deadlock inside
+  `nvEncEncodePicture` -- the driver waited for its own work while the
+  capture thread was in the middle of the device copy.
+  `D3D11State::create_on()` now queries `ID3D11Multithread` and enables
+  `SetMultithreadProtected(TRUE)`, which is the documented answer for
+  exactly this situation (a device used from more than one thread).
+  With that in place the capture thread no longer needs an artificial
+  wait before handing the surface over -- the device's own command queue
+  orders the copy before the encoder's work.
+- **The frames that predate the seam are discarded.**  The capture
+  device is opened before the codec exists (the codec has to adopt the
+  capture's device), so the frames produced in that window went through
+  the CPU staging path.  They are stale -- the mailbox delivers the
+  current picture within one capture interval -- so
+  `NimRTCEngine::drain_stale_cpu_frames()` drops them once the seam is
+  wired, keeping them out of the encoder.  It does not rewrite the
+  device's own `bytes_copied` accounting (those bytes really were
+  copied), which is why the verification program reports the startup
+  transient separately from the steady state.
 2. **The platform legs** — macOS (ScreenCaptureKit) and Linux
    (PipeWire / X11) are implemented but only validated on their own CI
    legs, on their own hardware.

@@ -240,8 +240,39 @@ bool NimRTCEngine::pump_video_capture() noexcept {
 // The zero-copy pump (remote-desktop plan B10)
 // ---------------------------------------------------------------------------
 
+void NimRTCEngine::drain_stale_cpu_frames() noexcept {
+    if (!video_capture_) return;
+
+    // The bound is a safety net, not a policy: the queue is small (the
+    // capture seam's default depth is a handful of frames), and the
+    // drain is a one-shot at seam-wiring time.
+    constexpr int kMaxDrain = 64;
+
+    plugins::CaptureFrame stale{};
+    int drained = 0;
+    while (drained < kMaxDrain &&
+           video_capture_->pop_frame(stale) == plugins::kOk) {
+        ++drained;
+    }
+    if (drained > 0) {
+        core::log::Logger::instance().info(
+            "engine: discarded " + std::to_string(drained) +
+            " capture frame(s) that were staged to the host before the "
+            "zero-copy seam was wired");
+    }
+}
+
 void NimRTCEngine::wire_capture_gpu_callback() noexcept {
     if (!video_capture_ || !video_codec_) return;
+
+    // ---- Did the host ask for the zero-copy path at all? ------------------
+    //
+    // `EngineConfig::video_zero_copy` is the host's switch.  When it is
+    // off, the CPU staging path is the one that must run — the seam is
+    // not wired, the captured pixels go to the host, and the statistics
+    // say so.  (This is what makes the CPU fallback *measurable*: the
+    // verification program turns the flag off to compare the two.)
+    if (!config_.video_zero_copy) return;
 
     // ---- Can the capture device deliver a surface? ------------------------
     //
@@ -287,6 +318,31 @@ void NimRTCEngine::wire_capture_gpu_callback() noexcept {
     // whether the zero-copy path is *live* (not merely requested) reads
     // it together with `video_capture_gpu_frames`.
     impl_->video_state.capture_gpu_wired = true;
+
+    // ---- Discard the frames that predate the seam --------------------
+    //
+    // The capture device was opened *before* the codec existed — the
+    // codec has to adopt the capture's device, so the device has to be
+    // open first.  The frames the device produced in that window went
+    // through the CPU staging path, because the GPU callback did not
+    // exist yet; it was the only path available.
+    //
+    // They are stale: the mailbox delivers the *current* picture within
+    // one capture interval.  Dropping them here keeps them out of the
+    // encoder — a frame that was staged to the host before the seam was
+    // wired has no business being encoded through the CPU path now that
+    // the GPU path is live.
+    //
+    // It does **not** undo the device's own `bytes_copied` accounting:
+    // those bytes really were copied to host memory when the frame was
+    // staged.  The number the session reports therefore carries a small
+    // startup transient, and a *measurement* has to account for it
+    // explicitly (the verification program reports the steady state
+    // separately).
+    //
+    // Draining is safe: a device whose GPU staging fails falls back to
+    // the CPU path and keeps filling its queue.
+    drain_stale_cpu_frames();
 }
 
 bool NimRTCEngine::pump_video_capture_gpu() noexcept {

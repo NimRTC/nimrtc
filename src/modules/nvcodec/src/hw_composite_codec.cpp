@@ -112,6 +112,20 @@ bool HwCompositeCodec::supports_zero_copy_decode() const noexcept {
     return decoder_ && decoder_->supports_zero_copy_decode();
 }
 
+plugins::Status HwCompositeCodec::encode_zero_copy(
+        const plugins::GpuBuffer& gpu,
+        plugins::EncodedVideoFrame& encoded_out) noexcept {
+    if (!encoder_ || !encoder_->can_encode()) return plugins::kErrUnsupported;
+    return encoder_->encode_zero_copy(gpu, encoded_out);
+}
+
+plugins::Status HwCompositeCodec::decode_zero_copy(
+        const plugins::EncodedVideoFrame& encoded,
+        plugins::GpuBuffer& out_surface) noexcept {
+    if (!decoder_ || !decoder_->can_decode()) return plugins::kErrUnsupported;
+    return decoder_->decode_zero_copy(encoded, out_surface);
+}
+
 plugins::VideoCodecConfig HwCompositeCodec::config() const noexcept {
     // The encoder's configuration is the one that describes the outbound
     // stream, which is what a caller inspecting `config()` wants.

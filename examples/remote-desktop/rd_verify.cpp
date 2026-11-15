@@ -503,6 +503,70 @@ EngineConfig make_config(const Options& opts, bool transmitting) {
 }
 
 // ---------------------------------------------------------------------------
+// The desktop activator
+// ---------------------------------------------------------------------------
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+/**
+ * @brief Makes the desktop *change* during the measurement window.
+ *
+ * DXGI Desktop Duplication and Windows Graphics Capture deliver a frame
+ * **only when the desktop changes**.  On an idle machine nothing changes,
+ * so the backends deliver nothing — which is the whole point of a
+ * dirty-rect-based capture path, but it does mean a measurement has
+ * nothing to measure.
+ *
+ * The activator jiggles the mouse pointer across the desktop.  It is
+ * deliberately the cheapest possible change: the compositor only has to
+ * re-blit the cursor, so the measured rate is the *backend's* delivery
+ * rate and not the compositor's redraw rate.
+ *
+ * The pointer's original position is restored when the program ends, so
+ * the machine is left as it was found.
+ *
+ * The user is welcome to move the mouse instead — this only guarantees
+ * that *something* changes.
+ */
+class DesktopActivator {
+public:
+    DesktopActivator() {
+#if defined(_WIN32)
+        if (::GetCursorPos(&saved_)) valid_ = true;
+#endif
+    }
+
+    ~DesktopActivator() {
+#if defined(_WIN32)
+        if (valid_) ::SetCursorPos(saved_.x, saved_.y);
+#endif
+    }
+
+    DesktopActivator(const DesktopActivator&)            = delete;
+    DesktopActivator& operator=(const DesktopActivator&) = delete;
+
+    /** Move the pointer one step.  Called from the measurement loop. */
+    void step() const {
+#if defined(_WIN32)
+        if (!valid_) return;
+        static LONG x = 0;
+        x += 24;
+        if (x > 240) x = 0;
+        ::SetCursorPos(saved_.x + x,
+                      saved_.y + ((x / 24) % 2 ? 8 : -8));
+#endif
+    }
+
+private:
+#if defined(_WIN32)
+    POINT saved_{};
+    bool  valid_ = false;
+#endif
+};
+
+// ---------------------------------------------------------------------------
 // The report
 // ---------------------------------------------------------------------------
 
@@ -525,6 +589,11 @@ void row_str(const char* label, const std::string& value) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char** argv) {
+    // The report is the program's output — it must not be lost in a
+    // buffer when the process is killed, and a reader watching the
+    // console must see the phases as they happen.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+
     Options opts;
 
     for (int i = 1; i < argc; ++i) {
@@ -596,8 +665,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("running for %d second(s) — move the mouse so the desktop "
-                "changes\n\n", opts.duration_sec);
+    std::printf("running for %d second(s) — the program moves the mouse so "
+                "the desktop changes\n\n", opts.duration_sec);
+    std::fflush(stdout);
+
+    // The activator makes the desktop change, so the measurement does not
+    // depend on the user doing something.
+    const DesktopActivator activator;
 
     // ---- Drive the loop ----------------------------------------------------
     //
@@ -610,7 +684,44 @@ int main(int argc, char** argv) {
                           std::chrono::seconds(opts.duration_sec);
 
     std::uint64_t wire_datagrams = 0;
+
+    // ---- The measurement window -------------------------------------------
+    //
+    // The capture device is opened *before* the codec exists — the codec
+    // has to adopt the capture's D3D11 device, and that device only
+    // exists once the capture device is open.  The handful of frames
+    // the device produced in that window had no GPU callback to go
+    // through, so they were staged to host memory.  Those bytes were
+    // really copied, and the device counts them honestly.
+    //
+    // The criterion is about the *seam*, so the measurement starts when
+    // the seam goes live: the counters are sampled once the first GPU
+    // frame has been encoded, and everything after that is the steady
+    // state.  The startup transient is reported separately, so nothing
+    // is hidden — it is simply not part of what is being measured.
+    //
+    // The window opens on the **first GPU frame**, not on the engine
+    // being opened: the capture device is opened *before* the codec
+    // exists (the codec has to adopt the capture's D3D11 device, and
+    // that device only exists once the capture device is open), so the
+    // handful of frames the device produced in that window went through
+    // the CPU staging path — the GPU callback did not exist yet.  Those
+    // bytes were really copied and the device counts them honestly, so
+    // they belong to the transient, not to the steady state.
+    //
+    // A run in which the seam never goes live (a software encoder, or a
+    // capture device with no GPU support) has **no** steady-state
+    // window: the counters below then describe the whole run, which is
+    // the honest reading — the seam was never live, so there was never
+    // a steady state to measure.
+    bool measuring = false;
+    std::uint64_t base_bytes_copied = 0;
+    std::uint64_t base_cpu_staged = 0;
+    std::uint64_t base_gpu_frames = 0;
+    std::uint64_t base_captured = 0;
+
     while (std::chrono::steady_clock::now() < deadline) {
+        activator.step();
         tx_engine.tick();
 
         std::vector<std::uint8_t> datagram;
@@ -621,7 +732,24 @@ int main(int argc, char** argv) {
 
         rx_engine.tick();
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
+        // The measurement window opens when the seam goes live.
+        if (!measuring) {
+            const auto s = tx_engine.stats();
+            if (s.video_capture_gpu_frames > 0) {
+                measuring = true;
+                base_bytes_copied = s.video_capture_bytes_copied;
+                base_cpu_staged   = s.video_capture_frames_cpu_staged;
+                base_gpu_frames   = s.video_capture_gpu_frames;
+                base_captured     = s.video_capture_frames_captured;
+                std::printf("  (the seam is live — the measurement window "
+                            "starts now)\n");
+                std::fflush(stdout);
+            }
+        }
     }
+    std::printf("  (the loop is over — draining the wire)\n");
+    std::fflush(stdout);
 
     // One last drain, so the frames that were in flight are counted.
     std::vector<std::uint8_t> datagram;
@@ -631,8 +759,21 @@ int main(int argc, char** argv) {
     }
     for (int i = 0; i < 20; ++i) rx_engine.tick();
 
+    std::printf("  (reading the stats)\n");
+    std::fflush(stdout);
     const auto tx_stats = tx_engine.stats();
     const auto rx_stats = rx_engine.stats();
+
+    // The steady state: the counters as they stood when the seam went
+    // live, subtracted from the counters now.
+    const std::uint64_t steady_bytes_copied =
+        tx_stats.video_capture_bytes_copied - base_bytes_copied;
+    const std::uint64_t steady_cpu_staged =
+        tx_stats.video_capture_frames_cpu_staged - base_cpu_staged;
+    const std::uint64_t steady_gpu_frames =
+        tx_stats.video_capture_gpu_frames - base_gpu_frames;
+    const std::uint64_t steady_captured =
+        tx_stats.video_capture_frames_captured - base_captured;
 
     CountingSink* counter = g_counter_sink.instance();
     const std::uint64_t sink_frames = counter ? counter->frames() : 0;
@@ -649,14 +790,31 @@ int main(int argc, char** argv) {
     row("encoder is hardware",
         tx_stats.video_codec_hardware_accelerated ? "yes" : "no");
 
-    std::printf("\n  the zero-copy seam\n");
+    if (measuring) {
+        std::printf("\n  the zero-copy seam (steady state)\n");
+    } else {
+        // The seam never went live, so there is no steady state to
+        // report — the numbers below are the whole run.  Saying so is
+        // the honest reading: a report that called them "steady state"
+        // would attribute a startup transient to the seam.
+        std::printf("\n  the zero-copy seam (the whole run — the seam "
+                    "never went live)\n");
+    }
     row("seam wired", tx_stats.video_capture_gpu_wired ? "yes" : "NO");
-    row_u64("gpu frames encoded", tx_stats.video_capture_gpu_frames);
+    row_u64("gpu frames encoded", steady_gpu_frames);
     row_u64("gpu errors", tx_stats.video_capture_gpu_errors);
-    row_u64("cpu bytes copied", tx_stats.video_capture_bytes_copied);
-    row_u64("cpu frames staged", tx_stats.video_capture_frames_cpu_staged);
+    row_u64("cpu bytes copied", steady_bytes_copied);
+    row_u64("cpu frames staged", steady_cpu_staged);
+    row_u64("frames captured", steady_captured);
 
-    std::printf("\n  the capture device\n");
+    if (measuring) {
+        std::printf("\n  the startup transient (before the seam was wired)\n");
+        row_u64("cpu bytes copied", base_bytes_copied);
+        row_u64("cpu frames staged", base_cpu_staged);
+        row_u64("gpu frames encoded", base_gpu_frames);
+    }
+
+    std::printf("\n  the capture device (whole run)\n");
     row_u64("frames captured", tx_stats.video_capture_frames_captured);
     row_u64("frames dropped", tx_stats.video_capture_frames_dropped);
     row_u64("frames zero-copy", tx_stats.video_capture_frames_zero_copy);
@@ -681,8 +839,14 @@ int main(int argc, char** argv) {
     //
     // The criterion is a *measurement*, so the verdict is a measurement
     // too — not "it ran" but "the number that must be zero is zero".
-    const bool seam_live   = tx_stats.video_capture_gpu_frames > 0;
-    const bool no_cpu_copy = tx_stats.video_capture_bytes_copied == 0;
+    //
+    // The numbers are the *steady state*: the ones measured after the
+    // seam went live.  The startup transient is reported on its own
+    // lines above; it is a real cost, but it is not what the criterion
+    // is about, and folding it in would hide the steady state behind a
+    // number that is not the seam's.
+    const bool seam_live   = steady_gpu_frames > 0;
+    const bool no_cpu_copy = steady_bytes_copied == 0;
     const bool no_errors   = tx_stats.video_capture_gpu_errors == 0;
     const bool got_picture = rx_stats.video_frames_decoded > 0 &&
                              rx_stats.video_frames_rendered > 0;
@@ -726,8 +890,15 @@ int main(int argc, char** argv) {
     }
 
     std::printf("\n=======================================================\n");
+    std::fflush(stdout);
 
+    std::printf("closing the transmitting engine...\n");
+    std::fflush(stdout);
     tx_engine.close();
+    std::printf("closing the receiving engine...\n");
+    std::fflush(stdout);
     rx_engine.close();
+    std::printf("(the engines are closed)\n");
+    std::fflush(stdout);
     return 0;
 }

@@ -394,6 +394,15 @@ public:
             if (owned &&
                 wcap::copy_texture_on_device(immediate_context(), texture.Get(),
                                             region, owned.Get())) {
+                // No wait here: the copy is *queued* on the device's
+                // immediate context, and the hardware encoder reads the
+                // destination texture on the **same** device — so the
+                // driver's own work is ordered after the copy by the
+                // device's command queue.  The one thing that must not
+                // happen is two threads using the immediate context at
+                // the same time, and that is what the device's
+                // multithread protection (see `D3D11State::create_on`)
+                // takes care of.
                 const auto format = wcap::pixel_format_from_dxgi(desc.Format);
                 auto buffer = wcap::make_gpu_buffer(owned, region.width,
                                                    region.height, format);

@@ -39,6 +39,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <nimrtc/nvcodec/hw_composite_codec.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
@@ -130,11 +131,65 @@ public:
         latency_max_ = max;
     }
 
+    // ---- The zero-copy seam ------------------------------------------------
+    //
+    // The double answers the *capability* and records the *call*, so the
+    // test can tell the two apart — which is the whole point: a
+    // composite that answers "yes, I can take a surface" but never
+    // forwards the call is the worst of both worlds.
+    bool supports_zero_copy_encode() const noexcept override {
+        return zero_copy_encode_;
+    }
+    bool supports_zero_copy_decode() const noexcept override {
+        return zero_copy_decode_;
+    }
+    np::Status encode_zero_copy(const np::GpuBuffer& gpu,
+                                np::EncodedVideoFrame& encoded_out) noexcept override {
+        ++zero_copy_encode_calls_;
+        if (!zero_copy_encode_) return np::kErrUnsupported;
+        last_gpu_ = &gpu;
+        encoded_out.payload_type = 102;
+        // The payload is a *span*, so it needs a backing buffer that
+        // outlives the call — the double owns one.
+        encoded_bytes_.assign(kEncodedBytes, 0xAB);
+        encoded_out.payload = nimrtc::core::ByteSpan(encoded_bytes_);
+        return np::kOk;
+    }
+    np::Status decode_zero_copy(const np::EncodedVideoFrame& encoded,
+                                np::GpuBuffer& out_surface) noexcept override {
+        ++zero_copy_decode_calls_;
+        if (!zero_copy_decode_) return np::kErrUnsupported;
+        (void)encoded;
+        (void)out_surface;
+        return np::kOk;
+    }
+
+    std::uint32_t zero_copy_encode_calls() const noexcept {
+        return zero_copy_encode_calls_;
+    }
+    std::uint32_t zero_copy_decode_calls() const noexcept {
+        return zero_copy_decode_calls_;
+    }
+    const np::GpuBuffer* last_encoded_gpu() const noexcept { return last_gpu_; }
+
+    void set_zero_copy_capabilities(bool encode, bool decode) noexcept {
+        zero_copy_encode_ = encode;
+        zero_copy_decode_ = decode;
+    }
+
 private:
+    static constexpr std::size_t kEncodedBytes = 64;
+
     std::string   id_;
     bool          hw_ = false;
     bool          can_encode_ = true;
     bool          can_decode_ = true;
+    bool          zero_copy_encode_ = false;
+    bool          zero_copy_decode_ = false;
+    std::uint32_t zero_copy_encode_calls_ = 0;
+    std::uint32_t zero_copy_decode_calls_ = 0;
+    const np::GpuBuffer* last_gpu_ = nullptr;
+    std::vector<std::uint8_t> encoded_bytes_;
     std::uint64_t frames_encoded_ = 0;
     std::uint64_t bytes_encoded_ = 0;
     std::uint64_t staged_ = 0;
@@ -237,4 +292,83 @@ TEST(HwCompositeCodec, TheBackendIdIsTheEncoders) {
     // The encoder's id, because the engine's codec telemetry describes
     // the *outbound* stream.
     EXPECT_EQ(composite.backend_id(), "nvenc");
+}
+
+// ---------------------------------------------------------------------------
+// The zero-copy seam: the capability *and* the call.
+// ---------------------------------------------------------------------------
+//
+// The composite has to answer both questions consistently.  Forwarding
+// `supports_zero_copy_encode()` while *not* forwarding
+// `encode_zero_copy()` is the worst of both worlds: the engine believes
+// the seam is live, wires the capture device's GPU callback, hands the
+// surface to the codec, and is told "unsupported" for every frame — and
+// because the capture device keeps no CPU mirror once the callback is
+// attached, every frame is lost and the session shows a picture that
+// never moves.
+
+TEST(HwCompositeCodec, TheZeroCopyEncodeIsForwardedToTheEncoder) {
+    auto enc = std::make_unique<TelemetryCodec>("nvenc", /*hw=*/true);
+    enc->set_can_decode(false);
+    enc->set_zero_copy_capabilities(/*encode=*/true, /*decode=*/false);
+
+    auto dec = std::make_unique<TelemetryCodec>("nvdec", /*hw=*/true);
+    dec->set_can_encode(false);
+
+    HwCompositeCodec composite(np::VideoCodecConfig{}, std::move(enc),
+                               std::move(dec));
+
+    // The capability is the encoder's, so the composite must be able to
+    // do what it claims.
+    ASSERT_TRUE(composite.supports_zero_copy_encode());
+
+    np::GpuBuffer gpu(np::GpuBackend::kWindowsD3D11Texture,
+                       reinterpret_cast<void*>(0x1234), 1920, 1080,
+                       nimrtc::video_frame::PixelFormat::kBGRA);
+    np::EncodedVideoFrame encoded{};
+    EXPECT_EQ(composite.encode_zero_copy(gpu, encoded), np::kOk);
+
+    // The call really reached the encoder (not the interface's default,
+    // which would have answered "unsupported").
+    EXPECT_EQ(encoded.payload_type, 102);
+    EXPECT_FALSE(encoded.payload.empty());
+}
+
+TEST(HwCompositeCodec, TheZeroCopyDecodeIsForwardedToTheDecoder) {
+    auto enc = std::make_unique<TelemetryCodec>("nvenc", /*hw=*/true);
+    enc->set_can_decode(false);
+
+    auto dec = std::make_unique<TelemetryCodec>("nvdec", /*hw=*/true);
+    dec->set_can_encode(false);
+    dec->set_zero_copy_capabilities(/*encode=*/false, /*decode=*/true);
+
+    HwCompositeCodec composite(np::VideoCodecConfig{}, std::move(enc),
+                               std::move(dec));
+
+    ASSERT_TRUE(composite.supports_zero_copy_decode());
+
+    np::EncodedVideoFrame encoded{};
+    np::GpuBuffer out;
+    EXPECT_EQ(composite.decode_zero_copy(encoded, out), np::kOk);
+}
+
+TEST(HwCompositeCodec, ACompositeWithoutAZeroCopyEncoderRefusesTheCall) {
+    // The encoder cannot take a surface: the composite must say so, and
+    // the call must be refused rather than silently succeeding.
+    auto enc = std::make_unique<TelemetryCodec>("openh264", /*hw=*/false);
+    enc->set_can_decode(false);
+
+    auto dec = std::make_unique<TelemetryCodec>("nvdec", /*hw=*/true);
+    dec->set_can_encode(false);
+
+    HwCompositeCodec composite(np::VideoCodecConfig{}, std::move(enc),
+                               std::move(dec));
+
+    EXPECT_FALSE(composite.supports_zero_copy_encode());
+
+    np::GpuBuffer gpu(np::GpuBackend::kWindowsD3D11Texture,
+                       reinterpret_cast<void*>(0x1234), 1920, 1080,
+                       nimrtc::video_frame::PixelFormat::kBGRA);
+    np::EncodedVideoFrame encoded{};
+    EXPECT_EQ(composite.encode_zero_copy(gpu, encoded), np::kErrUnsupported);
 }

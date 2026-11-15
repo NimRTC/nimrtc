@@ -4397,6 +4397,25 @@ private:
      */
     void wire_capture_gpu_callback() noexcept;
 
+    /**
+     * @brief Discard the capture frames that predate the zero-copy seam.
+     *
+     * The capture device is opened before the codec exists — the codec
+     * has to adopt the capture's D3D11 device, and that device only
+     * exists once the capture device is open.  The frames the device
+     * produced in that window therefore went through the CPU staging
+     * path, because the GPU callback did not exist yet.
+     *
+     * They are stale (the mailbox delivers the current picture within
+     * one capture interval) and they are the only frames that would be
+     * encoded through the CPU path once the seam is live.
+     *
+     * It is safe: a capture device whose GPU staging fails falls back to
+     * the CPU path and keeps filling its queue, so the picture does not
+     * depend on the drained frames.
+     */
+    void drain_stale_cpu_frames() noexcept;
+
     /** Hand the capture device's dirty rectangles to the video sender
      *  (remote-desktop plan B9).
      *

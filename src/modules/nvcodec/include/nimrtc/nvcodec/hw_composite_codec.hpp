@@ -116,6 +116,36 @@ public:
     bool supports_zero_copy_encode() const noexcept override;
     bool supports_zero_copy_decode() const noexcept override;
 
+    /**
+     * @brief Encode a GPU surface — forwarded to the *encoder*.
+     *
+     * The composite forwards the zero-copy encode exactly the way it
+     * forwards the ordinary `encode()`: to the sub-codec that can serve
+     * it, which is the encoder.
+     *
+     * Without this override the composite would inherit the interface's
+     * default — `kErrUnsupported` — while its `supports_zero_copy_encode()`
+     * answered *true* (it forwards that to the encoder too).  That is
+     * the worst of both worlds: the engine would believe the seam was
+     * live, wire the capture device's GPU callback, hand the surface to
+     * the codec, and be told "unsupported" for every single frame.  The
+     * frames would be dropped (the capture device does not keep a CPU
+     * mirror once the callback is attached) and the session would show
+     * a picture that never moves.
+     */
+    plugins::Status encode_zero_copy(const plugins::GpuBuffer& gpu,
+                                      plugins::EncodedVideoFrame& encoded_out) noexcept override;
+
+    /**
+     * @brief Decode into a GPU surface — forwarded to the *decoder*.
+     *
+     * The mirror image of `encode_zero_copy()` above, for the same
+     * reason: a composite whose decoder can consume a surface has to
+     * say so *and* be able to do it.
+     */
+    plugins::Status decode_zero_copy(const plugins::EncodedVideoFrame& encoded,
+                                      plugins::GpuBuffer& out_surface) noexcept override;
+
     plugins::VideoCodecConfig config() const noexcept override;
     plugins::Status update_config(plugins::VideoCodecConfig cfg) noexcept override;
     plugins::VideoCodecStats stats() const noexcept override;

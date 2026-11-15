@@ -2638,6 +2638,69 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       the log reports the fallback instead of the dropped-frame
       warning.
 
+- **The composite codec forwarded the zero-copy *capability* but not
+  the zero-copy *call*.**  `HwCompositeCodec::supports_zero_copy_encode()`
+  answered `true` -- it forwards that to the encoder -- but the
+  composite did not override `encode_zero_copy()`, so it inherited the
+  interface's default `kErrUnsupported`.  That is the worst of both
+  worlds: the engine believed the seam was live, wired the capture
+  device's GPU callback, handed the surface to the codec, and was told
+  "unsupported" for every single frame.  Because the capture device
+  keeps no CPU mirror once the callback is attached, every frame was
+  lost and the session showed a picture that never moved.  The
+  composite now forwards `encode_zero_copy()` to the encoder and
+  `decode_zero_copy()` to the decoder, exactly the way it already
+  forwards `encode()` and `decode()`.
+  `src/modules/nvcodec/tests/test_hw_composite_codec.cpp` gained the
+  three regression tests that pin the capability and the call
+  together: the encode is forwarded, the decode is forwarded, and a
+  composite whose encoder cannot take a surface refuses the call
+  rather than silently succeeding.
+
+- **The device-local texture copy was *recorded*, not *executed*.**  The
+  `CopySubresourceRegion` sits in the context's command buffer until the
+  GPU runs it, and two consumers need the copy to have *happened*: DXGI,
+  which is not allowed to recycle a texture whose copy is still in
+  flight, and the hardware encoder, which registers the destination
+  texture as its input surface and waits for the writes to it.  Neither
+  can see the other's work on its own, so the encode could block
+  forever waiting for a copy the GPU was never told to perform.
+  `wcap::copy_texture_on_device()` now **flushes** the immediate context
+  after recording the copy, so the command is submitted to the GPU queue
+  before the destination texture is handed to the encoder.  A flush is a
+  GPU-side submit -- the pixels never enter host memory, so
+  `bytes_copied` stays at zero.
+
+- **The shared D3D11 device was used from two threads without protection.**
+  The capture device copies the desktop into the device on **its own
+  thread**, and a hardware encoder that registers the copied surface as
+  its input uses the **same** device on the encoder's thread (the driver
+  inserts its own GPU work on the device's immediate context to read the
+  registered surface).  A D3D11 *immediate* context is not thread-safe:
+  two threads using it concurrently is undefined behaviour, and on the
+  reference host it showed up as a hard deadlock inside
+  `nvEncEncodePicture` -- the driver waited for its own work while the
+  capture thread was in the middle of the device copy.
+  `D3D11State::create_on()` now queries `ID3D11Multithread` and enables
+  `SetMultithreadProtected(TRUE)`, which is the documented answer for
+  exactly this situation (a device used from more than one thread).
+  With that in place the capture thread no longer needs an artificial
+  wait before handing the surface over -- the device's own command queue
+  orders the copy before the encoder's work.
+
+- **The capture frames that predate the zero-copy seam are discarded.**
+  The capture device is opened *before* the codec exists -- the codec
+  has to adopt the capture's D3D11 device, and that device only exists
+  once the capture device is open -- so the frames produced in that
+  window went through the CPU staging path, because the GPU callback
+  did not exist yet.  They are stale (the mailbox delivers the current
+  picture within one capture interval), so
+  `NimRTCEngine::drain_stale_cpu_frames()` drops them once the seam is
+  wired.  It does not rewrite the device's own `bytes_copied`
+  accounting -- those bytes really were copied -- which is why the
+  verification program reports the startup transient separately from
+  the steady state.
+
 - **The Windows capture device's GPU context released the D3D11 device
   one time too many.**  `WindowsCapture::gpu_context()` hands the caller
   a `GpuContext` whose `keepalive` is a `shared_ptr` that owns *one*

@@ -24,6 +24,33 @@ HRESULT D3D11State::create_on(const ComPtr<IDXGIAdapter1>& adapter_in) noexcept 
         reset();
         return hr;
     }
+
+    // ---- The device's own thread safety --------------------------------
+    //
+    // The device is *shared*: the capture device copies the desktop into
+    // it on **its own thread**, and a hardware encoder that registers the
+    // copied surface as its input uses the very same device on **the
+    // encoder's thread** (the driver inserts its own GPU work on the
+    // device's immediate context to read the registered surface).
+    //
+    // A D3D11 *immediate* context is not thread-safe.  Two threads using
+    // it concurrently is undefined behaviour, and on the reference host
+    // (RTX 3060) it showed up as a hard deadlock inside
+    // `nvEncEncodePicture`: the driver waited for its own work while the
+    // capture thread was in the middle of the device copy.
+    //
+    // Enabling the device's multithread protection makes the context
+    // serialise those accesses itself.  It is the documented answer for
+    // exactly this situation (a device used from more than one thread),
+    // and it costs a lock per context call — which is the price of
+    // sharing the device at all.
+    {
+        ComPtr<ID3D11Multithread> multithread;
+        if (SUCCEEDED(device.As(&multithread)) && multithread) {
+            multithread->SetMultithreadProtected(TRUE);
+        }
+    }
+
     adapter = adapter_in;
     return S_OK;
 }
@@ -256,17 +283,33 @@ bool copy_texture_on_device(const ComPtr<ID3D11DeviceContext>& immediate,
 
     if (region.is_full(src_desc.Width, src_desc.Height)) {
         immediate->CopyResource(destination, source);
-        return true;
+    } else {
+        D3D11_BOX box{};
+        box.left = sx;
+        box.top = sy;
+        box.right = sx + sw;
+        box.bottom = sy + sh;
+        box.back = 0;
+        box.front = 1;
+        immediate->CopySubresourceRegion(destination, 0, 0, 0, 0, source, 0, &box);
     }
 
-    D3D11_BOX box{};
-    box.left = sx;
-    box.top = sy;
-    box.right = sx + sw;
-    box.bottom = sy + sh;
-    box.back = 0;
-    box.front = 1;
-    immediate->CopySubresourceRegion(destination, 0, 0, 0, 0, source, 0, &box);
+    // ---- Flush the copy --------------------------------------------------
+    //
+    // The copy above is *recorded*, not executed: the command sits in the
+    // context's command buffer until something asks the GPU to run it.
+    //
+    // The consumer of the destination texture is a **hardware encoder**
+    // that reads the texture on the GPU (NVENC's registered-resource
+    // path).  It waits for the copy to have happened — and the way it
+    // learns that is through the device's fence, which is only advanced
+    // when the context is flushed.  Without the flush the encoder waits
+    // for a copy that the GPU was never told to perform, and the encode
+    // call blocks forever.
+    //
+    // (The CPU path does not need this: `Map()` flushes implicitly,
+    // because it has to read the result.)
+    immediate->Flush();
     return true;
 }
 

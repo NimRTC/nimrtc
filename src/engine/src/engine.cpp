@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file src/engine/src/engine.cpp
  * @brief NimRTCEngine — wires ICE + SDP + RTP + JB + Audio3A + DTLS + SRTP + Opus.
  *
@@ -372,7 +372,7 @@ uint32_t NimRTCEngine::open() noexcept {
                                            .count();
         impl_->timeline.sr_tracker.set_monotonic_origin(
             impl_->timeline.monotonic_origin_ntp64);
-        impl_->sr_last_sent = steady_now;   // first SR fires one period in
+        impl_->timeline.sr_last_sent = steady_now;   // first SR fires one period in
         if (config_.timeline_enabled) {
             core::log::Logger::instance().info(
                 "engine[timeline]: abs-send-time + Sender Reports enabled "
@@ -869,7 +869,7 @@ bool NimRTCEngine::is_ice_connected() const noexcept {
 
 
 bool NimRTCEngine::srtp_installed() const noexcept {
-    return impl_->srtp_installed;
+    return impl_->security.srtp_installed;
 }
 
 

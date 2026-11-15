@@ -43,6 +43,7 @@
  *   | `detail::ControlChannelSeam`    | `engine_control_seam.hpp`     |
  *   | `detail::QoeSeam`               | `engine_qoe_seam.hpp`         |
  *   | `detail::FeedbackState`         | `engine_feedback_state.hpp`   |
+ *   | `detail::SecurityState`         | `engine_security_state.hpp`   |
  *
  * The rule is simple: a member that only one feature reads or writes
  * belongs to that feature's collaborator, not to `Impl`.  The engine's
@@ -101,6 +102,7 @@
 #include "engine_render_state.hpp"
 #include "engine_scratch.hpp"
 #include "engine_sdp_helpers.hpp"
+#include "engine_security_state.hpp"
 #include "engine_session_state.hpp"
 #include "engine_timeline_state.hpp"
 #include "engine_video_state.hpp"
@@ -298,10 +300,12 @@ struct NimRTCEngine::Impl {
     TransportSession session;
 
     // ---- The DTLS / SRTP install state --------------------------------
-    bool            dtls_active_inbound = false;
-    bool            srtp_installed      = false;
-    int             srtp_stats_drop     = 0;
-    nimrtc::dtls::DtlsState last_dtls_state = nimrtc::dtls::DtlsState::Closed;
+    //
+    // The DTLS handshake trace, the SRTP installation flag and the SRTP
+    // drop counter are one feature — the transport security — so they
+    // live in one collaborator rather than as loose members here.
+    // See `engine_security_state.hpp`.
+    detail::SecurityState security;
 
     // ---- The RTCP feedback / BWE / pacing state ------------------------
     //
@@ -372,10 +376,12 @@ struct NimRTCEngine::Impl {
     detail::TimelineState timeline;
 
     // ---- Outbound Sender Report state ----------------------------------
-    // `sr_*` carry the values an SR body reports for the audio stream
-    // (RFC 3550 §6.4.1 sender info).  Video is folded into the same SR via
-    // report blocks only when a video sender is active; the audio stream is
-    // the SR's own media source because it is always the first one out.
-    std::chrono::steady_clock::time_point sr_last_sent{};};
+    // `sr_last_sent` carries the values an SR body reports for the audio
+    // stream (RFC 3550 §6.4.1 sender info).  Video is folded into the
+    // same SR via report blocks only when a video sender is active; the
+    // audio stream is the SR's own media source because it is always the
+    // first one out.  The timestamp itself lives in `TimelineState`,
+    // next to the rest of the ADR-017 timeline.
+};
 
 }  // namespace nimrtc::engine

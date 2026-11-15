@@ -16,7 +16,7 @@
 > | 1 | 正确性（A1-A12） | ✅ | transport 空指针契约、注册表键生命周期、视频 RTP 统一、分辨率可配置、调度器锁外 I/O、S-family 流控 |
 > | 2 | 插件契约补全（B1-B10、Q3/Q4） | ✅ | `ISrtpSessionBackend` 接线、`CapabilitySelector` 接线、配置项 / 宏名显式化、契约测试 |
 > | 3 | 性能（C1-C7） | ✅ | 帧缓冲池化、GPU 零拷贝路径、逐包分配消除、`hotpath_zero_allocs` 与音频分配门禁 |
-> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-025 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 394 行，状态按关注点分入 7 个具名协作者；§4.5.1 已完成：视频接收路径重建 Annex-B 起始码（单 NAL / STAP-A / AP / FU-A / FU 五条路径） |
+> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-025 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 387 行，状态按关注点分入 13 个具名协作者，`Impl` 只持有引擎自己的组合；§4.3 的 `< 400` 行验收线由 `tools/check_engine_layering.py` 的第三条规则守住（2026-11-16 收尾）；§4.5.1 已完成：视频接收路径重建 Annex-B 起始码（单 NAL / STAP-A / AP / FU-A / FU 五条路径） |
 > | 5 | 文档与 ADR 同步 | ✅ | ADR-023 / 024 / 025 / 026 已落地；§7.1 的 8 份必改文档全部同步完成 |
 >
 > Phase 3 的验收（§3.5）现状：
@@ -949,6 +949,73 @@ SR 状态等）。真正把这些成员也归位，需要先有上面那几个�
   （约一半概率失败）。现在等待期间像它的兄弟用例
   `DxgiReportsANonEmptyDirtyRectWhenTheDesktopChanges` 那样主动"戳"一下桌面。
 
+#### 4.3 执行结果 · 收尾（2026-11-16）：散装成员归位 + 验收线加守卫
+
+D1 的**状态**部分到此收尾。这一轮做了两件事，都不涉及行为改动。
+
+**第一件：`Impl` 里最后 5 个散装成员归位。**
+
+§4.3 第一次落地时留了一句"遗留"：`Impl` 本身仍持有"跨功能"的散装成员。
+本次把它们全部归位 —— 规则不变：**只被一个功能读写的成员属于那个功能的
+协作者，不属于 `Impl`**。
+
+| 原成员 | 去处 | 说明 |
+|---|---|---|
+| `dtls_active_inbound` | **删除** | 零使用点 —— 死成员。它从 `engine.cpp` 拆分为五个 TU 时就失去了最后一个读者 |
+| `srtp_installed` | `detail::SecurityState` | 新协作者 `engine_security_state.hpp` |
+| `srtp_stats_drop` | `detail::SecurityState` | 同上 |
+| `last_dtls_state` | `detail::SecurityState` | 同上 |
+| `sr_last_sent` | `detail::TimelineState` | 它本来就是 ADR-017 时间线的一部分 —— `engine_timeline_state.hpp` 的文件注释早就在讲这个字段，只是它自己一直留在 `Impl` 里 |
+
+新协作者 `detail::SecurityState`（`src/engine/src/engine_security_state.hpp`）
+收的是"引擎的传输安全"这一件事：DTLS 握手的状态迁移轨迹、SRTP 是否已安装
+（**出站路径是否加密的权威**）、以及 SRTP 的丢包计数。这三个字段放在一起是
+有理由的 —— 第 2 个是第 3 个的前提，两者分开放，读者就得在三个地方找
+"这个会话加密了吗"的答案。
+
+**`Impl::dtls` 与 `Impl::srtp` 两个句柄仍然留在 `Impl`** —— 它们是引擎*拥有*
+的对象，是引擎自己的**组合**（composition），按 §4.3 的定义就该留在 `Impl`。
+协作者只装关于它们的*状态*。
+
+结果：`engine_impl.hpp` **381 → 387 行**（新增了一个协作者成员和它的说明
+注释），仍在 §4.3 的验收线内。`Impl` 现在只持有引擎自己的组合 +
+13 个具名协作者的成员。
+
+**第二件：给 `< 400` 这条验收线加守卫。**
+
+§4.3 的验收线此前**只写在文档里**，没有任何检查守着 —— 而它已经被推回过
+两次（394 → 423 → 381 → 391 → 381）。每次的修法其实都一样（新状态属于某个
+协作者，不属于 `Impl`），但每次都要靠人**想起来**去修。
+
+现在 `tools/check_engine_layering.py` 增加第三条规则：
+
+| 规则 | 内容 |
+|---|---|
+| 1（已有） | Layout Invariant 4：`src/engine/` 只能 include 豁免清单里的具体模块 |
+| 2（已有） | ADR-025 Decision 4：`rtp::PacketBuilder` 只能在 `rtp_packetizer.cpp` 里被命名 |
+| 3（**新增**） | 整改计划 §4.3：`engine_impl.hpp` 不得超过 400 行 |
+
+计数方式与 §4.3 自己的历史数字一致（`wc -l` 语义，即换行符个数）——
+文档里记的 1076 / 394 / 423 / 391 / 381 和守卫算的是同一个数。
+
+守卫失败时的诊断不是"超了 17 行"，而是**指出该往哪儿搬**：新状态属于某个
+具名协作者，而不是 `Impl`。这正是两次回弹的正确答案。
+
+守卫挂在 CI 的既有 step 上（不新增 job），同时注册成 ctest 用例
+`test_engine_layering`（`LABELS "architecture;guard"`），这样本地 `ctest`
+也能看到它。self-test 覆盖了这条规则的四种形状：低于预算、恰好等于预算、
+超出一行、以及"最后一行没有换行符"的计数边界。
+
+> **为什么用行数而不是"成员数"**：这条规则的目的不是管住头文件的内容
+> （那是协作者拆分该管的事），而是让头文件的**膨胀在 review 时就可见**。
+> 成员数是个更差的代理 —— 挪一行注释它就变了；而"`Impl` 里不许加新成员"
+> 这条规则会重复一个 reviewer 读一遍头文件才能做得更好的判断。
+
+**验证**：全量 `ctest` **1989 / 1989 通过**（Windows MSVC Debug，
+`build/ci-msvc`，`NIMRTC_BUILD_EXAMPLES=ON`），构建零 error 零 warning。
+守卫的三条规则 + self-test 全绿，并**人为超预算 30 行验证过它真的会失败**
+（exit 1 + 上述诊断，恢复后重新通过）。
+
 
 ### 4.4 修 D5：C ABI **保留**（Q1 决策的连带修正）
 
@@ -1244,18 +1311,24 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
   第三条失败 —— `EngineMultiStream.EachStreamOwnsItsOwnCodecInstance` ——
   是**用例自身的断言错误**（把 backend id 当成了实例 id），在有 NVENC 的
   机器上才暴露，已按 §4.3 的补充修好。）
-- `engine_impl.hpp` 行数 < 400 —— ✅ **381**
+- `engine_impl.hpp` 行数 < 400 —— ✅ **387**
   （ADR-025 的 layering guard 落地时把一条 11 行的说明注释加进了这个头，
   把它推到 401 行；那条注释的完整理由本来就记在
   `tools/check_engine_layering.py` 里，于是把它压缩成一行指向 —— 回到 394。
   随后远程桌面的多流 / QoE 平面又把它推到 423 行，
   2026-11-15 用 `detail::FeedbackState` 收走 RTCP 反馈 / pacing 那组成员
-  —— 回到 **381**。）
+  —— 回到 381。
+  **2026-11-16 收尾**：`Impl` 里最后 5 个散装成员归位（`dtls_active_inbound`
+  删除，其余四个收进 `detail::SecurityState` 与 `detail::TimelineState`），
+  净到 **387**。
+  **这条验收线现在有守卫了** —— `tools/check_engine_layering.py` 的第三条规则
+  在每次 push 上检查它，所以它不再只是一句文档。见 §4.3 的收尾小节。）
 - 无死模块（每个模块或被引擎加载，或被删除）—— ✅
   `tools/check_dead_modules.py`：37 / 37 模块通过，`--self-test` 通过
 - `ARCHITECTURE.md` 的 Layout Invariant 4 描述与代码一致 —— ✅
   §4.5 / D6 已收窄到 ADR-025 的具名清单；D1 落地后补记了引擎内部协作者
-  的结构；"`rtp::` 集中化"这一项已于 2026-11-15 落地（§4.5.1），
+  的结构（2026-11-16 补齐了全部 13 个协作者，并记下了行数预算与它的守卫）；
+  "`rtp::` 集中化"这一项已于 2026-11-15 落地（§4.5.1），
   并由 `tools/check_engine_layering.py` 的第二条规则（符号级）守住
 
 > **未纳入本计划验收的一项**：D1 的**行为**部分（`VideoPipeline` /
@@ -1268,6 +1341,14 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 > ADR-025 Decision 4 的要求已满足并有守卫与测试守着。其余四个协作者
 > （`VideoPipeline` / `AudioPipeline` / `RtcpProcessor` / `TransportManager`）
 > 仍未开始。
+>
+> **2026-11-16 收尾**：D1 的**状态**部分到此结束 ——
+> `Impl` 只持有引擎自己的组合，不再有任何散装成员；§4.3 的行数验收线
+> 由 `tools/check_engine_layering.py` 的第三条规则守着。
+> 上面那四个行为协作者**仍是以后的工作**，不在本计划内 —— 它们每一个
+> 都是一次行为改动，需要各自的评审。计划里的 `TimelineTracker` 这一项
+> 也不必再单列：ADR-017 的时间线状态已经是 `detail::TimelineState`
+> （`engine_timeline_state.hpp`），与计划草案的命名不同，但装的是同一件事。
 
 ---
 

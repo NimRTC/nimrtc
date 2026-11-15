@@ -77,8 +77,10 @@ src/
 │                   collaborator headers next to it (`engine_audio_state.hpp`,
 │                   `engine_video_state.hpp`, `engine_session_state.hpp`,
 │                   `engine_scratch.hpp`, `engine_timeline_state.hpp`,
-│                   `engine_xr_state.hpp`, `engine_ref_frame_table.hpp`).
-│                   None of these are installed.
+│                   `engine_xr_state.hpp`, `engine_feedback_state.hpp`,
+│                   `engine_security_state.hpp`,
+│                   `engine_ref_frame_table.hpp`).  See Layout Invariant 4
+│                   for the full list.  None of these are installed.
 ├── log/          ← Logger / Sink implementation (nimrtc_log STATIC — the only
 │                   compiled module in src/ besides the engine itself)
 └── third_party/ ← Vendored upstream: mbedTLS, libsrtp, libopus, libjuice
@@ -273,8 +275,21 @@ it only hands the transport over and receives callbacks.
    to that feature's collaborator, not to `Impl`.  The collaborators
    (`detail::AudioState`, `detail::VideoState`, `detail::SessionState`,
    `detail::ScratchBuffers`, `detail::TimelineState`, `detail::XrState`,
-   `detail::RefFrameTable`) live in private headers under `src/engine/src/`
-   and are not installed.
+   `detail::FeedbackState`, `detail::SecurityState`, `detail::RenderState`,
+   `detail::ControlChannelInbox`, `detail::ControlChannelSeam`,
+   `detail::QoeSeam`, `detail::RefFrameTable`) live in private headers under
+   `src/engine/src/` and are not installed.  `engine_impl.hpp` itself keeps
+   the engine's *composition* — the SDP parser and munger, the DTLS handle,
+   the SRTP context, the transport session — and nothing else.
+
+   **The header is under a line budget.** The remediation plan §4.3 set
+   `< 400` lines as the acceptance criterion for `engine_impl.hpp`, and
+   `tools/check_engine_layering.py` enforces it on every push.  The budget
+   is not arbitrary: the header grew back over the line twice after the
+   split (the remote-desktop multi-stream work and the QoE collector), and
+   both times the fix was the same — the new state belonged in a
+   collaborator, not in `Impl`.  The guard makes that fix happen at review
+   time instead of at the next retrospective.
 
    **The exception (ADR-025).** The engine's *internal* implementation files
    (`engine_impl.hpp` and the `engine_*.cpp` translation units) may include

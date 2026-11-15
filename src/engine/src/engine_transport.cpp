@@ -1629,7 +1629,7 @@ void NimRTCEngine::poll_ice_flap_for_rehandshake() noexcept {
                     "triggering DTLS rehandshake");
                 const auto rc = d->rehandshake();
                 if (rc == plugins::kOk) {
-                    impl_->srtp_installed = false;
+                    impl_->security.srtp_installed = false;
                 } else {
                     core::log::Logger::instance().warn(
                         std::string("engine[dtls]: rehandshake rejected rc=") +
@@ -1745,7 +1745,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     std::vector<std::uint8_t> plaintext;
     core::ByteSpan view(pkt.data(), pkt.size());
     bool tried_srtp = false;
-    if (impl_->srtp_installed && impl_->srtp) {
+    if (impl_->security.srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(0, /*outgoing=*/false);
         if (sess) {
             // SRTP and SRTCP use *different* key derivations and independent
@@ -1768,7 +1768,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
                     handle_rtcp(rc.value());
                     return;
                 }
-                ++impl_->srtp_stats_drop;
+                ++impl_->security.srtp_stats_drop;
                 return;
             }
         }
@@ -1848,12 +1848,12 @@ int NimRTCEngine::drain_dtls() noexcept {
     // member (not a static local) so two engines in the same process
     // (e.g. the loopback test) log their transitions independently.
     const auto new_state = d->state();
-    if (new_state != impl_->last_dtls_state) {
+    if (new_state != impl_->security.last_dtls_state) {
         core::log::Logger::instance().info(
             "engine[dtls]: state transition " +
-            std::string(nimrtc::dtls::DtlsSession::state_name(impl_->last_dtls_state)) + " → " +
+            std::string(nimrtc::dtls::DtlsSession::state_name(impl_->security.last_dtls_state)) + " → " +
             std::string(nimrtc::dtls::DtlsSession::state_name(new_state)));
-        impl_->last_dtls_state = new_state;
+        impl_->security.last_dtls_state = new_state;
     }
 
     if (new_state == nimrtc::dtls::DtlsState::Connected) {
@@ -1885,7 +1885,7 @@ int NimRTCEngine::drain_dtls() noexcept {
 
 void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     // Idempotency: only install once per DTLS connection.
-    if (impl_->srtp_installed) {
+    if (impl_->security.srtp_installed) {
         core::log::Logger::instance().debug(
             "engine[dtls→srtp]: already installed, skipping");
         return;
@@ -1996,7 +1996,7 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     }
 
     // Mark installed; subsequent calls will short-circuit.
-    impl_->srtp_installed = true;
+    impl_->security.srtp_installed = true;
 
     log.info("engine[dtls→srtp]: SRTP keys INSTALLED ✓ "
              "(state=" + std::string(state_ == State::kOpen ? "Open" : "Other") +

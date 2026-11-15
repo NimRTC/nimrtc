@@ -9,6 +9,79 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The session limits and the administrative kill switch (v1.4,
+  remote-desktop plan I6).**  The reference signalling service had no
+  bounds at all: every device that presented a pairing code got a
+  session, every session lived until the peer disconnected, and there was
+  no way for an operator to stop a session they did not want.  A service
+  that is shipped as the *reference implementation* is also the thing a
+  reader copies, so the bounds belong here.
+
+    - `examples/remote-desktop/signalling_core.py` gained the two
+      dataclasses `SessionLimits` (`max_concurrent_sessions`,
+      `max_concurrent_rooms`, `session_lifetime_s`, `idle_timeout_s`) and
+      `SessionPolicy` (`check_join`, `check_room_budget`,
+      `session_expired`, `engage_kill_switch`, `release_kill_switch`),
+      and `SignallingService` now enforces them: the join is refused
+      when the concurrency cap or the room budget is exhausted, the
+      session ends when its lifetime or its idle timeout expires, and
+      the kill switch pauses *new* joins without tearing down the live
+      ones — an administrative pause, not a disconnect.
+    - A session is **room-scoped**: the device and the viewer that join
+      the same room attach to the *same* session record, so a pair costs
+      one slot and a re-join with existing credentials does not consume a
+      second one.
+    - `examples/remote-desktop/signalling.py` runs a background reaper
+      that enforces the timeouts, and the server takes
+      `--max-sessions`, `--max-rooms`, `--session-lifetime` and
+      `--idle-timeout` on the command line.
+    - The idle timeout is driven by **real activity**: the media-plane
+      relay touches the session, so a session that is only relaying
+      frames stays alive and one that has gone quiet is reaped.
+    - Covered by `examples/remote-desktop/test_signalling.py`: the cap,
+      the slot release on disconnect, the re-join without a new budget,
+      the kill switch, the idle timeout, the hard session lifetime, the
+      room budget and the parameter validation.
+
+- **The capture / encode benchmark now measures the *real* platform
+  backends (v1.4, remote-desktop plan M1 / J5).**  The committed
+  artifact measured the portable synthetic capture device and the
+  encoder, but the plan's exit criterion asks for the *capture rate* of
+  the platform backends and for *evidence* that the GPU path is really
+  zero-copy.  Neither was measured, so the claim rested on the code
+  reading well.
+
+    - `tests/bench/bench_capture_encode.cpp` gained two measurements.
+      **The platform throughput** opens the real DXGI Desktop
+      Duplication and WGC devices, drives them through the
+      `IVideoCapture` seam, and reports the delivery rate over a
+      two-second window.  **The zero-copy probe** attaches a GPU
+      consumer exactly as a hardware encoder would and reads the
+      device's own counters, so the two can be cross-checked against
+      each other rather than against a claim.
+    - **Both backends deliver a frame only when the desktop *changes*.**
+      That is the point of a dirty-rect capture path, but it means a
+      rate cannot be measured on a static desktop.  The benchmark
+      therefore jiggles the mouse pointer during the window (restoring
+      the pointer's original position afterwards) and reads the
+      device's `frames_captured` counter across it.  A backend that
+      still delivers nothing is recorded as a *static-desktop
+      observation*, not as a zero-fps backend — the artifact never
+      claims a number it did not measure.
+    - **The measured result on the CI reference machine** (committed to
+      [`docs/benchmarks/capture_encode_windows_x86_64.json`](docs/benchmarks/capture_encode_windows_x86_64.json)):
+      at 1920×1080, **DXGI 64.2 fps (31.0 fps per megapixel)** and **WGC
+      49.8 fps (24.0 fps per megapixel)**; the zero-copy probe shows
+      **60 / 60 GPU frames with `bytes_copied == 0` for DXGI** and
+      **61 / 61 for WGC** — the pixels never entered host memory.
+    - `tools/benchmark_capture_encode.py` grew a `--platform-only` mode
+      that merges the platform sections into an existing artifact
+      instead of rewriting it, so a machine with real capture backends
+      but no hardware encoder SDK can contribute its evidence without
+      discarding the encode numbers another machine produced.  The
+      merged artifact records the contributing machine under
+      `platform_capture_machine`.
+
 - **The QoE collector seam and the engine's QoE wiring (v1.4, remote-desktop
   plan J3 / J6).**  The `rd_qoe` module shipped the *metrics* but nothing in
   the product ever *fed* them: the engine's `Stats` carried the per-stream
@@ -1782,6 +1855,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+
+- **The dirty-rect incremental encode and the keyframe limiter are now
+  wired *into the engine* (v1.4, remote-desktop plan B9 / B14).**  Both
+  existed as module seams with their own test suites, but nothing in the
+  product called them — the dead-module state the architecture-remediation
+  plan D2 calls out.  A host could not reach the behaviour through the
+  engine at all.
+
+    - **B9 — the incremental encode.**  The engine now feeds the
+      capture device's dirty rectangles to the incremental encoder
+      through the `plugins::IVideoEncoder` seam and sends the RFC 3550
+      §6.1 application-defined RTCP **region-refresh** message
+      (`"NRGN"`) alongside the picture, so the peer knows *which* region
+      changed and not merely that something did.
+    - **B14 — the keyframe limiter.**  The limiter's counters are
+      exposed in `NimRTCEngine::Stats`, so a host can see how often the
+      keyframe budget actually bit, and a latency-triggered keyframe
+      request is **retried** rather than dropped when the limiter
+      declines it.
+    - Covered by the new `tests/test_engine_video_incremental.cpp`.
 
 - **`IVideoCodec` is deprecated in favour of the split `IVideoEncoder` /
   `IVideoDecoder` seams (v1.4, remote-desktop plan B1, ADR-015

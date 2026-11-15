@@ -2515,6 +2515,56 @@ if(COMMAND gtest_discover_tests)
 endif()
 
 # ---------------------------------------------------------------------------
+# ADR-025 Decision 4 — the engine's RTP packet builder.
+#
+# The engine's outbound RTP packets are built in exactly one place
+# (`src/engine/src/rtp_packetizer.cpp`), so that the engine's exemption
+# from Layout Invariant 4 has a visible boundary.  The test exercises the
+# `detail::RtpPacketizer` collaborator directly — no engine, no
+# transport, no clock — because that is the shape it has: a pure
+# function of a packet description.
+#
+# The reference is the *RTP module's own* builder: the test asserts that
+# the collaborator produces byte-for-byte what `rtp::PacketBuilder`
+# produces, and that the collaborator's abs-send-time encoder produces
+# what `rtp::encode_abs_send_time_24` produces.  A refactor of this
+# shape fails silently otherwise.
+#
+# The test compiles the engine's *private* header directory into its
+# include path, exactly as `test_bandwidth_allocation` does.  That
+# directory is not installed and is not on the public surface
+# (constraint L4).
+# ---------------------------------------------------------------------------
+add_executable(test_rtp_packetizer
+    test_rtp_packetizer.cpp
+    # The TU under test, compiled straight into the test.  The
+    # collaborator is engine-private and the test is its unit test, so
+    # pulling the object in directly is both simpler and more precise
+    # than linking the whole engine library (which would drag in the
+    # transport stack, the DTLS backend and the default-registrar
+    # table, none of which the test touches).
+    "${CMAKE_SOURCE_DIR}/src/engine/src/rtp_packetizer.cpp")
+target_link_libraries(test_rtp_packetizer PRIVATE
+    nimrtc::core
+    nimrtc::rtp
+    GTest::gtest_main)
+target_include_directories(test_rtp_packetizer PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_rtp_packetizer PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_rtp_packetizer LENIENT)
+add_test(NAME test_rtp_packetizer
+    COMMAND $<TARGET_FILE:test_rtp_packetizer>)
+set_tests_properties(test_rtp_packetizer PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_rtp_packetizer
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+endif()
+
+# ---------------------------------------------------------------------------
 # WP-A (remote-desktop plan A1 / E1) — the decoded-frame delivery-path
 # rule and the frozen capture-capability semantics.
 #

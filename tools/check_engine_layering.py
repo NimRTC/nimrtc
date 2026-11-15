@@ -23,6 +23,14 @@ classifies it:
     exemption is visible rather than implied.
   * Anything else — a violation.
 
+A second rule runs on top of the first.  ADR-025 Decision 4 says the
+RTP *packet building* is concentrated in one file (`rtp_packetizer.cpp`),
+so that the engine's exemption has a visible boundary.  The module-level
+rule cannot enforce that on its own -- `nimrtc/rtp/packet.hpp` is
+allowed *everywhere* as far as the exemption list is concerned -- so the
+guard checks the concentration separately, at the symbol level:
+`rtp::PacketBuilder` may be named in exactly one engine file.
+
 Two things make the guard worth having rather than merely nice:
 
   * A violation is a **new** concrete dependency, and it is exactly the
@@ -115,6 +123,52 @@ EXEMPT_MODULES = frozenset({
     "video_stats",
 })
 
+# ---------------------------------------------------------------------------
+# The ADR-025 Decision 4 rule: the *packet building* half of the engine's
+# `rtp::` usage is concentrated in one file.
+# ---------------------------------------------------------------------------
+#
+# ADR-025 Decision 1 exempts the `rtp` module from Layout Invariant 4,
+# and Decision 4 says the exemption is only honest if the concrete use
+# is *concentrated*: a reader must be able to look at one file and see
+# every place the engine touches the RTP wire format.
+#
+# The rule this guard enforces is **symbol-level**, not include-level:
+#
+#   * `rtp::PacketBuilder` -- the outbound RTP packet constructor --
+#     may be *named* in exactly one engine file: `rtp_packetizer.cpp`.
+#
+# Why the symbol and not the header: the engine legitimately uses the
+# RTP module for two different concerns, and the plan gives each of
+# them its own collaborator (§4.3):
+#
+#   * **building** outbound packets -- `RtpPacketizer`, which is what
+#     this rule is about.  The engine must not hand-assemble an RTP
+#     header anywhere else: a fix to the header format has to land in
+#     one place, or the audio path and the video path drift apart.
+#   * **parsing** inbound packets and RTCP -- `rtcp::demux_rtcp()`,
+#     `rtp::Parser`, the XR blocks.  Those live in their own module
+#     surfaces (`nimrtc/rtp/rtcp*.hpp`) and are the *receive* side;
+#     concentrating them is the `rtcp_processor` collaborator's job,
+#     which the plan names as separate work.
+#
+# An include-level rule ("only `rtp_packetizer.cpp` may include
+# `nimrtc/rtp/packet.hpp`") would forbid the receive side too, which is
+# not what the ADR asks for -- and it would force the receive-side
+# parser to be reached through a header that names it anyway.  The
+# symbol-level rule checks the thing the ADR actually cares about:
+# that the engine *builds* RTP packets in one place.
+#
+# This is the failure mode the guard exists to catch.  The module-level
+# rule answers "is this module allowed?"; this one answers "is this
+# *use* of the module in the one place the ADR says it is?".
+
+# The concrete `rtp::` symbols that may be named in exactly one engine
+# file, and the file that owns them.
+CONCENTRATED_SYMBOLS = {
+    "rtp::PacketBuilder": "rtp_packetizer.cpp",
+}
+
 # The engine's own source root, relative to the repository root.
 ENGINE_DIR = Path("src/engine")
 
@@ -172,6 +226,91 @@ def check(root: Path) -> list[tuple[Path, int, str, str]]:
     return violations
 
 
+def check_concentration(root: Path) -> list[tuple[Path, int, str, str]]:
+    """Return every *misplaced* concentrated symbol.
+
+    ADR-025 Decision 4 concentrates the RTP packet building in
+    `rtp_packetizer.cpp`.  A concentrated symbol named anywhere else is
+    a violation of that decision -- and the module-level exemption
+    would not catch it, because the module itself is allowed.
+
+    The scan strips comments and string literals first, so a symbol
+    mentioned in a doc comment ("the old code used `rtp::PacketBuilder`
+    directly") is not a violation.  What matters is the *code*.
+
+    Returns (path, line, symbol, allowed_file) tuples.
+    """
+    violations: list[tuple[Path, int, str, str]] = []
+    for path in _iter_engine_sources(root):
+        text = _read_text(path)
+        name = path.name
+        for lineno, line in enumerate(_strip_comments_and_strings(text), 1):
+            for symbol, allowed in CONCENTRATED_SYMBOLS.items():
+                if name == allowed:
+                    continue
+                if re.search(r"\b" + re.escape(symbol) + r"\b", line):
+                    violations.append((path, lineno, symbol, allowed))
+    return violations
+
+
+def _strip_comments_and_strings(text: str) -> list[str]:
+    """Return the source's code lines, with comments and literals blanked.
+
+    A guard that fires on a *mention* is a guard people learn to
+    silence with a reworded comment, so the scan looks at code only.
+    Each removed span is replaced by spaces, which keeps the line
+    numbers of the surviving code intact.
+    """
+    out: list[str] = []
+    in_block = False
+    for raw in text.split("\n"):
+        line: list[str] = []
+        i = 0
+        n = len(raw)
+        while i < n:
+            if in_block:
+                if raw.startswith("*/", i):
+                    in_block = False
+                    line.append("  ")
+                    i += 2
+                else:
+                    line.append(" ")
+                    i += 1
+                continue
+            if raw.startswith("//", i):
+                line.append(" " * (n - i))
+                break
+            if raw.startswith("/*", i):
+                in_block = True
+                line.append("  ")
+                i += 2
+                continue
+            ch = raw[i]
+            if ch in ('"', "'"):
+                quote = ch
+                line.append(" ")
+                i += 1
+                while i < n:
+                    if raw[i] == "\\":
+                        line.append(" ")
+                        i += 1
+                        if i < n:
+                            line.append(" ")
+                            i += 1
+                        continue
+                    if raw[i] == quote:
+                        line.append(" ")
+                        i += 1
+                        break
+                    line.append(" ")
+                    i += 1
+                continue
+            line.append(ch)
+            i += 1
+        out.append("".join(line))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -207,6 +346,34 @@ def report(root: Path, violations, verbose: bool) -> int:
         sources = _iter_engine_sources(root)
         print(f"Layering Invariant 4 (ADR-025): OK "
               f"({len(sources)} engine source files scanned)")
+    return 0
+
+
+def report_concentration(root: Path, violations, verbose: bool) -> int:
+    """Report the ADR-025 Decision 4 concentration violations."""
+    if violations:
+        print("ADR-025 Decision 4 violated: the RTP packet building is not "
+              "concentrated.\n",
+              file=sys.stderr)
+        for path, lineno, symbol, allowed in violations:
+            print(f"  {_rel(path, root)}:{lineno}: "
+                  f"{symbol}  -- only {allowed} may name it",
+                  file=sys.stderr)
+        print(
+            "\nThe outbound RTP packet building is concentrated in "
+            "src/engine/src/rtp_packetizer.cpp so that the engine's\n"
+            "exemption from Layout Invariant 4 has a visible boundary, and so "
+            "that a fix\nto the RTP header lands in one place.  Route the packet "
+            "through the\n`detail::RtpPacketizer` collaborator instead of naming "
+            "the concrete builder\nhere.  See docs/adr/ADR-025-sdp-rtp-not-pluggable.md\n"
+            "(Decision 4).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if verbose:
+        print("ADR-025 Decision 4 (rtp:: concentration): OK "
+              "(the RTP packet builder is named in rtp_packetizer.cpp only)")
     return 0
 
 
@@ -270,6 +437,63 @@ def self_test(root: Path) -> int:
     # A quoted include is the same include.
     check_case("quoted include", '"nimrtc/h264/codec_plugin.hpp"', True)
 
+    # ---- The ADR-025 Decision 4 concentration rule --------------------
+    def check_concentration_case(name: str, filename: str, body: str,
+                                 expect_violation: bool) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            _write(tmp_root / ENGINE_DIR / "src" / filename, body)
+            violations = check_concentration(tmp_root)
+            got = bool(violations)
+            if got != expect_violation:
+                failures.append(
+                    f"{name}: {filename} -> "
+                    f"{'violation' if got else 'allowed'}, "
+                    f"expected {'violation' if expect_violation else 'allowed'}")
+
+    # The one file that may name the concrete builder.
+    check_concentration_case(
+        "the packetizer owns the RTP builder",
+        "rtp_packetizer.cpp",
+        "rtp::PacketBuilder pb;\n", False)
+
+    # Everywhere else, it is a violation -- even though the *module* is
+    # exempt, which is the whole point of the second rule.
+    check_concentration_case(
+        "another engine file naming the RTP builder",
+        "engine_media.cpp",
+        "rtp::PacketBuilder pb;\n", True)
+    check_concentration_case(
+        "an engine header naming the RTP builder",
+        "engine_impl.hpp",
+        "    rtp::PacketBuilder pb;\n", True)
+
+    # A mention in a *comment* is not a use.  A guard that fires on a
+    # mention is a guard people learn to silence with a reworded
+    # comment.
+    check_concentration_case(
+        "a comment naming the RTP builder",
+        "engine_media.cpp",
+        "// the old code used rtp::PacketBuilder directly\n", False)
+    check_concentration_case(
+        "a block comment naming the RTP builder",
+        "engine_media.cpp",
+        "/* rtp::PacketBuilder was here once */\n", False)
+    check_concentration_case(
+        "a string literal naming the RTP builder",
+        "engine_media.cpp",
+        'const char* s = "rtp::PacketBuilder";\n', False)
+
+    # The *receive* side is a different concern and is not covered.
+    check_concentration_case(
+        "the receive-side parser is not concentrated",
+        "engine_media.cpp",
+        "rtp::Parser rp;\n", False)
+    check_concentration_case(
+        "the RTCP demux is not concentrated",
+        "engine_media.cpp",
+        "rtp::demux_rtcp(compound, out);\n", False)
+
     if failures:
         print("self-test FAILED:", file=sys.stderr)
         for f in failures:
@@ -297,8 +521,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         return self_test(root)
 
-    violations = check(root)
-    return report(root, violations, args.verbose)
+    # Two rules, both reported: the module-level exemption list, and
+    # the Decision 4 concentration.  A failure in either is a failure.
+    rc = report(root, check(root), args.verbose)
+    rc |= report_concentration(root, check_concentration(root), args.verbose)
+    return rc
 
 
 if __name__ == "__main__":

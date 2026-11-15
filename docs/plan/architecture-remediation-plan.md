@@ -1118,6 +1118,55 @@ reviewer 忽略它。把豁免清单**逐项列名**之后，L4 才变成可机�
 - `engine_impl.hpp` 的 `#include <nimrtc/h264/codec_plugin.hpp>` 只为链接期注册，不引用任何符号；待 D1 把默认注册表拆出 `engine_impl.hpp` 后删除
 - 计划里的"CIO guard"（机械检查 `src/engine/` 的 include）尚未实现
 
+**三项遗留的现状（2026-11-15 复查）**：
+
+| 遗留项 | 状态 |
+|---|---|
+| `rtp::` 集中到 `rtp_packetizer.cpp` | ✅ **已落地**（见 §4.5.1） |
+| `engine_impl.hpp` 的 `h264/codec_plugin.hpp` | ✅ **已删除** —— 默认注册表已拆到 `src/core/src/pal_default_registrars.cpp` |
+| "CIO guard" | ✅ **已实现** —— `tools/check_engine_layering.py`，并接入 `.github/workflows/ci.yml`（含 `--self-test`） |
+
+### 4.5.1 把 `rtp::` 集中到 `rtp_packetizer.cpp`（D1 的"行为"一半，2026-11-15）
+
+§4.3 落地时只搬了**状态**（`engine_impl.hpp` 的三类内容分开），把**行为**留给了
+后续 PR。ADR-025 Decision 4 要求的 "`rtp::` 集中到 `rtp_packetizer.cpp`" 正是其中
+一项 —— 本节记录它的落地。
+
+**做了什么**：新增私有协作者 `detail::RtpPacketizer`
+（`src/engine/src/rtp_packetizer.hpp` + `rtp_packetizer.cpp`），把引擎**出站** RTP
+打包的全部逻辑搬进去：
+
+| 调用点 | 之前 | 之后 |
+|---|---|---|
+| 音频路径（`engine_media.cpp`） | 直接用 `rtp::PacketBuilder` | `detail::RtpPacketizer::build_into()` |
+| DTMF 路径（`engine_dtmf.cpp`） | 直接用 `rtp::PacketBuilder` | 同上 |
+| 默认视频流（`engine_media.cpp`） | 直接用 `rtp::PacketBuilder` | 同上 |
+| 额外视频流（`engine_video_streams.cpp`） | 直接用 `rtp::PacketBuilder` | 同上 |
+
+协作者的**头文件不含任何 `rtp::` 类型**：它用纯标量 + 字节区间描述一个包，具体的
+`rtp::PacketBuilder` 只存在于那一个 `.cpp` 里。这样引擎的内部头可以 include 它而不
+会把具体的 RTP 模块一起拖进来。
+
+**abs-send-time 编码也一并搬进来了**：三个调用点原来各写一遍
+`rtp::encode_abs_send_time_24(steady_us, monotonic_origin_ntp64)`。协作者改为按
+引擎**已有的**原点（`TimelineState::boot_epoch_offset_us`，Unix 微秒）计算，避免
+"NTP64 → Unix 微秒"那次有损往返，并让引擎用同一个原点发布所有时刻。
+
+**验证**：
+
+- 新增 `tests/test_rtp_packetizer.cpp`：**12 / 12** 通过。测试的参照物是
+  **RTP 模块自己的** builder —— 断言协作者产出的包与 `rtp::PacketBuilder` 逐字节
+  相同，abs-send-time 编码与 `rtp::encode_abs_send_time_24` 相同。抽取这种形状的
+  重构出错时是**静默**的（少一个头字段、丢一个扩展），所以必须有这个参照。
+- `tools/check_engine_layering.py` 增加第二条规则（**符号级**）：`rtp::PacketBuilder`
+  只能被 `rtp_packetizer.cpp` 命名。符号级而非头文件级是刻意的 —— 头文件级会连
+  **接收侧**的 parser 一起禁掉，而那是 `rtcp_processor` 协作者的活（§4.3 另列的
+  工作）。扫描前先剥掉注释与字符串字面量，所以文档注释里**提到**这个符号不算违规。
+
+**边界**：接收侧（RTCP demux、SR/RR 解析、XR 块）**没有**搬 —— 它们属于
+`rtcp::` 的模块面，是计划 §4.3 里 `rtcp_processor` 协作者的独立工作。
+
+
 ### 4.5 附带发现：视频接收路径不重建 Annex-B 起始码（已修）
 
 写 `video_stats` 的引擎接线测试时发现的**产品缺陷**，与 D2 的接线工作相邻但独立。
@@ -1206,12 +1255,19 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
   `tools/check_dead_modules.py`：37 / 37 模块通过，`--self-test` 通过
 - `ARCHITECTURE.md` 的 Layout Invariant 4 描述与代码一致 —— ✅
   §4.5 / D6 已收窄到 ADR-025 的具名清单；D1 落地后补记了引擎内部协作者
-  的结构与"`rtp::` 集中化属于**行为**部分，尚未开始"
+  的结构；"`rtp::` 集中化"这一项已于 2026-11-15 落地（§4.5.1），
+  并由 `tools/check_engine_layering.py` 的第二条规则（符号级）守住
 
 > **未纳入本计划验收的一项**：D1 的**行为**部分（`VideoPipeline` /
 > `AudioPipeline` / `RtpPacketizer` / `RtcpProcessor` / `TransportManager`）。
 > 每搬一个都要把一段行为移出引擎，属于需要独立评审的行为改动；
 > 本计划只做了"把头的三类内容分开"的状态部分。
+>
+> **2026-11-15 更新**：`RtpPacketizer` 这一项**已经落地**（§4.5.1）——
+> 引擎的出站 RTP 打包集中到了 `src/engine/src/rtp_packetizer.cpp`，
+> ADR-025 Decision 4 的要求已满足并有守卫与测试守着。其余四个协作者
+> （`VideoPipeline` / `AudioPipeline` / `RtcpProcessor` / `TransportManager`）
+> 仍未开始。
 
 ---
 

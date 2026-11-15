@@ -1857,6 +1857,47 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The engine's outbound RTP packing is now concentrated in one file
+  (v1.4, architecture-remediation plan §4.5.1, ADR-025 Decision 4).**
+  The engine is exempt from Layout Invariant 4 for the `rtp` module
+  (SDP and RTP are not pluggable — see ADR-025), but that exemption was
+  only honest if the concrete use had a *visible boundary*.  It did not:
+  four engine files each named `rtp::PacketBuilder` and each hand-rolled
+  the abs-send-time stamp, so a fix to the RTP header had to be made in
+  four places, and nothing would have noticed if one of them was missed.
+
+    - The new private collaborator `detail::RtpPacketizer`
+      (`src/engine/src/rtp_packetizer.hpp` + `rtp_packetizer.cpp`) owns
+      the packet building.  Its header contains **no** `rtp::` type — it
+      describes a packet in plain scalars and a byte span — so the
+      engine's internal headers can include it without dragging the
+      concrete RTP module in with it.  The concrete `rtp::PacketBuilder`
+      lives in that one `.cpp`.
+    - Four call sites now go through it: the audio path, the RFC 4733
+      DTMF path, the default video stream's packet callback, and the
+      extra video streams' packet callback.
+    - The abs-send-time encoding moved with it, and now uses the origin
+      the engine already keeps (`TimelineState::boot_epoch_offset_us`,
+      Unix microseconds) instead of converting the NTP64 origin on every
+      packet — a lossy round trip that could drift from the instants the
+      engine publishes elsewhere.
+    - `tools/check_engine_layering.py` grew a **second rule** to keep
+      it that way: `rtp::PacketBuilder` may be named in exactly one
+      engine file.  The rule is *symbol*-level rather than header-level
+      on purpose — the module-level exemption cannot express this at all
+      (`nimrtc/rtp/packet.hpp` is allowed everywhere), and a header-level
+      rule would also forbid the receive-side parser, which belongs to a
+      different collaborator.  The scan strips comments and string
+      literals first, so a mention in a doc comment is not a violation.
+    - Covered by the new `tests/test_rtp_packetizer.cpp` (12 tests),
+      whose reference is the **RTP module's own** builder: the
+      collaborator is asserted to produce byte-for-byte what
+      `rtp::PacketBuilder` produces, and its abs-send-time encoder what
+      `rtp::encode_abs_send_time_24` produces.  A refactor of this shape
+      fails silently otherwise.
+    - The engine's *receive* side (RTCP demultiplexing, SR/RR parsing,
+      the XR blocks) is deliberately **not** moved — that is the
+      `rtcp_processor` collaborator's separate work.
 
 - **The dirty-rect incremental encode and the keyframe limiter are now
   wired *into the engine* (v1.4, remote-desktop plan B9 / B14).**  Both

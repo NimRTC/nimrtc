@@ -63,7 +63,11 @@
 
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/engine/pal/engine_plugin_resolver.hpp>
-#include <nimrtc/rtp/packet.hpp>
+
+// ADR-025 Decision 4: the RTP packet building is concentrated in the
+// `detail::RtpPacketizer` collaborator, so this file never names a
+// concrete `rtp::` type.
+#include "rtp_packetizer.hpp"
 
 namespace nimrtc::engine {
 
@@ -202,12 +206,12 @@ void NimRTCEngine::wire_stream_sender(detail::VideoStream* s) noexcept {
                   std::uint32_t rtp_ts,
                   std::uint16_t seq,
                   bool marker) {
-            rtp::PacketBuilder pb;
-            pb.set_ssrc(s->ssrc)
-              .set_seq(seq)
-              .set_timestamp(rtp_ts)
-              .set_payload_type(s->payload_type)
-              .set_marker(marker);
+            detail::RtpPacketSpec spec;
+            spec.ssrc         = s->ssrc;
+            spec.seq          = seq;
+            spec.timestamp    = rtp_ts;
+            spec.payload_type = s->payload_type;
+            spec.marker       = marker;
 
             // The abs-send-time extension (ADR-017) — the same seam the
             // default stream's callback stamps.
@@ -216,22 +220,22 @@ void NimRTCEngine::wire_stream_sender(detail::VideoStream* s) noexcept {
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         core::SteadyClock::now().time_since_epoch()).count();
                 if (impl_->timeline.local_abs_send_time_id != 0) {
-                    const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
+                    spec.abs_send_time_ext_id = impl_->timeline.local_abs_send_time_id;
+                    spec.abs_send_time_24mhz = detail::RtpPacketizer::encode_abs_send_time_24(
                         std::chrono::microseconds{steady_us},
-                        impl_->timeline.monotonic_origin_ntp64);
-                    pb.set_abs_send_time(rtp::AbsSendTime{ast24},
-                                         impl_->timeline.local_abs_send_time_id);
+                        impl_->timeline.boot_epoch_offset_us);
                 }
             }
 
-            pb.set_payload(core::ByteSpan(payload.data(), payload.size()));
+            spec.payload = core::ByteSpan(payload.data(), payload.size());
 
-            const std::size_t built_size = pb.compute_size();
+            const std::size_t built_size = detail::RtpPacketizer::compute_size(spec);
             if (s->rtp_scratch.size() < built_size) {
                 s->rtp_scratch.resize(built_size);
             }
             const std::size_t built_written =
-                pb.build_into(s->rtp_scratch.data(), s->rtp_scratch.size());
+                detail::RtpPacketizer::build_into(spec, s->rtp_scratch.data(),
+                                                  s->rtp_scratch.size());
             if (built_written == 0) return;
 
             std::vector<std::uint8_t>& rtp_pkt = s->pkt_scratch;

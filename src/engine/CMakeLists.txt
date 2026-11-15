@@ -75,6 +75,11 @@ add_library(nimrtc_engine STATIC
     # source, resolved through the registry by id (H2).  The per-stream
     # statistics are filled here (H4).
     src/engine_video_streams.cpp
+    # Architecture remediation plan §4.3 (D1) + ADR-025 Decision 4: the
+    # RTP packet builder.  This TU is the ONE place the engine names a
+    # concrete `rtp::` type for *outbound* packets, so the engine's
+    # exemption from Layout Invariant 4 has a visible boundary.
+    src/rtp_packetizer.cpp
 )
 
 nimrtc_apply_options(nimrtc_engine)

@@ -22,6 +22,11 @@
 // translation unit's anonymous namespace.
 #include "engine_video_staging.hpp"
 
+// ADR-025 Decision 4: the RTP packet building is concentrated in the
+// `detail::RtpPacketizer` collaborator, so this file never names a
+// concrete `rtp::` type.
+#include "rtp_packetizer.hpp"
+
 namespace nimrtc::engine {
 
 // The staging step's names are used unqualified below; they come from
@@ -1562,12 +1567,12 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
                 ? impl_->audio_state.negotiated_audio_pt
                 : config_.audio_codec.payload_type;
 
-        rtp::PacketBuilder pb;
-        pb.set_ssrc(impl_->audio_state.audio_ssrc)
-          .set_seq(impl_->audio_state.audio_seq++)
-          .set_timestamp(impl_->audio_state.audio_ts)
-          .set_payload_type(outbound_pt)
-          .set_marker(false);
+        detail::RtpPacketSpec spec;
+        spec.ssrc         = impl_->audio_state.audio_ssrc;
+        spec.seq          = impl_->audio_state.audio_seq++;
+        spec.timestamp    = impl_->audio_state.audio_ts;
+        spec.payload_type = outbound_pt;
+        spec.marker       = false;
 
     // ---- Cross-end timeline: stamp abs-send-time (ADR-017) ---------------
     // Only when the seam is on *and* the id was negotiated. The encoded
@@ -1597,28 +1602,28 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         // the same basis the abs-send-time encoder uses.
         impl_->audio_state.audio_last_send_unix_us = impl_->timeline.boot_epoch_offset_us + steady_us;
         if (impl_->timeline.local_abs_send_time_id != 0) {
-            const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
+            spec.abs_send_time_ext_id = impl_->timeline.local_abs_send_time_id;
+            spec.abs_send_time_24mhz = detail::RtpPacketizer::encode_abs_send_time_24(
                 std::chrono::microseconds{steady_us},
-                impl_->timeline.monotonic_origin_ntp64);
-            pb.set_abs_send_time(rtp::AbsSendTime{ast24},
-                                 impl_->timeline.local_abs_send_time_id);
+                impl_->timeline.boot_epoch_offset_us);
         }
     }
 
-        pb.set_payload(core::ByteSpan(impl_->scratch.audio_codec_pkt.data(), codec_len));
+        spec.payload = core::ByteSpan(impl_->scratch.audio_codec_pkt.data(), codec_len);
 
         // ---- Serialise into the reusable scratch (Phase 3 / C4) --------------
         //
-        // `pb.build()` would allocate a fresh buffer for every audio
-        // packet.  `build_into()` writes into the engine's per-session
-        // scratch instead, so the steady-state send path performs no heap
-        // allocation for the RTP header + payload copy.
-        const std::size_t pkt_size = pb.compute_size();
+        // The packetizer writes into the engine's per-session scratch
+        // instead of allocating a fresh buffer for every audio packet, so
+        // the steady-state send path performs no heap allocation for the
+        // RTP header + payload copy.
+        const std::size_t pkt_size = detail::RtpPacketizer::compute_size(spec);
         if (impl_->scratch.audio_rtp_scratch.size() < pkt_size) {
             impl_->scratch.audio_rtp_scratch.resize(pkt_size);
         }
         const std::size_t pkt_written =
-            pb.build_into(impl_->scratch.audio_rtp_scratch.data(),
+            detail::RtpPacketizer::build_into(spec,
+                          impl_->scratch.audio_rtp_scratch.data(),
                           impl_->scratch.audio_rtp_scratch.size());
         if (pkt_written == 0) {
             report_error(core::kAudioEncodeFailed,
@@ -3020,12 +3025,12 @@ void NimRTCEngine::wire_default_sender() noexcept {
                     : config_.video_sender_tuning.payload_type;
             const std::uint8_t pt = negotiated_pt != 0 ? negotiated_pt : local_pt;
 
-            rtp::PacketBuilder pb;
-            pb.set_ssrc(config_.video_sender_tuning.ssrc)
-              .set_seq(seq)
-              .set_timestamp(rtp_ts)
-              .set_payload_type(pt)
-              .set_marker(marker);
+            detail::RtpPacketSpec spec;
+            spec.ssrc         = config_.video_sender_tuning.ssrc;
+            spec.seq          = seq;
+            spec.timestamp    = rtp_ts;
+            spec.payload_type = pt;
+            spec.marker       = marker;
 
             // ---- Cross-end timeline: stamp abs-send-time (ADR-017) --------
             // Same contract as the audio path: only when the seam is
@@ -3041,15 +3046,14 @@ void NimRTCEngine::wire_default_sender() noexcept {
                 impl_->video_state.video_last_send_unix_us =
                     impl_->timeline.boot_epoch_offset_us + steady_us;
                 if (impl_->timeline.local_abs_send_time_id != 0) {
-                    const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
+                    spec.abs_send_time_ext_id = impl_->timeline.local_abs_send_time_id;
+                    spec.abs_send_time_24mhz = detail::RtpPacketizer::encode_abs_send_time_24(
                         std::chrono::microseconds{steady_us},
-                        impl_->timeline.monotonic_origin_ntp64);
-                    pb.set_abs_send_time(rtp::AbsSendTime{ast24},
-                                         impl_->timeline.local_abs_send_time_id);
+                        impl_->timeline.boot_epoch_offset_us);
                 }
             }
 
-            pb.set_payload(core::ByteSpan(payload.data(), payload.size()));
+            spec.payload = core::ByteSpan(payload.data(), payload.size());
 
             // ---- Serialise into the reusable scratch (Phase 3 / C4) ------
             //
@@ -3058,13 +3062,14 @@ void NimRTCEngine::wire_default_sender() noexcept {
             // read immediately below — the bytes are copied into the
             // scheduler's pooled outbound buffer — so it never escapes
             // this callback.
-            const std::size_t built_size = pb.compute_size();
+            const std::size_t built_size = detail::RtpPacketizer::compute_size(spec);
             if (impl_->scratch.video_rtp_scratch.size() < built_size) {
                 impl_->scratch.video_rtp_scratch.resize(built_size);
             }
             const std::size_t built_written =
-                pb.build_into(impl_->scratch.video_rtp_scratch.data(),
-                              impl_->scratch.video_rtp_scratch.size());
+                detail::RtpPacketizer::build_into(spec,
+                    impl_->scratch.video_rtp_scratch.data(),
+                    impl_->scratch.video_rtp_scratch.size());
             if (built_written == 0) {
                 if (on_error_) {
                     on_error_(core::kVideoEncodeFailed,

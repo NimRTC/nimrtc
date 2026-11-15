@@ -25,10 +25,13 @@ NimRTC 是一个 **原生 C++20 WebRTC 替代实现**，面向 AI Agent 和嵌�
 > 抖动缓冲、BWE、pacing、scheduler …）仍然必须通过 `plugins::I*` 接缝访问，
 > 不得 include 其头文件。
 >
-> `rtp::` 的用法最终要集中到 `src/engine/src/rtp_packetizer.cpp` 一个文件。
+> `rtp::` 的**出站打包**用法已集中到 `src/engine/src/rtp_packetizer.cpp` 一个文件
+> （`detail::RtpPacketizer` 协作者，2026-11-15 落地，ADR-025 Decision 4）。
+> `tools/check_engine_layering.py` 的第二条规则（符号级）强制这一点：
+> `rtp::PacketBuilder` 只能在那个文件里被命名。
 > D1 引擎拆分的**状态**部分已落地（`engine_impl.hpp` < 400 行，状态按关注点
-> 分入具名协作者）；**行为**部分（把 RTP 打包搬出引擎）是独立的改动，
-> 尚未开始。
+> 分入具名协作者）；**行为**部分的其余四项（`VideoPipeline` / `AudioPipeline` /
+> `RtcpProcessor` / `TransportManager`）尚未开始。
 **L5** `src/third_party/` 是 vendor 代码的唯一存放位置，`NIMRTC_VENDORED` 必须保持 ON
 **L6** 任何模块不得导出全局可变状态——单例（Logger、PluginRegistry）只能存在于 `nimrtc::core::`
 **L7** 保护域不可被策略规则覆盖：`policy/`、`.zelto/`、`AGENTS.md`

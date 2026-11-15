@@ -65,6 +65,25 @@ namespace nimrtc::video_capture {
 namespace {
 
 /**
+ * @brief The destination layout for a `GetDIBits` read of a 1-bit mask.
+ *
+ * A 1-bit-per-pixel `BI_RGB` destination carries a **2-entry** colour
+ * table, and `GetDIBits` writes that table into the destination
+ * structure *after* the header.  A plain `BITMAPINFO` has room for only
+ * **one** entry, so `GetDIBits` writes 4 bytes past the end of it — a
+ * stack buffer overflow that the debug runtime's stack check turns into
+ * a hard failure, and that a release build turns into silent
+ * corruption.
+ *
+ * So the destination is this structure instead: the header followed by
+ * an explicit 2-entry palette.
+ */
+struct MaskBitmapInfo {
+    BITMAPINFOHEADER header;
+    RGBQUAD colors[2];
+};
+
+/**
  * @brief The Windows cursor source.
  *
  * It keeps the last rendered bitmap around so that a cursor that does
@@ -277,23 +296,69 @@ class WindowsCursorSource final : public ICursorSource {
             return;
         }
 
-        // A monochrome mask is 1 bit per pixel.  `GetDIBits` returns
-        // 1-bit rows padded to a 4-byte boundary.
-        const std::size_t row_bytes = ((static_cast<std::size_t>(width) + 31u) / 32u) * 4u;
-        std::vector<std::uint8_t> row(row_bytes);
+        // ---- The mask ------------------------------------------------------
+        //
+        // The mask is a 1-bit-per-pixel bitmap whose rows are padded to a
+        // 4-byte boundary.
+        //
+        // Three things about `GetDIBits` matter here, and all three were
+        // found the hard way:
+        //
+        //   1. The `BITMAPINFO` must **not** be null.  `GetDIBits` reads
+        //      the destination's layout through it unconditionally, so a
+        //      null pointer there faults the process with an access
+        //      violation.
+        //
+        //   2. The destination must have room for the **colour table**.
+        //      A 1-bit-per-pixel `BI_RGB` destination carries a 2-entry
+        //      palette, and `GetDIBits` writes it into the structure
+        //      *after* the header.  A plain `BITMAPINFO` has room for
+        //      only **one** entry, so `GetDIBits` writes 4 bytes past the
+        //      end of it — a stack buffer overflow that the debug
+        //      runtime's stack check turns into a hard failure.  The
+        //      destination is therefore `MaskBitmapInfo`, which has an
+        //      explicit 2-entry palette.
+        //
+        //   3. The mask is read in **one** call, not one call per row.
+        //      A per-row request (`biHeight = 1`, `cLines = 1`) reports
+        //      success but leaves the destination buffer untouched for
+        //      every scan line past the first — so a per-row loop
+        //      silently reads the *same* row over and over.
+        //
+        // The read is **top-down** (`biHeight` negative) so that the mask
+        // rows line up with the drawn DIB, which is top-down as well.
+        // A bottom-up read puts the mask the wrong way up.
+        const std::size_t row_bytes = ((static_cast<std::size_t>(mask_width) + 31u) / 32u) * 4u;
+
+        MaskBitmapInfo mask_info{};
+        mask_info.header.biSize = sizeof(BITMAPINFOHEADER);
+        mask_info.header.biWidth = mask_width;
+        mask_info.header.biHeight = -mask_height;  // top-down
+        mask_info.header.biPlanes = 1;
+        mask_info.header.biBitCount = 1;
+        mask_info.header.biCompression = BI_RGB;
+
+        std::vector<std::uint8_t> mask_rows(row_bytes * static_cast<std::size_t>(mask_height));
+        const int copied = ::GetDIBits(mem, hbm_mask, 0, static_cast<UINT>(mask_height),
+                                       mask_rows.data(),
+                                       reinterpret_cast<BITMAPINFO*>(&mask_info), DIB_RGB_COLORS);
+        if (copied != mask_height) {
+            // The mask could not be read; leave the drawn alpha alone.
+            ::SelectObject(mem, old);
+            ::DeleteDC(mem);
+            ::ReleaseDC(nullptr, screen);
+            make_opaque();
+            return;
+        }
 
         for (int y = 0; y < height; ++y) {
-            // `bm.bmHeight` is positive for a bottom-up DIB, so row 0 of
-            // the icon is the *last* row of the mask.
-            const int mask_row = (bm.bmHeight > 0) ? (height - 1 - y) : y;
-            const int copied = ::GetDIBits(mem, hbm_mask, static_cast<UINT>(mask_row), 1,
-                                           row.data(), nullptr, DIB_RGB_COLORS);
-            if (copied != 1) continue;
+            const std::uint8_t* mask_row =
+                mask_rows.data() + row_bytes * static_cast<std::size_t>(y);
 
             for (int x = 0; x < width; ++x) {
                 const std::size_t byte_index = static_cast<std::size_t>(x) / 8u;
                 if (byte_index >= row_bytes) continue;
-                const std::uint8_t byte = row[byte_index];
+                const std::uint8_t byte = mask_row[byte_index];
                 const std::uint8_t bit = (byte >> (x % 8)) & 0x01u;
                 const std::size_t pixel_index =
                     (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +

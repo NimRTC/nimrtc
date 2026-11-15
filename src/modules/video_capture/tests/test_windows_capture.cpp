@@ -460,7 +460,21 @@ TEST(WindowsCapture, DxgiReportsDirtyRects) {
     // flag).  What must *never* happen is a frame that claims a full
     // update *and* names regions -- that leaves the encoder with two
     // conflicting answers.
-    ASSERT_TRUE(collector.wait_for(3))
+    //
+    // Desktop Duplication only delivers a frame when the screen
+    // actually *changes*, so a static desktop would stall here.  The
+    // desktop is nudged while waiting, exactly as the sibling test
+    // does -- otherwise the wait is a race against the desktop's
+    // idleness rather than a test of the dirty-rect contract.
+    {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(8000);
+        while (collector.count() < 3 && std::chrono::steady_clock::now() < deadline) {
+            nudge_the_desktop();
+            collector.wait_for(1, std::chrono::milliseconds(100));
+        }
+    }
+    ASSERT_GE(collector.count(), 3u)
         << "the DXGI capture produced too few frames";
 
     const GpuCaptureFrame frame = collector.last();

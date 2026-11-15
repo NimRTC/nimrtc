@@ -472,7 +472,7 @@ the platform legs that only run on their own hardware, the measurement
 artefacts that need a real link, and the non-NVIDIA hardware encoder
 bodies that are registered seams.
 
-The whole test suite is green: **1923 / 1923 ctest cases pass** (the
+The whole test suite is green: **1942 / 1942 ctest cases pass** (the
 skips are environment-gated — no WebRTC APM, no NVIDIA device, no
 usrsctp).
 
@@ -496,11 +496,14 @@ usrsctp).
 
 **The one-line summary:** the *engineering* is done and the *evidence*
 is in the tree — the whole suite is green, the per-frame CPU budget is
-instrumented and measured, and the capture / encode and weak-network
-curves are committed artefacts.  What the plan does **not** yet claim is
-the product-level sign-off: the platform legs are validated on their
-own hardware, the measured curves come from one machine, and the HEVC
-software decoder is deliberately absent (licensing).
+instrumented and measured, the **capture rate and the zero-copy path are
+measured on the real DXGI / WGC backends**, and the capture / encode and
+weak-network curves are committed artefacts.  What the plan does **not**
+yet claim is the product-level sign-off: the one remaining seam is the
+capture surface reaching NVENC with no staging and coming back out on the
+screen; the platform legs are validated on their own hardware; the
+measured curves come from one machine; and the HEVC software decoder is
+deliberately absent (licensing).
 
 ### Why this order
 

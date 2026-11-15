@@ -2599,6 +2599,45 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       offer (51 SDP lines, with both a video and an audio m-line), one
       answer, and eleven relayed ICE candidates.
 
+- **A software encoder no longer loses every captured frame (v1.4,
+  remote-desktop plan RD-4 / B10).**  The engine attached the capture
+  device's GPU callback whenever the *device* could deliver surfaces,
+  without asking the *codec* whether it could consume one.  But the
+  plug-in contract says that *with* a GPU callback attached the device
+  delivers the surface inside the callback and does **not** push the
+  frame through the CPU copy queue — the pixels are not available
+  anywhere else.  So a session whose codec was a software encoder
+  (OpenH264, or any machine without a matching hardware pair) ended up
+  with **no picture at all**: every frame delivered, every frame
+  dropped, and no CPU mirror to fall back to.  RD-4 says "zero-copy is
+  the default path; CPU staging is the fallback" — and the fallback was
+  unreachable.
+
+    - The two halves of the seam are now established at two different
+      moments, because the codec's capability is only known once the
+      codec is open: the `GpuContext` is published into
+      `VideoCodecConfig::gpu_context` **before** the codec is created
+      (the encode session has to live on the capture's device), and the
+      GPU callback is attached **after** the codec exists, by the new
+      `NimRTCEngine::wire_capture_gpu_callback()`, and **only** when
+      `IVideoCodec::supports_zero_copy_encode()` is true.
+    - When the codec cannot take a surface, the callback stays
+      unattached, so the capture device stages to the host and fills
+      its ordinary queue, the pump takes the CPU route, and the picture
+      still arrives.  The engine says so in the log and reports
+      `Stats::video_capture_gpu_wired == false`, so the fallback is
+      visible rather than silent.
+    - `tests/test_engine_capture_zero_copy.cpp` gained the regression
+      test (`ACodecThatCannotTakeASurfaceKeepsTheCpuPath`) with a
+      stand-in software codec: the seam must **not** be wired, nothing
+      may go down the zero-copy path, and the codec must still be given
+      the capture's device.
+    - **Verified** on a real Windows host with the OpenH264 software
+      encoder: `rd_device` ↔ `rd_viewer` delivers the picture
+      (`capture=496`, `pumped=118`, `decoded=114`, `rendered=114`) and
+      the log reports the fallback instead of the dropped-frame
+      warning.
+
 - **The Windows capture device's GPU context released the D3D11 device
   one time too many.**  `WindowsCapture::gpu_context()` hands the caller
   a `GpuContext` whose `keepalive` is a `shared_ptr` that owns *one*

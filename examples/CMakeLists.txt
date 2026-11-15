@@ -166,3 +166,50 @@ if(NIMRTC_MODULE_RD_INPUT)
     # them the viewer dies with STATUS_DLL_NOT_FOUND before `main()`.
     nimrtc_stage_runtime(rd_viewer)
 endif()
+
+# ---------------------------------------------------------------------------
+# `rd_verify` — the M1 sign-off program
+# ---------------------------------------------------------------------------
+#
+# `rd_verify` drives the *whole* remote-desktop media chain in **one
+# process** on **one real desktop**: the DXGI / WGC capture, the
+# zero-copy GPU seam, NVENC, the RTP packetization, NVDEC and the D3D11
+# renderer — and then prints a table whose most important line is
+# `cpu bytes copied: 0`.
+#
+# It is the human-facing half of the M1 exit criterion: the tests prove
+# the wiring and the driver facts, and this program proves that the two
+# hold *together, on a real machine, with real pixels*.
+#
+# It needs the capture module (the screen backends), the codec module
+# (the H.264 backends) and the sink module (the renderer).
+if(NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_SINK)
+    add_executable(rd_verify remote-desktop/rd_verify.cpp)
+    nimrtc_apply_options(rd_verify)
+    target_link_libraries(rd_verify PRIVATE
+        nimrtc::engine
+        nimrtc::core
+        nimrtc::plugins
+        nimrtc::ice
+        nimrtc::rtp
+        nimrtc::sdp
+        nimrtc::dtls_seam
+        nimrtc::datachannel       # the engine's registrar table references it
+        nimrtc::web_transport     # ditto
+        nimrtc::session
+        nimrtc::video_source      # the "memory" source the engine instantiates
+        nimrtc::video_sink        # the D3D11 renderer
+        nimrtc::video_pipeline    # the reference sender / receiver
+        nimrtc::video_capture     # the DXGI / WGC screen backends
+        nimrtc::video_frame
+    )
+    if(TARGET nimrtc::h264)
+        target_link_libraries(rd_verify PRIVATE nimrtc::h264)
+    endif()
+    if(TARGET nimrtc::nvcodec)
+        target_link_libraries(rd_verify PRIVATE nimrtc::nvcodec)
+    endif()
+
+    # The msquic runtime DLL and the Chrome-friendly DTLS cert.
+    nimrtc_stage_runtime(rd_verify)
+endif()

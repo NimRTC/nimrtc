@@ -983,6 +983,9 @@ public:
 
         // ---- The surface must be a D3D11 texture --------------------------
         if (gpu.handle().backend != plugins::GpuBackend::kWindowsD3D11Texture) {
+            NIMRTC_LOG_WARN("nvenc: the captured surface is not a D3D11 "
+                            "texture (backend=" << int(gpu.handle().backend)
+                            << ") — the CPU staging path will be used");
             return plugins::kErrUnsupported;
         }
         auto* texture = static_cast<ID3D11Texture2D*>(gpu.handle().handle);
@@ -1040,6 +1043,10 @@ public:
         } else {
             // Anything else (RGBA, a planar YUV, ...) is refused here,
             // and the caller falls back to the CPU staging path.
+            NIMRTC_LOG_WARN("nvenc: the captured surface's format is not one "
+                            "the driver accepts as a registered DirectX input "
+                            "(DXGI format=" << unsigned(desc.Format)
+                            << ") — the CPU staging path will be used");
             return plugins::kErrUnsupported;
         }
 
@@ -1050,6 +1057,9 @@ public:
         if (w != width_ || h != height_) {
             // A different size needs a fresh session (see `encode()`); the
             // CPU path re-initialises it, so this path just refuses.
+            NIMRTC_LOG_WARN("nvenc: the captured surface is " << w << "x" << h
+                            << " but the encode session is " << width_ << "x"
+                            << height_ << " — the CPU staging path will be used");
             return plugins::kErrUnsupported;
         }
 

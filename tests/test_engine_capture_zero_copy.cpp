@@ -372,6 +372,92 @@ private:
 };
 
 /**
+ * @brief A codec that stands in for a **software** encoder.
+ *
+ * It differs from `RecordingCodec` in exactly one way: it cannot take a
+ * GPU surface (`supports_zero_copy_encode()` is false).  That is the
+ * shape the seam has to survive — a session where the capture device
+ * *can* deliver surfaces but the codec cannot consume them.
+ */
+class CpuOnlyCodec final : public np::IVideoCodec {
+public:
+    CpuOnlyCodec(np::VideoCodecConfig cfg,
+                 std::shared_ptr<RecordingCodecState> state)
+        : cfg_(std::move(cfg)), state_(std::move(state)) {}
+
+    const char* name() const noexcept override { return "CpuOnlyCodec"; }
+
+    np::Status open() noexcept override {
+        if (state_) {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->received_context = cfg_.gpu_context;
+        }
+        opened_ = true;
+        return np::kOk;
+    }
+
+    void close() noexcept override { opened_ = false; }
+
+    bool can_encode() const noexcept override { return true; }
+    bool can_decode() const noexcept override { return false; }
+
+    np::VideoCodecKind kind() const noexcept override {
+        return np::VideoCodecKind::kH264;
+    }
+    std::string_view codec_name() const noexcept override { return "h264"; }
+
+    np::Status encode(const np::VideoFrame&,
+                      std::uint8_t*,
+                      std::size_t,
+                      np::EncodedVideoFrame& out) noexcept override {
+        if (state_) {
+            state_->encode_thread.store(std::this_thread::get_id());
+            ++state_->encode_calls;
+        }
+        static const std::uint8_t kIdr[] = {0x00, 0x00, 0x00, 0x01, 0x65, 0x88};
+        out.codec = np::VideoCodecKind::kH264;
+        out.payload_type = 96;
+        out.is_keyframe = true;
+        out.nalu_format = np::NaluFormat::kAnnexBStartCode;
+        out.payload = nc::ByteSpan{kIdr, sizeof(kIdr)};
+        return np::kOk;
+    }
+
+    np::Status decode(const np::EncodedVideoFrame&,
+                      np::VideoFrame&,
+                      std::uint8_t* const*) noexcept override {
+        return np::kErrUnsupported;
+    }
+
+    /** The whole point of this codec: it cannot take a surface. */
+    bool supports_zero_copy_encode() const noexcept override { return false; }
+
+    np::Status encode_zero_copy(const np::GpuBuffer&,
+                                np::EncodedVideoFrame&) noexcept override {
+        return np::kErrUnsupported;
+    }
+
+    np::Status force_keyframe() noexcept override { return np::kOk; }
+
+    np::VideoCodecConfig config() const noexcept override { return cfg_; }
+    np::Status update_config(np::VideoCodecConfig cfg) noexcept override {
+        cfg_ = std::move(cfg);
+        return np::kOk;
+    }
+    np::VideoCodecStats stats() const noexcept override { return {}; }
+    std::uint8_t payload_type() const noexcept override { return 96; }
+
+    std::string_view backend_id() const noexcept override { return "cpu-only"; }
+
+    bool is_hardware_accelerated() const noexcept override { return false; }
+
+private:
+    np::VideoCodecConfig cfg_;
+    std::shared_ptr<RecordingCodecState> state_;
+    bool opened_ = false;
+};
+
+/**
  * @brief The factories the test's plug-ins live in.
  *
  * The registry is a process-wide singleton, so the *factories* are
@@ -394,6 +480,27 @@ struct RecordingCodecFactory : public np::IVideoCodecFactory {
         auto state = std::make_shared<RecordingCodecState>();
         last_state() = state;
         return new RecordingCodec(std::move(cfg), std::move(state));
+    }
+
+    /** The state of the most recently created codec. */
+    static std::shared_ptr<RecordingCodecState>& last_state() {
+        static std::shared_ptr<RecordingCodecState> s;
+        return s;
+    }
+};
+
+/** A factory for the CPU-only codec (the one that cannot take a surface). */
+struct CpuOnlyCodecFactory : public np::IVideoCodecFactory {
+    std::string_view id() const noexcept override { return "cpu-only"; }
+
+    std::string_view display_name() const noexcept override {
+        return "CPU-only codec (the zero-copy seam's fallback test)";
+    }
+
+    np::IVideoCodec* create(np::VideoCodecConfig cfg) const override {
+        auto state = std::make_shared<RecordingCodecState>();
+        last_state() = state;
+        return new CpuOnlyCodec(std::move(cfg), std::move(state));
     }
 
     /** The state of the most recently created codec. */
@@ -439,6 +546,7 @@ public:
  */
 struct PluginHolder {
     RecordingCodecFactory codec_factory;
+    CpuOnlyCodecFactory cpu_only_codec_factory;
     GpuSurfaceCaptureFactory capture_factory;
 };
 
@@ -449,6 +557,7 @@ PluginHolder& holder() {
         registered = true;
         auto& reg = PluginRegistry::instance();
         reg.register_video_codec("recording", &h.codec_factory);
+        reg.register_video_codec("cpu-only", &h.cpu_only_codec_factory);
         reg.register_video_capture("gpu-surface", &h.capture_factory);
     }
     return h;
@@ -594,6 +703,44 @@ TEST(CaptureZeroCopy, TheMailboxDropsTheStaleFrameAndKeepsTheNewest) {
     // The engine kept going — a dropped frame is not an error.
     EXPECT_GT(engine.stats().video_capture_gpu_frames, 3u);
     EXPECT_EQ(engine.stats().video_capture_gpu_errors, 0u);
+
+    engine.close();
+}
+
+TEST(CaptureZeroCopy, ACodecThatCannotTakeASurfaceKeepsTheCpuPath) {
+    // The regression this guards: the engine used to attach the GPU
+    // callback whenever the *capture device* could deliver surfaces,
+    // without asking the codec.  But the plug-in contract says that
+    // *with* a GPU callback attached the device delivers the surface
+    // inside the callback and does **not** push the frame through the
+    // CPU copy queue — so a codec that cannot take a surface (a
+    // software encoder) would have left the session with **no picture
+    // at all**: every frame delivered, every frame dropped, and no
+    // mirror to fall back to.
+    holder();
+
+    EngineConfig cfg = make_config();
+    cfg.video_codec_name = "cpu-only";
+
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    // The seam was **not** wired: the codec cannot consume a surface.
+    EXPECT_FALSE(engine.stats().video_capture_gpu_wired)
+        << "the GPU callback was attached even though the codec cannot "
+           "consume a surface — every frame would be dropped";
+
+    // And nothing went down the zero-copy path.
+    EXPECT_EQ(engine.stats().video_capture_gpu_frames, 0u);
+    EXPECT_EQ(engine.stats().video_capture_gpu_errors, 0u);
+
+    // The codec was still given the capture's device — that is harmless
+    // (it just opens its session there) and it keeps the fallback path
+    // on the same device should the codec ever grow the capability.
+    const auto codec_state = CpuOnlyCodecFactory::last_state();
+    ASSERT_NE(codec_state, nullptr);
+    std::lock_guard<std::mutex> lock(codec_state->mutex);
+    EXPECT_TRUE(codec_state->received_context.valid());
 
     engine.close();
 }

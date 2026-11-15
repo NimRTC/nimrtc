@@ -240,6 +240,55 @@ bool NimRTCEngine::pump_video_capture() noexcept {
 // The zero-copy pump (remote-desktop plan B10)
 // ---------------------------------------------------------------------------
 
+void NimRTCEngine::wire_capture_gpu_callback() noexcept {
+    if (!video_capture_ || !video_codec_) return;
+
+    // ---- Can the capture device deliver a surface? ------------------------
+    //
+    // `supports_gpu_frames()` is the device's own statement: it knows
+    // whether its backend has a native surface at all (a DXGI texture, a
+    // `CVPixelBuffer`) and whether it is allowed to use it.
+    if (!video_capture_->supports_gpu_frames()) return;
+
+    // ---- Can the codec consume one? ---------------------------------------
+    //
+    // This is the half that decides whether the seam is *usable*.  The
+    // device hands over the surface and does **not** keep a CPU copy, so
+    // a codec that cannot take a surface would turn every frame into a
+    // dropped frame — with no fallback, because there is no mirror.
+    //
+    // The capability is queried on the *open* codec: an unopened codec
+    // has no encode session, and NVENC's answer depends on the session
+    // being there.
+    if (!video_codec_->supports_zero_copy_encode()) {
+        core::log::Logger::instance().info(
+            "engine: the capture device can deliver GPU surfaces but the "
+            "video codec cannot consume one — the frames take the CPU "
+            "staging path instead");
+        return;
+    }
+
+    // ---- Attach ------------------------------------------------------------
+    //
+    // The callback runs on the **capture device's own thread**.  It does
+    // one thing: hand the surface to the mailbox.  It never touches the
+    // codec, never blocks, and never calls back into the host.
+    //
+    // The mailbox drops the stale frame when a newer one arrives (see
+    // `engine_gpu_mailbox.hpp`): the newest picture is the truth, and a
+    // screen that changes at 30 fps must not cost a backlog of 30
+    // encodes.
+    video_capture_->set_gpu_frame_callback(
+        [this](plugins::GpuCaptureFrame&& frame) {
+            impl_->video_state.gpu_mailbox.push(std::move(frame));
+        });
+
+    // The flag makes the seam observable: a host that wants to know
+    // whether the zero-copy path is *live* (not merely requested) reads
+    // it together with `video_capture_gpu_frames`.
+    impl_->video_state.capture_gpu_wired = true;
+}
+
 bool NimRTCEngine::pump_video_capture_gpu() noexcept {
     if (!is_open()) return false;
     if (!video_capture_ || !video_codec_ || !video_sender_) return false;
@@ -313,7 +362,8 @@ bool NimRTCEngine::pump_video_capture_gpu() noexcept {
     if (rc != plugins::kOk) {
         ++vstate.video_capture_gpu_errors;
         core::log::Logger::instance().warn(
-            "engine: the zero-copy encode of a captured surface failed");
+            "engine: the zero-copy encode of a captured surface failed "
+            "(status=" + std::to_string(static_cast<int>(rc)) + ")");
         return false;
     }
 

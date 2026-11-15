@@ -552,23 +552,26 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
 
     // ---- The shared GPU device (remote-desktop plan B10) ----------------
     //
-    // The zero-copy capture seam has two halves, and both of them are
-    // established *here*, before the codec is created:
+    // The zero-copy capture seam has two halves, and they are established
+    // at two different moments — because the codec's own capability is
+    // only known once the codec exists.
     //
-    //   1. The capture device publishes the D3D11 device its surfaces
-    //      live on (`gpu_context()`).  The codec has to open its encode
-    //      session on **that** device: NVENC registers the input
-    //      surface per session and the driver refuses a texture that
-    //      was created on a different `ID3D11Device` — even on the same
-    //      physical adapter — with `NV_ENC_ERR_RESOURCE_REGISTER_FAILED`
-    //      (status 9).  So the context is put into the codec's config
-    //      *before* the codec is created, and the codec adopts it.
+    //   1. **Before** the codec is created: the capture device publishes
+    //      the D3D11 device its surfaces live on (`gpu_context()`).  The
+    //      codec has to open its encode session on **that** device:
+    //      NVENC registers the input surface per session and the driver
+    //      refuses a texture that was created on a different
+    //      `ID3D11Device` — even on the same physical adapter — with
+    //      `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9).  So the
+    //      context is put into the codec's config *before* the codec is
+    //      created, and the codec adopts it.
     //
-    //   2. The capture device's GPU callback is attached to the mailbox.
-    //      The callback runs on the **capture device's own thread**; the
-    //      codec may only be touched on the **tick thread** (RD-6).  The
-    //      mailbox is the boundary between the two (see
-    //      `engine_gpu_mailbox.hpp`).
+    //   2. **After** the codec is created: the capture device's GPU
+    //      callback is attached to the mailbox (see
+    //      `wire_capture_gpu_callback()` below).  The callback runs on
+    //      the **capture device's own thread**; the codec may only be
+    //      touched on the **tick thread** (RD-6).  The mailbox is the
+    //      boundary between the two (see `engine_gpu_mailbox.hpp`).
     //
     // A capture device that publishes no context (the CPU-only devices)
     // simply does not get the seam: the codec opens its own device and
@@ -578,28 +581,6 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     impl_->video_state.capture_gpu_wired = false;
     if (video_capture_ && video_capture_->supports_gpu_frames()) {
         capture_gpu_context = video_capture_->gpu_context();
-
-        // ---- The GPU callback → the mailbox ------------------------------
-        //
-        // The callback runs on the **capture device's own thread**.  It
-        // does exactly one thing: hand the surface to the mailbox.  It
-        // never touches the codec, never blocks, and never calls back
-        // into the host — all of that happens later, on the tick thread
-        // (RD-6), in `pump_video_capture_gpu()`.
-        //
-        // The mailbox drops the stale frame when a newer one arrives
-        // (see `engine_gpu_mailbox.hpp`): the newest picture is the
-        // truth, and a screen that changes at 30 fps must not cost a
-        // backlog of 30 encodes.
-        video_capture_->set_gpu_frame_callback(
-            [this](plugins::GpuCaptureFrame&& frame) {
-                impl_->video_state.gpu_mailbox.push(std::move(frame));
-            });
-
-        // The flag makes the seam observable: a host that wants to know
-        // whether the zero-copy path is *live* (not merely requested)
-        // reads it together with `video_capture_gpu_frames`.
-        impl_->video_state.capture_gpu_wired = true;
     }
 
     // ---- Video Sink --------------------------------------------------------
@@ -793,6 +774,30 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             shutdown_video_plugins();
             return core::kVideoCodecPluginMissing;
         }
+
+        // ---- The GPU callback → the mailbox (remote-desktop plan B10) ----
+        //
+        // This is the second half of the seam, and it happens **here**,
+        // after the codec exists — because the decision depends on the
+        // codec's own capability, and that is only known once the codec
+        // is open.
+        //
+        // The rule is simple and it is not negotiable: **the callback is
+        // attached only when the codec can actually consume a surface.**
+        //
+        // Attaching it unconditionally would be a trap.  The plug-in
+        // contract says that *with* a GPU callback attached the device
+        // delivers the surface inside the callback and does **not** push
+        // the frame through the CPU copy queue — the pixels are not
+        // available anywhere else.  So a codec that cannot take a
+        // surface (a software encoder, say) would leave the session with
+        // **no picture at all**: the frames would be delivered, dropped
+        // by the pump, and there would be no CPU mirror to fall back to.
+        //
+        // Leaving the callback unattached is the honest alternative: the
+        // device stages to the host and fills its ordinary queue, the
+        // pump takes the CPU path, and the picture still arrives.
+        wire_capture_gpu_callback();
     }
 
     // ---- The capability check (remote-desktop plan B1) ----------------------

@@ -4373,6 +4373,30 @@ private:
      */
     bool pump_video_capture_gpu() noexcept;
 
+    /**
+     * @brief Attach the capture device's GPU callback to the mailbox.
+     *
+     * The zero-copy seam's second half (remote-desktop plan B10).  The
+     * callback runs on the **capture device's own thread** and does
+     * exactly one thing: hand the surface to the single-slot mailbox.
+     * It never touches the codec, never blocks and never calls back into
+     * the host — all of that happens later, on the tick thread, in
+     * `pump_video_capture_gpu()` (RD-6).
+     *
+     * The callback is attached **only when the codec can consume a
+     * surface**.  That is not a nicety: the plug-in contract says that
+     * *with* a GPU callback attached the device delivers the surface
+     * inside the callback and does not push the frame through the CPU
+     * copy queue, so a codec that cannot take a surface would leave the
+     * session with no picture at all.  Leaving the callback unattached
+     * keeps the ordinary CPU path — the device stages to the host, the
+     * pump takes the CPU route, and the picture still arrives.
+     *
+     * A no-op when there is no capture device, when the device cannot
+     * deliver surfaces, or when the codec cannot consume one.
+     */
+    void wire_capture_gpu_callback() noexcept;
+
     /** Hand the capture device's dirty rectangles to the video sender
      *  (remote-desktop plan B9).
      *

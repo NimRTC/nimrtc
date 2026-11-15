@@ -237,7 +237,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 | **B7** | **Screen-content coding** — the encoder-side knobs that make screen content cheap: intra block copy, palette / text mode, higher QP on flat regions, and `content-hint` (`detail` vs `motion` / `text`) signalled in SDP (`a=content-hint`). H.264's `x-google-content-hint` / `x-google-start-bitrate` `fmtp` parameters and the AV1 / HEVC equivalents. | `M` + `E` | The negotiated `fmtp` carries the content hint; the encoder receives it and switches its tuning; a screen-content frame set encodes materially smaller (bytes-per-frame) than the same frames encoded as camera content, asserted in a test. |
 | **B8** | **Screen-content codec preference** — when the peer supports it, prefer AV1 (screen tools) > HEVC > H.264 for screen content; the preference table is configuration, not a hard-coded branch. | `E` + `profiles/` | Two profiles with different codec preferences negotiate different codecs; the negotiated result is reported in the stats. |
 | **B9** | **Dirty-rect incremental encode** — the encoder encodes only the changed region and signals the region to the peer (a region-invalidation / loss-region refresh mechanism), or — where the codec cannot express it — the sender emits a keyframe with the changed region only where the codec supports it. This is a **screen-content-specific optimisation** and is explicitly *not* part of the generic video path. | `M` | With a static desktop the outbound byte rate drops to near zero between changes; the mechanism is disabled when the codec does not support it and the fallback is reported. |
-| **B10** | **Zero-copy capture → encode** — the `GpuBuffer` from Track A reaches the hardware encoder's input surface without a CPU round-trip (D3D11 → NVENC, `CVPixelBuffer` → VideoToolbox, `VASurface` → VA-API). The CPU staging path remains for machines without a compatible pair. | `M` | A test asserts that on the hardware path no CPU readback of the captured surface occurs (the encoder receives the native handle); the CPU path is exercised by the software backend test. |
+| **B10** | **Zero-copy capture → encode** — the `GpuBuffer` from Track A reaches the hardware encoder's input surface without a CPU round-trip (D3D11 → NVENC, `CVPixelBuffer` → VideoToolbox, `VASurface` → VA-API). The CPU staging path remains for machines without a compatible pair. **Status: landed** (`src/engine/src/engine_gpu_mailbox.hpp` + `NimRTCEngine::wire_capture_gpu_callback()`), with the caveat the seam's *own* rule states: the capture device's GPU callback is attached **only when the codec can consume a surface** (`IVideoCodec::supports_zero_copy_encode()`).  With the callback attached the device delivers the surface *inside* the callback and does **not** push the frame through the CPU copy queue, so attaching it to a codec that cannot take a surface would leave the session with no picture at all.  Leaving it unattached keeps the ordinary CPU path — the device stages to the host, the pump takes the CPU route, and the picture still arrives (RD-4's "CPU staging is the fallback").  The engine reports the decision in `Stats::video_capture_gpu_wired`. | `M` | A test asserts that on the hardware path no CPU readback of the captured surface occurs (the encoder receives the native handle); the CPU path is exercised by the software backend test.  Both are asserted: `tests/test_engine_capture_zero_copy.cpp` proves the hardware path (`video_capture_bytes_copied == 0`) and, with a stand-in software codec, proves the fallback (the seam is **not** wired and the picture still arrives). |
 | **B10a** | **Hardware round-trip test (B10's prerequisite)** — the existing `src/modules/h264/tests/test_hw_backends.cpp` exercises only the **selection** logic (registry population, priority ordering, preferred-name resolution, bitstream helper functions) — **no test actually encodes a frame through a hardware backend and checks the output.** Add a hardware-leg test that, for each available backend, encodes one known frame, asserts the output is a non-empty Annex-B / parameter-set-carrying bitstream, and (for the platforms with a decoder) decodes it back and compares the pixels. Without this, B10's zero-copy claim cannot be verified — the only way to prove a frame never hit the CPU is to prove the encoded output is correct while the frame was never readable by the CPU. **Status: landed** as `src/modules/nvcodec/tests/test_nvcodec_roundtrip.cpp` (NVENC → NVDEC round trip, plus a CUVID test vector in `nvdec_test_vector.hpp`); the round trip is asserted for **every codec the driver offers** (H.264, H.265, AV1) — `NvencNvdecRoundTripH265` / `NvencNvdecRoundTripAv1` cover the codec-generic leg, and a host whose silicon lacks an encoder for a codec skips honestly with that reason; the non-NVIDIA backends still have no round-trip coverage. | `M` + `X` | On a machine with an available backend the round-trip test passes and is reported in the hardware leg; on a machine without one it **skips cleanly** (not a failure) and the skip reason names the missing backend. The test is registered with ctest but tagged so the standard CI matrix does not require the hardware. |
 | **B11** | **Optional software AV1 / VP9 encode** — `svt-av1` (screen-content mode + intra block copy; official CI covers Windows/MSVC, macOS and Linux) and `libvpx`, both behind `NIMRTC_VENDORED_*` options that default OFF. | `V` + `M` | With the option ON, the software encoder registers, encodes a frame, and the peer decodes it; with the option OFF the build still configures and the plug-in is absent. |
 | **B12** | **Encoder parameter set, computed in one place** — one `VideoEncoderParams` struct (width, height, fps, bitrate, keyframe interval, QP / quality, content hint, ROI) computed by the engine and pushed to the encoder. The encoder is **passive**: it has no access to `IBwe`, to the rate controller, or to the feedback stream. This is the video plan's B5. | `P` + `M` | The encoder plug-in interface exposes a single `set_params()`-style entry point; a test asserts the encoder never queries the bandwidth estimator. |
@@ -472,7 +472,7 @@ the platform legs that only run on their own hardware, the measurement
 artefacts that need a real link, and the non-NVIDIA hardware encoder
 bodies that are registered seams.
 
-The whole test suite is green: **1985 / 1985 ctest cases pass** (the CI
+The whole test suite is green: **1986 / 1986 ctest cases pass** (the CI
 configuration, `build/ci-msvc`), and the signalling example's own suite
 reports **94 / 94 checks** (the ctest skips are environment-gated — no
 WebRTC APM, no NVIDIA device, no usrsctp).
@@ -579,6 +579,29 @@ machine; and the HEVC software decoder is deliberately absent
    and the *driver-level* facts by the NVENC round-trip test and the
    seam probe; what the sign-off adds is the two running together on
    one display.
+
+   > **The sign-off program exists** — `examples/remote-desktop/rd_verify.cpp`
+   > drives the *whole* media chain in **one process** on **one real
+   > desktop** (the DXGI / WGC capture → the GPU mailbox → the encoder →
+   > the RTP packetization → the depacketizer → the decoder → the sink)
+   > and prints a table whose most important line is `cpu bytes copied`.
+   > The bytes that cross its in-memory wire are the *same* RTP the
+   > engine produced, and they enter the receiving engine through the
+   > same `feed_media_inbound()` seam a real connection uses, so the
+   > demux → parse → depacketize → jitter buffer → decode → render chain
+   > is the production one.  `--no-zero-copy` measures the CPU fallback
+   > on the same machine, which is the comparison the criterion is about.
+
+   > **What the fallback run proves (measured 2026-11-15, software
+   > encoder):** with the codec unable to consume a surface the seam is
+   > correctly **not** wired (`seam wired = NO`), the capture device
+   > stages to the host instead, and the picture still arrives end to
+   > end — `frames pumped = 81`, `frames decoded = 60`,
+   > `frames rendered = 60`.  Before the RD-4 fix (2026-11-15) the
+   > callback was attached whenever the *device* could deliver surfaces,
+   > without asking the codec; because the plug-in contract says the
+   > device does **not** keep a CPU copy when the callback is attached,
+   > every frame was dropped and the session had **no picture at all**.
 2. **The platform legs** — macOS (ScreenCaptureKit) and Linux
    (PipeWire / X11) are implemented but only validated on their own CI
    legs, on their own hardware.

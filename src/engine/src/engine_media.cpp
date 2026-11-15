@@ -901,6 +901,33 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
              .open_fail_mode = pal::PluginFailureMode::Error,
              .missing_mode = pal::PluginFailureMode::Error,
              .on_error = on_error_});
+
+        // ---- The key-frame storm limiter (remote-desktop plan B14) ------
+        //
+        // The limiter is configured here, once, because the policy is a
+        // property of the *session* (how much of the link a key frame
+        // may cost), not of a particular PLI.  The sender arbitrates;
+        // the engine only owns the policy.
+        if (video_sender_) {
+            video_sender_->set_keyframe_limiter_config(
+                config_.video_keyframe_limiter);
+        }
+
+        // ---- The incremental (dirty-rect) encode mechanism (plan B9) -----
+        //
+        // The content type and the opt-in flag are handed to the sender,
+        // which hosts the arbiter (it sits next to the encoder and needs
+        // the codec's capability).  The engine pushes the dirty
+        // rectangles to it from the capture pump.
+        if (video_sender_) {
+            video_sender_->set_content_type(config_.video_content_type);
+            video_sender_->set_incremental_encode_enabled(
+                config_.video_incremental_encode);
+            // The sender's arbiter pushes the incremental request to the
+            // encoder, so it needs the encoder's pointer.  The codec
+            // plugin was created earlier in this function, so it exists.
+            video_sender_->set_incremental_encoder(video_codec_.get());
+        }
     }
 
     // ---- The decoded-frame delivery path (remote-desktop plan E1) --------
@@ -2154,7 +2181,6 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
             }
         }
     }
-
     // The peer's Sender Report is parsed whether or not the cross-end
     // timeline is enabled: the report's *LSR* field (the middle 32
     // bits of the peer's NTP timestamp) is a fact about the wire that
@@ -2226,7 +2252,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
                                                  blk.packet, now);
-                    ++impl_->net_feedback_blocks;
+                    ++impl_->feedback.net_feedback_blocks;
                 }
                 break;
 
@@ -2257,7 +2283,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
                                                  blk.packet, now);
-                    ++impl_->net_feedback_blocks;
+                    ++impl_->feedback.net_feedback_blocks;
                 }
                 break;
 
@@ -2284,7 +2310,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
                                                  blk.packet, now);
-                    ++impl_->net_feedback_blocks;
+                    ++impl_->feedback.net_feedback_blocks;
                 }
                 break;
 
@@ -2296,7 +2322,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 // its business.
                 if (xr_report_) {
                     xr_report_->on_rtcp_block(blk.payload_type, blk.packet, now);
-                    ++impl_->xr_report_blocks;
+                    ++impl_->feedback.xr_report_blocks;
                 }
                 // The Receiver Reference Time block (BT = 4) is the
                 // one block that needs the *engine's* attention: our
@@ -2311,6 +2337,40 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 // about: not ours.
                 break;
         }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// The key-frame storm limiter (remote-desktop plan B14)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::retry_pending_keyframe() noexcept {
+    if (!video_sender_ || !video_codec_) return;
+
+    // The limiter *defers* a request that arrives too soon after the
+    // last one, and it **holds** it rather than dropping it: the peer
+    // may only ask once, and the picture still has to recover.
+    //
+    // The retry happens here, in the tick, because the limiter owns no
+    // clock — the engine does.  When the limiter grants the held
+    // request, it publishes it through the same door an inbound PLI
+    // uses, so there is exactly one place that arms the encoder.
+    if (!video_sender_->keyframe_request_pending()) return;
+
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    const std::uint32_t granted = video_sender_->retry_pending_keyframe(now_us);
+    if (granted == 0) return;
+
+    // The grant is now in the sender's request counter; drain it through
+    // the same path the inbound-feedback path uses.
+    const std::uint32_t keyframe_requests =
+        video_sender_->take_keyframe_requests();
+    if (keyframe_requests > 0) {
+        impl_->video_state.video_keyframes_applied += keyframe_requests;
+        (void)video_codec_->force_keyframe();
     }
 }
 
@@ -2680,10 +2740,10 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // v1.2.0 M1: the feedback loop's own counters.  `bwe_feedback_samples`
     // staying at zero means the loop is not closed — the estimator is
     // never fed, so the bandwidth target never moves.
-    out.net_feedback_blocks   = impl_->net_feedback_blocks;
-    out.bwe_feedback_samples  = impl_->bwe_feedback_samples;
+    out.net_feedback_blocks   = impl_->feedback.net_feedback_blocks;
+    out.bwe_feedback_samples  = impl_->feedback.bwe_feedback_samples;
     // v1.2.0 (session plan X1): the XR routing counter.
-    out.xr_report_blocks      = impl_->xr_report_blocks;
+    out.xr_report_blocks      = impl_->feedback.xr_report_blocks;
     if (bwe_) {
         out.bandwidth_estimate_bps = bwe_->estimate().target_bitrate_bps;
     }
@@ -2819,6 +2879,33 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.video_sink_render_errors          = ss.render_errors;
         out.video_sink_present_fps             = ss.present_fps;
     }
+
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    //
+    // The sender owns the limiter, so the engine asks it for the
+    // counters rather than keeping its own copy.  The counters are what
+    // make the limiter observable: a host sees the requests the peer
+    // made, how many were granted, how many were held back, and how
+    // many bypassed the limiter because they carried the parameter sets.
+    if (video_sender_) {
+        const plugins::VideoSenderStats ss = video_sender_->stats();
+        out.video_keyframes_limiter_requests = ss.keyframe_requests;
+        out.video_keyframes_granted          = ss.keyframes_granted;
+        out.video_keyframes_deferred         = ss.keyframes_deferred;
+        out.video_keyframes_rejected         = ss.keyframes_rejected;
+        out.video_keyframes_forced           = ss.keyframes_forced;
+
+        // ---- The incremental (dirty-rect) encode (plan B9) --------------
+        const plugins::VideoIncrementalStats is = video_sender_->incremental_stats();
+        out.video_incremental_frames_seen = is.frames_seen;
+        out.video_incremental_unchanged   = is.frames_unchanged;
+        out.video_incremental_encoded     = is.frames_incremental;
+        out.video_incremental_full        = is.frames_full;
+        out.video_incremental_fallbacks   = is.fallback_keyframes;
+        out.video_incremental_skipped     = is.skipped_not_screen;
+    }
+    out.video_region_refreshes_sent =
+        impl_->video_state.video_region_refreshes_sent;
 
     // The outbound video bitrate: the encoded bytes over the last
     // second, as measured by the video-quality sink's bitrate window.

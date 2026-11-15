@@ -288,6 +288,17 @@ if(NIMRTC_MODULE_RD_INPUT)
 endif()
 
 # -----------------------------------------------------------------------------
+# Remote-desktop control plane — the input-injection module (plan Track G).
+#
+# The device side of the control plane: the module that actually makes the
+# remote operating system believe that a key was pressed.  It consumes the
+# rd_input vocabulary and depends on nothing else, so it is self-contained.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_RD_INPUT_INJECT)
+    add_subdirectory(rd_input_inject)
+endif()
+
+# -----------------------------------------------------------------------------
 # Remote-desktop plan Track D — the video rate controller (D1 / D2 / D3 / D4).
 #
 # Self-contained: it depends on nimrtc::core + nimrtc::plugins (the seam it

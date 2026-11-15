@@ -170,6 +170,12 @@ option(NIMRTC_MODULE_VIDEO_SINK
 # a DataChannel and only the payload format is NimRTC's.
 option(NIMRTC_MODULE_RD_INPUT
        "Build remote-desktop input module (event codec, coalescer, safety filter)" ON)
+# Remote-desktop plan Track G (the device side of the control plane): the
+# OS input-injection module — the platform-neutral key layout and the
+# Windows / macOS / Linux injection backends.  A module, not a seam: it
+# is driven by the example application, not by the engine.
+option(NIMRTC_MODULE_RD_INPUT_INJECT
+       "Build remote-desktop input-injection module (SendInput / CGEvent / XTest)" ON)
 # Remote-desktop plan Track F (F2): the audio-device module — the
 # PortAudio-backed capture + playback devices, the shared ring buffer
 # and the synthetic device the module's tests run on.

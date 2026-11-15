@@ -188,6 +188,22 @@ bool NimRTCEngine::pump_video_capture() noexcept {
         return false;
     }
 
+    // ---- The dirty rectangles (remote-desktop plan B9) ------------------
+    //
+    // The capture device reports which rectangles changed.  The
+    // information is computed by the device, copied once into the
+    // capture queue, and would otherwise be *discarded here* — and the
+    // last twenty metres are exactly where it matters: "a static
+    // desktop costs a full frame every tick" vs. "a static desktop
+    // costs nothing".
+    //
+    // The rectangles are handed to the sender's arbiter, which decides
+    // whether the frame can be coded incrementally (it needs the
+    // codec's capability, and it is the one that knows the content
+    // type).  The decision must be made **before** the encode, because
+    // the incremental request is what the encoder acts on.
+    offer_dirty_rects_to_sender(captured);
+
     // ---- Encode and push ------------------------------------------------
     //
     // The *same* code path `send_video()` uses, so the manual and the
@@ -201,5 +217,85 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     }
     return rc == plugins::kOk;
 }
+
+// ---------------------------------------------------------------------------
+// The dirty-rect incremental encode (remote-desktop plan B9)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::offer_dirty_rects_to_sender(
+        const plugins::CaptureFrame& captured) noexcept {
+    if (!video_sender_) return;
+
+    // The mechanism is opt-in and additionally gated on the content type
+    // (ADR-022 Decision 5): it only makes sense for screen content.  The
+    // sender's arbiter owns the second half of that gate, but the engine
+    // checks the flag first so a disabled mechanism costs nothing at
+    // all.
+    if (!config_.video_incremental_encode) return;
+    if (config_.video_content_type != plugins::VideoContentType::kScreen) {
+        return;
+    }
+
+    auto& vstate = impl_->video_state;
+
+    // ---- The SSRCs the region-refresh message names ----------------------
+    //
+    // The media SSRC is the outbound video stream's SSRC; the feedback
+    // SSRC is the engine's own RTCP reporter SSRC (RFC 3550 §6.1 — the
+    // SSRC identifies the *originator* of the message).  They are
+    // handed to the sender once, when the sender exists.
+    if (!vstate.video_region_ssrcs_set) {
+        vstate.video_media_ssrc = config_.video_sender_tuning.ssrc;
+        vstate.video_region_feedback_ssrc = rtcp_reporter_ssrc();
+        vstate.video_region_ssrcs_set = true;
+    }
+
+    // ---- Translate the rectangles ----------------------------------------
+    //
+    // `CaptureRegion` and `VideoRegion` carry the same four numbers (a
+    // rectangle in source pixels), but they are distinct types on
+    // distinct seams, so the translation is explicit rather than a
+    // reinterpret_cast.  The vector is reused across frames (it lives in
+    // the video state), so the steady state allocates nothing.
+    vstate.dirty_rects.clear();
+    vstate.dirty_rects.reserve(captured.dirty.rects.size());
+    for (const auto& r : captured.dirty.rects) {
+        plugins::VideoRegion vr{};
+        vr.x      = r.x;
+        vr.y      = r.y;
+        vr.width  = r.width;
+        vr.height = r.height;
+        vstate.dirty_rects.push_back(vr);
+    }
+
+    // ---- The decision ----------------------------------------------------
+    //
+    // The sender's arbiter owns the decision: it knows the content type,
+    // the codec's capability, and whether the mechanism is enabled.  The
+    // engine's job is to hand over the facts and to publish the result.
+    const plugins::VideoIncrementalDecision decision =
+        video_sender_->offer_dirty_region(vstate.dirty_rects,
+                                          captured.dirty.full_frame);
+
+    // ---- The region-refresh message --------------------------------------
+    //
+    // The peer has to be told which region changed — otherwise it cannot
+    // invalidate it, and the incremental encode would leave the peer
+    // showing a stale area.  The sender builds the message (it knows the
+    // media SSRC and the regions it just coded); the engine sends it,
+    // because the engine owns the RTCP transport.
+    if (decision == plugins::VideoIncrementalDecision::kIncremental) {
+        const core::ByteSpan refresh = video_sender_->take_region_refresh();
+        if (!refresh.empty()) {
+            // The message goes out through the same path as every other
+            // RTCP the engine emits (protected, then handed to ICE).
+            core::ByteBuffer packet(refresh.begin(), refresh.end());
+            if (send_rtcp_packet(vstate.video_region_feedback_ssrc, packet)) {
+                ++vstate.video_region_refreshes_sent;
+            }
+        }
+    }
+}
+
 
 }  // namespace nimrtc::engine

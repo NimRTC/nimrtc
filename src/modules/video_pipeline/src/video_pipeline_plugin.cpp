@@ -505,6 +505,123 @@ nimrtc::video_pipeline::KeyframeDecision SenderAdapter::request_keyframe(
 }
 
 // ---------------------------------------------------------------------------
+// The key-frame storm limiter — the seam's half (remote-desktop plan B14)
+// ---------------------------------------------------------------------------
+
+void SenderAdapter::set_keyframe_limiter_config(
+        const plugins::VideoKeyframeLimiterConfig& cfg) noexcept {
+    if (!concrete_) return;
+
+    // Translate the seam's policy into the module's own policy type.  The
+    // two carry the same knobs; the module's type is the one that knows
+    // about the FIR coalescer, so the translation happens here.
+    nimrtc::video_pipeline::KeyframeLimiterConfig concrete_cfg{};
+    concrete_cfg.min_interval_us         = cfg.min_interval_us;
+    concrete_cfg.keyframe_budget         = cfg.keyframe_budget;
+    concrete_cfg.keyframe_cost_ratio     = cfg.keyframe_cost_ratio;
+    concrete_cfg.max_keyframes_per_window = cfg.max_keyframes_per_window;
+    concrete_cfg.window_us               = cfg.window_us;
+    concrete_cfg.disabled                = cfg.disabled;
+    // The media SSRC is the key the coalescer accounts per (RFC 5104
+    // §4.3.1.1), so it has to be carried across — the module keeps the
+    // authoritative copy.
+    concrete_cfg.media_ssrc = concrete_->keyframe_limiter_config().media_ssrc;
+    concrete_->set_keyframe_limiter_config(concrete_cfg);
+}
+
+plugins::VideoKeyframeLimiterConfig
+SenderAdapter::keyframe_limiter_config_seam() const noexcept {
+    plugins::VideoKeyframeLimiterConfig out{};
+    if (!concrete_) return out;
+    const auto cfg = concrete_->keyframe_limiter_config();
+    out.min_interval_us          = cfg.min_interval_us;
+    out.keyframe_budget          = cfg.keyframe_budget;
+    out.keyframe_cost_ratio      = cfg.keyframe_cost_ratio;
+    out.max_keyframes_per_window = cfg.max_keyframes_per_window;
+    out.window_us                = cfg.window_us;
+    out.disabled                 = cfg.disabled;
+    return out;
+}
+
+bool SenderAdapter::keyframe_request_pending() const noexcept {
+    if (!concrete_) return false;
+    return concrete_->keyframe_request_pending();
+}
+
+std::uint32_t SenderAdapter::retry_pending_keyframe(std::int64_t now_us) noexcept {
+    if (!concrete_) return 0;
+    const std::uint32_t granted = concrete_->retry_pending_keyframe(now_us);
+    // The granted request is published through the *same* door an
+    // inbound PLI uses, so the engine has one place that arms the
+    // encoder.
+    keyframe_requests_ += granted;
+    return granted;
+}
+
+// ---------------------------------------------------------------------------
+// The incremental (dirty-rect) encode mechanism (remote-desktop plan B9)
+// ---------------------------------------------------------------------------
+
+void SenderAdapter::set_content_type(plugins::VideoContentType type) noexcept {
+    if (!concrete_) return;
+    concrete_->set_content_type(
+        static_cast<nimrtc::video_pipeline::VideoContentType>(type));
+}
+
+plugins::VideoContentType SenderAdapter::content_type() const noexcept {
+    if (!concrete_) return plugins::VideoContentType::kUnspecified;
+    return static_cast<plugins::VideoContentType>(concrete_->content_type());
+}
+
+void SenderAdapter::set_incremental_encode_enabled(bool enabled) noexcept {
+    if (!concrete_) return;
+    concrete_->set_incremental_encode_enabled(enabled);
+}
+
+bool SenderAdapter::incremental_encode_enabled() const noexcept {
+    if (!concrete_) return false;
+    return concrete_->incremental_encode_enabled();
+}
+
+plugins::VideoIncrementalDecision SenderAdapter::offer_dirty_region(
+        const std::vector<plugins::VideoRegion>& dirty,
+        bool full_frame) noexcept {
+    if (!concrete_) return plugins::VideoIncrementalDecision::kFullFrame;
+    const auto decision = concrete_->offer_dirty_region(dirty, full_frame);
+    return static_cast<plugins::VideoIncrementalDecision>(decision);
+}
+
+core::ByteSpan SenderAdapter::take_region_refresh() noexcept {
+    if (!concrete_) return {};
+    return concrete_->take_region_refresh();
+}
+
+plugins::VideoIncrementalStats SenderAdapter::incremental_stats() const noexcept {
+    plugins::VideoIncrementalStats out{};
+    if (!concrete_) return out;
+    const auto s = concrete_->incremental_stats();
+    out.frames_seen          = s.frames_seen;
+    out.frames_unchanged     = s.frames_unchanged;
+    out.frames_incremental   = s.frames_incremental;
+    out.frames_full          = s.frames_full;
+    out.fallback_keyframes   = s.fallback_keyframes;
+    out.skipped_not_screen   = s.skipped_not_screen;
+    out.region_refreshes_sent = s.region_refreshes_sent;
+    return out;
+}
+
+void SenderAdapter::set_incremental_encoder(plugins::IVideoEncoder* encoder) noexcept {
+    if (!concrete_) return;
+    concrete_->set_incremental_encoder(encoder);
+}
+
+void SenderAdapter::set_region_refresh_ssrcs(std::uint32_t media_ssrc,
+                                             std::uint32_t feedback_ssrc) noexcept {
+    if (!concrete_) return;
+    concrete_->set_region_refresh_ssrcs(media_ssrc, feedback_ssrc);
+}
+
+// ---------------------------------------------------------------------------
 // ReferenceReceiverFactory
 // ---------------------------------------------------------------------------
 

@@ -42,6 +42,7 @@
  *   | `detail::ControlChannelInbox`   | `engine_control_inbox.hpp`    |
  *   | `detail::ControlChannelSeam`    | `engine_control_seam.hpp`     |
  *   | `detail::QoeSeam`               | `engine_qoe_seam.hpp`         |
+ *   | `detail::FeedbackState`         | `engine_feedback_state.hpp`   |
  *
  * The rule is simple: a member that only one feature reads or writes
  * belongs to that feature's collaborator, not to `Impl`.  The engine's
@@ -93,6 +94,7 @@
 #include "engine_audio_state.hpp"
 #include "engine_control_inbox.hpp"
 #include "engine_control_seam.hpp"
+#include "engine_feedback_state.hpp"
 #include "engine_qoe_seam.hpp"
 #include "engine_rtcp_helpers.hpp"
 #include "engine_ref_frame_table.hpp"
@@ -301,35 +303,13 @@ struct NimRTCEngine::Impl {
     int             srtp_stats_drop     = 0;
     nimrtc::dtls::DtlsState last_dtls_state = nimrtc::dtls::DtlsState::Closed;
 
-    // ---- Network feedback loop (v1.2.0 M1, F2/F6) ----------------------
+    // ---- The RTCP feedback / BWE / pacing state ------------------------
     //
-    // The loop is: inbound RTCP -> engine demux -> collector -> snapshot
-    // -> IBwe::on_feedback().  These two counters make the loop
-    // observable: `net_feedback_blocks` counts the RTCP blocks that were
-    // routed to the collector, `bwe_feedback_samples` counts the
-    // aggregated snapshots that were actually handed to the estimator.
-    //
-    // The last two fields are the de-duplication state: a snapshot is
-    // fed only when it carries new information (its timestamp moved),
-    // so the estimator sees one sample per feedback report rather than
-    // one per engine tick.
-    std::uint64_t net_feedback_blocks   = 0;
-    std::uint64_t bwe_feedback_samples  = 0;
-    core::TimePoint last_fed_feedback_ts{};
-    bool           has_fed_feedback     = false;
-
-    // True once the engine has reported that the transport-cc path was
-    // required but is unavailable (ADR-018 Decision 2's "fail loudly"
-    // mode).  The report is made once per session.
-    bool           transport_cc_unavailable_reported = false;
-
-    // ---- RTCP Extended Reports (v1.2.0, session plan X1) ---------------
-    //
-    // The number of inbound RTCP XR sub-packets that were routed to the
-    // XR consumer.  It is the observable that proves the wiring is
-    // closed: a peer that sends extended reports and a counter that
-    // stays at zero mean the routing is broken.
-    std::uint64_t xr_report_blocks = 0;
+    // The network-feedback counters, the XR routing counter and the
+    // pacing split are all "what the engine observed on the RTCP path",
+    // so they live in one collaborator rather than as loose members
+    // here.  See `engine_feedback_state.hpp`.
+    detail::FeedbackState feedback;
 
     // ---- The negotiated RTCP XR / TMMBR state --------------------------
     //
@@ -338,28 +318,6 @@ struct NimRTCEngine::Impl {
     // *authority* on what may be sent (RFC 3611 §5.1, RFC 5104 §7.2),
     // and they only make sense together with the state they gate.
     detail::XrState xr;
-
-    // ---- Pacing split (v1.2.0 M3, P2) ----------------------------------
-    //
-    // The demand list of the bandwidth split, kept as a member so that
-    // the per-tick split does not allocate a vector every time.  The
-    // contents are rewritten (never reallocated) on each tick.
-    std::vector<detail::BandwidthDemand> pacing_demands_;
-
-    /** The result of the last D5 split (the per-stream bandwidth
-     *  shares).
-     *
-     *  The allocation lives here rather than being returned by value, so
-     *  the *private* split helper does not have to expose the private
-     *  `BandwidthAllocation` type through the public header.  The
-     *  pacer and the rate-control path read the same object, which is
-     *  what makes their numbers agree by construction. */
-    detail::BandwidthAllocation pacing_allocation_;
-
-    /** The sum of the video streams' encoder ceilings, in bits per
-     *  second.  The video *class* rate is capped by it: the video may
-     *  not be paced faster than it encodes. */
-    std::uint32_t video_ceiling_total_bps = 0;
 
     // ---- The feature-scoped state --------------------------------------
     //

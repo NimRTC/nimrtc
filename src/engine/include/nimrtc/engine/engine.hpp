@@ -691,6 +691,48 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  spend the bits*. */
     std::optional<plugins::VideoRegion> video_roi;
 
+    // ---- The screen content type (ADR-022 Decision 5 / plan B9) ---------
+    //
+    // The content type is carried **explicitly** and is never inferred
+    // from the capture device's kind: a document camera is camera-shaped
+    // but screen-like, and a screen playing video is screen-shaped but
+    // motion-like.  The host decides.
+    //
+    // It matters for the incremental-encode mechanism (plan B9), which
+    // only engages for screen content — a camera stream has no
+    // unchanged area worth skipping, so skipping it would corrupt the
+    // picture.
+    //
+    // The default is `kUnspecified` — the camera defaults, which are
+    // the behaviour that is correct for a camera and merely *safe* for
+    // a screen.
+    plugins::VideoContentType video_content_type =
+        plugins::VideoContentType::kUnspecified;
+
+    /** Enable the dirty-rect incremental encode (remote-desktop plan B9).
+     *
+     *  The mechanism is opt-in: it engages only when the host enabled it
+     *  *and* the content type is screen content *and* the codec can
+     *  express a region.  When the codec cannot, the sender falls back
+     *  to a full key frame and the fallback is counted (the fallback is
+     *  reported, not hidden).
+     *
+     *  The default is false: the mechanism changes the wire format
+     *  (region-refresh messages), so a peer that does not understand
+     *  them must not receive them by accident. */
+    bool video_incremental_encode = false;
+
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    //
+    // The limiter bounds the IDR rate a peer can provoke.  It is *on*
+    // by default, because the failure it prevents (a PLI every 100 ms
+    // saturating the link) is worse than the cost it imposes (a
+    // key frame is at most 250 ms late).
+    //
+    // A request that carries the codec's parameter sets (a resolution
+    // change) bypasses the limiter: deferring it breaks the decode.
+    plugins::VideoKeyframeLimiterConfig video_keyframe_limiter{};
+
     // ---- BWE plugin selection (ADR-001: resolved via PluginRegistry) --------
     //
     // BWE controls outbound pacing and adapts to network congestion.
@@ -3309,6 +3351,28 @@ public:
         std::uint64_t video_keyframes_q        = 0;  // keyframe reqs queued
         std::uint64_t video_feedback_applied   = 0;  // inbound RTCP actions
         std::uint64_t video_keyframes_applied  = 0;  // inbound keyframe reqs
+        // ---- The key-frame storm limiter (remote-desktop plan B14) ------
+        // The counters make the limiter observable: a host that sees
+        // `video_keyframes_deferred` climbing knows the peer is asking
+        // faster than the policy allows, and the rate is bounded.
+        std::uint64_t video_keyframes_limiter_requests  = 0;  // offered
+        std::uint64_t video_keyframes_granted           = 0;  // granted
+        std::uint64_t video_keyframes_deferred          = 0;  // held back
+        std::uint64_t video_keyframes_rejected          = 0;  // budget spent
+        std::uint64_t video_keyframes_forced            = 0;  // bypassed
+        // ---- The incremental (dirty-rect) encode (plan B9) --------------
+        // The counters make the mechanism observable: a static desktop
+        // shows up as `video_incremental_unchanged` climbing, and a
+        // codec that cannot express a region shows up as
+        // `video_incremental_fallbacks` climbing (the fallback is
+        // reported, not hidden).
+        std::uint64_t video_incremental_frames_seen      = 0;
+        std::uint64_t video_incremental_unchanged        = 0;
+        std::uint64_t video_incremental_encoded          = 0;
+        std::uint64_t video_incremental_full             = 0;
+        std::uint64_t video_incremental_fallbacks        = 0;
+        std::uint64_t video_incremental_skipped          = 0;
+        std::uint64_t video_region_refreshes_sent        = 0;
         // ---- Video zero-copy counters (Phase 3 / C3) ---------------------
         // `video_zero_copy_frames` counts the frames that took the GPU
         // path (the native handle went to the codec, no CPU staging);
@@ -4269,6 +4333,34 @@ private:
      *  @return true when a frame was taken from the device and handed
      *          to the encoder; false when there was nothing to do. */
     bool pump_video_capture() noexcept;
+
+    /** Hand the capture device's dirty rectangles to the video sender
+     *  (remote-desktop plan B9).
+     *
+     *  The rectangles are the *changed region* of the frame the pump is
+     *  about to encode.  The sender's arbiter decides what to do with
+     *  them: an incremental encode when the codec can express a region,
+     *  a full key frame when it cannot (and the fallback is counted).
+     *
+     *  The call is a no-op when the mechanism is off, when there is no
+     *  sender, or when the content type is not screen content.
+     *
+     *  @param captured The frame the device just handed over. */
+    void offer_dirty_rects_to_sender(
+        const plugins::CaptureFrame& captured) noexcept;
+
+    /** Re-offer the held key-frame request (remote-desktop plan B14).
+     *
+     *  The key-frame storm limiter defers a request that arrives too
+     *  soon after the last one, and it *holds* it rather than dropping
+     *  it — so the picture still recovers even when the peer asked only
+     *  once.
+     *
+     *  Called from `tick()`.  The limiter owns no clock; the engine
+     *  does, which is why the retry lives here.
+     *
+     *  A no-op when nothing is held. */
+    void retry_pending_keyframe() noexcept;
 
     /** Encode one staged frame and push it onto the wire.
      *

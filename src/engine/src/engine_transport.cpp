@@ -155,8 +155,8 @@ void NimRTCEngine::feed_bwe_from_net_feedback() noexcept {
     // failure than a degraded one — but the host learns that its
     // transport-cc path is broken.
     if (net_feedback_->transport_cc_unavailable() &&
-        !impl_->transport_cc_unavailable_reported) {
-        impl_->transport_cc_unavailable_reported = true;
+        !impl_->feedback.transport_cc_unavailable_reported) {
+        impl_->feedback.transport_cc_unavailable_reported = true;
         core::log::Logger::instance().warn(
             "engine[bwe]: transport-cc was required but is unavailable "
             "(the peer did not negotiate it, or its feedback stopped "
@@ -166,12 +166,12 @@ void NimRTCEngine::feed_bwe_from_net_feedback() noexcept {
     const plugins::NetFeedbackSnapshot snap = net_feedback_->snapshot();
 
     // Nothing new since the last feed.
-    if (impl_->has_fed_feedback &&
-        snap.timestamp == impl_->last_fed_feedback_ts) {
+    if (impl_->feedback.has_fed_feedback &&
+        snap.timestamp == impl_->feedback.last_fed_feedback_ts) {
         return;
     }
-    impl_->last_fed_feedback_ts = snap.timestamp;
-    impl_->has_fed_feedback = true;
+    impl_->feedback.last_fed_feedback_ts = snap.timestamp;
+    impl_->feedback.has_fed_feedback = true;
 
     // The collector has not seen any signal yet — nothing to report.
     if (!snap.has_loss_rtt && !snap.has_transport_cc &&
@@ -219,7 +219,7 @@ void NimRTCEngine::feed_bwe_from_net_feedback() noexcept {
     }
 
     bwe_->on_feedback(fb);
-    ++impl_->bwe_feedback_samples;
+    ++impl_->feedback.bwe_feedback_samples;
 }
 
 
@@ -1191,6 +1191,18 @@ int NimRTCEngine::tick() noexcept {
     // common case, because the capture cadence is slower than the tick.
     pump_video_capture();
 
+    // ---- Re-offer the held key-frame request (plan B14) -----------------
+    //
+    // The key-frame storm limiter *defers* a request that arrives too
+    // soon after the last one: the request is **held**, not dropped, so
+    // the picture still recovers even when the peer only asked once.
+    //
+    // The retry lives here, in the tick, because the limiter does not
+    // own a clock — the engine does.  When the limiter grants the
+    // held request, it publishes it through the *same* door an inbound
+    // PLI uses, so there is exactly one place that arms the encoder.
+    retry_pending_keyframe();
+
     // ---- Drain the scheduler (if enabled) ---------------------------------
     // The scheduler holds outbound packets (audio / video / control) and
     // dispatches them in priority order.  drain_with() invokes our callback
@@ -1354,7 +1366,7 @@ void NimRTCEngine::update_pacing_rates() noexcept {
     // `compute_video_stream_shares()`, the one function that owns it.
     // The pacer reads the result rather than recomputing it, so the
     // class rates and the per-stream shares can never disagree.
-    const detail::BandwidthAllocation& alloc = impl_->pacing_allocation_;
+    const detail::BandwidthAllocation& alloc = impl_->feedback.pacing_allocation_;
     if (alloc.targets.empty()) return;
 
     // ---- The class rates ------------------------------------------------
@@ -1390,7 +1402,7 @@ void NimRTCEngine::update_pacing_rates() noexcept {
     for (std::size_t i = 1; i < alloc.targets.size(); ++i) {
         video_rate += alloc.targets[i];
     }
-    const std::uint32_t video_ceiling_total = impl_->video_ceiling_total_bps;
+    const std::uint32_t video_ceiling_total = impl_->feedback.video_ceiling_total_bps;
     if (video_ceiling_total > 0 && video_rate > video_ceiling_total) {
         video_rate = video_ceiling_total;
     }
@@ -1452,7 +1464,7 @@ void NimRTCEngine::update_pacing_rates() noexcept {
 
 void NimRTCEngine::compute_video_stream_shares(
     std::uint32_t estimate) noexcept {
-    detail::BandwidthAllocation& alloc = impl_->pacing_allocation_;
+    detail::BandwidthAllocation& alloc = impl_->feedback.pacing_allocation_;
     alloc.targets.clear();
     if (estimate == 0) return;
 
@@ -1463,7 +1475,7 @@ void NimRTCEngine::compute_video_stream_shares(
     // what the audio left).  The split rule itself lives in
     // `bandwidth_allocation.hpp` (v1.2.0, video plan F8) and is the very
     // same rule the audio bitrate adaptation uses — one rule, not two.
-    std::vector<detail::BandwidthDemand>& demands = impl_->pacing_demands_;
+    std::vector<detail::BandwidthDemand>& demands = impl_->feedback.pacing_demands_;
     demands.clear();
 
     const int audio_ceiling = resolve_audio_bitrate_ceiling();
@@ -1530,7 +1542,7 @@ void NimRTCEngine::compute_video_stream_shares(
     }
 
     // The total ceiling, for the pacer's class rate.
-    impl_->video_ceiling_total_bps = video_ceiling_total;
+    impl_->feedback.video_ceiling_total_bps = video_ceiling_total;
 
     alloc = detail::allocate_bandwidth(estimate, demands);
     if (alloc.targets.size() != demands.size()) {

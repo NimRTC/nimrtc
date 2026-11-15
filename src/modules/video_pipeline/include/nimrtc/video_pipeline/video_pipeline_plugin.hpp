@@ -166,6 +166,42 @@ public:
             std::int64_t now_us,
             bool carries_parameter_sets = false) noexcept;
 
+    // ---- The seam's half of the limiter ---------------------------------
+    //
+    // The engine configures the policy through the seam and reads the
+    // counters back from `stats()`.  The adapter translates between the
+    // seam's policy type and the module's own.  The names differ from
+    // the module-level ones above on purpose: C++ cannot overload on
+    // the return type alone, and the two accessors answer different
+    // questions (the module's type vs the seam's type).
+    void set_keyframe_limiter_config(
+            const plugins::VideoKeyframeLimiterConfig& cfg) noexcept override;
+    plugins::VideoKeyframeLimiterConfig
+        keyframe_limiter_config_seam() const noexcept override;
+    bool keyframe_request_pending() const noexcept override;
+    std::uint32_t retry_pending_keyframe(std::int64_t now_us) noexcept override;
+
+    // ---- The incremental (dirty-rect) encode mechanism (plan B9) --------
+    void set_content_type(plugins::VideoContentType type) noexcept override;
+    plugins::VideoContentType content_type() const noexcept override;
+    void set_incremental_encode_enabled(bool enabled) noexcept override;
+    bool incremental_encode_enabled() const noexcept override;
+    plugins::VideoIncrementalDecision offer_dirty_region(
+            const std::vector<plugins::VideoRegion>& dirty,
+            bool full_frame) noexcept override;
+    core::ByteSpan take_region_refresh() noexcept override;
+    plugins::VideoIncrementalStats incremental_stats() const noexcept override;
+
+    /** Attach the encoder the incremental requests are pushed to.
+     *
+     *  The adapter does not own the encoder (the engine does), so the
+     *  pointer is borrowed. */
+    void set_incremental_encoder(plugins::IVideoEncoder* encoder) noexcept override;
+
+    /** Set the SSRCs the region-refresh message names. */
+    void set_region_refresh_ssrcs(std::uint32_t media_ssrc,
+                                   std::uint32_t feedback_ssrc) noexcept;
+
 private:
     std::unique_ptr<VideoSender>                       concrete_;
     plugins::VideoSenderPacketCallback                 user_pkt_cb_;

@@ -66,10 +66,12 @@
 // ----------------------------------------------------------------------------
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -78,6 +80,11 @@
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/plugins/video_capture.hpp>
 #include <nimrtc/video_capture/synthetic_capture.hpp>
+#if defined(_WIN32)
+#include <windows.h>
+
+#include <nimrtc/video_capture/windows_capture.hpp>
+#endif
 
 namespace {
 
@@ -188,6 +195,9 @@ struct Resolution {
 
 /** The capture-device throughput, on the portable (synthetic) path. */
 struct CaptureResult {
+    std::string backend;         // "synthetic", "windows-dxgi", "windows-wgc"
+    bool        opened = false;  // the device actually opened
+    std::string error;           // why it did not open
     std::uint32_t width  = 0;
     std::uint32_t height = 0;
     long long   frames = 0;
@@ -202,6 +212,14 @@ struct CaptureResult {
     double      pop_mean_us = 0.0;
     /** The mean cost of one produced+popped frame, end to end. */
     double      frame_mean_us = 0.0;
+    /** Zero-copy evidence (plan B10): frames delivered as GPU surfaces. */
+    long long   frames_zero_copy = 0;
+    /** Frames staged into host memory (the fallback path). */
+    long long   frames_cpu_staged = 0;
+    /** Bytes copied between CPU and GPU. Zero means fully zero-copy. */
+    long long   bytes_copied = 0;
+    /** Frames the device dropped (the queue was full). */
+    long long   frames_dropped = 0;
 };
 
 /** The pipeline cost for one (backend class, resolution) pair. */
@@ -259,6 +277,7 @@ CaptureResult bench_capture(const Resolution& res, int frames, int warmup) {
     namespace np = nimrtc::plugins;
 
     CaptureResult out;
+    out.backend = "synthetic";
     out.width  = res.width;
     out.height = res.height;
     out.megapixels = res.megapixels();
@@ -273,8 +292,10 @@ CaptureResult bench_capture(const Resolution& res, int frames, int warmup) {
     nimrtc::video_capture::SyntheticCapture device(cfg);
     if (device.open() != np::kOk) {
         std::fprintf(stderr, "bench: the synthetic capture device refused to open\n");
+        out.error = "the synthetic capture device refused to open";
         return out;
     }
+    out.opened = true;
 
     np::CaptureFrame frame;
 
@@ -312,6 +333,331 @@ CaptureResult bench_capture(const Resolution& res, int frames, int warmup) {
     out.frame_mean_us = out.produce_mean_us + out.pop_mean_us;
     return out;
 }
+
+// ---------------------------------------------------------------------------
+// Measurement 1b — the *platform* capture backends' throughput.
+//
+// The synthetic device is the portable layer's cost.  The numbers that
+// matter for a real remote desktop are the platform backends': DXGI
+// Desktop Duplication and Windows Graphics Capture.  They are measured
+// the same way — the device is opened, frames are pulled, and the wall
+// clock is read — but the *source* of the frames is the desktop.
+//
+// A platform backend that cannot open on this machine (no display, a
+// secure desktop, a refused consent) is **not** a failure: it is a
+// missing measurement, and it is recorded as such.  The artifact never
+// claims a number it did not measure.
+// ---------------------------------------------------------------------------
+#if defined(_WIN32)
+
+/**
+ * @brief The desktop activator — makes the desktop *change* during a
+ *        measurement window.
+ *
+ * DXGI Desktop Duplication and WGC deliver a frame **only when the
+ * desktop changes**.  On an idle machine nothing changes, so the
+ * backends deliver nothing and a throughput measurement has nothing to
+ * measure.  That is not a backend limitation — it is the whole point
+ * of a dirty-rect-based capture path — but it does mean the rate can
+ * only be measured while something moves.
+ *
+ * The activator jiggles the mouse pointer across the desktop.  The
+ * pointer's original position is restored when the window closes, so
+ * the benchmark leaves the machine as it found it.
+ *
+ * It is deliberately the *cheapest* possible change: the compositor
+ * only has to re-blit the cursor, so the measured rate is the
+ * backend's delivery rate and not the compositor's redraw rate.
+ */
+class DesktopActivator {
+public:
+    DesktopActivator() {
+        if (::GetCursorPos(&saved_)) {
+            valid_ = true;
+        }
+    }
+
+    ~DesktopActivator() {
+        if (valid_) {
+            ::SetCursorPos(saved_.x, saved_.y);
+        }
+    }
+
+    DesktopActivator(const DesktopActivator&)            = delete;
+    DesktopActivator& operator=(const DesktopActivator&) = delete;
+
+    /** Move the pointer one step. Called from the measurement loop. */
+    void step() const {
+        if (!valid_) return;
+        // A small, fast sweep: the pointer moves far enough to dirty
+        // the screen, but not far enough to disturb the user.
+        static LONG x = 0;
+        x += 24;
+        if (x > 240) x = 0;
+        ::SetCursorPos(saved_.x + x, saved_.y + ((x / 24) % 2 ? 8 : -8));
+    }
+
+private:
+    POINT saved_{};
+    bool  valid_ = false;
+};
+
+/**
+ * @brief Measure one Windows capture backend.
+ *
+ * The device is driven through the `IVideoCapture` seam: the engine
+ * does exactly this, so the number is the number the product pays.
+ *
+ * The measurement runs over a **time window**, not over a frame count.
+ * That is not a stylistic choice: a desktop-duplication backend
+ * delivers a frame when the desktop *changes*, so on a static desktop
+ * it delivers nothing at all.  A "count N frames" loop would then
+ * measure how long the loop waited, not how fast the backend is.  The
+ * window makes the two cases distinguishable:
+ *
+ *  - a busy desktop yields a frame rate near the compositor's cadence;
+ *  - a static desktop yields *no* frames, which the artifact records
+ *    as a static-desktop observation rather than as a zero-fps backend.
+ *
+ * The `CaptureStats` counters are read *before* and *after* the window
+ * and subtracted, so the warm-up frames are excluded from the count.
+ */
+CaptureResult bench_windows_capture(nimrtc::video_capture::WindowsCaptureBackend backend,
+                                    int frames,
+                                    int warmup) {
+    namespace np = nimrtc::plugins;
+
+    CaptureResult out;
+    out.backend = nimrtc::video_capture::windows_capture_backend_name(backend);
+    out.opened = false;
+
+    // The resolution is the *display's* own: a desktop-duplication
+    // backend captures whatever the display is, not an arbitrary
+    // resolution, so the requested one is only a hint.
+    np::CaptureConfig cfg;
+    cfg.format.width  = 1920;
+    cfg.format.height = 1080;
+    cfg.format.fps    = 30;
+    cfg.format.tag    = "bgra";
+    cfg.queue_depth   = 4;
+
+    nimrtc::video_capture::WindowsCaptureOptions opts;
+    opts.backend = backend;
+
+    nimrtc::video_capture::WindowsCapture device(cfg, opts);
+    const np::Status status = device.open();
+    if (status != np::kOk) {
+        out.error = "the capture device refused to open (status=" +
+                    std::to_string(static_cast<int>(status)) + ")";
+        std::fprintf(stderr, "bench: %s refused to open: %s\n", out.backend.c_str(),
+                     out.error.c_str());
+        return out;
+    }
+    out.opened = true;
+
+    // The device's own resolution is the one that was measured.
+    const np::CaptureConfig active = device.config();
+    out.width  = active.format.width;
+    out.height = active.format.height;
+    out.megapixels = out.width && out.height
+                         ? (static_cast<double>(out.width) *
+                            static_cast<double>(out.height)) / 1'000'000.0
+                         : 0.0;
+
+    np::CaptureFrame frame;
+
+    // Warm-up: the first frames pay for the backend's own allocations
+    // (the D3D11 device, the texture pool, the duplication object).
+    for (int i = 0; i < warmup; ++i) {
+        (void)device.pop_frame(frame);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // The counters are the source of truth for "how many frames did the
+    // backend actually deliver"; the queue is drained alongside so the
+    // backend is never blocked by a full queue.
+    const np::CaptureStats before = device.stats();
+
+    // The window is long enough to hold a meaningful number of frames
+    // at the compositor's cadence, and short enough to keep the
+    // benchmark quick.
+    //
+    // The activator makes the desktop change during the window, so the
+    // backends actually deliver.  Without it a static desktop would
+    // yield no frames and the rate could not be measured at all.
+    DesktopActivator activator;
+
+    const auto window = std::chrono::milliseconds(2000);
+    const auto wall_start = Clock::now();
+    const auto deadline = wall_start + window;
+    while (Clock::now() < deadline) {
+        activator.step();
+        (void)device.pop_frame(frame);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto wall_end = Clock::now();
+
+    const np::CaptureStats after = device.stats();
+
+    device.close();
+
+    const long long delivered = static_cast<long long>(
+        after.frames_captured - before.frames_captured);
+    out.frames  = delivered;
+    out.seconds = std::chrono::duration<double>(wall_end - wall_start).count();
+    out.fps = out.seconds > 0.0 ? static_cast<double>(delivered) / out.seconds : 0.0;
+    out.fps_per_megapixel =
+        out.megapixels > 0.0 ? out.fps / out.megapixels : 0.0;
+    // The platform backend's own per-frame cost is not separable from
+    // the wait: the frame arrives when the desktop changes.  What *is*
+    // separable is the queue handoff, which the mean pop cost carries.
+    out.frame_mean_us =
+        out.frames > 0 ? (out.seconds * 1'000'000.0) / static_cast<double>(out.frames) : 0.0;
+
+    // The zero-copy evidence (plan B10): the device's own counters say
+    // how many frames never crossed the PCI bus and how many bytes were
+    // copied instead.  A backend that staged everything reports
+    // `frames_zero_copy == 0` and a non-zero `bytes_copied` — the
+    // artifact says so rather than claiming zero-copy.
+    out.frames_zero_copy =
+        static_cast<long long>(after.frames_zero_copy - before.frames_zero_copy);
+    out.frames_cpu_staged =
+        static_cast<long long>(after.frames_cpu_staged - before.frames_cpu_staged);
+    out.bytes_copied =
+        static_cast<long long>(after.bytes_copied - before.bytes_copied);
+    out.frames_dropped =
+        static_cast<long long>(after.frames_dropped - before.frames_dropped);
+
+    // A backend that delivered nothing over the window was measuring a
+    // *static* desktop, not a broken one.  The distinction matters: the
+    // artifact must not report "0 fps capture" as if the backend were
+    // the bottleneck.
+    if (delivered == 0) {
+        out.error = "no frames were delivered over the measurement window "
+                    "(the desktop was static — DXGI and WGC only deliver on "
+                    "a change)";
+    }
+    return out;
+}
+
+#endif // defined(_WIN32)
+
+// ---------------------------------------------------------------------------
+// Measurement 1c — the zero-copy path, measured.
+//
+// Plan B10 asks for *evidence* that the GPU path is real: frames that
+// reach the encoder as native surfaces, never crossing the PCI bus.
+// The device counts that itself (`CaptureStats::frames_zero_copy` vs
+// `bytes_copied`), but only when a GPU consumer is attached — without
+// one, the device is right to stage to the CPU.
+//
+// So the measurement attaches a GPU consumer that holds each frame
+// alive for one iteration, exactly like a hardware encoder does, and
+// reports what the device counted.  The number of frames that arrived
+// through the GPU callback is measured *independently* of the device's
+// own counter, so the two can be cross-checked: if the callback saw
+// fewer frames than the device claims, the artifact says so.
+// ---------------------------------------------------------------------------
+#if defined(_WIN32)
+
+/** The zero-copy evidence for one Windows capture backend. */
+struct ZeroCopyResult {
+    std::string backend;
+    bool        opened = false;
+    std::string error;
+    /** Frames the GPU callback actually received. */
+    long long   gpu_frames_received = 0;
+    /** Frames the device claims it delivered zero-copy. */
+    long long   frames_zero_copy = 0;
+    /** Frames the device staged into host memory instead. */
+    long long   frames_cpu_staged = 0;
+    /** Bytes copied CPU↔GPU. Zero means the fast path was taken. */
+    long long   bytes_copied = 0;
+    /** True when the fast path was really taken. */
+    bool        zero_copy = false;
+};
+
+ZeroCopyResult bench_windows_zero_copy(
+    nimrtc::video_capture::WindowsCaptureBackend backend,
+    int frames,
+    int warmup) {
+    namespace np = nimrtc::plugins;
+
+    ZeroCopyResult out;
+    out.backend = nimrtc::video_capture::windows_capture_backend_name(backend);
+
+    np::CaptureConfig cfg;
+    cfg.format.width  = 1920;
+    cfg.format.height = 1080;
+    cfg.format.fps    = 30;
+    cfg.format.tag    = "bgra";
+    cfg.queue_depth   = 4;
+
+    nimrtc::video_capture::WindowsCaptureOptions opts;
+    opts.backend = backend;
+    opts.allow_zero_copy = true;
+
+    nimrtc::video_capture::WindowsCapture device(cfg, opts);
+    if (device.open() != np::kOk) {
+        out.error = "the capture device refused to open";
+        std::fprintf(stderr, "bench: %s refused to open (zero-copy probe)\n",
+                     out.backend.c_str());
+        return out;
+    }
+    out.opened = true;
+
+    // The GPU consumer: it receives the surface and holds it for one
+    // iteration — the lifetime a hardware encoder needs.
+    std::vector<std::shared_ptr<nimrtc::video_frame::GpuBuffer>> held;
+    held.reserve(4);
+    std::atomic<long long> received{0};
+
+    device.set_gpu_frame_callback(
+        [&](nimrtc::video_capture::GpuCaptureFrame&& frame) {
+            received.fetch_add(1, std::memory_order_relaxed);
+            held.push_back(std::move(frame.gpu_buffer));
+            // Keep the window small: the point is the delivery, not the
+            // retention.  A real encoder drains it every frame.
+            if (held.size() > 3) held.erase(held.begin());
+        });
+
+    const auto wall_start = Clock::now();
+    const auto deadline = wall_start + std::chrono::seconds(5);
+    DesktopActivator activator;
+    while (received.load(std::memory_order_relaxed) < frames &&
+           Clock::now() < deadline) {
+        activator.step();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    const auto wall_end = Clock::now();
+
+    // Let the device settle its counters after the last frame.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    const np::CaptureStats stats = device.stats();
+    out.gpu_frames_received = received.load(std::memory_order_relaxed);
+    out.frames_zero_copy   = static_cast<long long>(stats.frames_zero_copy);
+    out.frames_cpu_staged  = static_cast<long long>(stats.frames_cpu_staged);
+    out.bytes_copied       = static_cast<long long>(stats.bytes_copied);
+    // The fast path is proven when the GPU callback received frames and
+    // the device copied no bytes to the host.  Zero received frames
+    // means the desktop was static — an *absence of evidence*, not a
+    // failure of the zero-copy path, and it is reported as such.
+    out.zero_copy = out.gpu_frames_received > 0 && out.bytes_copied == 0 &&
+                    out.frames_zero_copy > 0;
+    if (out.gpu_frames_received == 0) {
+        out.error = "no GPU frames were delivered over the probe window "
+                    "(the desktop was static — DXGI and WGC only deliver on "
+                    "a change)";
+    }
+
+    (void)warmup;
+    device.close();
+    (void)wall_end;
+    return out;
+}
+
+#endif // defined(_WIN32)
 
 // ---------------------------------------------------------------------------
 // Measurement 2 — the pipeline cost, per backend class and resolution.
@@ -481,6 +827,19 @@ int main(int argc, char** argv) {
         captures.push_back(bench_capture(res, opt.frames, opt.warmup));
     }
 
+    // The platform backends' throughput (Windows only).  A backend that
+    // cannot open is recorded as "not measured" rather than skipped.
+    std::vector<CaptureResult> platform_captures;
+#if defined(_WIN32)
+    {
+        using nimrtc::video_capture::WindowsCaptureBackend;
+        platform_captures.push_back(bench_windows_capture(
+            WindowsCaptureBackend::kDxgiDesktopDuplication, opt.frames, opt.warmup));
+        platform_captures.push_back(bench_windows_capture(
+            WindowsCaptureBackend::kWgc, opt.frames, opt.warmup));
+    }
+#endif
+
     std::vector<PipelineResult> pipelines;
     for (const char* pref : preferences) {
         for (const auto& res : resolutions) {
@@ -506,7 +865,9 @@ int main(int argc, char** argv) {
     j.begin_array();
     for (const auto& c : captures) {
         j.begin_object();
-        j.field("backend", std::string("synthetic"));
+        j.field("backend", c.backend);
+        j.field("opened", c.opened);
+        if (!c.error.empty()) j.field("error", c.error);
         j.field("width", static_cast<long long>(c.width));
         j.field("height", static_cast<long long>(c.height));
         j.field("frames", c.frames);
@@ -517,6 +878,32 @@ int main(int argc, char** argv) {
         j.field("produce_mean_us", c.produce_mean_us);
         j.field("pop_mean_us", c.pop_mean_us);
         j.field("frame_mean_us", c.frame_mean_us);
+        j.end_object();
+    }
+    j.end_array();
+
+    // The platform backends' throughput.  A backend that could not open
+    // is present with `"opened": false` — the artifact records the
+    // missing measurement rather than hiding it.
+    j.key("platform_capture");
+    j.begin_array();
+    for (const auto& c : platform_captures) {
+        j.begin_object();
+        j.field("backend", c.backend);
+        j.field("opened", c.opened);
+        if (!c.error.empty()) j.field("error", c.error);
+        j.field("width", static_cast<long long>(c.width));
+        j.field("height", static_cast<long long>(c.height));
+        j.field("frames", c.frames);
+        j.field("seconds", c.seconds);
+        j.field("fps", c.fps);
+        j.field("megapixels", c.megapixels);
+        j.field("fps_per_megapixel", c.fps_per_megapixel);
+        j.field("frame_mean_us", c.frame_mean_us);
+        j.field("frames_zero_copy", c.frames_zero_copy);
+        j.field("frames_cpu_staged", c.frames_cpu_staged);
+        j.field("bytes_copied", c.bytes_copied);
+        j.field("frames_dropped", c.frames_dropped);
         j.end_object();
     }
     j.end_array();
@@ -562,6 +949,36 @@ int main(int argc, char** argv) {
         j.field("format_copies", p.format_copies);
         j.end_object();
     }
+    j.end_array();
+
+    // The zero-copy evidence (plan B10).  `zero_copy: true` means the
+    // GPU callback received frames AND the device copied no bytes — the
+    // pixels never entered host memory.
+    j.key("zero_copy");
+    j.begin_array();
+#if defined(_WIN32)
+    {
+        using nimrtc::video_capture::WindowsCaptureBackend;
+        const ZeroCopyResult probes[] = {
+            bench_windows_zero_copy(WindowsCaptureBackend::kDxgiDesktopDuplication,
+                                    opt.frames, opt.warmup),
+            bench_windows_zero_copy(WindowsCaptureBackend::kWgc,
+                                    opt.frames, opt.warmup),
+        };
+        for (const auto& z : probes) {
+            j.begin_object();
+            j.field("backend", z.backend);
+            j.field("opened", z.opened);
+            if (!z.error.empty()) j.field("error", z.error);
+            j.field("gpu_frames_received", z.gpu_frames_received);
+            j.field("frames_zero_copy", z.frames_zero_copy);
+            j.field("frames_cpu_staged", z.frames_cpu_staged);
+            j.field("bytes_copied", z.bytes_copied);
+            j.field("zero_copy", z.zero_copy);
+            j.end_object();
+        }
+    }
+#endif
     j.end_array();
 
     j.end_object();

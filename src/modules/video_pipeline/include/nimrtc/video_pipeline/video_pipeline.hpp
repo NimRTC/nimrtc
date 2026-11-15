@@ -74,8 +74,10 @@
 
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/core/error.hpp>
+#include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 #include <nimrtc/video_jb/video_jitter_buffer.hpp>
+#include <nimrtc/video_pipeline/incremental_encode.hpp>
 #include <nimrtc/video_pipeline/keyframe_limiter.hpp>
 #include <nimrtc/video_rtcp_feedback/video_rtcp_feedback.hpp>
 #include <nimrtc/rtp/packet.hpp>
@@ -289,6 +291,10 @@ struct NIMRTC_API_STABLE SenderStats {
     std::uint64_t keyframes_deferred            = 0;
     /** Key-frame requests the limiter rejected (the budget was spent). */
     std::uint64_t keyframes_rejected            = 0;
+    /** Grants that bypassed the limiter because the request carried the
+     *  codec's parameter sets (a resolution change / a codec switch).
+     *  Those are never deferred: deferring them breaks the decode. */
+    std::uint64_t keyframes_forced              = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -412,6 +418,63 @@ public:
 
     /** The limiter's counters. */
     KeyframeLimiterStats keyframe_limiter_stats() const noexcept;
+
+    /** True iff a key-frame request is still waiting to be re-offered.
+     *
+     *  A deferred request is **held**, not dropped: the limiter says
+     *  "not yet", and the caller re-offers it once the minimum interval
+     *  has elapsed, so the picture still recovers even when the peer
+     *  only asked once. */
+    bool keyframe_request_pending() const noexcept;
+
+    /** Re-offer the held key-frame request.
+     *
+     *  @param now_us Monotonic timestamp in microseconds.
+     *  @return The number of key frames granted (0 or 1). */
+    std::uint32_t retry_pending_keyframe(std::int64_t now_us) noexcept;
+
+    // ---- The incremental (dirty-rect) encode mechanism (plan B9) --------
+    //
+    // The sender hosts the arbiter because the arbiter needs the
+    // *codec's* capability (`IVideoEncoder::supports_incremental_encode()`),
+    // and the sender is the one that sits next to the encoder.
+    //
+    // The content type is carried explicitly (ADR-022 Decision 5): the
+    // mechanism only engages for screen content, because a camera
+    // stream has no unchanged area worth skipping.
+
+    /** The stream's content type. */
+    void set_content_type(VideoContentType type) noexcept;
+    VideoContentType content_type() const noexcept;
+
+    /** Enable / disable the incremental-encode mechanism. */
+    void set_incremental_encode_enabled(bool enabled) noexcept;
+    bool incremental_encode_enabled() const noexcept;
+
+    /** Offer one frame's changed region to the arbiter.
+     *
+     *  @param dirty     The changed rectangles, in source pixels.
+     *  @param full_frame True iff the whole frame changed.
+     *  @return The decision. */
+    IncrementalDecision offer_dirty_region(
+            const std::vector<plugins::VideoRegion>& dirty,
+            bool full_frame) noexcept;
+
+    /** The region-refresh message for the peer, or empty. */
+    core::ByteSpan take_region_refresh() noexcept;
+
+    /** The incremental mechanism's counters. */
+    IncrementalEncodeStats incremental_stats() const noexcept;
+
+    /** Attach the encoder the incremental requests are pushed to.
+     *
+     *  The sender does not own the encoder (the engine does), so the
+     *  pointer is borrowed and must outlive the sender's use of it. */
+    void set_incremental_encoder(plugins::IVideoEncoder* encoder) noexcept;
+
+    /** Set the SSRCs the region-refresh message names. */
+    void set_region_refresh_ssrcs(std::uint32_t media_ssrc,
+                                   std::uint32_t feedback_ssrc) noexcept;
 
     /** Snapshot of sender counters. */
     SenderStats stats() const noexcept;

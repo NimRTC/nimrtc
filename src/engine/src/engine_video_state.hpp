@@ -319,6 +319,35 @@ struct VideoState {
      *  at. */
     std::uint32_t capture_rtp_base_ts = 0;
 
+    // ---- The incremental (dirty-rect) encode mechanism (plan B9) --------
+    //
+    // The dirty rectangles the capture device reported for the frame the
+    // pump is encoding.  They are handed to the sender's arbiter, which
+    // decides whether the frame can be coded incrementally.
+    //
+    // The buffer lives here (not on the stack) because the pump runs
+    // every tick and the vectors would otherwise be reallocated on
+    // every frame — the zero-allocation gate of Phase 3 §3.5.
+    std::vector<plugins::VideoRegion> dirty_rects;
+
+    /** The media SSRC the region-refresh message names (the outbound
+     *  video stream's SSRC). */
+    std::uint32_t video_media_ssrc = 0;
+
+    /** The SSRC the region-refresh message is sent under (the engine's
+     *  own RTCP reporter SSRC). */
+    std::uint32_t video_region_feedback_ssrc = 0;
+
+    /** True once the region-refresh SSRCs have been handed to the
+     *  sender. */
+    bool video_region_ssrcs_set = false;
+
+    /** The number of region-refresh messages the engine put on the wire.
+     *  It is the evidence that the peer was *told* which region
+     *  changed — without it the mechanism would be invisible to the
+     *  peer and therefore useless. */
+    std::uint64_t video_region_refreshes_sent = 0;
+
     // ---- The encoder's parameter set (remote-desktop plan B12 / B13) -----
     //
     // The engine computes the parameter set in one place (see

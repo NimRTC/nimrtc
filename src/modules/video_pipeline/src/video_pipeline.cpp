@@ -763,6 +763,15 @@ struct VideoSender::Impl {
     video_rtcp_feedback::FirCoalescer coalescer{0};
     KeyframeLimiter limiter{coalescer, KeyframeLimiterConfig{}};
 
+    // ---- The incremental (dirty-rect) encode driver (plan B9) -----------
+    //
+    // The driver owns the controller (the arbiter) and does the three
+    // things that have to happen together for the mechanism to be worth
+    // anything: it asks the controller what to do with the frame's dirty
+    // rectangles, it pushes the resulting request to the encoder, and it
+    // builds the region-refresh message the peer needs.
+    IncrementalEncodeDriver incremental;
+
     // Reusable scratch buffer for emitted packet payloads.
     std::vector<std::uint8_t> scratch;
 
@@ -1321,6 +1330,7 @@ KeyframeDecision VideoSender::request_keyframe(KeyframeReason reason,
     s.stats.keyframes_granted = ls.granted;
     s.stats.keyframes_deferred = ls.deferred;
     s.stats.keyframes_rejected = ls.rejected;
+    s.stats.keyframes_forced  = ls.forced_grants;
 
     if (decision == KeyframeDecision::kGranted) {
         // Arm the encoder-side marker.  The *encoder* produces the IDR;
@@ -1333,6 +1343,88 @@ KeyframeDecision VideoSender::request_keyframe(KeyframeReason reason,
 
 KeyframeLimiterStats VideoSender::keyframe_limiter_stats() const noexcept {
     return impl_->limiter.stats();
+}
+
+bool VideoSender::keyframe_request_pending() const noexcept {
+    return impl_->limiter.pending();
+}
+
+std::uint32_t VideoSender::retry_pending_keyframe(std::int64_t now_us) noexcept {
+    auto& s = *impl_;
+    if (!s.limiter.pending()) return 0;
+
+    // Re-offer the held request.  The limiter arbitrates again: if the
+    // minimum interval still has not elapsed, the request stays held
+    // and the next tick tries again — which is the whole point of
+    // *holding* rather than dropping it.
+    const KeyframeDecision decision =
+        s.limiter.request(KeyframeReason::kPli, now_us);
+
+    // Mirror the limiter's counters into the sender's stats, so a host
+    // that only reads the sender's counters still sees the limiter
+    // working.
+    const KeyframeLimiterStats ls = s.limiter.stats();
+    s.stats.keyframe_requests = ls.requests;
+    s.stats.keyframes_granted = ls.granted;
+    s.stats.keyframes_deferred = ls.deferred;
+    s.stats.keyframes_rejected = ls.rejected;
+    s.stats.keyframes_forced  = ls.forced_grants;
+
+    if (decision != KeyframeDecision::kGranted) return 0;
+
+    // The grant is published through the *same* path an inbound PLI
+    // takes, so the engine has one place that arms the encoder.
+    s.keyframe_pending = true;
+    s.stats.force_keyframe_calls++;
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// The incremental (dirty-rect) encode mechanism (remote-desktop plan B9)
+// ---------------------------------------------------------------------------
+
+void VideoSender::set_content_type(VideoContentType type) noexcept {
+    impl_->incremental.controller().set_content_type(type);
+}
+
+VideoContentType VideoSender::content_type() const noexcept {
+    return impl_->incremental.controller().content_type();
+}
+
+void VideoSender::set_incremental_encode_enabled(bool enabled) noexcept {
+    impl_->incremental.controller().set_enabled(enabled);
+}
+
+bool VideoSender::incremental_encode_enabled() const noexcept {
+    return impl_->incremental.controller().enabled();
+}
+
+IncrementalDecision VideoSender::offer_dirty_region(
+        const std::vector<plugins::VideoRegion>& dirty,
+        bool full_frame) noexcept {
+    // The driver pushes the request to the encoder and builds the
+    // region-refresh message; the controller counts the decision.
+    return impl_->incremental.on_frame_dirty(dirty, full_frame);
+}
+
+core::ByteSpan VideoSender::take_region_refresh() noexcept {
+    const core::ByteBuffer& buf = impl_->incremental.last_region_refresh();
+    if (buf.empty()) return {};
+    return core::ByteSpan{buf.data(), buf.size()};
+}
+
+IncrementalEncodeStats VideoSender::incremental_stats() const noexcept {
+    return impl_->incremental.stats();
+}
+
+void VideoSender::set_incremental_encoder(plugins::IVideoEncoder* encoder) noexcept {
+    impl_->incremental.set_encoder(encoder);
+}
+
+void VideoSender::set_region_refresh_ssrcs(std::uint32_t media_ssrc,
+                                            std::uint32_t feedback_ssrc) noexcept {
+    impl_->incremental.set_media_ssrc(media_ssrc);
+    impl_->incremental.set_feedback_ssrc(feedback_ssrc);
 }
 
 bool VideoSender::retransmit(std::uint16_t seq) noexcept {

@@ -1780,6 +1780,29 @@ if(TARGET nimrtc::video_capture)
 endif()
 
 # ----------------------------------------------------------------------------
+# The dirty-rect incremental encode (remote-desktop plan B9) and the
+# key-frame storm limiter (plan B14).
+#
+# B9's acceptance criterion is that the capture device's dirty rectangles
+# reach the encoder instead of being discarded at the pump — and that the
+# fallback to a full key frame (a codec that cannot express a region) is
+# *reported* rather than hidden.  B14's is that a peer which requests a
+# key frame every 100 ms produces at most the rate-limited number of
+# IDRs, and that the count is in the stats.
+#
+# It links the capture module (its registrar is referenced by the PAL
+# Slice 2 default-registrar table) and the video pipeline (the engine
+# resolves the "reference" sender through it).
+# ----------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_video_incremental test_engine_video_incremental.cpp)
+if(TARGET nimrtc::video_capture)
+  target_link_libraries(test_engine_video_incremental PRIVATE nimrtc::video_capture)
+endif()
+if(TARGET nimrtc::video_pipeline)
+  target_link_libraries(test_engine_video_incremental PRIVATE nimrtc::video_pipeline)
+endif()
+
+# ----------------------------------------------------------------------------
 # Architecture-remediation Phase 4.2 / D2 — the `assembly` disposition.
 #
 # The `assembly` module's Profile carries a `transport` section (strategy

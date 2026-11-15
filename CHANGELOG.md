@@ -81,6 +81,8 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       discarding the encode numbers another machine produced.  The
       merged artifact records the contributing machine under
       `platform_capture_machine`.
+    - Verified: full build clean, `ctest` **1966 / 1966 passing**, and the
+      signalling example's own suite **94 / 94 checks** passing.
 
 - **The QoE collector seam and the engine's QoE wiring (v1.4, remote-desktop
   plan J3 / J6).**  The `rd_qoe` module shipped the *metrics* but nothing in
@@ -1997,7 +1999,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   observed on the RTCP path", so they moved into
   `detail::FeedbackState` (`engine_feedback_state.hpp`): **423 → 381
   lines**, back under the target.  Re-verified: full build clean,
-  `ctest` **1942 / 1942 passing**.
+  `ctest` **1966 / 1966 passing**.
 
 - **The plugin ID naming contract is now written down, and the docs
   that describe the config surface now match the code (v1.2.0,

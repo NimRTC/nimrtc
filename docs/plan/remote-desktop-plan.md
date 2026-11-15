@@ -472,7 +472,8 @@ the platform legs that only run on their own hardware, the measurement
 artefacts that need a real link, and the non-NVIDIA hardware encoder
 bodies that are registered seams.
 
-The whole test suite is green: **1942 / 1942 ctest cases pass** (the
+The whole test suite is green: **1966 / 1966 ctest cases pass**, and the
+signalling example's own suite reports **94 / 94 checks** (the ctest
 skips are environment-gated — no WebRTC APM, no NVIDIA device, no
 usrsctp).
 

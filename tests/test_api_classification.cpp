@@ -539,11 +539,21 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   - plugins/qoe_collector.hpp (the IQoeCollector seam + its
     //     factory, the config and the snapshot value types)
     //
+    // Remote-desktop plan Track G (the device side of the control
+    // plane) bump: +2 public headers (186 -> 188) for the OS
+    // input-injection module (`src/modules/rd_input_inject/`, the
+    // plan's Track G device leg):
+    //   - rd_input_inject/input_injector.hpp (the InputInjector seam
+    //     and its factory: the injection backends and the result
+    //     vocabulary)
+    //   - rd_input_inject/key_map.hpp (the platform-neutral key
+    //     layout and its translation into the OS virtual-key numbers)
+    //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 186;
+    constexpr std::size_t kBaselineHeaderCount = 188;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -410,6 +410,15 @@ REACHABILITY_ROOTS = {
     "demo-p2p",
     "demo-wtserver",
     "loopback-p2p",
+    # The remote-desktop examples (plan Track G).  `rd_device` is the
+    # shipped consumer of the `rd_input_inject` module (the OS input
+    # injection), and `rd_viewer` is the shipped consumer of the
+    # `rd_input` module's capture-side policy (the coalescer, the
+    # binder and the safety filter).  Both are real executables an
+    # operator runs, so both are roots of the reachability walk — a
+    # module consumed only by one of them is part of the product.
+    "rd_device",
+    "rd_viewer",
 }
 
 

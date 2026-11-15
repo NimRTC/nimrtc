@@ -89,3 +89,69 @@ target_link_libraries(demo-wtserver PRIVATE
 if(WIN32)
     target_link_libraries(demo-wtserver PRIVATE dbghelp)
 endif()
+
+# ---------------------------------------------------------------------------
+# The remote-desktop examples (plan Track G, examples/remote-desktop/)
+# ---------------------------------------------------------------------------
+#
+# `rd_device` is the **device** side of a remote-desktop session: the
+# machine whose screen is shared.  It captures the screen through the
+# engine's capture-device seam (with the engine's capture pump doing
+# the encode), and it injects the operator's input into the local OS
+# through the `rd_input_inject` module.
+#
+# `rd_viewer` is the **operator** side: it decodes the device's screen
+# into a video sink and captures the operator's local mouse / keyboard
+# to send over the control channel.
+#
+# Both speak the same newline-delimited JSON signalling dialect as
+# `demo-p2p`, so the reference service's client (`client.py`) bridges
+# them without a change.
+#
+# The `rd_input_inject` module is *optional* (a build without it gets
+# a read-only device), so the target is only created when the module
+# was built.
+if(NIMRTC_MODULE_RD_INPUT_INJECT)
+    add_executable(rd_device remote-desktop/rd_device.cpp)
+    nimrtc_apply_options(rd_device)
+    target_link_libraries(rd_device PRIVATE
+        nimrtc::engine
+        nimrtc::rd_input        # the event vocabulary + the control channel
+        nimrtc::rd_input_inject # the OS input injection
+        nimrtc::datachannel    # the engine's registrar table references it
+        nimrtc::web_transport  # ditto
+    )
+
+    # The device needs the capture-device module (the screen backends)
+    # and the video sink / codec modules.
+    if(NIMRTC_MODULE_VIDEO_CAPTURE)
+        target_link_libraries(rd_device PRIVATE nimrtc::video_capture)
+    endif()
+    if(NIMRTC_MODULE_VIDEO_SINK)
+        target_link_libraries(rd_device PRIVATE nimrtc::video_sink)
+    endif()
+endif()
+
+# The viewer needs the `rd_input` module (the event vocabulary, the
+# coalescer, the binder, the watchdog and the safety filter) — but not
+# `rd_input_inject`: the operator side *captures* the input, it does
+# not inject it.  So the viewer is built whenever the input module is.
+if(NIMRTC_MODULE_RD_INPUT)
+    add_executable(rd_viewer remote-desktop/rd_viewer.cpp)
+    nimrtc_apply_options(rd_viewer)
+    target_link_libraries(rd_viewer PRIVATE
+        nimrtc::engine
+        nimrtc::rd_input        # the event vocabulary + the input policy
+        nimrtc::datachannel    # the engine's registrar table references it
+        nimrtc::web_transport  # ditto
+    )
+
+    # The viewer renders the device's screen into a video sink.
+    if(NIMRTC_MODULE_VIDEO_SINK)
+        target_link_libraries(rd_viewer PRIVATE nimrtc::video_sink)
+    endif()
+    # The QoE collector (plan J3 / J6) measures the input-to-photon latency.
+    if(NIMRTC_MODULE_RD_QOE)
+        target_link_libraries(rd_viewer PRIVATE nimrtc::rd_qoe)
+    endif()
+endif()

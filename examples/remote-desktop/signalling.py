@@ -50,14 +50,16 @@ import json
 import logging
 import os
 import sys
-from typing import Dict
+from typing import Dict, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import wsproto  # noqa: E402  (path shim above)
 from signalling_core import (  # noqa: E402
+    DEFAULT_MAX_CONCURRENT_SESSIONS,
     DEFAULT_TURN_TTL_S,
     PairingStore,
+    SessionLimits,
     SignallingService,
     TurnCredentialIssuer,
 )
@@ -70,16 +72,63 @@ logger = logging.getLogger("signalling")
 
 
 class SignalingServer:
-    """The asyncio WebSocket server around :class:`SignallingService`."""
+    """The asyncio WebSocket server around :class:`SignallingService`.
 
-    def __init__(self, service: SignallingService) -> None:
+    The server owns one *policy* duty beyond moving bytes: it reaps
+    the sessions that have outlived their welcome.  The service can
+    decide that a session is expired, but only the server knows when
+    to ask — and an expired session nobody reaps is an expired session
+    that lives forever.
+    """
+
+    def __init__(
+        self,
+        service: SignallingService,
+        reap_interval_s: float = 10.0,
+    ) -> None:
         self.service = service
         self._connections: Dict[str, wsproto.WebSocketConnection] = {}
         self._peer_seq = 0
+        self._reap_interval_s = reap_interval_s
+        self._reaper: Optional[asyncio.Task] = None
 
     def _next_peer_id(self) -> str:
         self._peer_seq += 1
         return f"peer-{self._peer_seq:04d}"
+
+    # ---- the session reaper ---------------------------------------------
+
+    async def _reap_loop(self) -> None:
+        """Drop the sessions that have outlived their welcome.
+
+        The loop is a no-op when neither timeout is armed: the service
+        then reports every session as alive, and there is nothing to
+        reap.
+        """
+        while True:
+            await asyncio.sleep(self._reap_interval_s)
+            try:
+                expired = self.service.reap_expired_sessions()
+            except Exception as exc:  # noqa: BLE001 - the loop must survive
+                logger.warning("the session reaper raised: %r", exc)
+                continue
+            for target, outbound in expired:
+                await self._send(target, outbound)
+
+    def start_reaper(self) -> None:
+        """Start the reaper loop."""
+        if self._reaper is None:
+            self._reaper = asyncio.create_task(self._reap_loop())
+
+    async def stop_reaper(self) -> None:
+        """Stop the reaper loop."""
+        if self._reaper is not None:
+            self._reaper.cancel()
+            try:
+                await self._reaper
+            except asyncio.CancelledError:
+                pass
+            self._reaper = None
 
     async def handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -164,12 +213,42 @@ async def main() -> int:
         default=DEFAULT_TURN_TTL_S,
         help="TURN credential TTL in seconds (default: 3600)",
     )
+    parser.add_argument(
+        "--max-sessions",
+        type=int,
+        default=DEFAULT_MAX_CONCURRENT_SESSIONS,
+        help="Maximum number of concurrent sessions (0 = no limit)",
+    )
+    parser.add_argument(
+        "--max-rooms",
+        type=int,
+        default=0,
+        help="Maximum number of concurrent rooms (0 = no limit)",
+    )
+    parser.add_argument(
+        "--session-lifetime",
+        type=float,
+        default=0.0,
+        help="Hard session lifetime in seconds (0 = no limit)",
+    )
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=0.0,
+        help="Idle disconnect timeout in seconds (0 = no limit)",
+    )
     args = parser.parse_args()
 
     secret = args.turn_secret.encode("utf-8") if args.turn_secret else os.urandom(32)
     service = SignallingService(
         pairing_store=PairingStore(),
         turn_issuer=TurnCredentialIssuer(secret, ttl_s=args.turn_ttl, url=args.turn_url),
+        limits=SessionLimits(
+            max_concurrent_sessions=args.max_sessions,
+            max_concurrent_rooms=args.max_rooms,
+            session_lifetime_s=args.session_lifetime,
+            idle_timeout_s=args.idle_timeout,
+        ),
     )
     server = SignalingServer(service)
 
@@ -179,6 +258,7 @@ async def main() -> int:
     listener = await asyncio.start_server(on_client, args.host, args.port)
     logger.info("reference signalling service listening on ws://%s:%d", args.host, args.port)
     logger.info("this is a REFERENCE implementation, not a production server")
+    server.start_reaper()
     async with listener:
         await listener.serve_forever()
     return 0

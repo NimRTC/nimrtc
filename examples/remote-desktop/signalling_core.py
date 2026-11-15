@@ -53,6 +53,9 @@ __all__ = [
     "PairingStore",
     "TurnCredentialIssuer",
     "Room",
+    "SessionLimits",
+    "SessionPolicy",
+    "PolicyViolation",
     "SignallingService",
     "DEFAULT_PAIRING_TTL_S",
     "DEFAULT_SESSION_TTL_S",
@@ -73,6 +76,17 @@ DEFAULT_TURN_TTL_S = 3600.0
 
 #: Default TURN relay advertised to clients.
 DEFAULT_TURN_URL = "turn:127.0.0.1:3478?transport=udp"
+
+#: How many sessions may be live at once, by default.
+DEFAULT_MAX_CONCURRENT_SESSIONS = 64
+
+#: How long a session may sit idle (no relayed media-plane traffic)
+#: before it is dropped, by default.  Zero disables the idle timeout.
+DEFAULT_IDLE_TIMEOUT_S = 300.0
+
+#: How long a session may live in total, by default.  Zero disables
+#: the hard session lifetime.
+DEFAULT_SESSION_LIFETIME_S = 7200.0
 
 
 def _now() -> float:
@@ -279,6 +293,211 @@ class TurnCredentialIssuer:
 
 
 @dataclass
+class SessionLimits:
+    """The limits a session has to live within.
+
+    Every limit is a plain number, and every one of them is optional:
+    a limit of zero (or ``None``) means "no limit of this kind".  That
+    makes the *policy* (which limits are actually armed) a separate
+    concern from the *numbers* — see :class:`SessionPolicy`.
+    """
+
+    #: How many sessions may be live at the same time.  Zero disables
+    #: the cap.
+    max_concurrent_sessions: int = DEFAULT_MAX_CONCURRENT_SESSIONS
+
+    #: How long a session may live in total, in seconds, counted from
+    #: the moment its first peer joined.  Zero disables the hard
+    #: lifetime.
+    session_lifetime_s: float = DEFAULT_SESSION_LIFETIME_S
+
+    #: How long a session may sit idle — with no relayed media-plane
+    #: traffic — before it is dropped.  Zero disables the idle timeout.
+    idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S
+
+    #: How many rooms may be live at the same time.  Zero disables the
+    #: cap.  A room is live while at least one of its peers is joined.
+    max_concurrent_rooms: int = 0
+
+    def __post_init__(self) -> None:
+        if self.max_concurrent_sessions < 0:
+            raise ValueError("max_concurrent_sessions must not be negative")
+        if self.max_concurrent_rooms < 0:
+            raise ValueError("max_concurrent_rooms must not be negative")
+        if self.session_lifetime_s < 0:
+            raise ValueError("session_lifetime_s must not be negative")
+        if self.idle_timeout_s < 0:
+            raise ValueError("idle_timeout_s must not be negative")
+
+
+class PolicyViolation:
+    """The reasons a session can be refused or torn down.
+
+    The values are stable strings: they travel on the wire in the
+    ``code`` field of an error message, so a client can branch on them.
+    """
+
+    #: Too many sessions are live at once.
+    SESSION_LIMIT = "session_limit"
+
+    #: The session has been alive longer than its hard lifetime.
+    SESSION_EXPIRED = "session_expired"
+
+    #: The session has been idle for longer than its idle timeout.
+    SESSION_IDLE = "session_idle"
+
+    #: The administrative kill switch is engaged.
+    KILL_SWITCH = "kill_switch"
+
+    #: Too many rooms are live at once.
+    ROOM_LIMIT = "room_limit"
+
+
+@dataclass
+class SessionPolicy:
+    """The live-session bookkeeping and the policy decisions on it.
+
+    The policy owns three things:
+
+    1. **The kill switch.**  An administrator can engage it, and every
+       subsequent join is refused.  This is the "stop the bleeding"
+       lever: it takes effect immediately and without unwinding the
+       sessions that are already up.
+    2. **The concurrency cap.**  A new session is refused when the
+       number of live sessions is already at the cap.
+    3. **The timeouts.**  A session dies when it has been alive longer
+       than its hard lifetime, or when it has been idle for longer than
+       its idle timeout.
+
+    The policy is *transport-free* and *side-effect free* with respect
+    to the network: it answers questions ("may this peer join?",
+    "is this session still alive?") and the caller acts on the answer.
+    """
+
+    limits: SessionLimits = field(default_factory=SessionLimits)
+
+    #: When the kill switch was engaged (None when it is not).
+    kill_switch_engaged_at: Optional[float] = None
+
+    #: The reason the kill switch carries, reported to the clients.
+    kill_switch_reason: str = "the service is administratively paused"
+
+    # ---- the live sessions ----------------------------------------------
+
+    def _session_table(self) -> Dict[str, Dict]:
+        """The live-session table.
+
+        The owner (:class:`SignallingService`) binds this to its own
+        table, so the policy and the service can never disagree about
+        which sessions are up.
+        """
+        raise NotImplementedError
+
+    # ---- the kill switch -------------------------------------------------
+
+    @property
+    def kill_switch_engaged(self) -> bool:
+        """True iff the administrative kill switch is engaged."""
+        return self.kill_switch_engaged_at is not None
+
+    def engage_kill_switch(self, now: Optional[float] = None, reason: str = "") -> None:
+        """Engage the kill switch.  New joins are refused from now on.
+
+        The sessions that are already up are *not* torn down: the
+        switch is a brake on new work, and tearing down live sessions
+        is a separate, deliberate act (``kill_all_sessions``).
+        """
+        now = _now() if now is None else now
+        self.kill_switch_engaged_at = now
+        if reason:
+            self.kill_switch_reason = reason
+        logger.warning("the administrative kill switch is engaged: %s", self.kill_switch_reason)
+
+    def release_kill_switch(self) -> None:
+        """Release the kill switch.  Joins are accepted again."""
+        if self.kill_switch_engaged_at is not None:
+            logger.info("the administrative kill switch is released")
+        self.kill_switch_engaged_at = None
+
+    # ---- the decisions ---------------------------------------------------
+
+    def check_join(self, now: Optional[float] = None) -> Optional[str]:
+        """Can a new session be admitted?
+
+        Returns ``None`` when the join is allowed, else the policy
+        violation code that explains the refusal.
+        """
+        now = _now() if now is None else now
+        if self.kill_switch_engaged:
+            return PolicyViolation.KILL_SWITCH
+        limit = self.limits.max_concurrent_sessions
+        if limit > 0 and len(self._live_sessions(now)) >= limit:
+            return PolicyViolation.SESSION_LIMIT
+        return None
+
+    def check_room_budget(self, now: Optional[float] = None) -> Optional[str]:
+        """Can another room be admitted?
+
+        Returns ``None`` when the room is allowed, else the policy
+        violation code.
+        """
+        now = _now() if now is None else now
+        limit = self.limits.max_concurrent_rooms
+        if limit > 0 and len(self._live_rooms(now)) >= limit:
+            return PolicyViolation.ROOM_LIMIT
+        return None
+
+    def session_expired(self, session: Dict, now: Optional[float] = None) -> Optional[str]:
+        """Has this session outlived its welcome?
+
+        Returns ``None`` when the session is still alive, else the
+        policy violation code.
+        """
+        now = _now() if now is None else now
+        lifetime = self.limits.session_lifetime_s
+        if lifetime > 0:
+            started = session.get("started_at")
+            if started is not None and now >= started + lifetime:
+                return PolicyViolation.SESSION_EXPIRED
+        idle = self.limits.idle_timeout_s
+        if idle > 0:
+            last = session.get("last_activity")
+            if last is not None and now >= last + idle:
+                return PolicyViolation.SESSION_IDLE
+        return None
+
+    # ---- the live set ----------------------------------------------------
+
+    def _session_table(self) -> Dict[str, Dict]:
+        """The live-session table.
+
+        The owner (:class:`SignallingService`) binds this to its own
+        table, so the policy and the service can never disagree about
+        which sessions are up.
+        """
+        raise NotImplementedError
+
+    def _live_sessions(self, now: float) -> List[str]:
+        """The session ids that are alive at ``now``."""
+        alive = []
+        for sid, session in self._session_table().items():
+            if self.session_expired(session, now) is None:
+                alive.append(sid)
+        return alive
+
+    def _live_rooms(self, now: float) -> List[str]:
+        """The room ids that hold at least one live peer."""
+        rooms = set()
+        for sid, session in self._session_table().items():
+            if self.session_expired(session, now) is not None:
+                continue
+            room_id = session.get("room_id")
+            if room_id:
+                rooms.add(room_id)
+        return list(rooms)
+
+
+@dataclass
 class Room:
     """One signalling room: exactly one device and one viewer."""
 
@@ -313,6 +532,7 @@ class SignallingService:
         turn_issuer: Optional[TurnCredentialIssuer] = None,
         session_ttl_s: float = DEFAULT_SESSION_TTL_S,
         now_fn=_now,
+        limits: Optional[SessionLimits] = None,
     ) -> None:
         self.pairing = pairing_store or PairingStore()
         self.turn = turn_issuer or TurnCredentialIssuer(secrets.token_bytes(32))
@@ -322,6 +542,16 @@ class SignallingService:
         self._rooms: Dict[str, Room] = {}
         self._peer_credential: Dict[str, str] = {}  # peer_id → credential token
         self._peer_room: Dict[str, str] = {}  # peer_id → room id
+
+        # ---- the session policy -----------------------------------------
+        #
+        # The policy owns the live-session table, so it is handed a
+        # back-reference to the service's table rather than a copy of
+        # it: the two must never disagree about which sessions are up.
+        self._sessions: Dict[str, Dict] = {}  # session_id → session record
+        self._peer_session: Dict[str, str] = {}  # peer_id → session id
+        self.policy = SessionPolicy(limits=limits or SessionLimits())
+        self.policy._session_table = lambda: self._sessions  # type: ignore[assignment]
 
     # ---- helpers ---------------------------------------------------------
 
@@ -347,6 +577,128 @@ class SignallingService:
     def room_of_peer(self, peer_id: str) -> Optional[Room]:
         room_id = self._peer_room.get(peer_id)
         return self._rooms.get(room_id) if room_id else None
+
+    # ---- the session policy ----------------------------------------------
+
+    def session_of_peer(self, peer_id: str) -> Optional[Dict]:
+        """The session record of the peer, or None when it has none."""
+        session_id = self._peer_session.get(peer_id)
+        return self._sessions.get(session_id) if session_id else None
+
+    def _session_of_room(self, room_id: str) -> Optional[Dict]:
+        """The session of the room, or None when the room has no session.
+
+        A room carries exactly one session: the device and the viewer
+        of a room share it, and the concurrency budget counts it once.
+        """
+        for session in self._sessions.values():
+            if session.get("room_id") == room_id:
+                return session
+        return None
+
+    def live_session_count(self, now: Optional[float] = None) -> int:
+        """How many sessions are alive right now."""
+        return len(self.policy._live_sessions(self._now() if now is None else now))
+
+    def live_room_count(self, now: Optional[float] = None) -> int:
+        """How many rooms hold at least one live peer right now."""
+        return len(self.policy._live_rooms(self._now() if now is None else now))
+
+    def engage_kill_switch(self, reason: str = "") -> None:
+        """Engage the administrative kill switch.
+
+        New joins are refused from now on.  The sessions that are
+        already up keep running — tearing them down is a separate,
+        deliberate act (:meth:`kill_all_sessions`).
+        """
+        self.policy.engage_kill_switch(now=self._now(), reason=reason)
+
+    def release_kill_switch(self) -> None:
+        """Release the administrative kill switch."""
+        self.policy.release_kill_switch()
+
+    def kill_all_sessions(self, reason: str = "the session was terminated by the operator") -> List[Tuple[str, Dict]]:
+        """Tear down every live session.
+
+        Returns the ``(peer_id, message)`` pairs the transport has to
+        deliver: each peer in a killed session gets a ``bye``.
+        """
+        now = self._now()
+        out: List[Tuple[str, Dict]] = []
+        for session_id in list(self._sessions.keys()):
+            out.extend(self._kill_session(session_id, now, reason))
+        return out
+
+    def reap_expired_sessions(self, now: Optional[float] = None) -> List[Tuple[str, Dict]]:
+        """Drop the sessions that have outlived their welcome.
+
+        A session is expired when it has been alive longer than the
+        hard lifetime, or when it has been idle for longer than the
+        idle timeout.  Returns the ``bye`` messages for the peers that
+        were dropped.
+        """
+        now = self._now() if now is None else now
+        out: List[Tuple[str, Dict]] = []
+        for session_id in list(self._sessions.keys()):
+            session = self._sessions.get(session_id)
+            if session is None:
+                continue
+            reason = self.policy.session_expired(session, now)
+            if reason is None:
+                continue
+            out.extend(self._kill_session(session_id, now, self._reason_text(reason)))
+        return out
+
+    @staticmethod
+    def _reason_text(code: str) -> str:
+        return {
+            PolicyViolation.SESSION_EXPIRED: "the session reached its maximum lifetime",
+            PolicyViolation.SESSION_IDLE: "the session was idle for too long",
+            PolicyViolation.KILL_SWITCH: "the service is administratively paused",
+            PolicyViolation.SESSION_LIMIT: "the service is at its session limit",
+            PolicyViolation.ROOM_LIMIT: "the service is at its room limit",
+        }.get(code, "the session was terminated")
+
+    def _kill_session(
+        self, session_id: str, now: float, reason: str
+    ) -> List[Tuple[str, Dict]]:
+        """Tear down one session and notify its peers."""
+        session = self._sessions.pop(session_id, None)
+        if session is None:
+            return []
+        out: List[Tuple[str, Dict]] = []
+        for peer_id in list(session.get("peers", [])):
+            self._peer_session.pop(peer_id, None)
+            self._leave(peer_id)
+            out.append((peer_id, {"type": "bye", "reason": reason}))
+        logger.info("session %s torn down: %s", session_id, reason)
+        return out
+
+    def _touch(self, peer_id: str, now: Optional[float] = None) -> None:
+        """Record activity on the peer's session.
+
+        The idle timeout is measured from the last *media-plane*
+        traffic, so the relay — not the join — is what keeps a session
+        alive.
+        """
+        now = self._now() if now is None else now
+        session = self.session_of_peer(peer_id)
+        if session is not None:
+            session["last_activity"] = now
+
+    def _enforce_policy(self, peer_id: str) -> Optional[Dict]:
+        """Check the peer against the policy.  Returns an error or None."""
+        now = self._now()
+        # An expired session is torn down *before* anything else, so the
+        # peer gets a clear "your session ended" rather than a
+        # confusing downstream failure.
+        session = self.session_of_peer(peer_id)
+        if session is not None:
+            reason = self.policy.session_expired(session, now)
+            if reason is not None:
+                self._kill_session(session["id"], now, self._reason_text(reason))
+                return self._error(reason, self._reason_text(reason))
+        return None
 
     # ---- the router ------------------------------------------------------
 
@@ -459,6 +811,34 @@ class SignallingService:
                     self._error("unauthorized", "unknown or expired session credential"),
                 )
             ]
+
+        # ---- the policy ----------------------------------------------------
+        #
+        # The policy is checked *before* the room is touched, so a
+        # refused join leaves no trace: no half-joined peer, no room
+        # with a dangling credential.
+        now = self._now()
+
+        # A peer that is already in a session is not a *new* session:
+        # re-joining with the same credential must not consume a second
+        # slot of the concurrency budget.
+        already_joined = peer_id in self._peer_session
+
+        if not already_joined:
+            refusal = self.policy.check_join(now)
+            if refusal is not None:
+                logger.info("join refused for %s: %s", peer_id, refusal)
+                return [(peer_id, self._error(refusal, self._reason_text(refusal)))]
+
+            # The room budget is checked only when the room is a *new*
+            # one — a room that already holds this peer's partner is
+            # not a new room.
+            if not self._room_has_live_peer(credential.room_id, now):
+                refusal = self.policy.check_room_budget(now)
+                if refusal is not None:
+                    logger.info("join refused for %s: %s", peer_id, refusal)
+                    return [(peer_id, self._error(refusal, self._reason_text(refusal)))]
+
         room = self._room(credential.room_id)
         # A room holds exactly one device and one viewer.
         existing = room.peer_of_role(credential.role)
@@ -473,6 +853,28 @@ class SignallingService:
         self._peer_credential[peer_id] = token
         self._peer_room[peer_id] = credential.room_id
 
+        # ---- the session record -------------------------------------------
+        #
+        # A *session* is a room with at least one peer in it, not a
+        # peer: the device and the viewer share one session, and the
+        # session is over when the last of them leaves.
+        session = self._session_of_room(credential.room_id)
+        if session is None:
+            session_id = f"sess-{secrets.token_hex(8)}"
+            session = {
+                "id": session_id,
+                "room_id": credential.room_id,
+                "device_id": credential.device_id,
+                "peers": [],
+                "started_at": now,
+                "last_activity": now,
+            }
+            self._sessions[session_id] = session
+        session_id = session["id"]
+        self._peer_session[peer_id] = session_id
+        if peer_id not in session["peers"]:
+            session["peers"].append(peer_id)
+
         other_role = "viewer" if credential.role == "device" else "device"
         other_peer = room.peer_of_role(other_role)
         out = [
@@ -484,6 +886,7 @@ class SignallingService:
                     "room_id": credential.room_id,
                     "device_id": credential.device_id,
                     "peer_present": other_peer is not None,
+                    "session_id": session_id,
                 },
             )
         ]
@@ -495,6 +898,19 @@ class SignallingService:
                 )
             )
         return out
+
+    def _room_has_live_peer(self, room_id: str, now: float) -> bool:
+        """Does the room already hold a live peer?
+
+        A room that holds a live peer is not a new room, so it does
+        not consume a second slot of the room budget.
+        """
+        for session in self._sessions.values():
+            if session.get("room_id") != room_id:
+                continue
+            if self.policy.session_expired(session, now) is None:
+                return True
+        return False
 
     def _on_leave(self, peer_id: str, message: Dict) -> List[Tuple[str, Dict]]:
         return self._leave(peer_id)
@@ -511,6 +927,18 @@ class SignallingService:
         room.peers.pop(peer_id, None)
         self._peer_room.pop(peer_id, None)
         self._peer_credential.pop(peer_id, None)
+
+        # The session record is dropped with its last peer, so the
+        # concurrency budget is released as soon as the session ends.
+        session_id = self._peer_session.pop(peer_id, None)
+        if session_id is not None:
+            session = self._sessions.get(session_id)
+            if session is not None:
+                if peer_id in session["peers"]:
+                    session["peers"].remove(peer_id)
+                if not session["peers"]:
+                    del self._sessions[session_id]
+
         if role is None:
             return []
         other_role = "viewer" if role == "device" else "device"
@@ -529,12 +957,27 @@ class SignallingService:
         role = room.role_of(peer_id)
         if role is None:
             return [(peer_id, self._error("not_joined", "join a room first"))]
+
+        # ---- the policy ----------------------------------------------------
+        #
+        # A session that has outlived its welcome is torn down before
+        # the message is relayed, so the peer gets a clear reason
+        # rather than a silent drop.
+        refusal = self._enforce_policy(peer_id)
+        if refusal is not None:
+            return [(peer_id, refusal)]
+
         other_role = "viewer" if role == "device" else "device"
         other_peer = room.peer_of_role(other_role)
         if other_peer is None:
             # The peer is not there yet.  The message is *not* buffered:
             # a stale offer must never be applied after an ICE restart.
             return [(peer_id, self._error("peer_absent", "the other peer has not joined"))]
+
+        # The media plane is what keeps a session alive: the idle
+        # timeout is measured from the last relayed message.
+        self._touch(peer_id)
+
         out = dict(message)
         out["from"] = role
         return [(other_peer, out)]

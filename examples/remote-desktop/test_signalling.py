@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wsproto  # noqa: E402  (path shim above)
 from signalling_core import (  # noqa: E402
     PairingStore,
+    SessionLimits,
     SignallingService,
     TurnCredentialIssuer,
 )
@@ -260,6 +261,207 @@ def test_routing() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Session limits and policy (I6)
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """A manually advanced clock, so the timeouts are testable."""
+
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _pair_up(service, device: str, viewer: str):
+    """Run the whole pairing flow and join both peers.
+
+    Returns the two credentials.
+    """
+    out = service.handle(device, {"type": "pairing_request"})
+    code = out[0][1]["code"]
+    out = service.handle(device, {"type": "device_register", "code": code})
+    device_cred = out[0][1]["credential"]
+    out = service.handle(viewer, {"type": "pair", "code": code})
+    viewer_cred = out[0][1]["credential"]
+    service.handle(device, {"type": "join", "credential": device_cred})
+    service.handle(viewer, {"type": "join", "credential": viewer_cred})
+    return device_cred, viewer_cred
+
+
+def test_session_policy() -> None:
+    section("session limits and policy")
+
+    # ---- the concurrency cap ------------------------------------------
+    clock = _Clock()
+    limits = SessionLimits(max_concurrent_sessions=2, session_lifetime_s=0, idle_timeout_s=0)
+    service = SignallingService(now_fn=clock, limits=limits)
+
+    _pair_up(service, "dev-a", "view-a")
+    check(service.live_session_count() == 1, "one pair is one session")
+    check(service.live_room_count() == 1, "one pair is one room")
+
+    # The second pair fits.
+    _pair_up(service, "dev-b", "view-b")
+    check(service.live_session_count() == 2, "the second pair fits under the cap")
+
+    # The third pair does not: both peers are refused, and neither
+    # leaves a trace in the room.
+    out = service.handle("dev-c", {"type": "pairing_request"})
+    code = out[0][1]["code"]
+    out = service.handle("dev-c", {"type": "device_register", "code": code})
+    cred_c = out[0][1]["credential"]
+    out = service.handle("view-c", {"type": "pair", "code": code})
+    view_c = out[0][1]["credential"]
+
+    out = service.handle("dev-c", {"type": "join", "credential": cred_c})
+    check(out[0][1].get("code") == "session_limit", "the cap refuses a new session")
+    out = service.handle("view-c", {"type": "join", "credential": view_c})
+    check(out[0][1].get("code") == "session_limit", "the cap refuses the partner too")
+    check(service.live_session_count() == 2, "a refused join does not consume a slot")
+
+    # A session that ends releases its slot.
+    service.disconnect("dev-b")
+    service.disconnect("view-b")
+    check(service.live_session_count() == 1, "the slot is released when the session ends")
+    out = service.handle("dev-c", {"type": "join", "credential": cred_c})
+    check(out[0][1]["type"] == "joined", "the freed slot admits the waiting pair")
+
+    # ---- re-joining does not consume a second slot --------------------
+    clock2 = _Clock()
+    limits2 = SessionLimits(max_concurrent_sessions=1, session_lifetime_s=0, idle_timeout_s=0)
+    service2 = SignallingService(now_fn=clock2, limits=limits2)
+    device_cred, viewer_cred = _pair_up(service2, "dev-x", "view-x")
+    out = service2.handle("dev-x", {"type": "join", "credential": device_cred})
+    check(out[0][1]["type"] == "joined", "re-joining with the same credential is allowed")
+    check(service2.live_session_count() == 1, "re-joining does not consume a second slot")
+
+    # ---- the kill switch ----------------------------------------------
+    clock3 = _Clock()
+    service3 = SignallingService(now_fn=clock3)
+    device_cred, viewer_cred = _pair_up(service3, "dev-k", "view-k")
+
+    service3.engage_kill_switch("maintenance window")
+    check(service3.policy.kill_switch_engaged, "the kill switch reports itself as engaged")
+
+    out = service3.handle("dev-k2", {"type": "pairing_request"})
+    code = out[0][1]["code"]
+    out = service3.handle("dev-k2", {"type": "device_register", "code": code})
+    cred_k2 = out[0][1]["credential"]
+    out = service3.handle("dev-k2", {"type": "join", "credential": cred_k2})
+    check(out[0][1].get("code") == "kill_switch", "the kill switch refuses a new join")
+
+    # The sessions that are already up are *not* torn down by the
+    # switch: it is a brake on new work.
+    out = service3.handle("view-k", {"type": "candidate", "candidate": "a=candidate:1 1 UDP 1 10.0.0.1 5000 typ host"})
+    check(out and out[0][1].get("type") == "candidate",
+          "the kill switch does not tear down a live session")
+
+    # The administrative teardown does.
+    out = service3.kill_all_sessions("the operator ended the session")
+    check(len(out) == 2, "the administrative teardown reaches both peers")
+    check(all(m.get("type") == "bye" for _, m in out), "the teardown tells the peers why")
+    check(service3.live_session_count() == 0, "the teardown leaves no live session")
+
+    # Releasing the switch admits the new work again.
+    service3.release_kill_switch()
+    check(not service3.policy.kill_switch_engaged, "the kill switch can be released")
+    out = service3.handle("dev-k2", {"type": "join", "credential": cred_k2})
+    check(out[0][1]["type"] == "joined", "the released service admits the waiting peer")
+
+    # ---- the idle timeout ---------------------------------------------
+    clock4 = _Clock()
+    limits4 = SessionLimits(max_concurrent_sessions=0, session_lifetime_s=0, idle_timeout_s=60.0)
+    service4 = SignallingService(now_fn=clock4, limits=limits4)
+    device_cred, viewer_cred = _pair_up(service4, "dev-i", "view-i")
+
+    # The media plane keeps the session alive.
+    clock4.advance(30.0)
+    service4.handle("view-i", {"type": "candidate", "candidate": "a=candidate:1 1 UDP 1 10.0.0.1 5000 typ host"})
+    clock4.advance(30.0)
+    out = service4.handle("view-i", {"type": "candidate", "candidate": "a=candidate:2 1 UDP 1 10.0.0.1 5001 typ host"})
+    check(out and out[0][1].get("type") == "candidate", "the traffic keeps the session alive")
+
+    # Now let it go quiet for longer than the timeout.
+    clock4.advance(120.0)
+    out = service4.reap_expired_sessions()
+    check(len(out) == 2, "the idle timeout drops both peers")
+    check(all(m.get("type") == "bye" for _, m in out), "the idle drop tells the peers why")
+    check(service4.live_session_count() == 0, "the idle drop leaves no live session")
+
+    # A peer that is gone is not resurrected by a stale relay.
+    out = service4.handle("view-i", {"type": "candidate", "candidate": "a=candidate:3 1 UDP 1 10.0.0.1 5002 typ host"})
+    check(out[0][1].get("code") == "not_joined", "a dropped peer cannot relay any more")
+
+    # ---- the hard session lifetime ------------------------------------
+    clock5 = _Clock()
+    limits5 = SessionLimits(max_concurrent_sessions=0, session_lifetime_s=100.0, idle_timeout_s=0)
+    service5 = SignallingService(now_fn=clock5, limits=limits5)
+    device_cred, viewer_cred = _pair_up(service5, "dev-l", "view-l")
+
+    # Traffic does *not* extend the hard lifetime: that is the point
+    # of a hard lifetime.
+    clock5.advance(60.0)
+    service5.handle("view-l", {"type": "candidate", "candidate": "a=candidate:1 1 UDP 1 10.0.0.1 5000 typ host"})
+    clock5.advance(60.0)
+    out = service5.reap_expired_sessions()
+    check(len(out) == 2, "the hard lifetime drops the session")
+    check(service5.live_session_count() == 0, "the hard lifetime leaves no live session")
+
+    # The lifetime is enforced on the relay path too, so a peer that
+    # is not reaped in time still gets a clear reason.
+    clock6 = _Clock()
+    limits6 = SessionLimits(max_concurrent_sessions=0, session_lifetime_s=10.0, idle_timeout_s=0)
+    service6 = SignallingService(now_fn=clock6, limits=limits6)
+    device_cred, viewer_cred = _pair_up(service6, "dev-e", "view-e")
+    clock6.advance(30.0)
+    out = service6.handle("view-e", {"type": "candidate", "candidate": "a=candidate:1 1 UDP 1 10.0.0.1 5000 typ host"})
+    check(out[0][1].get("code") == "session_expired",
+          "an expired session is refused on the relay path")
+
+    # ---- the room budget ----------------------------------------------
+    clock7 = _Clock()
+    limits7 = SessionLimits(max_concurrent_sessions=0, session_lifetime_s=0, idle_timeout_s=0,
+                             max_concurrent_rooms=1)
+    service7 = SignallingService(now_fn=clock7, limits=limits7)
+    _pair_up(service7, "dev-r1", "view-r1")
+
+    out = service7.handle("dev-r2", {"type": "pairing_request"})
+    code = out[0][1]["code"]
+    out = service7.handle("dev-r2", {"type": "device_register", "code": code})
+    cred_r2 = out[0][1]["credential"]
+    out = service7.handle("dev-r2", {"type": "join", "credential": cred_r2})
+    check(out[0][1].get("code") == "room_limit", "the room budget refuses a second room")
+
+    # The partner of the first pair may still join: its room already
+    # exists, so it does not consume a second room slot.
+    out = service7.handle("view-r1", {"type": "join", "credential": _credential_of(service7, "view-r1")})
+    check(out[0][1]["type"] == "joined", "the partner of a live room may still join")
+
+    # ---- the limits are validated -------------------------------------
+    try:
+        SessionLimits(max_concurrent_sessions=-1)
+        check(False, "a negative session cap is refused")
+    except ValueError:
+        check(True, "a negative session cap is refused")
+    try:
+        SessionLimits(idle_timeout_s=-1.0)
+        check(False, "a negative idle timeout is refused")
+    except ValueError:
+        check(True, "a negative idle timeout is refused")
+
+
+def _credential_of(service, peer_id: str) -> str:
+    """The credential token a peer joined with (a test helper)."""
+    return service._peer_credential[peer_id]
+
+
+# ---------------------------------------------------------------------------
 # Live WebSocket round trip
 # ---------------------------------------------------------------------------
 
@@ -338,6 +540,7 @@ def main() -> int:
     test_pairing_codes()
     test_turn_credentials()
     test_routing()
+    test_session_policy()
     try:
         asyncio.run(_run_live_check())
     except Exception as exc:  # noqa: BLE001 - the report must survive

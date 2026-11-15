@@ -1999,7 +1999,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   observed on the RTCP path", so they moved into
   `detail::FeedbackState` (`engine_feedback_state.hpp`): **423 → 381
   lines**, back under the target.  Re-verified: full build clean,
-  `ctest` **1966 / 1966 passing**.
+  `ctest` **1943 / 1943 passing** (the 1966 / 1966 figure recorded
+  earlier was taken in the `NIMRTC_BUILD_EXAMPLES=ON` tree, which
+  compiles 24 more AV1 / dav1d cases and drops one `test_nvenc_probe`
+  — 1943 + 24 − 1 = 1966).
+
+- **A multi-stream test asserted the wrong thing, and only failed on
+  the machines that matter most (v1.4, remote-desktop plan H2).**
+  `EngineMultiStream.EachStreamOwnsItsOwnCodecInstance` used to prove
+  "the two streams own separate encoder instances" by requiring the two
+  streams' `backend_id`s to differ.  But `IVideoCodec::backend_id()`
+  names the backend *implementation* ("nvenc", "openh264",
+  "software-stub"), not the instance — so on a host with an NVIDIA GPU
+  the H.264 and the H.265 encoders both legitimately report `"nvenc"`,
+  and on a software-only host they both report `"software-stub"`.  The
+  assertion therefore failed on exactly the hardware hosts where the
+  hardware path is worth having, and passed on the hosts where it was
+  least meaningful.  The test now proves instance separation
+  *structurally* — the camera stream's encoder was swapped to H.265 and
+  the screen stream still reports H.264, which could not happen if one
+  encoder were shared — and separately asserts that each stream's entry
+  still names the backend it actually ran on.  **No engine behaviour
+  changed.**
 
 - **The plugin ID naming contract is now written down, and the docs
   that describe the config surface now match the code (v1.2.0,

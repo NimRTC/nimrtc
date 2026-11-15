@@ -46,6 +46,17 @@
  * well, so the core property (independent instances) is covered even in
  * a build without the H.265 module.
  *
+ * ## Why the backend id is not the instance id
+ *
+ * `IVideoCodec::backend_id()` names the backend *implementation* — the
+ * family of code that produced the bitstream ("nvenc", "openh264",
+ * "software-stub", ...).  It is **not** an instance identity, and two
+ * streams running on the same backend legitimately report the same
+ * string.  On a host with an NVIDIA GPU the H.264 and the H.265
+ * encoder are both "nvenc"; on a software-only host they are both
+ * "software-stub".  So the per-stream backend id cannot be used as the
+ * evidence of instance separation, and the tests below do not try.
+ *
  * ## No networking
  *
  * The test opens the engine with the "shell" transport strategy and the
@@ -387,11 +398,35 @@ TEST_F(EngineMultiStream, EachStreamOwnsItsOwnCodecInstance) {
         EXPECT_EQ(cam->codec_name, "h265")
             << "the two streams must be able to use different codecs in the "
                "same session";
-        EXPECT_NE(scr->backend_id, cam->backend_id)
-            << "the two streams must run on separate encoder instances";
+
+        // The proof that the two streams do not *share* one encoder.
+        //
+        // `backend_id()` names the backend *implementation* ("nvenc",
+        // "openh264", ...), NOT the instance, so two streams that
+        // happen to run on the same hardware backend legitimately
+        // report the same id.  On a machine with an NVIDIA GPU the
+        // H.264 and the H.265 encoder are both "nvenc", and asserting
+        // that the two ids differ would fail on exactly the hosts
+        // where the hardware path is worth having.
+        //
+        // The property under test is instance separation, and the
+        // structural evidence for it is the codec identity: the camera
+        // stream's encoder was *replaced* with an H.265 one, and the
+        // screen stream still reports H.264.  Had the two streams
+        // shared a single encoder, the swap would have moved both.
+        EXPECT_NE(scr->codec_name, cam->codec_name)
+            << "the two streams must not share one encoder instance";
+
+        // Each stream's entry still names the backend it actually ran
+        // on — the id is per-stream telemetry, not a shared constant.
+        EXPECT_FALSE(scr->backend_id.empty())
+            << "the screen stream reports the backend it ran on";
+        EXPECT_FALSE(cam->backend_id.empty())
+            << "the camera stream reports the backend it ran on";
     } else {
         // Same codec id, but two distinct instances: the per-stream
-        // counters and the per-stream backend ids are the evidence.
+        // counters are the evidence.  (The backend ids are *not* — see
+        // the note at the top of this file.)
         EXPECT_EQ(scr->codec_name, cam->codec_name);
         EXPECT_EQ(scr->frames_encoded, cam->frames_encoded);
     }

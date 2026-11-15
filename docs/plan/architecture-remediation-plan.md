@@ -916,7 +916,22 @@ SR 状态等）。真正把这些成员也归位，需要先有上面那几个�
 
 结果：`engine_impl.hpp` **423 → 381 行**，重新达标。
 
-**验证**：全量 `ctest` **1942 / 1942 通过**，构建零 error 零 warning。
+**验证**：全量 `ctest` **1943 / 1943 通过**，构建零 error 零 warning。
+
+> **补充（2026-11-15 晚）**：本机（NVIDIA RTX 3060）上
+> `EngineMultiStream.EachStreamOwnsItsOwnCodecInstance` 会失败 —— 而失败的是
+> **测试的断言写错了**，不是引擎。该用例用 `backend_id` 的不同来证明"两个流
+> 各自持有独立的编码器实例"，但 `IVideoCodec::backend_id()` 报的是**后端
+> 实现**的名字（"nvenc"、"openh264"、"software-stub"），**不是实例身份**：
+> 在有 NVIDIA 卡的机器上 H.264 与 H.265 的编码器**都**合法地报 "nvenc"，在
+> 纯软件机器上则都报 "software-stub"。断言已改为用**结构性的证据**（两条流的
+> codec 身份不同 —— 若共用一个编码器，换 codec 会把两条流一起挪走）并额外
+> 断言两条流各自的 backend id 非空。修完后本机全量 `ctest` **1943 / 1943 通过**。
+>
+> **关于 1943 与 1966 两个数字**：两者都对，只是构建配置不同 ——
+> `1966` 取自 `build/ci-msvc`（`NIMRTC_BUILD_EXAMPLES=ON`，且 AV1 / dav1d 的
+> 24 个用例编进来了）；`1943` 取自 `build/hwtest`（`NIMRTC_BUILD_EXAMPLES=OFF`，
+> 少这 24 个用例，多一个 `test_nvenc_probe`）。**1943 + 24 − 1 = 1966**。
 
 **这一轮同时修掉的两条既有失败**（都不是 D1 拆分造成的，但它们让"全绿"
 无法成立，所以一并处理了）：
@@ -1171,12 +1186,15 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 
 ### 4.6 修 B7/B9 的最终形态 + Phase 4 验收
 
-- `ctest` 全绿 —— ✅ **1942 / 1942**（Windows MSVC Debug，2026-11-15 复验；
+- `ctest` 全绿 —— ✅ **1943 / 1943**（Windows MSVC Release，2026-11-15 复验；
   §4.5.1 落地后的数字是 1436 / 1436，其后因 ADR-023 的契约测试、ADR-025 /
   ADR-026 两个守卫的 self-test 与远程桌面的新测试而增长。
   之前记录的 2 个失败 —— Windows 光标源的 `GetDIBits` 崩溃，以及
   `WindowsCapture.DxgiReportsDirtyRects` 在静止桌面上的超时 —— 已在
-  §4.3 的补充里一并修掉，见那里。）
+  §4.3 的补充里一并修掉，见那里。
+  第三条失败 —— `EngineMultiStream.EachStreamOwnsItsOwnCodecInstance` ——
+  是**用例自身的断言错误**（把 backend id 当成了实例 id），在有 NVENC 的
+  机器上才暴露，已按 §4.3 的补充修好。）
 - `engine_impl.hpp` 行数 < 400 —— ✅ **381**
   （ADR-025 的 layering guard 落地时把一条 11 行的说明注释加进了这个头，
   把它推到 401 行；那条注释的完整理由本来就记在

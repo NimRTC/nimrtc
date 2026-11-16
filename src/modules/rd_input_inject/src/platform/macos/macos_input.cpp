@@ -8,6 +8,10 @@
 #include "macos_input.hpp"
 
 #import <ApplicationServices/ApplicationServices.h>
+// The virtual keycodes (`kVK_Escape`, `kVK_ANSI_A`, ...) live in the
+// IOKit HID event map, which the ApplicationServices umbrella header
+// does NOT pull in.  Without this import every `kVK_*` is undeclared.
+#import <IOKit/hidsystem/ev_keymap.h>
 #import <Foundation/Foundation.h>
 
 #include <nimrtc/core/log.hpp>

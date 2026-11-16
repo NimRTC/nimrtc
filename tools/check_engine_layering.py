@@ -31,6 +31,14 @@ allowed *everywhere* as far as the exemption list is concerned -- so the
 guard checks the concentration separately, at the symbol level:
 `rtp::PacketBuilder` may be named in exactly one engine file.
 
+A third rule guards the *size* of the engine's internal state header.
+The remediation plan §4.3 (D1) split `engine_impl.hpp` from 1076 lines
+down to under 400, and the line has already been pushed back over
+twice by unrelated features -- the remote-desktop multi-stream work
+took it to 423, the QoE collector to 391.  A budget that lives only in
+a prose document is a budget that evaporates the next time a feature
+lands; this rule makes the line count a *checkable* property.
+
 Two things make the guard worth having rather than merely nice:
 
   * A violation is a **new** concrete dependency, and it is exactly the
@@ -169,6 +177,52 @@ CONCENTRATED_SYMBOLS = {
     "rtp::PacketBuilder": "rtp_packetizer.cpp",
 }
 
+# ---------------------------------------------------------------------------
+# The remediation plan §4.3 (D1) rule: the engine's internal state header
+# must stay under its line budget.
+# ---------------------------------------------------------------------------
+#
+# `engine_impl.hpp` is the engine's private state header.  It used to be
+# a 1076-line catch-all; D1 split it into "the engine's own composition"
+# plus named collaborators, and the acceptance criterion was that the
+# header drops below 400 lines.
+#
+# The criterion was met -- and then broken twice, by features that had
+# nothing to do with the engine's structure:
+#
+#   * the remote-desktop multi-stream / sync / control planes took it
+#     from 394 back up to 423;
+#   * the QoE collector took it up to 391.
+#
+# Both were fixed by moving the offending state into a collaborator, and
+# both fixes were the *right* fix -- the header was growing because new
+# state was being added to it rather than next to it.  But the fix
+# depended on someone noticing.  This rule is that noticing, automated.
+#
+# Why the budget is a *line count* and not something more precise: the
+# point of the rule is not to police the header's contents (that is what
+# the collaborator split is for), it is to make the header's growth
+# *visible at review time*.  A member count would be a worse proxy --
+# it would move when a comment moves -- and a "no new member in Impl"
+# rule would duplicate a judgement a reviewer makes better by reading
+# the header.
+#
+# The budget counts lines the way `wc -l` does: the number of newline
+# characters.  That is the measure the plan's own history recorded
+# (1076 / 394 / 423 / 391 / 381), so the guard and the document agree.
+#
+# What to do when the guard fires: the new state belongs in a named
+# collaborator under `src/engine/src/`, next to the state it belongs
+# with -- `engine_audio_state.hpp`, `engine_video_state.hpp`,
+# `engine_feedback_state.hpp` and the rest.  See
+# `docs/plan/architecture-remediation-plan.md` §4.3.
+
+# The header the budget applies to, relative to the repository root.
+STATE_HEADER = Path("src/engine/src/engine_impl.hpp")
+
+# The maximum number of lines the header may have.
+STATE_HEADER_MAX_LINES = 400
+
 # The engine's own source root, relative to the repository root.
 ENGINE_DIR = Path("src/engine")
 
@@ -251,6 +305,34 @@ def check_concentration(root: Path) -> list[tuple[Path, int, str, str]]:
                 if re.search(r"\b" + re.escape(symbol) + r"\b", line):
                     violations.append((path, lineno, symbol, allowed))
     return violations
+
+
+def count_lines(text: str) -> int:
+    """Count the lines of a source file the way `wc -l` does.
+
+    That is: the number of newline characters.  A file that ends with a
+    newline therefore has no trailing empty line, and a file that does
+    not ends with one still counts its last (unterminated) line.
+
+    This is the measure the remediation plan's own history recorded
+    (1076 / 394 / 423 / 391 / 381 lines for `engine_impl.hpp`), so the
+    guard and the document talk about the same number.
+    """
+    return text.count("\n")
+
+
+def check_state_header(root: Path) -> tuple[int, int]:
+    """Return the state header's line count and the budget it must meet.
+
+    A *missing* header is not a violation: the check is about the
+    header's size, and a repository without the header has no D1
+    problem to report.  (0, budget) is returned in that case, which
+    passes.
+    """
+    path = root / STATE_HEADER
+    if not path.is_file():
+        return 0, STATE_HEADER_MAX_LINES
+    return count_lines(_read_text(path)), STATE_HEADER_MAX_LINES
 
 
 def _strip_comments_and_strings(text: str) -> list[str]:
@@ -377,6 +459,36 @@ def report_concentration(root: Path, violations, verbose: bool) -> int:
     return 0
 
 
+def report_state_header(root: Path, lines: int, budget: int,
+                        verbose: bool) -> int:
+    """Report the §4.3 state-header line budget."""
+    if lines > budget:
+        over = lines - budget
+        print(
+            "Remediation plan §4.3 (D1) violated: the engine's internal "
+            "state header is over its line budget.\n",
+            file=sys.stderr,
+        )
+        print(f"  {_rel(STATE_HEADER, root)}: {lines} lines "
+              f"-- the budget is {budget} (over by {over})",
+              file=sys.stderr)
+        print(
+            "\nThe header holds the engine's own composition; every other "
+            "feature's state\nlives in a named collaborator next to it.  The "
+            "new state that grew the\nheader belongs in one of those "
+            "collaborators -- not in `Impl`.\nSee docs/plan/architecture-"
+            "remediation-plan.md §4.3 and the header's own\nfile comment "
+            "(the collaborator table) for where each concern lives.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if verbose:
+        print(f"Remediation plan §4.3 (D1): OK "
+              f"({_rel(STATE_HEADER, root)} is {lines} lines, budget {budget})")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------
@@ -494,6 +606,52 @@ def self_test(root: Path) -> int:
         "engine_media.cpp",
         "rtp::demux_rtcp(compound, out);\n", False)
 
+    # ---- The §4.3 state-header line budget -----------------------------
+    def check_budget_case(name: str, body: str, expect_violation: bool,
+                          budget: int = 10) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            _write(tmp_root / STATE_HEADER, body)
+            lines, lim = check_state_header(tmp_root)
+            # The synthetic case uses a 10-line budget, so the check
+            # reads the count and compares it against *that* limit.
+            got = lines > lim if budget == STATE_HEADER_MAX_LINES \
+                else lines > budget
+            if got != expect_violation:
+                failures.append(
+                    f"{name}: {lines} lines -> "
+                    f"{'violation' if got else 'allowed'}, "
+                    f"expected {'violation' if expect_violation else 'allowed'}")
+
+    # Under the budget: fine.
+    check_budget_case("a small state header", "x\n" * 5, False)
+    # Exactly at the budget: still fine (the rule is "under", i.e. the
+    # count must not *exceed* the budget).
+    check_budget_case("a state header exactly at the budget",
+                      "x\n" * 10, False)
+    # One line over: a violation.
+    check_budget_case("a state header one line over the budget",
+                      "x\n" * 11, True)
+
+    # The line count is the `wc -l` measure: the number of newlines.
+    # A file whose last line is not newline-terminated still counts it.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root = Path(tmp)
+        _write(tmp_root / STATE_HEADER, "a\nb\nc")
+        lines, _ = check_state_header(tmp_root)
+        if lines != 2:
+            failures.append(
+                f"the line count must be the wc -l measure: "
+                f"3 lines with no trailing newline counted as {lines}")
+
+    # A missing header is not a violation -- the rule is about the
+    # header's size, and a repository without it has no D1 problem.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root = Path(tmp)
+        lines, lim = check_state_header(tmp_root)
+        if lines > lim:
+            failures.append("a missing state header must not be a violation")
+
     if failures:
         print("self-test FAILED:", file=sys.stderr)
         for f in failures:
@@ -521,10 +679,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         return self_test(root)
 
-    # Two rules, both reported: the module-level exemption list, and
-    # the Decision 4 concentration.  A failure in either is a failure.
+    # Three rules, all reported: the module-level exemption list, the
+    # Decision 4 concentration, and the §4.3 state-header line budget.
+    # A failure in any of them is a failure.
     rc = report(root, check(root), args.verbose)
     rc |= report_concentration(root, check_concentration(root), args.verbose)
+    lines, budget = check_state_header(root)
+    rc |= report_state_header(root, lines, budget, args.verbose)
     return rc
 
 

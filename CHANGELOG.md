@@ -2542,6 +2542,46 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       the XR blocks) is deliberately **not** moved — that is the
       `rtcp_processor` collaborator's separate work.
 
+- **The engine's internal state header has no loose members left, and
+  its line budget is now enforced (v1.4, architecture-remediation plan
+  §4.3, D1 wrap-up).**  The remediation plan split `engine_impl.hpp`
+  from 1076 lines into "the engine's own composition plus named
+  collaborators", with `< 400` lines as the acceptance criterion.  The
+  split held, but two things were left undone: a handful of members
+  were still loose in `Impl`, and the budget was only ever a sentence
+  in a plan document.
+
+    - The last five loose members moved.  `srtp_installed`,
+      `srtp_stats_drop` and `last_dtls_state` went into a new
+      collaborator, `detail::SecurityState`
+      (`src/engine/src/engine_security_state.hpp`), which holds one
+      thing — the engine's transport security: the DTLS handshake's
+      state-transition trace, whether the SRTP keying material is
+      installed (the **authority** on whether the outbound path is
+      encrypted), and how many packets SRTP refused to encrypt.  The
+      last two only make sense together, so a reader looking for "is
+      this session encrypted?" now finds the answer in one place.
+    - `sr_last_sent` went into `detail::TimelineState`, where the
+      ADR-017 timeline had been describing it all along — the field's
+      own file comment already claimed it.
+    - `dtls_active_inbound` was **deleted**: it had no readers left
+      since `engine.cpp` was split into five translation units.
+    - `Impl::dtls` and `Impl::srtp` — the DTLS handle and the SRTP
+      context — stay in `Impl` on purpose.  They are the objects the
+      engine *owns*, i.e. its composition, which is exactly what §4.3
+      says belongs there.  The collaborator holds the state about
+      them, not the objects.
+    - `tools/check_engine_layering.py` grew a **third rule**: the
+      internal state header must stay under 400 lines, counted the way
+      the plan's own history counted them.  The budget had already been
+      broken twice by features that had nothing to do with the engine's
+      structure (the remote-desktop multi-stream work took it to 423,
+      the QoE collector to 391), and both times the fix was the same —
+      the new state belonged in a collaborator.  The rule turns that
+      fix into something that happens at review time.  It runs on the
+      existing CI step and is also registered as the ctest case
+      `test_engine_layering`, so a local `ctest` sees it too.
+
 - **The dirty-rect incremental encode and the keyframe limiter are now
   wired *into the engine* (v1.4, remote-desktop plan B9 / B14).**  Both
   existed as module seams with their own test suites, but nothing in the

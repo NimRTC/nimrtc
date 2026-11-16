@@ -1801,7 +1801,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
                 pkt_span.size() + kSrtpAuthTagBytes);
         }
         core::ByteSpan out_payload(pkt_span.data(), pkt_span.size());
-        if (impl_->srtp_installed && impl_->srtp) {
+        if (impl_->security.srtp_installed && impl_->srtp) {
             auto* sess = impl_->srtp->get_session(impl_->audio_state.audio_ssrc,
                                                    /*outgoing=*/true);
             if (!sess) {
@@ -2667,7 +2667,7 @@ void NimRTCEngine::flush_video_feedback() noexcept {
     // produce a packet the peer's unprotect_rtcp rejects.
     core::ByteSpan out(buf.data(), written);
     std::vector<std::uint8_t> enc;
-    if (impl_->srtp_installed && impl_->srtp) {
+    if (impl_->security.srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(
             config_.video_sender_tuning.ssrc, /*outgoing=*/true);
         if (!sess) return;   // SRTP installed but no keying yet — skip.
@@ -2897,7 +2897,7 @@ void NimRTCEngine::apply_audio_bitrate(int target, int current,
 NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
 
     Stats out;
-    out.srtp_drops = impl_->srtp_stats_drop;
+    out.srtp_drops = impl_->security.srtp_stats_drop;
     // v1.1 V1: cumulative video counters (additive; zero when unused).
     out.video_frames_sent       = impl_->video_state.video_frames_sent;
     out.video_packets_sent      = impl_->video_state.video_packets_sent;
@@ -3370,7 +3370,7 @@ void NimRTCEngine::wire_default_sender() noexcept {
                                static_cast<std::ptrdiff_t>(built_written));
 
             // ---- SRTP protect (if DTLS is connected) ----------------------
-            if (impl_->srtp_installed && impl_->srtp) {
+            if (impl_->security.srtp_installed && impl_->srtp) {
                 auto* sess = impl_->srtp->get_session(
                     config_.video_sender_tuning.ssrc, /*outgoing=*/true);
                 if (!sess) {

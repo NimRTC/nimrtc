@@ -3003,3 +3003,42 @@ if(NIMRTC_BUILD_TESTS)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# The engine-layering guard.
+#
+# `tools/check_engine_layering.py` enforces three things about
+# `src/engine/`:
+#
+#   * Layout Invariant 4 (ADR-025) — the engine reaches a concrete
+#     module only through its `plugins::I*` seam, with a named,
+#     enumerated set of exemptions;
+#   * ADR-025 Decision 4 — the outbound RTP packet building is
+#     concentrated in one file;
+#   * the remediation plan §4.3 line budget for the engine's internal
+#     state header (`engine_impl.hpp`), which two unrelated features
+#     have already pushed back over once each.
+#
+# Registered as a ctest case for the same reason as the dead-module
+# guard: a developer sees it next to the other gates, and `ctest` alone
+# is enough to catch the regression.  It is skipped (not failed) when
+# no Python interpreter is available -- a missing interpreter must not
+# turn into a red build on a machine that has no Python.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_engine_layering
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_engine_layering.py"
+                         --repo-root "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(test_engine_layering PROPERTIES
+            TIMEOUT 60
+            LABELS "architecture;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the engine-layering "
+            "guard (tools/check_engine_layering.py).  CI runs it as a "
+            "dedicated step.")
+    endif()
+endif()
+

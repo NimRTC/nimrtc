@@ -331,6 +331,10 @@ jobs:
       # invariant enforceable rather than aspirational -- a new
       # concrete `#include` in src/engine/ is one line, and the coupling
       # it creates is not.
+      #
+      # The same script also enforces the remediation plan §4.3 line
+      # budget for the engine's internal state header, which two
+      # unrelated features have already pushed back over once each.
       - name: Check the engine's layering against ADR-025
         run: python tools/check_engine_layering.py
 

@@ -248,7 +248,7 @@ void NimRTCEngine::wire_stream_sender(detail::VideoStream* s) noexcept {
                                static_cast<std::ptrdiff_t>(built_written));
 
             // ---- SRTP protect (per SSRC) ----------------------------------
-            if (impl_->srtp_installed && impl_->srtp) {
+            if (impl_->security.srtp_installed && impl_->srtp) {
                 auto* sess = impl_->srtp->get_session(s->ssrc,
                                                        /*outgoing=*/true);
                 if (!sess) return;

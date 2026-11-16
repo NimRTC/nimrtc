@@ -339,7 +339,7 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
     }
 
     const core::ByteSpan out_payload(pkt_span.data(), pkt_span.size());
-    if (impl_->srtp_installed && impl_->srtp) {
+    if (impl_->security.srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(impl_->audio_state.audio_ssrc,
                                                /*outgoing=*/true);
         if (!sess) return false;

@@ -35,6 +35,12 @@ set(NIMRTC_RD_INPUT_INJECT_SOURCES
     src/input_injector.cpp
     src/injector_base.cpp
     src/key_map.cpp
+    # The macOS virtual-keycode table.  The table is *data* with no
+    # Apple type in it, so it is compiled on EVERY platform -- which is
+    # what lets the unit test verify it on the Windows and Linux legs
+    # too, where the macOS backend itself is never compiled.  A table
+    # that can only be checked on an Apple machine rots silently.
+    src/macos_keycodes.cpp
     )
 
 # ---------------------------------------------------------------------------

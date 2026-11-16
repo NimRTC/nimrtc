@@ -33,8 +33,10 @@
  * ## The virtual-key table
  *
  * The macOS virtual keycodes are *not* the neutral layout's codes, so
- * the backend carries the table.  A key the table does not know is
- * refused (see `input_injector.hpp`).
+ * the module carries the table -- in the portable header
+ * `../../macos_keycodes.hpp`, so that it can be unit tested on every
+ * CI leg.  A key the table does not know is refused (see
+ * `input_injector.hpp`).
  */
 
 #pragma once
@@ -50,13 +52,6 @@
 #include "../../injector_base.hpp"
 
 namespace nimrtc::rd_input_inject::detail {
-
-/**
- * @brief The macOS virtual keycode for a neutral key.
- *
- * @return the keycode, or 0 when the table does not know the key.
- */
-CGKeyCode macos_keycode_for(NeutralKey key) noexcept;
 
 /** The macOS backend. */
 class MacosInjector final : public InjectorBase {

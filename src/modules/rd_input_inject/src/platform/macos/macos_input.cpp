@@ -7,86 +7,18 @@
 
 #include "macos_input.hpp"
 
+// The virtual-keycode table and its neutral-key mapping.  The table is
+// portable (see ../../macos_keycodes.hpp) so that it can be unit
+// tested on every CI leg; only the *use* of it is macOS-specific.
+#include "macos_keycodes.hpp"
+
 #import <ApplicationServices/ApplicationServices.h>
-// The virtual keycodes (`kVK_Escape`, `kVK_ANSI_A`, ...) live in the
-// IOKit HID event map, which the ApplicationServices umbrella header
-// does NOT pull in.  Without this import every `kVK_*` is undeclared.
-#import <IOKit/hidsystem/ev_keymap.h>
 #import <Foundation/Foundation.h>
 
 #include <nimrtc/core/log.hpp>
 
 namespace nimrtc::rd_input_inject::detail {
 namespace {
-
-// The macOS virtual keycodes.  These are the *hardware* key positions
-// on an ANSI layout, not characters — the window server maps them to
-// characters through the active input source.
-CGKeyCode keycode_for_neutral(NeutralKey key) noexcept {
-    switch (key) {
-        case NeutralKey::kEscape:   return kVK_Escape;
-        case NeutralKey::kTab:      return kVK_Tab;
-        case NeutralKey::kEnter:    return kVK_Return;
-        case NeutralKey::kSpace:    return kVK_Space;
-        case NeutralKey::kBackspace:return kVK_Delete;
-        case NeutralKey::kDelete:   return kVK_ForwardDelete;
-        case NeutralKey::kHome:     return kVK_Home;
-        case NeutralKey::kEnd:      return kVK_End;
-        case NeutralKey::kPageUp:   return kVK_PageUp;
-        case NeutralKey::kPageDown: return kVK_PageDown;
-        case NeutralKey::kLeft:     return kVK_LeftArrow;
-        case NeutralKey::kUp:       return kVK_UpArrow;
-        case NeutralKey::kRight:    return kVK_RightArrow;
-        case NeutralKey::kDown:     return kVK_DownArrow;
-        case NeutralKey::kShift:    return kVK_Shift;
-        case NeutralKey::kControl:  return kVK_Control;
-        case NeutralKey::kAlt:      return kVK_Option;
-        case NeutralKey::kMeta:     return kVK_Command;
-
-        case NeutralKey::kF1:  return kVK_F1;
-        case NeutralKey::kF2:  return kVK_F2;
-        case NeutralKey::kF3:  return kVK_F3;
-        case NeutralKey::kF4:  return kVK_F4;
-        case NeutralKey::kF5:  return kVK_F5;
-        case NeutralKey::kF6:  return kVK_F6;
-        case NeutralKey::kF7:  return kVK_F7;
-        case NeutralKey::kF8:  return kVK_F8;
-        case NeutralKey::kF9:  return kVK_F9;
-        case NeutralKey::kF10: return kVK_F10;
-        case NeutralKey::kF11: return kVK_F11;
-        case NeutralKey::kF12: return kVK_F12;
-
-        case NeutralKey::kA: return kVK_ANSI_A;
-        case NeutralKey::kB: return kVK_ANSI_B;
-        case NeutralKey::kC: return kVK_ANSI_C;
-        case NeutralKey::kD: return kVK_ANSI_D;
-        case NeutralKey::kE: return kVK_ANSI_E;
-        case NeutralKey::kF: return kVK_ANSI_F;
-        case NeutralKey::kG: return kVK_ANSI_G;
-        case NeutralKey::kH: return kVK_ANSI_H;
-        case NeutralKey::kI: return kVK_ANSI_I;
-        case NeutralKey::kJ: return kVK_ANSI_J;
-        case NeutralKey::kK: return kVK_ANSI_K;
-        case NeutralKey::kL: return kVK_ANSI_L;
-        case NeutralKey::kM: return kVK_ANSI_M;
-        case NeutralKey::kN: return kVK_ANSI_N;
-        case NeutralKey::kO: return kVK_ANSI_O;
-        case NeutralKey::kP: return kVK_ANSI_P;
-        case NeutralKey::kQ: return kVK_ANSI_Q;
-        case NeutralKey::kR: return kVK_ANSI_R;
-        case NeutralKey::kS: return kVK_ANSI_S;
-        case NeutralKey::kT: return kVK_ANSI_T;
-        case NeutralKey::kU: return kVK_ANSI_U;
-        case NeutralKey::kV: return kVK_ANSI_V;
-        case NeutralKey::kW: return kVK_ANSI_W;
-        case NeutralKey::kX: return kVK_ANSI_X;
-        case NeutralKey::kY: return kVK_ANSI_Y;
-        case NeutralKey::kZ: return kVK_ANSI_Z;
-
-        case NeutralKey::kNone: break;
-    }
-    return 0;
-}
 
 /** The macOS button number for a mouse button. */
 CGMouseButton cg_button_for(rd_input::MouseButton button) noexcept {
@@ -100,10 +32,6 @@ CGMouseButton cg_button_for(rd_input::MouseButton button) noexcept {
 }
 
 } // namespace
-
-CGKeyCode macos_keycode_for(NeutralKey key) noexcept {
-    return keycode_for_neutral(key);
-}
 
 // ---------------------------------------------------------------------------
 // The backend
@@ -191,8 +119,9 @@ bool MacosInjector::do_inject_key(NeutralKey key,
         return false;
     }
 
-    const CGKeyCode keycode = keycode_for_neutral(key);
-    if (keycode == 0) return false;  // the table does not know the key
+    const MacVKCode keycode = macos_keycode_for(key);
+    // The sentinel is 0xFFFF, NOT 0 -- 0x00 is the real keycode for 'A'.
+    if (keycode == kMacVKUnknown) return false;  // the table does not know the key
 
     CGEventRef event = CGEventCreateKeyboardEvent(
         nullptr, keycode, action == rd_input::KeyAction::kDown);

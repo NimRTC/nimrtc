@@ -35,11 +35,22 @@
 #include <nimrtc/rd_input_inject/key_map.hpp>
 #include <nimrtc/rd_input/input_event.hpp>
 
+// The macOS keycode table is portable data (see ../src/macos_keycodes.hpp),
+// so it is reachable -- and testable -- on every platform.
+#include "../src/macos_keycodes.hpp"
+
 // The base class is not exported through the public header, so the
 // test reaches it by a relative path.  That is deliberate: the base
 // class is an implementation detail, and a test that only used the
 // public seam could not prove the state machine's behaviour.
 #include "../src/injector_base.hpp"
+
+// The macOS virtual-keycode table is portable data (see
+// ../src/macos_keycodes.hpp), so the test reaches it by a relative
+// path -- the same way it reaches the base class.  The table is
+// verified on EVERY CI leg, including the ones where the macOS
+// backend itself is never compiled.
+#include "../src/macos_keycodes.hpp"
 
 namespace {
 
@@ -466,3 +477,102 @@ TEST(RdInputInject, TheStubRefusesEveryEvent) {
     EXPECT_EQ(injector->stats().refused, 1u);
     EXPECT_EQ(injector->release_all(), 0u);
 }
+
+// ===========================================================================
+// 8. The macOS virtual-keycode table
+// ===========================================================================
+//
+// The table is *portable data* (see ../../macos_keycodes.hpp), so it is
+// verified on EVERY CI leg -- including the Windows and Linux ones,
+// where the macOS backend itself is never compiled.  That is the point:
+// a keycode table that could only be checked on an Apple machine would
+// rot silently between two Apple machines.
+//
+// The expected values are the platform's frozen ANSI-layout hardware
+// key positions.  They are spelled out literally here (rather than
+// re-derived from the table) so that a wrong *entry* in the table is
+// caught, not merely a change.
+
+TEST(RdInputInject, TheMacosKeycodeTableIsCorrect) {
+    using namespace nimrtc::rd_input_inject::detail;
+
+    // The letters.
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kA), 0x00);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kS), 0x01);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kD), 0x02);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF), 0x03);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kH), 0x04);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kG), 0x05);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kZ), 0x06);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kX), 0x07);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kC), 0x08);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kV), 0x09);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kB), 0x0B);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kQ), 0x0C);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kW), 0x0D);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kE), 0x0E);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kR), 0x0F);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kY), 0x10);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kT), 0x11);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kO), 0x1F);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kU), 0x20);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kI), 0x22);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kP), 0x23);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kL), 0x25);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kJ), 0x26);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kK), 0x28);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kN), 0x2D);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kM), 0x2E);
+
+    // The editing / navigation keys.
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kEnter), 0x24);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kTab), 0x30);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kSpace), 0x31);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kBackspace), 0x33);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kDelete), 0x75);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kEscape), 0x35);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kHome), 0x73);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kPageUp), 0x74);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kEnd), 0x77);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kPageDown), 0x79);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kLeft), 0x7B);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kRight), 0x7C);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kDown), 0x7D);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kUp), 0x7E);
+
+    // The modifiers.  On macOS the "Alt" key is the Option key and the
+    // "Meta" key is the Command key.
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kMeta), 0x37);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kShift), 0x38);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kAlt), 0x3A);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kControl), 0x3B);
+
+    // The function keys.
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF5), 0x60);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF6), 0x61);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF7), 0x62);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF3), 0x63);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF8), 0x64);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF9), 0x65);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF11), 0x67);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF10), 0x6D);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF12), 0x6F);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF4), 0x76);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF2), 0x78);
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kF1), 0x7A);
+}
+
+TEST(RdInputInject, TheMacosKeycodeTableRefusesTheUnknownKey) {
+    using namespace nimrtc::rd_input_inject::detail;
+
+    // The sentinel is 0xFFFF, NOT 0 -- 0x00 is the real code for 'A'.
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kNone), 0xFFFF);
+    EXPECT_EQ(kMacVKUnknown, 0xFFFF);
+
+    // And 'A' -- the key whose code is 0 -- must NOT be mistaken for
+    // the "unknown" sentinel.  This is the one case where a table that
+    // used 0 as its sentinel would silently refuse a valid key.
+    EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kA), 0x00);
+    EXPECT_NE(macos_keycode_for(inj::NeutralKey::kA), kMacVKUnknown);
+}
+

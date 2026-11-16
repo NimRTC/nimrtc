@@ -269,6 +269,22 @@ Two rules the operator must respect:
   device prints a *fresh* code — use the newest one. Reusing a spent
   code yields `pairing_invalid`.
 
+Two more that silently break a run:
+
+- **The device's console session must stay unlocked.** Windows locks
+  the screen when it is idle; a locked session starts `LogonUI.exe` and
+  the capture then either stops after one frame (WGC) or is refused
+  outright (DXGI reports `E_ACCESSDENIED`). Turn off the screen saver
+  and the automatic lock, or keep the session active. The device now
+  prints the DXGI reason, so a locked screen says so instead of
+  looking like a broken capture.
+- **The device needs `--inject` for the operator's input to reach the
+  desktop.** The device does not inject input events by default —
+  injecting real mouse and keyboard events into the desktop is not
+  something a test harness should do by surprise. Without `--inject`
+  the control channel still runs, but the events are dropped
+  (`injected=0`).
+
 The operator's machine needs **Python 3** (the `.bat` invokes
 `python`); everything else is self-contained.
 
@@ -380,6 +396,29 @@ Check, in this order:
 3. The device's log shows frames being *pumped*
    (`capture=N pumped=N` — the two counters must track).
 
+### 6.3a The device captures one frame and then stops
+
+`capture` sticks at 1 (or stops growing while `pumped` follows it).
+
+**The most common cause is a locked console session.** Windows starts
+`LogonUI.exe` when the screen locks, which switches the active input
+desktop to Winlogon; a WGC capture then produces a single static frame
+and no more, and a DXGI `DuplicateOutput` call is refused with
+`E_ACCESSDENIED`.
+
+Turn off the screen saver and the automatic lock, or keep the session
+active. `tsdiscon 1` followed by `tscon 1 /dest:console` clears a
+locked session without killing the running processes.
+
+The device now names the reason in its log, so the message tells you
+which case you are in:
+
+| The message says | What it means |
+|---|---|
+| `access denied ... LOCKED workstation` | The console session is locked |
+| `another program already holds the desktop-duplication slot` | A screen recorder or another remote-desktop tool owns the output; close it |
+| `this display does not support desktop duplication` | A remote or virtual display; use the WGC capture instead |
+
 ### 6.4 ICE never connects
 
 - Is the signalling service bound to `0.0.0.0`? (§3.1)
@@ -439,9 +478,13 @@ to 250 ms so a broken stream cannot turn into a PLI storm.
 - [ ] The signalling service is bound to `0.0.0.0`.
 - [ ] Both clients were given `--no-stun`.
 - [ ] The operator can `ping` the device's LAN address.
+- [ ] The device's console session is **unlocked** (no screen saver, no
+      automatic lock) — a locked session stops the capture (§6.3a).
 - [ ] The device's log shows `armed the video encoder for an IDR`.
 - [ ] The viewer's log shows `decoded` growing and `rendered` tracking it.
 - [ ] The viewer's log shows `beats` growing (the control plane is alive).
+- [ ] If the operator should control the device's desktop, the device
+      was started with `--inject` — otherwise the events are dropped.
 
 ---
 

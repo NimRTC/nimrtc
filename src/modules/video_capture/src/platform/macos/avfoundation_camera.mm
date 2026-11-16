@@ -20,6 +20,16 @@
 // device's thread picks them up — so the engine's tick thread is never
 // parked by the capture callback (RD-6).
 //
+// ## Why the delegate is a separate Objective-C object
+//
+// The frame source is a C++ class (`ICameraFrameSource` is a plain
+// C++ interface).  It cannot *also* inherit
+// `AVCaptureVideoDataOutputSampleBufferDelegate`: in Objective-C++ a
+// protocol-qualified name is a template, and a C++ class cannot
+// inherit from a template base.  So the delegate lives in its own
+// small Objective-C class, which forwards the samples into the C++
+// source through a plain C function pointer.
+//
 // ## The zero-copy path
 //
 // The `CVPixelBuffer` is a native GPU-backed surface, so the frames
@@ -40,11 +50,47 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 
-#include <atomic>
-#include <cstring>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
+
+// The C callback the Objective-C delegate uses to hand a sample over.
+// It is a plain C function pointer so that the Objective-C class does
+// not have to name any C++ type in its interface.
+using NimAvfSampleDeliverer = void (*)(void* ctx, CMSampleBufferRef sample);
+
+/**
+ * @brief The Objective-C half of the AVFoundation delegate.
+ *
+ * It owns nothing but the callback: the C++ side owns the session, the
+ * output and the slot.
+ */
+@interface NimAVFCameraDelegate
+    : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
+- (void)setDeliverer:(NimAvfSampleDeliverer)deliverer context:(void*)context;
+@end
+
+@implementation NimAVFCameraDelegate {
+    NimAvfSampleDeliverer deliverer_;
+    void* context_;
+}
+
+- (void)setDeliverer:(NimAvfSampleDeliverer)deliverer context:(void*)context {
+    deliverer_ = deliverer;
+    context_ = context;
+}
+
+- (void)captureOutput:(AVCaptureOutput*)output
+    didOutputSampleBuffer:(CMSampleBufferRef)sample
+           fromConnection:(AVCaptureConnection*)connection {
+    (void)static_cast<void*>(output);
+    (void)static_cast<void*>(connection);
+    if (deliverer_ == nullptr) return;
+    deliverer_(context_, sample);
+}
+
+@end
 
 namespace nimrtc::video_capture {
 
@@ -53,8 +99,7 @@ namespace {
 /**
  * @brief The AVFoundation camera frame source.
  */
-class AvfoundationCameraSource final : public ICameraFrameSource,
-                                      public AVCaptureVideoDataOutputSampleBufferDelegate {
+class AvfoundationCameraSource final : public ICameraFrameSource {
   public:
     AvfoundationCameraSource() = default;
 
@@ -67,18 +112,25 @@ class AvfoundationCameraSource final : public ICameraFrameSource,
     enumerate_cameras() const noexcept override {
         std::vector<plugins::CaptureDevice> devices;
 
-        AVCaptureDeviceDiscoverySession* discovery = [AVCaptureDeviceDiscoverySession
-            discoverySessionWithDeviceTypes:@[ AVCaptureDeviceTypeBuiltInWideAngleCamera,
-                                               AVCaptureDeviceTypeExternalUnknown ]
-                                  mediaType:AVMediaTypeVideo
-                                   position:AVCaptureDevicePositionUnspecified];
+        AVCaptureDeviceDiscoverySession* discovery =
+            [AVCaptureDeviceDiscoverySession
+                discoverySessionWithDeviceTypes:@[
+                    AVCaptureDeviceTypeBuiltInWideAngleCamera,
+                    AVCaptureDeviceTypeExternalUnknown
+                ]
+                                      mediaType:AVMediaTypeVideo
+                                       position:AVCaptureDevicePositionUnspecified];
         if (discovery == nil) return devices;
 
         for (AVCaptureDevice* device in discovery.devices) {
             plugins::CaptureDevice out;
-            out.id = std::string(device.uniqueID.UTF8String ?: "");
+            // The `?:` with an omitted middle operand is a GNU
+            // extension, and the project's warning set rejects it.
+            const char* uid = device.uniqueID.UTF8String;
+            out.id = std::string(uid != nullptr ? uid : "");
             if (out.id.empty()) continue;
-            out.name = std::string(device.localizedName.UTF8String ?: "");
+            const char* label = device.localizedName.UTF8String;
+            out.name = std::string(label != nullptr ? label : "");
             out.kind = plugins::CaptureDeviceKind::kCamera;
 
             // The largest format the device offers.
@@ -135,16 +187,22 @@ class AvfoundationCameraSource final : public ICameraFrameSource,
 
     plugins::Status open(const std::string& device_id,
                          const plugins::CaptureFormat& format) noexcept override {
+        (void)format;
         close();
 
         AVCaptureDevice* device = nil;
-        AVCaptureDeviceDiscoverySession* discovery = [AVCaptureDeviceDiscoverySession
-            discoverySessionWithDeviceTypes:@[ AVCaptureDeviceTypeBuiltInWideAngleCamera,
-                                               AVCaptureDeviceTypeExternalUnknown ]
-                                  mediaType:AVMediaTypeVideo
-                                   position:AVCaptureDevicePositionUnspecified];
+        AVCaptureDeviceDiscoverySession* discovery =
+            [AVCaptureDeviceDiscoverySession
+                discoverySessionWithDeviceTypes:@[
+                    AVCaptureDeviceTypeBuiltInWideAngleCamera,
+                    AVCaptureDeviceTypeExternalUnknown
+                ]
+                                      mediaType:AVMediaTypeVideo
+                                       position:AVCaptureDevicePositionUnspecified];
         for (AVCaptureDevice* candidate in discovery.devices) {
-            if (device_id == std::string(candidate.uniqueID.UTF8String ?: "")) {
+            const char* uid = candidate.uniqueID.UTF8String;
+            if (uid == nullptr) continue;
+            if (device_id == std::string(uid)) {
                 device = candidate;
                 break;
             }
@@ -158,7 +216,7 @@ class AvfoundationCameraSource final : public ICameraFrameSource,
 
         AVCaptureVideoDataOutput* output = [[AVCaptureVideoDataOutput alloc] init];
         output.videoSettings = @{
-            (id)kCVPixelBufferPixelFormatTypeKey :
+            (__bridge id)kCVPixelBufferPixelFormatTypeKey :
                 @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
         };
         output.alwaysDiscardsLateVideoFrames = YES;
@@ -172,27 +230,36 @@ class AvfoundationCameraSource final : public ICameraFrameSource,
         // The output's delegate receives the frames on its own queue.
         dispatch_queue_t queue =
             dispatch_queue_create("com.nimrtc.camera.avfoundation", DISPATCH_QUEUE_SERIAL);
-        [output setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)self
-                                  queue:queue];
-        self.queue_ = queue;
+
+        NimAVFCameraDelegate* delegate = [[NimAVFCameraDelegate alloc] init];
+        [delegate setDeliverer:&AvfoundationCameraSource::deliver_sample
+                        context:this];
+        [output setSampleBufferDelegate:delegate queue:queue];
 
         [session startRunning];
 
         session_ = session;
         output_ = output;
+        delegate_ = delegate;
+        queue_ = queue;
         return plugins::kOk;
     }
 
-    void close() noexcept {
-        if (session_ != nil) {
-            [session_ stopRunning];
-            session_ = nil;
-        }
+    void close() noexcept override {
+        // The delegate is detached *first*: after this call AVFoundation
+        // makes no further callbacks, so the C++ object can be torn
+        // down safely.
         if (output_ != nil) {
             [output_ setSampleBufferDelegate:nil queue:NULL];
             output_ = nil;
         }
+        delegate_ = nil;
         queue_ = nil;
+
+        if (session_ != nil) {
+            [session_ stopRunning];
+            session_ = nil;
+        }
 
         std::lock_guard<std::mutex> lock(mutex_);
         pending_.clear();
@@ -229,31 +296,27 @@ class AvfoundationCameraSource final : public ICameraFrameSource,
     }
 
   private:
-    // ---- AVCaptureVideoDataOutputSampleBufferDelegate ---------------------
+    // ---- The delegate callback -------------------------------------------
     //
     // AVFoundation hands the frame over on its own queue, and the
     // camera's thread picks it up from the slot.
-    void captureOutput:(AVCaptureOutput*)output
-        didOutputSampleBuffer:(CMSampleBufferRef)sample
-               fromConnection:(AVCaptureConnection*)connection {
-        (void)output;
-        (void)connection;
-        handle_sample(sample);
+    static void deliver_sample(void* ctx, CMSampleBufferRef sample) {
+        if (ctx == nullptr) return;
+        static_cast<AvfoundationCameraSource*>(ctx)->handle_sample(sample);
     }
 
-    // The delegate callback: AVFoundation hands the frame over on its
-    // own queue, and the camera's thread picks it up from the slot.
     void handle_sample(CMSampleBufferRef sample) {
         if (sample == nullptr) return;
 
         CVImageBufferRef image = CMSampleBufferGetImageBuffer(sample);
         if (image == nullptr) return;
 
-        const std::size_t y_size = CVPixelBufferGetPlaneCount(image) > 0
+        const std::size_t plane_count = CVPixelBufferGetPlaneCount(image);
+        const std::size_t y_size = plane_count > 0
                                        ? CVPixelBufferGetBytesPerRowOfPlane(image, 0) *
                                              CVPixelBufferGetHeightOfPlane(image, 0)
                                        : 0;
-        const std::size_t uv_size = CVPixelBufferGetPlaneCount(image) > 1
+        const std::size_t uv_size = plane_count > 1
                                         ? CVPixelBufferGetBytesPerRowOfPlane(image, 1) *
                                               CVPixelBufferGetHeightOfPlane(image, 1)
                                         : 0;
@@ -271,14 +334,15 @@ class AvfoundationCameraSource final : public ICameraFrameSource,
                          y_plane + row * y_stride + CVPixelBufferGetWidthOfPlane(image, 0));
         }
 
-        if (uv_size > 0 && CVPixelBufferGetPlaneCount(image) > 1) {
+        if (uv_size > 0 && plane_count > 1) {
             const std::uint8_t* uv_plane =
                 static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(image, 1));
             const std::size_t uv_stride = CVPixelBufferGetBytesPerRowOfPlane(image, 1);
             const std::size_t uv_height = CVPixelBufferGetHeightOfPlane(image, 1);
             for (std::size_t row = 0; row < uv_height; ++row) {
                 bytes.insert(bytes.end(), uv_plane + row * uv_stride,
-                             uv_plane + row * uv_stride + CVPixelBufferGetWidthOfPlane(image, 1));
+                             uv_plane + row * uv_stride +
+                                 CVPixelBufferGetWidthOfPlane(image, 1));
             }
         }
 
@@ -295,6 +359,7 @@ class AvfoundationCameraSource final : public ICameraFrameSource,
 
     AVCaptureSession* session_ = nil;
     AVCaptureVideoDataOutput* output_ = nil;
+    NimAVFCameraDelegate* delegate_ = nil;
     dispatch_queue_t queue_ = nil;
 
     std::mutex mutex_;

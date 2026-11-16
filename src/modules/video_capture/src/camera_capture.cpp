@@ -232,7 +232,7 @@ void CameraCapture::capture_loop() noexcept {
             continue;
         }
         if (status != plugins::kOk) {
-            ++stats_.device_errors;
+            ++device_errors_;
             running_.store(false, std::memory_order_release);
             break;
         }
@@ -249,20 +249,20 @@ void CameraCapture::capture_loop() noexcept {
             queue_.push(pixels.data(), size, stride, width, height, ts, seq, dirty);
         switch (outcome) {
             case CaptureQueue::PushResult::kQueued:
-                ++stats_.frames_captured;
+                ++frames_captured_;
                 break;
             case CaptureQueue::PushResult::kDroppedOldest:
-                ++stats_.frames_captured;
-                ++stats_.frames_dropped;
+                ++frames_captured_;
+                ++frames_dropped_;
                 break;
             case CaptureQueue::PushResult::kRejected:
                 // The camera's default policy drops the *newest* frame:
                 // the queue keeps what it had, and the arrival is
                 // counted as a drop.
-                ++stats_.frames_dropped;
+                ++frames_dropped_;
                 break;
         }
-        ++stats_.frames_cpu_staged;
+        ++frames_cpu_staged_;
 
         if (cb_) {
             plugins::CaptureFrame view;
@@ -342,7 +342,12 @@ void CameraCapture::set_frame_callback(plugins::CaptureFrameCallback cb) noexcep
 }
 
 plugins::CaptureStats CameraCapture::stats() const noexcept {
-    return stats_;
+    plugins::CaptureStats s;
+    s.frames_captured = frames_captured_.load(std::memory_order_relaxed);
+    s.frames_dropped = frames_dropped_.load(std::memory_order_relaxed);
+    s.frames_cpu_staged = frames_cpu_staged_.load(std::memory_order_relaxed);
+    s.device_errors = device_errors_.load(std::memory_order_relaxed);
+    return s;
 }
 
 // ---------------------------------------------------------------------------

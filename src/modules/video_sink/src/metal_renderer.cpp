@@ -881,7 +881,10 @@ plugins::Status MetalRenderer::render(
     // cast is spelled on the plain `id` and the protocol-qualified
     // variable is then assigned from it -- an `id` converts to any
     // qualified `id` without a cast.
-    __bridge id bridged = (__bridge id)surface.handle().handle;
+    //
+    // `__bridge` qualifies a *cast expression*, not a declaration, so
+    // the variable itself is declared as a plain `id`.
+    id bridged = (__bridge id)surface.handle().handle;
     id<MTLTexture> texture = bridged;
     [encoder setFragmentTexture:texture atIndex:0];
     const float dest_rect[4] = {0.0f, 0.0f, 1.0f, 1.0f};

@@ -338,7 +338,17 @@ private:
 
     CaptureQueue queue_{2};
     plugins::CaptureFrameCallback cb_;
-    plugins::CaptureStats stats_{};
+    /**
+     * @brief The capture counters.
+     *
+     * The capture thread writes them and the consumer reads them
+     * (`stats()`), so they are atomics: a plain `uint64_t` would be a
+     * data race, and ThreadSanitizer says so.
+     */
+    std::atomic<std::uint64_t> frames_captured_{0};
+    std::atomic<std::uint64_t> frames_dropped_{0};
+    std::atomic<std::uint64_t> frames_cpu_staged_{0};
+    std::atomic<std::uint64_t> device_errors_{0};
 
     plugins::CaptureFormat negotiated_{};
 

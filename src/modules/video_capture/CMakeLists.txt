@@ -110,6 +110,16 @@ if(APPLE)
         # AVFoundation's AVCaptureSession.
         src/platform/macos/avfoundation_camera.mm
         )
+
+    # The AVFoundation camera source is compiled with ARC.  Without it
+    # every `alloc` has to be paired with a `release` by hand, and the
+    # `dispatch_queue_t` objects have to be released explicitly too --
+    # a discipline that is easy to get wrong and impossible to check
+    # with the compiler.  With ARC the ownership is described by the
+    # strong `__strong` variables and the compiler enforces it.
+    set_source_files_properties(
+        src/platform/macos/avfoundation_camera.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
 # ---------------------------------------------------------------------------

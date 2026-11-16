@@ -410,7 +410,54 @@ REACHABILITY_ROOTS = {
     "demo-p2p",
     "demo-wtserver",
     "loopback-p2p",
+    # The remote-desktop examples (plan Track G).  `rd_device` is the
+    # shipped consumer of the `rd_input_inject` module (the OS input
+    # injection), and `rd_viewer` is the shipped consumer of the
+    # `rd_input` module's capture-side policy (the coalescer, the
+    # binder and the safety filter).  Both are real executables an
+    # operator runs, so both are roots of the reachability walk — a
+    # module consumed only by one of them is part of the product.
+    "rd_device",
+    "rd_viewer",
 }
+
+
+# ---------------------------------------------------------------------------
+# Pending-wiring waivers
+# ---------------------------------------------------------------------------
+#
+# A module may legitimately land *before* the item that wires it into the
+# product, when the plan schedules them that way: the module carries the
+# substance (a format, an algorithm, a policy), and a later item adds the
+# engine / example wiring.  Without a waiver the guard reports such a
+# module as `[orphan]` -- which is exactly the right verdict for a module
+# nobody ever intends to wire, and exactly the wrong one for a module
+# whose wiring is a scheduled, separately-owned work item.
+#
+# A waiver is therefore *named*, *dated* and *annotated with the work item
+# that removes it*.  Widening this list is a visible act, the same shape as
+# the ADR-025 exemption list in `check_engine_layering.py`: the point is
+# that a reader can see which module is waiting for what, and a reviewer
+# can tell when the waiver has outlived its work item.
+#
+# A waived module is still reported by `--verbose` (with the `pending`
+# tag) so it does not silently vanish from the consumption map, and it is
+# still reported when the waiver's stated reason no longer holds.
+#
+# The list is currently empty: both modules that used to be here have
+# been wired into the engine.
+#
+#   rd_input — remote-desktop plan Track G.  The engine links
+#   `nimrtc::rd_input` and resolves its control channel through the
+#   `plugins::IControlChannel` seam, so the module is reachable from
+#   the composition root.
+#
+#   rd_qoe — remote-desktop plan Track J (J3 / J6).  The engine links
+#   `nimrtc::rd_qoe` and resolves its collector through the
+#   `plugins::IQoeCollector` seam; the engine pushes the presented
+#   frames, the drops and the input events into it, so the module is
+#   reachable from the composition root.
+PENDING_WIRING: dict[str, str] = {}
 
 
 def compute_reachable(edges: dict[str, set[str]], roots: set[str]) -> set[str]:
@@ -480,6 +527,19 @@ def check(root: Path, verbose: bool = False) -> list[str]:
                     tag = "ok-reg "
                     who = "registrar table"
                 print(f"  [{tag}] {name:24s} <- {who}")
+            continue
+
+        # ---- pending wiring: named, documented, and still reported ------
+        #
+        # The module has no path from the composition root *yet*, but a
+        # scheduled work item owns that wiring (see PENDING_WIRING above).
+        # It is reported as `[pending]` rather than as a failure, so the
+        # module stays visible in the consumption map and a reviewer can
+        # see it is waiting for a named item rather than being forgotten.
+        if name in PENDING_WIRING:
+            if verbose:
+                print(f"  [pending] {name:24s} <- awaiting wiring: "
+                      f"{PENDING_WIRING[name]}")
             continue
 
         # ---- neither: the module is dead ---------------------------------

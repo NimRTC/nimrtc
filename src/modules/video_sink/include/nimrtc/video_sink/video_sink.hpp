@@ -48,6 +48,12 @@ namespace nimrtc::video_sink {
  *  responsibility — the sink does not serialize concurrent renders. */
 class NIMRTC_API_STABLE HeadlessSink : public plugins::IVideoSink {
 public:
+    // `IVideoSink` declares three `render()` overloads.  A derived
+    // class that overrides one of them hides the others (the usual C++
+    // name-hiding rule), which GCC's `-Woverloaded-virtual` rejects.
+    // The `using` declaration brings the base overloads back.
+    using plugins::IVideoSink::render;
+
     explicit HeadlessSink(plugins::VideoSinkConfig cfg) noexcept;
     ~HeadlessSink() override;
 
@@ -61,8 +67,20 @@ public:
 
     // ---- plugins::IVideoSink -----------------------------------------------
     plugins::Status render(const plugins::VideoSourceFrame& frame) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface,
+                           const plugins::VideoFrameInfo& info) noexcept override;
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+    plugins::Status set_config(plugins::VideoSinkConfig cfg) noexcept override;
+
+    // ---- Capability probes ------------------------------------------------
+    //
+    // The headless sink drops the pixels either way, so it accepts both
+    // delivery paths.  Saying so is what lets the engine take the GPU
+    // path when the decoder can produce a surface.
+    bool supports_gpu_render() const noexcept override { return true; }
+    bool supports_cpu_render() const noexcept override { return true; }
 
 private:
     plugins::VideoSinkConfig cfg_;
@@ -78,6 +96,9 @@ private:
  *  is strictly increasing. Catches timestamp mishandling in tests. */
 class NIMRTC_API_STABLE PinnedSink : public plugins::IVideoSink {
 public:
+    // See `HeadlessSink` for why the `using` declaration is needed.
+    using plugins::IVideoSink::render;
+
     explicit PinnedSink(plugins::VideoSinkConfig cfg) noexcept;
     ~PinnedSink() override;
 
@@ -91,8 +112,16 @@ public:
 
     // ---- plugins::IVideoSink -----------------------------------------------
     plugins::Status render(const plugins::VideoSourceFrame& frame) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface,
+                           const plugins::VideoFrameInfo& info) noexcept override;
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+    plugins::Status set_config(plugins::VideoSinkConfig cfg) noexcept override;
+
+    // ---- Capability probes ------------------------------------------------
+    bool supports_gpu_render() const noexcept override { return true; }
+    bool supports_cpu_render() const noexcept override { return true; }
 
 private:
     plugins::VideoSinkConfig cfg_;
@@ -130,6 +159,9 @@ NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoSink> create_pinned_sink(
  *  (or wraps in unique_ptr) after no longer needed. */
 class NIMRTC_API_STABLE PluginAdapter : public plugins::IVideoSink {
 public:
+    // See `HeadlessSink` for why the `using` declaration is needed.
+    using plugins::IVideoSink::render;
+
     explicit PluginAdapter(std::unique_ptr<plugins::IVideoSink> concrete) noexcept;
     ~PluginAdapter() override;
 
@@ -143,8 +175,24 @@ public:
 
     // ---- plugins::IVideoSink -----------------------------------------------
     plugins::Status render(const plugins::VideoSourceFrame& frame) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface,
+                           const plugins::VideoFrameInfo& info) noexcept override;
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+    plugins::Status set_config(plugins::VideoSinkConfig cfg) noexcept override;
+
+    // ---- Capability probes ------------------------------------------------
+    //
+    // The adapter forwards the probes to the sink it wraps: the adapter
+    // is what the engine sees, so a GPU-only concrete sink must be
+    // reported as GPU-capable through the adapter too.
+    bool supports_gpu_render() const noexcept override {
+        return concrete_ && concrete_->supports_gpu_render();
+    }
+    bool supports_cpu_render() const noexcept override {
+        return concrete_ && concrete_->supports_cpu_render();
+    }
 
 private:
     std::unique_ptr<plugins::IVideoSink> concrete_;

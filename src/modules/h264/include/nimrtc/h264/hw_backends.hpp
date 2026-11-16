@@ -4,22 +4,27 @@
  *
  * Mirrors Sunshine's `video.cpp` backend table:
  *
- *   priority  backend        platforms                impl plugin
- *   ───────── ────────────── ─────────────────────── ──────────────────
- *      450    nvenc_h264     Win+Linux NVIDIA         src/plugins/nvenc/
- *      420    mediacodec_h264 Android                  src/plugins/mediacodec/
- *      400    videotoolbox_h264 macOS/iOS              src/plugins/videotoolbox/
- *      380    amf_h264       Windows AMD              src/plugins/amf/
- *      360    vaapi_h264      Linux Intel/AMD          src/plugins/vaapi/
- *      340    quicksync_h264  Windows Intel            src/plugins/qsv/
- *      320    dxva_h264       Windows fallback         src/plugins/dxva/
- *       80    ffmpeg_h264     all                      src/plugins/ffmpeg/
- *       50    openh264_h264   all                      src/plugins/openh264/
- *       10    stub_h264       all                      this module
+ *   priority  backend            platforms                impl plugin
+ *   ───────── ────────────────── ─────────────────────── ──────────────────────
+ *      450    nvenc_h264          Win+Linux NVIDIA         src/modules/nvcodec/
+ *      430    nvdec_h264          Win+Linux NVIDIA         src/modules/nvcodec/
+ *      420    mediacodec_h264     Android                  src/plugins/mediacodec/
+ *      400    videotoolbox_h264   macOS                    src/modules/nvcodec/
+ *      380    amf_h264            Windows AMD              src/modules/h264/
+ *      360    vaapi_h264          Linux Intel/AMD          src/modules/h264/
+ *      340    quicksync_h264      Windows+Linux Intel      src/modules/h264/
+ *      320    dxva_h264           Windows fallback         src/modules/h264/
+ *       50    openh264_h264       all                      src/modules/h264/
+ *        0    stub_h264           all                      this module
  *
  * `available()` for each entry is implemented in hw_backends.cpp and depends
  * on compile-time switches (`NIMRTC_PLUGINS_NVENC_ON` etc.) plus runtime
  * probes (driver loaded, HW present, profile supported).
+ *
+ * A row that exists in the table but not in the silicon reports
+ * `available() == false` **with a reason** (`unavailable_reason()`), so an
+ * unsupported combination is explicitly reported rather than silently
+ * ignored (remote-desktop plan B5a / B5 / B6).
  *
  * `create()` returns either:
  *   - A real IVideoCodec derived from a plugin implementation

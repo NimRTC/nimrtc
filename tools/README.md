@@ -159,6 +159,43 @@ python tools/sanitizer_gate.py --self-test
 
 The self-test runs in the `docs / markdown links` job on every push.
 
+## The merge-gate guard
+
+The repository's merge gate is a GitHub Ruleset, mirrored in
+`.github/rulesets/protect-main.json` so that a change to the gate is a
+pull request rather than a click in the web UI.
+
+| Script | Purpose |
+|--------|---------|
+| `check_ci_ruleset.py` | Compares the ruleset mirror against the CI workflows and fails when the two disagree. Wired into CI as the `docs / markdown links` job and into CTest as `test_ci_ruleset`. |
+| `apply_ci_ruleset.py` | Writes the mirror to the GitHub repository (`--apply`), or reports the difference (`--check`). Needs a token with write access. |
+
+```
+python tools/check_ci_ruleset.py --verbose
+python tools/check_ci_ruleset.py --self-test
+python tools/apply_ci_ruleset.py --check
+python tools/apply_ci_ruleset.py --apply
+```
+
+The two sets have to be **equal**, not merely one a subset of the other,
+because both directions fail badly:
+
+| Failure | Symptom |
+|---------|---------|
+| the gate requires a check no workflow produces | every merge is blocked, forever, with nothing to fix from the PR page |
+| the matrix produces a check the gate does not require | the check costs runner time and catches nothing |
+
+The trap the guard was written for is `windows / fast`: it comes from
+`ci-fast.yml`, which deliberately does *not* run on `main`
+(`branches-ignore: [main, 'release/**']`), so requiring it would
+deadlock the repository.
+
+A check counts as "produced" only when its workflow runs both on a push
+to `main` **and** on a pull request into `main`.  The second half is
+the one that is easy to miss: `pull_request: branches: [main]` filters
+on the PR's *base* branch, so a workflow that omits it never runs for
+the merge it is supposed to be gating.
+
 ## Release evidence (the seven-day soak)
 
 The v1.1 release gate needs one evidence record per platform per day.

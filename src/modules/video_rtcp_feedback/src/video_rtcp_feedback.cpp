@@ -380,6 +380,126 @@ core::Result<NackPacket> parse_nack(core::ByteSpan input) noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// Region refresh (remote-desktop plan B9)
+// ---------------------------------------------------------------------------
+
+std::size_t build_region_refresh(core::MutableByteSpan output,
+                                  const RegionRefreshPacket& p) noexcept {
+    // A region-refresh message with no region carries no information:
+    // the peer would learn "something changed somewhere", which is the
+    // PLI's job, not this message's.
+    if (p.regions.empty()) return 0;
+
+    const std::size_t total =
+        region_refresh_size(p.regions.size());
+    if (output.size() < total) return 0;
+
+    // RTCP header: V=2, P=0, subtype=0, PT=204 (APP).
+    write_header(output.data(), /*fmt=*/0, kAppPt, length_from_bytes(total));
+    write_be32(output.data() + kRtcpHeaderSize, p.sender_ssrc);
+
+    // The APP name ("NRGN") and the media SSRC.
+    //
+    // The wire layout is:
+    //   [0..3]   RTCP header
+    //   [4..7]   sender SSRC
+    //   [8..11]  name ("NRGN")
+    //   [12..15] media SSRC
+    //   [16..]   the rectangles
+    //
+    // which is exactly `kRegionRefreshHeaderSize` bytes of preamble.
+    std::uint8_t* fp = output.data() + kRtcpHeaderSize + 4;
+    std::memcpy(fp, kRegionRefreshName, sizeof(kRegionRefreshName));
+    fp += sizeof(kRegionRefreshName);
+    write_be32(fp, p.media_ssrc);
+    fp += 4;
+
+    for (const RegionRect& r : p.regions) {
+        write_be32(fp,     r.x);
+        write_be32(fp + 4, r.y);
+        write_be32(fp + 8, r.width);
+        write_be32(fp + 12, r.height);
+        fp += kRegionRefreshEntrySize;
+    }
+    return total;
+}
+
+bool is_region_refresh(core::ByteSpan input) noexcept {
+    if (input.size() < kRegionRefreshHeaderSize) return false;
+    const std::uint8_t b0 = input[0];
+    const std::uint8_t version = static_cast<std::uint8_t>((b0 >> 6) & 0x03u);
+    if (version != 2) return false;
+    if (input[1] != kAppPt) return false;
+    // The name sits right after the sender SSRC.
+    return std::memcmp(input.data() + kRtcpHeaderSize + 4,
+                       kRegionRefreshName, sizeof(kRegionRefreshName)) == 0;
+}
+
+core::Result<RegionRefreshPacket> parse_region_refresh(
+        core::ByteSpan input) noexcept {
+    if (input.size() < kRegionRefreshHeaderSize) {
+        return core::Result<RegionRefreshPacket>::fail(
+            core::ErrorCode::ProtocolError,
+            "video_rtcp_feedback: region refresh truncated (header)");
+    }
+    const std::uint8_t b0 = input[0];
+    const std::uint8_t version = static_cast<std::uint8_t>((b0 >> 6) & 0x03u);
+    if (version != 2) {
+        return core::Result<RegionRefreshPacket>::fail(
+            core::ErrorCode::ProtocolError,
+            "video_rtcp_feedback: region refresh RTCP version != 2");
+    }
+    if (input[1] != kAppPt) {
+        return core::Result<RegionRefreshPacket>::fail(
+            core::ErrorCode::ProtocolError,
+            "video_rtcp_feedback: region refresh is not an APP packet");
+    }
+    if (!is_region_refresh(input)) {
+        return core::Result<RegionRefreshPacket>::fail(
+            core::ErrorCode::ProtocolError,
+            "video_rtcp_feedback: APP packet is not a region refresh");
+    }
+
+    const std::uint16_t length_words = read_be16(input.data() + 2);
+    const std::size_t total_bytes =
+        static_cast<std::size_t>(length_words + 1u) * 4u;
+    if (total_bytes < kRegionRefreshHeaderSize) {
+        return core::Result<RegionRefreshPacket>::fail(
+            core::ErrorCode::ProtocolError,
+            "video_rtcp_feedback: region refresh length field too small");
+    }
+    if (input.size() < total_bytes) {
+        return core::Result<RegionRefreshPacket>::fail(
+            core::ErrorCode::ProtocolError,
+            "video_rtcp_feedback: region refresh truncated (body)");
+    }
+    const std::size_t body = total_bytes - kRegionRefreshHeaderSize;
+    if (body % kRegionRefreshEntrySize != 0) {
+        return core::Result<RegionRefreshPacket>::fail(
+            core::ErrorCode::ProtocolError,
+            "video_rtcp_feedback: region refresh body not 16-byte aligned");
+    }
+
+    RegionRefreshPacket p;
+    p.sender_ssrc = read_be32(input.data() + kRtcpHeaderSize);
+    p.media_ssrc  = read_be32(input.data() + kRtcpHeaderSize + 8);
+
+    const std::size_t n = body / kRegionRefreshEntrySize;
+    p.regions.reserve(n);
+    const std::uint8_t* fp = input.data() + kRegionRefreshHeaderSize;
+    for (std::size_t i = 0; i < n; ++i) {
+        RegionRect r;
+        r.x      = read_be32(fp);
+        r.y      = read_be32(fp + 4);
+        r.width  = read_be32(fp + 8);
+        r.height = read_be32(fp + 12);
+        p.regions.push_back(r);
+        fp += kRegionRefreshEntrySize;
+    }
+    return core::Result<RegionRefreshPacket>::ok(p);
+}
+
+// ---------------------------------------------------------------------------
 // NACK FCI packing helpers
 // ---------------------------------------------------------------------------
 
@@ -442,14 +562,21 @@ std::vector<std::uint16_t> unpack_nack_entries(const NackPacket& p) noexcept {
 
 FirCoalescer::FirCoalescer(std::uint32_t sender_ssrc) noexcept
     : sender_ssrc_(sender_ssrc),
-      next_seq_nr_(0) {}
+      next_seq_nr_(0),
+      min_interval_us_(kFirMinIntervalUs) {}
+
+FirCoalescer::FirCoalescer(std::uint32_t sender_ssrc,
+                           std::int64_t min_interval_us) noexcept
+    : sender_ssrc_(sender_ssrc),
+      next_seq_nr_(0),
+      min_interval_us_(min_interval_us < 0 ? 0 : min_interval_us) {}
 
 bool FirCoalescer::should_send(std::uint32_t media_ssrc, std::int64_t now_us) noexcept {
     auto it = last_sent_us_.find(media_ssrc);
     if (it == last_sent_us_.end()) {
         return true;                          // never sent
     }
-    return (now_us - it->second) >= kFirMinIntervalUs;
+    return (now_us - it->second) >= min_interval_us_;
 }
 
 void FirCoalescer::mark_sent(std::uint32_t media_ssrc, std::int64_t now_us) noexcept {

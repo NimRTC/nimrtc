@@ -36,15 +36,21 @@
 #include <atomic>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 
 #include <nimrtc/plugins/video_pipeline.hpp>
 
 #include "audio_routing.hpp"
+#include "engine_gpu_mailbox.hpp"
 #include "engine_ref_frame_table.hpp"
+#include "engine_render_state.hpp"
+#include "engine_stage_timing.hpp"
 #include "video_codec_config.hpp"
 #include "video_negotiation.hpp"
+#include "video_render_path.hpp"
 #include "video_stats_bridge.hpp"
+#include "video_stream_set.hpp"
 
 namespace nimrtc::engine::detail {
 
@@ -72,6 +78,36 @@ struct VideoState {
     // the path is actually being taken.
     std::uint64_t video_zero_copy_frames    = 0;
     std::uint64_t video_zero_copy_fallbacks = 0;
+
+    // ---- Video receive-side delivery path (remote-desktop plan E1) -------
+    //
+    // Which route a decoded frame takes from the decoder to the sink.
+    // Decided ONCE, at `open()` time, from the decoder's
+    // `supports_zero_copy_decode()` and the sink's
+    // `supports_gpu_render()` / `supports_cpu_render()` — see
+    // `src/engine/src/video_render_path.hpp` for the rule and for why
+    // it lives in a pure, unit-tested function.
+    //
+    // `kGpuSurface` means the decoder hands back a native surface and
+    // the sink presents it (no host copy).  `kCpuStaging` is the
+    // universal fallback.  `kIncompatible` means neither path is
+    // possible — the engine reports `kVideoSinkIncompatible` at
+    // `open()` time and the receive pipeline renders nothing.
+    detail::VideoRenderPath video_render_path = detail::VideoRenderPath::kCpuStaging;
+
+    /** The decoder's zero-copy decode output pool, when the GPU path is
+     *  in use.  The engine acquires a surface from it per frame and
+     *  hands it to the sink.  Null when the GPU path is not in use. */
+    std::shared_ptr<plugins::GpuBufferPool> video_decode_pool;
+
+    /** The receive-side zero-copy counters.  `video_rx_gpu_frames` counts
+     *  the frames that reached the sink as a GPU surface;
+     *  `video_rx_cpu_frames` counts the frames that were staged to host
+     *  memory first.  The two make the decision observable from the
+     *  outside — a host that expects the GPU path can see whether it is
+     *  actually being taken. */
+    std::uint64_t video_rx_gpu_frames = 0;
+    std::uint64_t video_rx_cpu_frames = 0;
 
     // ---- Video capture counters (remote-desktop plan A11) --------------
     //
@@ -136,6 +172,19 @@ struct VideoState {
      *  inside its recv() would be a needless risk. */
     plugins::VideoFeedbackReport pending_video_feedback_{};
     bool                        has_pending_video_feedback_ = false;
+
+    /** The last moment a *decoder-driven* key-frame request went out.
+     *
+     *  A frame the decoder refused (a P-frame whose reference never
+     *  arrived, or a picture whose parameter sets the decoder never
+     *  saw) is the receiver's signal that it needs a new IDR — but the
+     *  failure repeats on *every* subsequent P-frame, so an
+     *  unthrottled request would be a PLI storm.
+     *
+     *  This is the engine's own throttle: at most one decoder-driven
+     *  key-frame request per interval.  The *peer's* key-frame storm
+     *  limiter (plan B14) bounds the other side; this bounds ours. */
+    std::int64_t video_last_decode_keyframe_us = 0;
 
     // ---- Negotiated payload-type routing (B-4) -------------------------
     //
@@ -258,6 +307,196 @@ struct VideoState {
     //
     // Zero means "no packet sent yet".
     std::int64_t video_last_send_unix_us = 0;
+
+    // ---- The capture → engine pump (remote-desktop plan A10) -------------
+    //
+    // The pump pops frames from the capture device's bounded queue and
+    // drives them through the encoder **on the tick thread**.  The
+    // counters below make the pump observable: a host that expects an
+    // automatic stream sees `video_capture_pumped_frames` move; a
+    // session where the pump never runs sees it stuck at zero, which
+    // is the difference between "the device produced nothing" and
+    // "the pump is not wired".
+
+    /** Frames the pump took from the capture device and pushed onto the
+     *  wire. */
+    std::uint64_t video_capture_pumped_frames = 0;
+
+    /** Frames the pump took but could not encode (or could not push). */
+    std::uint64_t video_capture_pump_errors = 0;
+
+    /** Metadata-only frames the pump skipped (no pixels to encode). */
+    std::uint64_t video_capture_pumped_metadata = 0;
+
+    // ---- The pump's view of the device's own counters ------------------
+    //
+    // The device's counters (`plugins::CaptureStats`) are cumulative, so
+    // the pump keeps the baseline it has already accounted for and
+    // publishes the *delta*.  Without the baseline a plain comparison
+    // would either fire on every tick (the counters only grow) or
+    // underflow after a device restart (they restart from zero).
+
+    /** The device's error counter as the pump last saw it. */
+    std::uint64_t capture_seen_device_errors = 0;
+
+    /** The device's captured-frame counter as the pump last saw it. */
+    std::uint64_t capture_seen_frames_captured = 0;
+
+    /** The device's dropped-frame counter as the pump last saw it. */
+    std::uint64_t capture_seen_frames_dropped = 0;
+
+    /** The device's copied-byte counter as the pump last saw it. */
+    std::uint64_t capture_seen_bytes_copied = 0;
+
+    /** The format the device negotiated, as the pump last saw it.  A
+     *  change means the device renegotiated mid-session. */
+    std::uint32_t capture_negotiated_width  = 0;
+    std::uint32_t capture_negotiated_height = 0;
+    std::string   capture_negotiated_tag;
+
+    // ---- The GPU-frame mailbox (remote-desktop plan B10) ----------------
+    //
+    // The zero-copy capture seam delivers a GPU surface on the
+    // *capture device's* thread; the codec may only be touched on the
+    // *tick* thread (RD-6).  The mailbox is the boundary between them:
+    // a single-slot hand-off whose semantics are "the newest frame is
+    // the truth".
+    //
+    // It lives in the video state because the pump is the only reader
+    // and the capture wiring is the only writer.
+    detail::GpuFrameMailbox gpu_mailbox;
+
+    /** True once the engine has wired the capture device's GPU callback
+     *  to the mailbox.  A host that wants to know whether the
+     *  zero-copy path is *live* (not merely requested) reads this
+     *  together with `video_capture_gpu_frames`. */
+    bool capture_gpu_wired = false;
+
+    /** Frames the tick thread encoded straight from a GPU surface —
+     *  the count that proves the zero-copy hand-off actually ran. */
+    std::uint64_t video_capture_gpu_frames = 0;
+
+    /** Frames the GPU path handed to the encoder but the encoder
+     *  refused (so the CPU path had to be used instead). */
+    std::uint64_t video_capture_gpu_errors = 0;
+
+    /** True once the pump has established its media-clock origin. */
+    bool capture_rtp_base_valid = false;
+
+    // ---- The format normalisation counters (remote-desktop plan C3) -----
+    //
+    // The capture path may deliver BGRA / NV12 / I420; the encoder path
+    // wants one canonical format.  The engine does the conversion and
+    // counts what it did, so a host can see the cost.
+    /** Frames that needed a colour-space conversion (BGRA → I420, ...). */
+    std::uint64_t video_format_conversions = 0;
+    /** Frames that were copied without a colour conversion. */
+    std::uint64_t video_format_copies = 0;
+    /** Frames that reached the encoder as a native GPU surface. */
+    std::uint64_t video_format_zero_copy = 0;
+    /** The canonical format the encoder is fed. */
+    plugins::VideoPixelFormat video_format_canonical =
+        plugins::VideoPixelFormat::kUnknown;
+    /** The format the capture device most recently delivered. */
+    plugins::VideoPixelFormat video_format_source =
+        plugins::VideoPixelFormat::kUnknown;
+
+    // ---- The backend preference (remote-desktop plan B2) ----------------
+    //
+    // The class of backend the host asked for.  The engine reports it in
+    // the stats next to the backend it actually got, so a mismatch is
+    // visible without reading a log.
+    plugins::VideoCodecBackendPreference video_codec_backend_preference =
+        plugins::VideoCodecBackendPreference::kAuto;
+
+    /** The capture timestamp (microseconds) the media clock's origin is
+     *  anchored at. */
+    std::int64_t capture_rtp_base_us = 0;
+
+    /** The RTP timestamp (90 kHz) the media clock's origin is anchored
+     *  at. */
+    std::uint32_t capture_rtp_base_ts = 0;
+
+    // ---- The incremental (dirty-rect) encode mechanism (plan B9) --------
+    //
+    // The dirty rectangles the capture device reported for the frame the
+    // pump is encoding.  They are handed to the sender's arbiter, which
+    // decides whether the frame can be coded incrementally.
+    //
+    // The buffer lives here (not on the stack) because the pump runs
+    // every tick and the vectors would otherwise be reallocated on
+    // every frame — the zero-allocation gate of Phase 3 §3.5.
+    std::vector<plugins::VideoRegion> dirty_rects;
+
+    /** The media SSRC the region-refresh message names (the outbound
+     *  video stream's SSRC). */
+    std::uint32_t video_media_ssrc = 0;
+
+    /** The SSRC the region-refresh message is sent under (the engine's
+     *  own RTCP reporter SSRC). */
+    std::uint32_t video_region_feedback_ssrc = 0;
+
+    /** True once the region-refresh SSRCs have been handed to the
+     *  sender. */
+    bool video_region_ssrcs_set = false;
+
+    /** The number of region-refresh messages the engine put on the wire.
+     *  It is the evidence that the peer was *told* which region
+     *  changed — without it the mechanism would be invisible to the
+     *  peer and therefore useless. */
+    std::uint64_t video_region_refreshes_sent = 0;
+
+    // ---- The encoder's parameter set (remote-desktop plan B12 / B13) -----
+    //
+    // The engine computes the parameter set in one place (see
+    // `engine_video_params.hpp`) and pushes it through
+    // `IVideoCodec::set_params()`.  These two fields are the memory of
+    // that: what the encoder was last told, and what geometry it was
+    // last told about.
+    //
+    // The geometry matters separately because a *geometry* change is a
+    // parameter-set change (B13): the encoder must restart and emit the
+    // new SPS / PPS with the next frame, so the peer decodes it without
+    // asking for a keyframe.
+    /** The parameter set currently in force (the last one the codec
+     *  accepted). */
+    plugins::VideoEncoderParams video_encoder_params{};
+
+    /** True once the engine has pushed a parameter set to the codec. */
+    bool video_encoder_params_set = false;
+    /** The number of times the engine had to restart the encoder because
+     *  the geometry changed.  A non-zero value means the ladder (or the
+     *  capture device) changed resolution mid-session. */
+    std::uint64_t video_encoder_restarts = 0;
+
+    // ---- The per-stage CPU-time instrumentation (plan J1) -----------------
+    //
+    // The plan's exit measurement is written in terms of time ("CPU time
+    // per frame (capture → encode → packetize)"), so the engine measures
+    // each stage of the pipeline.  The accumulator lives here so it is
+    // reset with the rest of the session state.
+    StageTimings stage_timings{};
+
+    // ---- The video stream set (remote-desktop plan H1 / H2) -------------
+    //
+    // The set owns the *extra* video streams — everything except the
+    // default one, whose plugin instances stay in the engine's own
+    // members (`video_codec_`, `video_sender_`, ...; see the plan's R-3
+    // row: the refactor is incremental and revertible).
+    //
+    // It is the single view the iteration, the statistics (plan H4) and
+    // the inbound routing use, so a host that never touches the
+    // multi-stream API sees exactly the behaviour it saw before.
+    VideoStreamSet video_streams;
+
+    // ---- The receive / presentation plane (remote-desktop plan E5-E9) ---
+    //
+    // The render clock (E5), the displayed-frame record (E9), the
+    // presentation configuration (E7) and the input-echo decision (E6)
+    // are one concern: what the *viewer* sees and how it is driven.
+    // They live in a named collaborator so this header stays a state
+    // list rather than a catch-all.
+    RenderState render;
 };
 
 }  // namespace nimrtc::engine::detail

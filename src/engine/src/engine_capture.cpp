@@ -66,4 +66,31 @@ std::int64_t NimRTCEngine::audio_capture_time_us(
     return *cap;
 }
 
+std::int64_t NimRTCEngine::video_capture_time_us(
+        std::uint32_t ssrc,
+        std::uint32_t rtp_timestamp) const noexcept {
+    if (impl_ == nullptr) return 0;
+    if (ssrc == 0) return 0;
+
+    // The timeline seam is the only source of a capture instant (the same
+    // rule as the audio half above — spec O-9: never fake it).
+    if (!config_.timeline_enabled) return 0;
+
+    // The argument list mirrors `audio_capture_time_us()` exactly: the
+    // abs-send-time argument is 0 and the "has abs-send-time" flag is
+    // false on purpose — this is a *frame* lookup, not a packet
+    // observation.  The observation is recorded by `observe_timeline()`
+    // on the packet path, where the element was actually parsed.
+    auto cap = impl_->timeline.sr_tracker.capture_ts_us_for(
+        ssrc,
+        rtp_timestamp,
+        /*abs_send_time_24=*/0,
+        /*clock_rate_hz=*/0,
+        /*local_recv_us_since_epoch=*/detail::steady_now_us(),
+        /*out_sender_recv_skew_us=*/nullptr);
+
+    if (!cap) return 0;   // No usable Sender Report for this source.
+    return *cap;
+}
+
 }  // namespace nimrtc::engine

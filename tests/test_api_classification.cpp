@@ -488,7 +488,145 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 150;
+    //
+    // v1.3 bump: +1 public header (139 -> 140) for the Windows D3D11 /
+    //   DXGI presentation sink (remote-desktop plan E2) — the renderer
+    //   track's Windows leg, the first concrete `plugins::IVideoSink`
+    //   that consumes the GPU delivery path added alongside it:
+    //     - video_sink/d3d11_renderer.hpp (the DXGI swap-chain sink)
+    //
+    // WP-C bump: +1 public header (140 -> 141) for the Windows capture
+    //   backends (remote-desktop plan A3) -- the DXGI Desktop Duplication
+    //   + WGC thin adapters over the portable capture layer:
+    //     - video_capture/windows_capture.hpp (WindowsCapture device)
+    //
+    // Track C bump: +1 public header (141 -> 142) for the libyuv-backed
+    //   scaler (remote-desktop plan C2) -- the SIMD I420 scaling and
+    //   BGRA <-> I420 conversion the capture -> encode and display paths
+    //   use:
+    //     - video_frame/scaler.hpp (VideoFrameScaler / ScaleFilter)
+    //
+    // Track G bump: +4 public headers (142 -> 146) for the remote-desktop
+    //   input module (remote-desktop plan G3 / G4 / G7) -- the module
+    //   `src/modules/rd_input/`, which does not exist before this change:
+    //     - rd_input/input_event.hpp (the input event vocabulary)
+    //     - rd_input/event_codec.hpp (the compact, versioned binary codec)
+    //     - rd_input/coalescer.hpp (the pointer coalescer + rate limiter)
+    //     - rd_input/safety_filter.hpp (the allow / deny safety filter)
+    //
+    // Track F bump: +6 public headers (146 -> 152) for the audio-device
+    //   layer (remote-desktop plan F1 / F2) -- the capture / playback
+    //   seams and the module that implements them:
+    //     - plugins/audio_device.hpp (the shared device vocabulary)
+    //     - plugins/audio_source.hpp (IAudioSource + factory seam)
+    //     - plugins/audio_sink.hpp (IAudioSink + factory seam)
+    //     - audio_device/audio_device.hpp (the module's public API)
+    //     - audio_device/ring_buffer.hpp (the shared PCM ring buffer)
+    //     - audio_device/synthetic_device.hpp (the CI-testable backend)
+    //
+    // Track D bump: +4 public headers (152 -> 156) for the video rate
+    //   controller (remote-desktop plan D1 / D2 / D3 / D4) -- the seam
+    //   the engine resolves the ladder through and the module that owns
+    //   the ladder policy:
+    //     - plugins/video_bitrate_controller.hpp (the seam + factory)
+    //     - video_bitrate_control/controller.hpp (the controller)
+    //     - video_bitrate_control/factory.hpp (the plugin factory)
+    //     - video_bitrate_control/ladder.hpp (the ladder itself)
+    //
+    // Track J bump: +7 public headers (156 -> 163):
+    //   - rd_qoe/qoe_metrics.hpp (the QoE metrics module's public API --
+    //     the percentile estimator, the sharpness estimator and the
+    //     collector; remote-desktop plan J3 / J6)
+    //   - video_capture/unix_capture.hpp, video_capture/unix_capture_core.hpp
+    //     (the Unix capture backends -- remote-desktop plan A3 / A4)
+    //   - video_sink/egl_renderer.hpp, video_sink/metal_renderer.hpp,
+    //     video_sink/presenter_core.hpp, video_sink/scale_to_fit.hpp
+    //     (the presentation sinks -- remote-desktop plan E2 / E5)
+    //
+    // Track K bump: +4 public headers (163 -> 167):
+    //   - audio_device/playback_progress.hpp (the playback progress
+    //     callback surface for the audio device module)
+    //   - audio_device/aec_delay.hpp (the AEC delay estimator surface)
+    //   - video_pipeline/keyframe_limiter.hpp (the keyframe limiter)
+    //   - video_rtcp_feedback/video_rtcp_feedback.hpp (the region-refresh
+    //     RTCP APP packet surface)
+    //
+    // Track L bump: +1 public header (167 -> 168):
+    //   - video_pipeline/incremental_encode.hpp (the dirty-rect incremental
+    //     encode controller / driver -- remote-desktop plan B9)
+    //
+    // Track F bump: +1 public header (the explicit sample-rate
+    //   converter -- remote-desktop plan F5):
+    //   - audio_device/resampler.hpp
+    //
+    // Track F bump: +2 public headers (the system-audio (loopback)
+    //   capture device and the two-source mixer -- remote-desktop plan
+    //   F6):
+    //   - audio_device/system_audio.hpp (the system-audio loopback
+    //     source: the factory, the device identity, the synthetic
+    //     CI-testable device)
+    //   - audio_device/mixer.hpp (the two-source mixer: the mix /
+    //     separate configuration and the deterministic saturating
+    //     add)
+    //
+    // Track A6/A9 bump: the three headers this track added are already
+    //   counted in the 180 total above (they landed before the Track
+    //   F bump that set it):
+    //   - video_capture/cursor_compositor.hpp (the portable cursor
+    //     compositing core -- remote-desktop plan A6)
+    //   - video_capture/cursor_source.hpp (the platform cursor source
+    //     seam and the pinned fallback -- remote-desktop plan A6)
+    //   - video_capture/camera_capture.hpp (the portable camera capture
+    //     layer and the synthetic camera -- remote-desktop plan A9)
+    //
+    // Concurrent bump: +2 public headers (180 -> 182) landed while
+    // this track was in flight -- the control-channel seam headers
+    // (`plugins/control_channel.hpp` and
+    // `rd_input/control_channel.hpp`), added by the track that owns
+    // the remote-desktop control channel.
+    //
+    // Video plan B11 bump: +3 public headers (182 -> 185) for the
+    // optional VP9 codec module (`src/modules/vp9/`, the remote-desktop
+    // plan B11 / video plan C6 leg), which carries the vendored libvpx
+    // software VP9 encoder / decoder and its HW-backend table:
+    //   - vp9/codec_plugin.hpp (the VP9 plugin factory)
+    //   - vp9/decoder.hpp (the VP9 software decoder)
+    //   - vp9/hw_backends.hpp (the VP9 HW backend ids)
+    //
+    // Remote-desktop plan Track J (J3 / J6) bump: +1 public header
+    // (185 -> 186) for the QoE-collector seam:
+    //   - plugins/qoe_collector.hpp (the IQoeCollector seam + its
+    //     factory, the config and the snapshot value types)
+    //
+    // Remote-desktop plan Track G (the device side of the control
+    // plane) bump: +2 public headers (186 -> 188) for the OS
+    // input-injection module (`src/modules/rd_input_inject/`, the
+    // plan's Track G device leg):
+    //   - rd_input_inject/input_injector.hpp (the InputInjector seam
+    //     and its factory: the injection backends and the result
+    //     vocabulary)
+    //   - rd_input_inject/key_map.hpp (the platform-neutral key
+    //     layout and its translation into the OS virtual-key numbers)
+    //
+    // M1C bump: +1 public header (189 -> 190) for the M1C platform
+    //   capture layer that landed on `main` and was merged into this
+    //   branch:
+    //     - video_capture/dirty_rect_diff.hpp (the dirty-rectangle
+    //       detector -- the frame-difference core the platform backends
+    //       share)
+    //
+    //   The same merge also brought in
+    //   `core/gpu_device_registry.hpp` (the GPU device registry) and
+    //   dropped `video_capture/capture_source_adapter.hpp` (the
+    //   intermediary adapter this branch does not need -- the engine
+    //   polls `IVideoCapture::pop_frame()` directly), so the net move
+    //   is +1.
+    //
+    // The baseline above is the total on disk.  Several track bumps
+    // landed concurrently (Track J / K / L / F), so the per-track
+    // ranges above do not simply add up to it -- the total is what the
+    // walker measures and what this constant must match.
+    constexpr std::size_t kBaselineHeaderCount = 190;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

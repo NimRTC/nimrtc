@@ -208,7 +208,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 |---|---|---|---|
 | **O-1** | Screen-share capture, multi-device capture, camera hot-plug | Capture seam (C1) lands first; device breadth is a separate effort. | v1.4.0+ |
 | **O-2** | ULPFEC / FlexFEC / RED, simulcast / SVC | Need the codec matrix and the pacing work to be right first; they multiply the number of interacting variables. | v1.5.0+ |
-| **O-3** | **Bundling a software H.265 / AV1 encoder or decoder** | **CLOSED by OD-1 — this is now a prohibition, not a deferral.** NimRTC ships no bundled software video encoder/decoder for H.265 or AV1; x265 (GPL-2.0) is incompatible with the permissive distribution model, and permissive AV1 encoders add unacceptable binary weight. Host application or out-of-tree plug-in supplies the codec. Revisit only via an ADR amendment. | closed |
+| **O-3** | **Bundling a software H.265 / AV1 encoder or decoder** | **CLOSED by OD-1, as amended by ADR-021 — this is now a prohibition with a narrowed scope, not a deferral.** NimRTC ships no bundled **copyleft** codec: x265 (GPL-2.0) stays out of the tree. What ADR-021 changes is that **permissive** codecs with a distributable patent grant (BSD / BSD-3-Clause / Apache-2.0 + the AOM Patent License 1.0) **may** be vendored, behind a `NIMRTC_VENDORED_<NAME>` option whose default follows the remote-desktop plan's K1 policy. The codecs themselves still come from the host application or an out-of-tree plug-in unless the option is on. Revisit only via an ADR amendment. | closed |
 | **O-4** | A second bundled software H.264 encoder beyond the existing OpenH264 option | The existing `NIMRTC_PLUGINS_OPENH264` option already covers the software fallback need. | — |
 | **O-5** | Server-side SFU video forwarding, video in the relay path | SFU track stays closed per `docs/plan/v1.0-plan.md` §7. | v1.5.0+ |
 | **O-6** | End-to-end hardware encode on every supported CI leg | The CI legs do not all have a hardware encoder; hardware coverage is validated on a dedicated job or manually, and the software path is what CI enforces. | v1.3.0 |
@@ -303,6 +303,16 @@ The three questions this plan originally left open are now decided. They are
 binding on the work items below.
 
 ### B.7.1 OD-1 — No bundled software video encoders
+
+> **Amended by [ADR-021](../adr/ADR-021-codec-bundling-posture.md)** (2026-11-14).
+> OD-1's *reasoning* — the copyleft licence of x265 — is unchanged. What
+> changed is the *scope*: the prohibition is now on **copyleft** codecs,
+> and a **permissive** codec with a distributable patent grant (BSD /
+> BSD-3-Clause / Apache-2.0 + the AOM Patent License 1.0) may be vendored
+> behind a `NIMRTC_VENDORED_<NAME>` option. Binary weight, which OD-1
+> listed as a second reason, now decides the *default* of that option
+> rather than the possibility of vendoring. See the ADR's Decision 1 and
+> Decision 5.
 
 **Decision.** NimRTC ships **no bundled software video encoder or decoder**
 for H.265 or AV1. The seams, payload layers, SDP layers and the negotiation
@@ -445,4 +455,4 @@ Everything else in this plan is downstream of M1/M2/M3.
 | O — observability / interop | O1, O2, O5 | v1.2.0; O3 → v1.3.0; O4 → continuous |
 | G — governance | G1, G2 | v1.2.0; G3 → v1.3.0; G4–G8 spread across both |
 | X — deferred | O-1, O-2, O-4, O-5, O-6 | v1.4.0+ / v1.5.0+ / — |
-| X — closed | O-3 | **closed by OD-1** — bundling is prohibited, not deferred |
+| X — closed | O-3 | **closed by OD-1, as amended by ADR-021** — bundling is prohibited with a narrowed scope |

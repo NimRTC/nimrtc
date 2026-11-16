@@ -113,24 +113,6 @@ public:
 
     plugins::Status force_keyframe() noexcept override;
 
-    /** Encode one GPU-handle frame (remote-desktop plan B10).
-     *
-     * Forwarded to the *encoder* half — the composite's decode half
-     * cannot encode, and the encode half is the one that owns the
-     * hardware session the surface has to be registered with. */
-    plugins::Status encode_zero_copy(const plugins::GpuBuffer& gpu,
-                                     plugins::EncodedVideoFrame& encoded_out) noexcept override {
-        if (!encoder_ || !encoder_->can_encode()) return plugins::kErrUnsupported;
-        return encoder_->encode_zero_copy(gpu, encoded_out);
-    }
-
-    /** Decode one bitstream frame into a GPU surface. */
-    plugins::Status decode_zero_copy(const plugins::EncodedVideoFrame& encoded,
-                                     plugins::GpuBuffer& out_surface) noexcept override {
-        if (!decoder_ || !decoder_->can_decode()) return plugins::kErrUnsupported;
-        return decoder_->decode_zero_copy(encoded, out_surface);
-    }
-
     /** Push a live parameter set into the encoder (remote-desktop plan
      *  B12).  The decoder half is *not* reconfigured: its geometry is
      *  an upper bound set by the bitstream, not by the local capture. */
@@ -142,10 +124,71 @@ public:
     bool supports_zero_copy_encode() const noexcept override;
     bool supports_zero_copy_decode() const noexcept override;
 
+    /**
+     * @brief Encode a GPU surface — forwarded to the *encoder*.
+     *
+     * The composite forwards the zero-copy encode exactly the way it
+     * forwards the ordinary `encode()`: to the sub-codec that can serve
+     * it, which is the encoder.
+     *
+     * Without this override the composite would inherit the interface's
+     * default — `kErrUnsupported` — while its `supports_zero_copy_encode()`
+     * answered *true* (it forwards that to the encoder too).  That is
+     * the worst of both worlds: the engine would believe the seam was
+     * live, wire the capture device's GPU callback, hand the surface to
+     * the codec, and be told "unsupported" for every single frame.  The
+     * frames would be dropped (the capture device does not keep a CPU
+     * mirror once the callback is attached) and the session would show
+     * a picture that never moves.
+     */
+    plugins::Status encode_zero_copy(const plugins::GpuBuffer& gpu,
+                                      plugins::EncodedVideoFrame& encoded_out) noexcept override;
+
+    /**
+     * @brief Decode into a GPU surface — forwarded to the *decoder*.
+     *
+     * The mirror image of `encode_zero_copy()` above, for the same
+     * reason: a composite whose decoder can consume a surface has to
+     * say so *and* be able to do it.
+     */
+    plugins::Status decode_zero_copy(const plugins::EncodedVideoFrame& encoded,
+                                      plugins::GpuBuffer& out_surface) noexcept override;
+
     plugins::VideoCodecConfig config() const noexcept override;
     plugins::Status update_config(plugins::VideoCodecConfig cfg) noexcept override;
     plugins::VideoCodecStats stats() const noexcept override;
     std::uint8_t payload_type() const noexcept override;
+
+    /** The backend identity of the sub-codec that carries the *outbound*
+     *  stream — the encoder, when there is one.
+     *
+     *  The engine reports this verbatim in `Stats::video_codec_backend`,
+     *  and those stats describe the encode path (frames encoded,
+     *  keyframes, encode latency), so the encoder is the sub-codec that
+     *  has to be named.  A receive-only composite falls back to the
+     *  decoder's id.
+     *
+     *  Without this override the composite would report the interface's
+     *  default "unknown", and a host could no longer tell a real
+     *  software codec ("openh264") from the synthetic stub
+     *  ("software-stub"). */
+    std::string_view backend_id() const noexcept override;
+
+    /**
+     * @brief True iff the *encoder* runs on a hardware accelerator.
+     *
+     * The composite forwards the question to the encoder, because the
+     * engine's telemetry describes the *outbound* stream: a composite
+     * whose encoder is NVENC and whose decoder is OpenH264 is a
+     * hardware-accelerated *encode* path, and the budget the remote
+     * desktop plan's §B.6 writes is a send-side budget.
+     *
+     * Without this override the composite would inherit the interface's
+     * default `false`, and a machine that really was encoding on the
+     * GPU would be reported as software — which is exactly the claim
+     * the capture/encode benchmark exists to check.
+     */
+    bool is_hardware_accelerated() const noexcept override;
 
 private:
     plugins::VideoCodecConfig            cfg_;

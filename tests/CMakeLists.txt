@@ -1243,8 +1243,289 @@ endif()
 # `nimrtc_add_engine_codec_test`'s link set.
 if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
    AND NIMRTC_MODULE_H264)
-nimrtc_add_engine_codec_test(test_engine_video_codec_family
+  nimrtc_add_engine_codec_test(test_engine_video_codec_family
                               test_engine_video_codec_family.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# Remote-desktop plan B1 — the encoder / decoder split seam.
+#
+# `IVideoEncoder` / `IVideoDecoder` are the split halves; the deprecated
+# combined `IVideoCodec` stays as a compatibility shim for one MINOR cycle
+# (ADR-015 Decision 3).  The test proves three things:
+#
+#   1. an encoder-only implementation is an `IVideoEncoder` and needs no
+#      decoder at all,
+#   2. the deprecated combined interface still *compiles* and still
+#      satisfies both halves,
+#   3. the engine rejects a geometry the codec's capability set does not
+#      cover **at open()**, with a distinct error code — not at the first
+#      frame.
+#
+# The link set is `nimrtc_add_engine_codec_test`'s: the fake codecs register
+# under ids no module claims, so they cannot collide with a real backend.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+  nimrtc_add_engine_codec_test(test_engine_video_codec_split
+                              test_engine_video_codec_split.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# Remote-desktop plan H1 / H2 / H4 — the multi-stream video plane.
+#
+# The engine's single-video-slot model becomes a *stream set* keyed by a
+# stable stream id: every extra stream owns its own encoder / sender /
+# receiver / sink, and the statistics snapshot carries one entry per active
+# stream.  The default stream keeps the legacy single-stream path, so the
+# existing call sites keep working unchanged.
+#
+# The link set is `nimrtc_add_engine_codec_test`'s plus the H.265 module
+# (optional — when it is present the test exercises two *different* codec
+# families in one session, the plan's H2 example).
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+  nimrtc_add_engine_codec_test(test_engine_multi_stream
+                              test_engine_multi_stream.cpp)
+  if(TARGET nimrtc::h265)
+    target_link_libraries(test_engine_multi_stream PRIVATE nimrtc::h265)
+  endif()
+endif()
+
+# ----------------------------------------------------------------------------
+# Remote-desktop plan D1 / D4 — the engine half of the video rate control.
+#
+# D1 — the engine resolves the rate controller through the registry's
+#      video-bitrate-controller slot (never by naming a concrete module),
+#      and the controller's name is *configuration*.
+# D4 — "video bitrate reaches the encoder": under a synthetic bandwidth
+#      collapse the *encoder's* configured bitrate moves, not only the
+#      pacer rate.
+#
+# The link set adds the rate-controller module (its registrar is referenced
+# by the PAL Slice 2 default-registrar table).
+# ----------------------------------------------------------------------------
+function(nimrtc_add_engine_video_bitrate_control_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE
+        nimrtc::engine
+        nimrtc::core
+        nimrtc::plugins
+        nimrtc::video_source
+        nimrtc::video_sink
+        nimrtc::video_pipeline
+        nimrtc::h264
+        nimrtc::video_bitrate_control
+        nimrtc::datachannel
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/engine/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/h264/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_bitrate_control/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name}
+        COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 60)
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 60
+            DISCOVERY_TIMEOUT 10)
+    endif()
+    nimrtc_copy_wolfssl_certs(${name})
+endfunction()
+
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264 AND NIMRTC_MODULE_VIDEO_BITRATE_CONTROL)
+nimrtc_add_engine_video_bitrate_control_test(test_engine_video_bitrate_control
+                                             test_engine_video_bitrate_control.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# Remote-desktop plan D5 — the per-stream bandwidth shares.
+#
+# The *rule* (how a session estimate is divided between the reserved audio
+# and the elastic video streams) is unit-tested in
+# `tests/test_bandwidth_allocation.cpp` — the same file that covers the audio
+# split, because it is one rule.
+#
+# This file covers what that file cannot: that the engine feeds the rule the
+# right demands and writes the result back to the right stream.  It is the
+# regression test for an off-by-one in that write-back (the extra streams
+# started at the *default* stream's target), which was invisible with an
+# even split and obvious with unequal weights.
+#
+# The link set is the multi-stream test's set.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+  nimrtc_add_engine_codec_test(test_engine_video_stream_shares
+                              test_engine_video_stream_shares.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# Remote-desktop plan Track E — the engine half of the render state.
+#
+#   | feature | the decision                      | the wiring            |
+#   |---------|----------------------------------|-----------------------|
+#   | E5      | `detail::VideoSyncController`    | the engine's render path |
+#   | E6      | `detail::InputEchoController`    | the engine's echo seam   |
+#   | E7      | `detail::compute_scale_to_fit`   | the engine's sink config |
+#   | E9      | (none — it is a record)          | the engine's render path |
+#
+# The decisions are tested **directly** — they are engine-private header-only
+# collaborators with no clock, no allocation and no thread — so the test
+# compiles the engine's *private* header directory into its include path.
+# That directory is not installed and is not on the public surface
+# (constraint L4).
+# ----------------------------------------------------------------------------
+function(nimrtc_add_engine_video_sync_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE
+        nimrtc::engine
+        nimrtc::core
+        nimrtc::plugins
+        nimrtc::video_source
+        nimrtc::video_sink
+        nimrtc::video_pipeline
+        nimrtc::h264
+        nimrtc::datachannel
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/engine/include"
+        # The engine's PRIVATE collaborator headers (Layout Invariant 4:
+        # these are not installed and no public header includes them).
+        "${CMAKE_SOURCE_DIR}/src/engine/src"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name}
+        COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 30
+            DISCOVERY_TIMEOUT 10)
+    endif()
+    nimrtc_copy_wolfssl_certs(${name})
+endfunction()
+
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+nimrtc_add_engine_video_sync_test(test_engine_video_sync
+                                  test_engine_video_sync.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# The M1 exit criterion (remote-desktop plan §B.2 / §B.6) — the engine-level
+# video loopback.
+#
+# "Two native clients see each other's real desktop, in real pixels, over the
+# network, with the picture actually encoded by a real codec ... pixel-diff
+# test on a synthetic pattern."
+#
+# The test drives a *transmitting* and a *receiving* engine through the whole
+# media path:
+#
+#   capture device (BGRA) → engine pump → BGRA→I420 staging → OpenH264
+#   encode → STAP-A / FU-A packetization → RTP → fake ICE wire →
+#   feed_media_inbound() → depacketize → Annex-B reassembly → OpenH264
+#   decode → recording sink
+#
+# and then *compares the pixels*: the decoded luma is diffed against the
+# reference luma of the source pattern (MAE < 12 grey levels, Pearson r >
+# 0.95).  The codec is pinned to the vendored OpenH264 backend, so the
+# synthetic stub (which would report "software-stub") can never satisfy the
+# assertion — a *real* codec is required.
+#
+# Link-wise it needs everything the other engine tests need, plus:
+#   - nimrtc::h264          (the OpenH264 backend + the backend registry)
+#   - nimrtc::video_frame   (the pixel-format vocabulary the codec seam uses)
+#   - nimrtc::video_capture (the capture-device seam the pump drives)
+#   - nimrtc::video_pipeline(the reference sender / receiver)
+#   - nimrtc::video_sink    (the sink seam the decoded frame is rendered to)
+#   - nimrtc::video_source  (the source seam the engine instantiates)
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_FRAME AND NIMRTC_MODULE_H264)
+  add_executable(test_engine_video_e2e_loopback test_engine_video_e2e_loopback.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_e2e_loopback PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_e2e_loopback PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_e2e_loopback PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_e2e_loopback PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::h264
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_e2e_loopback PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_e2e_loopback PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_e2e_loopback PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_e2e_loopback LENIENT)
+  add_test(NAME test_engine_video_e2e_loopback
+      COMMAND $<TARGET_FILE:test_engine_video_e2e_loopback>)
+  set_tests_properties(test_engine_video_e2e_loopback PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_e2e_loopback
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_video_e2e_loopback)
 endif()
 
 # Phase 3 / C3 — the GPU zero-copy video send path.  The test needs the
@@ -1254,6 +1535,180 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
    AND NIMRTC_MODULE_H264)
 nimrtc_add_engine_codec_test(test_engine_video_zero_copy
                               test_engine_video_zero_copy.cpp)
+endif()
+
+# The encoder's parameter set on the engine side (remote-desktop plan
+# B12 / B13 / C5 / B7).  The test needs the video pipeline (receiver /
+# sender "reference") so it reuses `nimrtc_add_engine_codec_test`'s
+# link set.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+  nimrtc_add_engine_codec_test(test_engine_video_params
+                              test_engine_video_params.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# The `codec_backend` selector (remote-desktop plan B2).
+#
+# B2's acceptance criterion: "On a machine with no hardware encoder the
+# pipeline still runs (software path) and *says so* in the stats; on a
+# machine with one, the hardware path is selected and reported; an
+# explicit `software` override really does use software."
+#
+# The selection policy is driven directly against the registry (that is
+# where it lives), and the reporting is driven through the engine (that
+# is where the host reads the answer).
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+  nimrtc_add_engine_codec_test(test_engine_video_codec_backend
+                              test_engine_video_codec_backend.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# The per-stage CPU-time instrumentation (remote-desktop plan J1) and the
+# format normalisation counters (plan C3).
+#
+# §B.6's budget is written in terms of *time* ("CPU time per frame
+# (capture → encode → packetize)"), and C3 asks for the conversion count
+# to be in the stats.  Neither existed, so neither was checked by
+# anything.  This test asserts that the stage counters move when the
+# pipeline runs, that the means are individually plausible, and that the
+# format counters tell "a colour conversion happened" from "the frame
+# was already canonical" apart.
+#
+# It needs the capture module (the device the pump drives), so it reuses
+# the e2e loopback target's link set.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_H264)
+  add_executable(test_engine_video_stage_timing test_engine_video_stage_timing.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_stage_timing PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_stage_timing PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_stage_timing PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_stage_timing PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::h264
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_stage_timing PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_stage_timing PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_stage_timing PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_stage_timing LENIENT)
+  add_test(NAME test_engine_video_stage_timing
+      COMMAND $<TARGET_FILE:test_engine_video_stage_timing>)
+  set_tests_properties(test_engine_video_stage_timing PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_stage_timing
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_video_stage_timing)
+endif()
+
+# ----------------------------------------------------------------------------
+# The engine's QoE wiring (remote-desktop plan J3 / J6).
+#
+# The `rd_qoe` module owns the metrics; the engine owns the events.  This
+# test drives the *engine* and asserts that the engine really pushes the
+# presented frames, the drops and the input events into the collector and
+# really publishes the result through `Stats::qoe`.
+#
+# It needs the capture module (the device the pump drives), so it reuses
+# the e2e loopback target's link set — the same shape as the
+# stage-timing test above.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_H264)
+  add_executable(test_engine_qoe test_engine_qoe.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_qoe PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_qoe PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_qoe PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_qoe PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::h264
+      GTest::gtest_main)
+  target_include_directories(test_engine_qoe PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_qoe PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_qoe PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_qoe LENIENT)
+  add_test(NAME test_engine_qoe
+      COMMAND $<TARGET_FILE:test_engine_qoe>)
+  set_tests_properties(test_engine_qoe PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_qoe
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_qoe)
 endif()
 
 # ----------------------------------------------------------------------------
@@ -1315,8 +1770,159 @@ if(NIMRTC_MODULE_VIDEO_CAPTURE)
   endif()
 endif()
 
+# ----------------------------------------------------------------------------
+# The capture → encoder zero-copy seam (remote-desktop plan B10 / M1).
+#
+# The seam between the capture device and the hardware encoder is not
+# "hand the texture across": NVENC registers the DirectX input surface
+# per encode session, and the driver accepts the registration ONLY if
+# the texture was created on the same `ID3D11Device` the session was
+# opened with (a texture from another device is refused with
+# `NV_ENC_ERR_RESOURCE_REGISTER_FAILED`, status 9).
+#
+# So the seam is "share the device and hand the texture across", and
+# that is what the test drives — through the **engine**, because the
+# engine is what wires the capture's GPU callback into the mailbox and
+# hands the capture's device to the codec.  A module-level test would
+# prove the pieces but not the wiring.
+#
+# It needs the capture module (the real Windows backend is exercised on
+# a host with a display, and skipped elsewhere), the video pipeline
+# (the reference sender the frames go out on) and the frame vocabulary.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_FRAME)
+  add_executable(test_engine_capture_zero_copy test_engine_capture_zero_copy.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_capture_zero_copy PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_capture_zero_copy PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_capture_zero_copy PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_capture_zero_copy PRIVATE
+      nimrtc::engine
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::video_pipeline
+      GTest::gtest_main)
+  target_include_directories(test_engine_capture_zero_copy PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_capture_zero_copy PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_capture_zero_copy PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_capture_zero_copy LENIENT)
+  add_test(NAME test_engine_capture_zero_copy
+      COMMAND $<TARGET_FILE:test_engine_capture_zero_copy>)
+  set_tests_properties(test_engine_capture_zero_copy PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_capture_zero_copy
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+endif()
+
 # R2.5 validation: engine consumes PluginRegistry for plugin slots.
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
+
+# ----------------------------------------------------------------------------
+# The remote-desktop control channel (remote-desktop plan G1 / G2 / G6).
+#
+# The engine resolves the control channel through the registry's
+# control-channel slot (`EngineConfig::control_channel_name`) and drives it
+# over the DTLS application-data seam (plan G1).  The test proves the
+# *wiring* — two engines exchanging whole messages with NO DataChannel
+# backend configured — which the module-level test
+# (`src/modules/rd_input/tests/test_control_channel.cpp`) cannot prove,
+# because that one is deliberately transport-free.
+#
+# It links the `rd_input` module for two reasons: the module's registrar
+# entry point is referenced by the PAL Slice 2 default-registrar table (the
+# engine's open() → register_all_default_plugins() chain resolves), and the
+# test decodes the received payload with the module's own event codec.
+# ----------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_control_channel test_engine_control_channel.cpp)
+if(TARGET nimrtc::rd_input)
+  target_link_libraries(test_engine_control_channel PRIVATE nimrtc::rd_input)
+endif()
+
+# ----------------------------------------------------------------------------
+# The capture → engine pump (remote-desktop plan A10).
+#
+# The pump is the engine's *automatic* video path: it pops frames from the
+# capture device's bounded queue and drives them through the encoder ON THE
+# TICK THREAD, so a capture plug-in plus an encoder produce an outbound RTP
+# stream without the host ever calling send_video().
+#
+# The test's capture device pushes from *its own* thread (the way a real
+# DXGI / PipeWire backend does), and the codec records the thread it was
+# called on — so the RD-6 invariant ("the codec is only ever touched from
+# the tick thread") is asserted, not assumed.
+#
+# It links the same set as the other engine tests, plus the capture module
+# (its registrar is referenced by the PAL Slice 2 default-registrar table).
+# ----------------------------------------------------------------------------
+# The target itself is declared further up (the `nimrtc_add_engine_video_test`
+# block with the msquic copy), because the device half needs the same
+# linkage plus the QUIC runtime.
+if(TARGET nimrtc::video_capture)
+  target_link_libraries(test_engine_capture_pump PRIVATE nimrtc::video_capture)
+endif()
+
+# The *device* half of the capture-pump suite: the engine resolves the
+# plug-in, the negotiated geometry is the device's own, an unknown plug-in
+# is reported rather than ignored, the counters move during a live session,
+# and a lost device is counted and reopened.
+if(TARGET nimrtc::video_capture)
+  nimrtc_add_engine_video_test(test_engine_capture_device
+                               test_engine_capture_device.cpp
+                               PRE_TEST)
+  target_link_libraries(test_engine_capture_device PRIVATE nimrtc::video_capture)
+  nimrtc_copy_msquic_dll(test_engine_capture_device)
+endif()
+
+# ----------------------------------------------------------------------------
+# The dirty-rect incremental encode (remote-desktop plan B9) and the
+# key-frame storm limiter (plan B14).
+#
+# B9's acceptance criterion is that the capture device's dirty rectangles
+# reach the encoder instead of being discarded at the pump — and that the
+# fallback to a full key frame (a codec that cannot express a region) is
+# *reported* rather than hidden.  B14's is that a peer which requests a
+# key frame every 100 ms produces at most the rate-limited number of
+# IDRs, and that the count is in the stats.
+#
+# It links the capture module (its registrar is referenced by the PAL
+# Slice 2 default-registrar table) and the video pipeline (the engine
+# resolves the "reference" sender through it).
+# ----------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_video_incremental test_engine_video_incremental.cpp)
+if(TARGET nimrtc::video_capture)
+  target_link_libraries(test_engine_video_incremental PRIVATE nimrtc::video_capture)
+endif()
+if(TARGET nimrtc::video_pipeline)
+  target_link_libraries(test_engine_video_incremental PRIVATE nimrtc::video_pipeline)
+endif()
 
 # ----------------------------------------------------------------------------
 # Architecture-remediation Phase 4.2 / D2 — the `assembly` disposition.
@@ -1465,7 +2071,8 @@ target_link_libraries(test_registry_contract PRIVATE
 # `NIMRTC_MODULE_*` options and their `register_default_plugins()`
 # symbol only exists when the module is compiled in.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
-              video_capture audio_rx dtmf srtp)
+              video_capture audio_rx dtmf srtp vp9 video_bitrate_control
+              rd_input rd_qoe)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_registry_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -1549,7 +2156,8 @@ target_link_libraries(test_plugin_id_contract PRIVATE
 # They are gated behind `NIMRTC_MODULE_*` options, so each one is linked
 # only when it was actually built.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
-              video_capture audio_rx dtmf srtp)
+              video_capture audio_rx dtmf srtp vp9 video_bitrate_control
+              rd_input rd_qoe)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_plugin_id_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -2029,6 +2637,102 @@ if(COMMAND gtest_discover_tests)
 endif()
 
 # ---------------------------------------------------------------------------
+# ADR-025 Decision 4 — the engine's RTP packet builder.
+#
+# The engine's outbound RTP packets are built in exactly one place
+# (`src/engine/src/rtp_packetizer.cpp`), so that the engine's exemption
+# from Layout Invariant 4 has a visible boundary.  The test exercises the
+# `detail::RtpPacketizer` collaborator directly — no engine, no
+# transport, no clock — because that is the shape it has: a pure
+# function of a packet description.
+#
+# The reference is the *RTP module's own* builder: the test asserts that
+# the collaborator produces byte-for-byte what `rtp::PacketBuilder`
+# produces, and that the collaborator's abs-send-time encoder produces
+# what `rtp::encode_abs_send_time_24` produces.  A refactor of this
+# shape fails silently otherwise.
+#
+# The test compiles the engine's *private* header directory into its
+# include path, exactly as `test_bandwidth_allocation` does.  That
+# directory is not installed and is not on the public surface
+# (constraint L4).
+# ---------------------------------------------------------------------------
+add_executable(test_rtp_packetizer
+    test_rtp_packetizer.cpp
+    # The TU under test, compiled straight into the test.  The
+    # collaborator is engine-private and the test is its unit test, so
+    # pulling the object in directly is both simpler and more precise
+    # than linking the whole engine library (which would drag in the
+    # transport stack, the DTLS backend and the default-registrar
+    # table, none of which the test touches).
+    "${CMAKE_SOURCE_DIR}/src/engine/src/rtp_packetizer.cpp")
+target_link_libraries(test_rtp_packetizer PRIVATE
+    nimrtc::core
+    nimrtc::rtp
+    GTest::gtest_main)
+target_include_directories(test_rtp_packetizer PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_rtp_packetizer PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_rtp_packetizer LENIENT)
+add_test(NAME test_rtp_packetizer
+    COMMAND $<TARGET_FILE:test_rtp_packetizer>)
+set_tests_properties(test_rtp_packetizer PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_rtp_packetizer
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+endif()
+
+# ---------------------------------------------------------------------------
+# WP-A (remote-desktop plan A1 / E1) — the decoded-frame delivery-path
+# rule and the frozen capture-capability semantics.
+#
+# Both rules are engine-private, header-only pure functions in
+# `src/engine/src/video_render_path.hpp`:
+#
+#   - `decide_video_render_path()` — GPU surface vs. CPU staging vs.
+#     incompatible, from (decoder zero-copy, sink GPU, sink CPU);
+#   - `check_capture_capabilities()` — whether a requested capture
+#     configuration is supported by the device's advertised
+#     capabilities.
+#
+# They are unit tested directly - no engine, no transport, no clock -
+# because that is the shape the rules have.  The test also pins the
+# graceful-sink contract: a third-party sink that implements only one of
+# the two delivery paths keeps working, and the rule routes it to the
+# side that exists.
+#
+# The test compiles the engine's *private* header directory into its
+# include path, exactly as `test_bandwidth_allocation` does.  That
+# directory is not installed and is not on the public surface
+# (constraint L4).
+# ---------------------------------------------------------------------------
+add_executable(test_video_render_path test_video_render_path.cpp)
+target_link_libraries(test_video_render_path PRIVATE
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main)
+target_include_directories(test_video_render_path PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_video_render_path PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_video_render_path LENIENT)
+add_test(NAME test_video_render_path
+    COMMAND $<TARGET_FILE:test_video_render_path>)
+set_tests_properties(test_video_render_path PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_video_render_path
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+endif()
+
+# ---------------------------------------------------------------------------
 # Architecture-remediation Phase 0.3 — the hot-path performance baseline.
 #
 # Phase 3 ("消除热路径上的分配与拷贝") needs a number to compare against,
@@ -2091,6 +2795,109 @@ nimrtc_apply_options(bench_engine_hotpath LENIENT)
 nimrtc_copy_wolfssl_certs(bench_engine_hotpath)
 
 # ---------------------------------------------------------------------------
+# The capture / encode micro-benchmark (remote-desktop plan J5).
+#
+# The plan's M1 exit criterion is written in terms of *numbers*, and three
+# of them have never been measured: the capture rate (frames/s per
+# megapixel), the encode cost (ms per frame, per backend class, per
+# resolution) and the per-frame CPU budget of the §B.6 table (capture ->
+# convert -> scale -> encode -> packetize).
+#
+# `bench_capture_encode` produces those three as a JSON document on stdout.
+# It is deliberately NOT a ctest case: every number in it is
+# machine-dependent, so a threshold assertion would be a flaky test rather
+# than a measurement.  `tools/benchmark_capture_encode.py` is the wrapper
+# that captures a run into `build/` and writes the committed artifact.
+#
+# The link set is the engine one plus the capture module (the benchmark
+# drives the portable synthetic capture device through the engine's pump).
+# ---------------------------------------------------------------------------
+if(TARGET nimrtc::video_capture)
+    add_executable(bench_capture_encode bench/bench_capture_encode.cpp)
+    if(WIN32)
+        target_link_libraries(bench_capture_encode PRIVATE ws2_32)
+    elseif(APPLE)
+        target_link_libraries(bench_capture_encode PRIVATE c++ pthread)
+    else()
+        target_link_libraries(bench_capture_encode PRIVATE atomic)
+    endif()
+    target_link_libraries(bench_capture_encode PRIVATE
+        nimrtc::engine
+        nimrtc::core
+        nimrtc::plugins
+        nimrtc::ice
+        nimrtc::rtp
+        nimrtc::sdp
+        nimrtc::jb
+        nimrtc::audio3a
+        nimrtc::dtls_seam
+        nimrtc::sctp
+        nimrtc::raw_udp
+        nimrtc::transport
+        nimrtc::datachannel
+        nimrtc::net_feedback
+        nimrtc::web_transport
+        nimrtc::session
+        nimrtc::h264
+        nimrtc::video_source
+        nimrtc::video_sink
+        nimrtc::video_pipeline
+        nimrtc::video_capture)
+    target_include_directories(bench_capture_encode PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/engine/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include")
+    if(WIN32)
+        target_compile_definitions(bench_capture_encode PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    set_target_properties(bench_capture_encode PROPERTIES
+        VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+    nimrtc_apply_options(bench_capture_encode LENIENT)
+    nimrtc_copy_wolfssl_certs(bench_capture_encode)
+endif()
+
+# ---------------------------------------------------------------------------
+# The zero-copy *seam* probe (remote-desktop M1).
+#
+# `bench_capture_encode` proves the *capture* side of the zero-copy claim
+# (`bytes_copied == 0` on the DXGI / WGC GPU path).  This probe answers
+# the other half — what the hardware encoder actually accepts on its
+# DirectX input path — because the answer decides the *shape* of the
+# capture → encoder seam:
+#
+#   - an NV12 texture on the encoder's own D3D11 device,
+#   - a BGRA texture on the encoder's own device (the shape the capture
+#     device produces), and
+#   - an NV12 texture on a *different* device (the shape a plain
+#     "hand the texture across" seam would produce).
+#
+# It is NOT a ctest case: it is a measurement whose numbers are
+# machine- and driver-dependent, and every case answers "accepted" or
+# "refused" rather than asserting a threshold.
+# ---------------------------------------------------------------------------
+if(TARGET nimrtc::nvcodec AND WIN32)
+    add_executable(bench_zc_seam bench/bench_zc_seam.cpp)
+    set_target_properties(bench_zc_seam PROPERTIES
+        VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+    target_link_libraries(bench_zc_seam PRIVATE
+        nimrtc::nvcodec
+        nimrtc::video_frame
+        nimrtc::core
+        nimrtc::plugins
+        d3d11)
+    target_include_directories(bench_zc_seam PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/nvcodec/include")
+    target_compile_definitions(bench_zc_seam PRIVATE
+        NIMRTC_PLUGINS_NVENC_ON=1
+        _WIN32_WINNT=0x0A00)
+    nimrtc_apply_options(bench_zc_seam LENIENT)
+endif()
+
+# ---------------------------------------------------------------------------
 # The zero-allocation regression gate.
 #
 # The benchmark itself is NOT a ctest case (see the comment above): the
@@ -2116,7 +2923,12 @@ if(NIMRTC_BUILD_TESTS)
                      --assert-zero-allocs)
     set_tests_properties(hotpath_zero_allocs PROPERTIES
         TIMEOUT 300
-        LABELS "performance;hotpath")
+        LABELS "performance;hotpath"
+        # Exit code 77 means "skipped" (ctest's convention).  A
+        # sanitizer build cannot install the benchmark's allocation
+        # probe -- the sanitizer runtime owns the global `operator new`
+        # -- so the gate reports itself as not run instead of failed.
+        SKIP_RETURN_CODE 77)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -2153,6 +2965,85 @@ if(NIMRTC_BUILD_TESTS)
         message(STATUS
             "Python3 interpreter not found — skipping the dead-module guard "
             "(tools/check_dead_modules.py).  CI runs it as a dedicated step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The merge-gate guard.
+#
+# The repository's merge gate is a GitHub Ruleset, and it demands a list
+# of required status checks.  That list and the set of checks the CI
+# workflows actually produce drift apart, and the drift is invisible
+# until it blocks a merge:
+#
+#   * a required check that no workflow produces blocks every merge,
+#     forever, with nothing to fix from the PR page;
+#   * a check the matrix produces but the gate does not require costs
+#     runner time and catches nothing.
+#
+# `tools/check_ci_ruleset.py` compares `.github/rulesets/protect-main.json`
+# against the workflows and fails when the two sets differ.  It needs no
+# build and no network, so it runs on every push.
+#
+# Registered as a ctest case for the same reason as the dead-module
+# guard: a developer sees it next to the other gates, and `ctest` alone
+# is enough to catch the regression.  It is skipped (not failed) when no
+# Python interpreter is available -- a missing interpreter must not turn
+# into a red build on a machine that has no Python.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_ci_ruleset
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_ci_ruleset.py"
+                         --repo-root "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(test_ci_ruleset PROPERTIES
+            TIMEOUT 60
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the merge-gate guard "
+            "(tools/check_ci_ruleset.py).  CI runs it as a dedicated step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The engine-layering guard.
+#
+# `tools/check_engine_layering.py` enforces three things about
+# `src/engine/`:
+#
+#   * Layout Invariant 4 (ADR-025) — the engine reaches a concrete
+#     module only through its `plugins::I*` seam, with a named,
+#     enumerated set of exemptions;
+#   * ADR-025 Decision 4 — the outbound RTP packet building is
+#     concentrated in one file;
+#   * the remediation plan §4.3 line budget for the engine's internal
+#     state header (`engine_impl.hpp`), which two unrelated features
+#     have already pushed back over once each.
+#
+# Registered as a ctest case for the same reason as the dead-module
+# guard: a developer sees it next to the other gates, and `ctest` alone
+# is enough to catch the regression.  It is skipped (not failed) when
+# no Python interpreter is available -- a missing interpreter must not
+# turn into a red build on a machine that has no Python.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_engine_layering
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_engine_layering.py"
+                         --repo-root "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(test_engine_layering PROPERTIES
+            TIMEOUT 60
+            LABELS "architecture;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the engine-layering "
+            "guard (tools/check_engine_layering.py).  CI runs it as a "
+            "dedicated step.")
     endif()
 endif()
 

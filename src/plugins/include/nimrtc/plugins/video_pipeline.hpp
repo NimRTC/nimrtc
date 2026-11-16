@@ -416,6 +416,141 @@ struct NIMRTC_API_STABLE VideoSenderStats {
     /** NACKs that could not be answered (the packet had already left the
      *  retransmission cache) (v1.1 Q3). */
     std::uint64_t packets_retransmit_missed    = 0;
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    /** Key-frame requests the limiter was offered. */
+    std::uint64_t keyframe_requests             = 0;
+    /** Key-frame requests the limiter granted (a key frame was produced). */
+    std::uint64_t keyframes_granted             = 0;
+    /** Key-frame requests the limiter deferred (held back, not dropped). */
+    std::uint64_t keyframes_deferred            = 0;
+    /** Key-frame requests the limiter rejected (the budget was spent). */
+    std::uint64_t keyframes_rejected            = 0;
+    /** Grants that bypassed the limiter because the request carried the
+     *  codec's parameter sets (a resolution change / a codec switch).
+     *  Those are never deferred: deferring them breaks the decode. */
+    std::uint64_t keyframes_forced              = 0;
+};
+
+/**
+ * @brief The key-frame storm limiter's policy (remote-desktop plan B14).
+ *
+ * The limiter sits between "a key frame was asked for" and "the encoder
+ * is armed".  A peer that asks for a key frame every 100 ms would
+ * otherwise produce an IDR storm: an IDR costs roughly an order of
+ * magnitude more bytes than an inter frame, so the storm saturates the
+ * link and makes the picture *worse*.
+ *
+ * This is the **configuration** half of the limiter; the counters live
+ * in `VideoSenderStats`.  The engine owns the policy (the host does not
+ * configure the sender's internals), and the seam is where the
+ * configuration crosses.
+ */
+struct NIMRTC_API_STABLE VideoKeyframeLimiterConfig {
+    /** The minimum interval between two granted key frames, in
+     *  microseconds.  0 disables the interval gate.
+     *
+     *  The default is 250 ms — the same interval the FIR coalescer
+     *  (RFC 5104 §4.3.1.1) applies, because the two are the *same
+     *  policy* seen from two ends: the coalescer limits how often a
+     *  key-frame *request* may go out, the limiter how often a key
+     *  *frame* may be produced. */
+    std::int64_t min_interval_us = 250'000;
+
+    /** The key-frame **cost budget** per window, expressed in "inter
+     *  frame equivalents".  A key frame costs `keyframe_cost_ratio`
+     *  times an inter frame, so the limiter refuses to spend more than
+     *  the budget inside one window.  0 disables the cost gate. */
+    std::uint32_t keyframe_budget = 32;
+
+    /** How many times more expensive a key frame is than an inter
+     *  frame.  Used to convert the budget into a "key frames per
+     *  window" bound.  Must be at least 1. */
+    std::uint32_t keyframe_cost_ratio = 8;
+
+    /** The hard cap on granted key frames inside one window, whatever
+     *  the cost budget says.  0 disables the cap. */
+    std::uint32_t max_keyframes_per_window = 4;
+
+    /** The length of the accounting window, in microseconds. */
+    std::int64_t window_us = 1'000'000;
+
+    /** True iff the limiter does nothing (every request is granted).
+     *  The default is false — the limiter is *on*. */
+    bool disabled = false;
+};
+
+// ---------------------------------------------------------------------------
+// Incremental (dirty-rect) encode — remote-desktop plan B9
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The stream-level content type of a video stream.
+ *
+ * ADR-022 Decision 5: the content type is carried **explicitly** and
+ * is *never* inferred from the capture device's kind.  A document
+ * camera is camera-shaped but screen-like, and a screen playing video
+ * is screen-shaped but motion-like — the host decides.
+ *
+ * The gate matters for the incremental-encode mechanism: it only
+ * engages for screen content, because a camera stream has no unchanged
+ * area worth skipping.
+ */
+enum class NIMRTC_API_STABLE VideoContentType : std::uint8_t {
+    /** Nobody said.  The camera default — the safe choice. */
+    kUnspecified = 0,
+    /** Camera content.  The incremental mechanism never engages. */
+    kCamera = 1,
+    /** Screen content.  The incremental mechanism may engage. */
+    kScreen = 2,
+};
+
+/**
+ * @brief What the incremental-encode arbiter decided for one frame.
+ *
+ * The decision is *reported* rather than hidden: plan B9's acceptance
+ * criterion says "the mechanism is disabled when the codec does not
+ * support it and **the fallback is reported**".
+ */
+enum class NIMRTC_API_STABLE VideoIncrementalDecision : std::uint8_t {
+    /** Nothing changed — the frame carries no region. */
+    kNoChange = 0,
+    /** The whole frame changed — an ordinary full encode. */
+    kFullFrame = 1,
+    /** The encoder was asked to code only the changed region. */
+    kIncremental = 2,
+    /** The codec cannot express the region — the sender falls back to a
+     *  full key frame, and the fallback is counted. */
+    kFallbackKeyframe = 3,
+    /** The mechanism did not engage: the content is not screen content. */
+    kNotScreenContent = 4,
+};
+
+/**
+ * @brief The incremental-encode mechanism's counters.
+ *
+ * They make the mechanism observable from the outside: a host that
+ * expects a static desktop to cost nothing can see `frames_unchanged`
+ * move, and a host whose codec cannot express a region can see the
+ * `fallback_keyframes` counter rather than wondering why the byte rate
+ * did not drop.
+ */
+struct NIMRTC_API_STABLE VideoIncrementalStats {
+    /** Frames offered to the arbiter. */
+    std::uint64_t frames_seen            = 0;
+    /** Frames that carried no change at all (the static-desktop case). */
+    std::uint64_t frames_unchanged        = 0;
+    /** Frames encoded incrementally (the mechanism engaged). */
+    std::uint64_t frames_incremental      = 0;
+    /** Frames that needed a full encode because the whole frame changed. */
+    std::uint64_t frames_full             = 0;
+    /** The **fallback** counter: frames that fell back to a full key
+     *  frame because the codec cannot express the region. */
+    std::uint64_t fallback_keyframes      = 0;
+    /** Frames where the mechanism did not engage because the content is
+     *  not screen content (or the mechanism was switched off). */
+    std::uint64_t skipped_not_screen      = 0;
+    /** Region-refresh messages emitted for the peer. */
+    std::uint64_t region_refreshes_sent   = 0;
 };
 
 /** Per-packet callback: invoked for each emitted RTP packet payload.
@@ -500,6 +635,135 @@ public:
      *  one.  Default = 0. */
     virtual std::uint32_t take_keyframe_requests() noexcept {
         return 0;
+    }
+
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    //
+    // The limiter is what turns a key-frame-request *storm* into a
+    // bounded IDR rate.  It lives behind the seam because it is the
+    // sender's business: the sender knows when it is about to produce a
+    // key frame, and only it can arbitrate.
+    //
+    // The engine configures the policy once (at open() time) and then
+    // reads the counters back.  Both halves are optional: a sender that
+    // does not implement the limiter keeps the default behaviour, and
+    // the default configuration is the limiter's own default (on).
+
+    /** Configure the key-frame storm limiter.
+     *
+     *  @param cfg The limiter's policy.  The engine calls this once,
+     *             after the sender was created.  Default = no-op. */
+    virtual void set_keyframe_limiter_config(
+            const VideoKeyframeLimiterConfig& cfg) noexcept {
+        (void)cfg;
+    }
+
+    /** The limiter's current configuration.  Default = the defaults. */
+    virtual VideoKeyframeLimiterConfig keyframe_limiter_config_seam() const noexcept {
+        return {};
+    }
+
+    /** True iff a key-frame request is still waiting to be re-offered.
+     *
+     *  A deferred request is **held**, not dropped: the limiter says
+     *  "not yet", and the caller re-offers it once the minimum interval
+     *  has elapsed, so the picture still recovers even when the peer
+     *  only asked once.  Default = false (nothing pending). */
+    virtual bool keyframe_request_pending() const noexcept {
+        return false;
+    }
+
+    /** Re-offer the held key-frame request.
+     *
+     *  The engine calls this from `tick()`: the limiter arbitrates, and
+     *  the answer is published through `take_keyframe_requests()` — the
+     *  same path an inbound PLI takes, so the engine has *one* place
+     *  that arms the encoder.
+     *
+     *  @param now_us Monotonic timestamp in microseconds.
+     *  @return The number of key frames granted (0 or 1).  Default = 0. */
+    virtual std::uint32_t retry_pending_keyframe(std::int64_t /*now_us*/) noexcept {
+        return 0;
+    }
+
+    // ---- The incremental (dirty-rect) encode mechanism (plan B9) --------
+    //
+    // The mechanism has three parts and the seam carries all three:
+    //
+    //   1. the *capture* reports the changed rectangles (the engine
+    //      hands them over here),
+    //   2. the *sender* arbitrates whether the region can be coded
+    //      incrementally (the codec's capability decides), and
+    //   3. the *peer* is told which region changed (the region-refresh
+    //      message comes back through the callback).
+    //
+    // The arbiter lives behind the seam because it needs the codec's
+    // capability (`IVideoEncoder::supports_incremental_encode()`), and
+    // only the sender is in a position to hold both.
+
+    /** The stream's content type.
+     *
+     *  ADR-022 Decision 5: the content type is carried explicitly and
+     *  is never inferred from the capture device's kind.  The default is
+     *  `kUnspecified` (the camera default — the behaviour that is
+     *  correct for a camera and merely *safe* for a screen). */
+    virtual void set_content_type(VideoContentType type) noexcept {
+        (void)type;
+    }
+    virtual VideoContentType content_type() const noexcept {
+        return VideoContentType::kUnspecified;
+    }
+
+    /** Enable / disable the incremental-encode mechanism.
+     *
+     *  Disabled (the default) means every frame takes the ordinary full
+     *  encode path.  The mechanism is additionally gated on the content
+     *  type: it only engages for screen content. */
+    virtual void set_incremental_encode_enabled(bool enabled) noexcept {
+        (void)enabled;
+    }
+    virtual bool incremental_encode_enabled() const noexcept {
+        return false;
+    }
+
+    /** Offer one frame's changed region to the incremental arbiter.
+     *
+     *  @param dirty     The changed rectangles, in source pixels.  An
+     *                   empty list means "nothing changed" — the
+     *                   static-desktop case.
+     *  @param full_frame True iff the whole frame changed.
+     *  @return The decision.  Default = `kFullFrame` (no mechanism). */
+    virtual VideoIncrementalDecision offer_dirty_region(
+            const std::vector<VideoRegion>& dirty, bool full_frame) noexcept {
+        (void)dirty; (void)full_frame;
+        return VideoIncrementalDecision::kFullFrame;
+    }
+
+    /** The region-refresh message the sender wants sent to the peer.
+     *
+     *  The message is produced by the sender (it knows the media SSRC
+     *  and the regions it just coded) but *sent* by whoever owns the
+     *  RTCP transport — the engine.  The bytes are only valid until the
+     *  next call.  Default = empty (nothing to signal). */
+    virtual core::ByteSpan take_region_refresh() noexcept {
+        return {};
+    }
+
+    /** The incremental mechanism's counters.  Default = zeros. */
+    virtual VideoIncrementalStats incremental_stats() const noexcept {
+        return {};
+    }
+
+    /** Attach the encoder the incremental requests are pushed to.
+     *
+     *  The sender does not own the encoder (the engine does), so the
+     *  pointer is borrowed and must outlive the sender's use of it.
+     *  The engine wires it once, right after both plugins exist.
+     *
+     *  Default = no-op (a sender that does not implement the mechanism
+     *  ignores it). */
+    virtual void set_incremental_encoder(plugins::IVideoEncoder* encoder) noexcept {
+        (void)encoder;
     }
 
     /** P3 — interface stable; implementation lands in 1.0.

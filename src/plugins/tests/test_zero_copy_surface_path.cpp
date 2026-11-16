@@ -175,8 +175,18 @@ TEST(GpuBufferZeroCopy, HandleRoundTrip) {
 
 TEST(GpuBufferZeroCopy, FrameClassificationGpu) {
     auto* pool = new FakeGpuBufferPool(GpuBackend::kAppleCFPixelBuffer);
+    // The recycle callback is a *static* function, so it finds the pool
+    // through this global.  Without the guard the callback would find no
+    // pool, the buffer would never come back to the pool's idle list, and
+    // the pool's destructor would have nothing to free -- a leak that
+    // the sanitizer reports against `acquire()`.
+    ScopedTestPool guard(pool);
     GpuBuffer* buf = pool->acquire(1920, 1080, PixelFormat::kBGRA);
     ASSERT_NE(buf, nullptr);
+    // The deleter drops both references: the caller's (ref=2→1) and the
+    // pool's (ref=1→0, which fires the recycle callback and hands the
+    // buffer back to the pool's idle list).  The pool's destructor then
+    // deletes it, so nothing is leaked.
     auto gb = std::shared_ptr<GpuBuffer>(buf,
         [](GpuBuffer* p) {
             if (p) {
@@ -196,6 +206,17 @@ TEST(GpuBufferZeroCopy, FrameClassificationGpu) {
     EXPECT_EQ(f.height(), 1080u);
     EXPECT_EQ(f.format(), PixelFormat::kBGRA);
 
+    // The buffer goes back to the pool's idle list before the pool is
+    // destroyed, so the pool's destructor owns it and frees it.
+    // `f.buffer.reset()` alone is not enough: `gb` is a second owner of
+    // the same control block, and the custom deleter (which drops the
+    // refs and fires the recycle callback) only runs once the *last*
+    // shared_ptr is gone.  Releasing `gb` explicitly guarantees the
+    // buffer is recycled into the pool's idle list while the pool is
+    // still alive -- otherwise the pool's destructor finds an empty idle
+    // list and LeakSanitizer reports the buffer as leaked.
+    f.buffer.reset();
+    gb.reset();
     delete pool;
 }
 

@@ -219,6 +219,54 @@ function(nimrtc_apply_options target)
             target_compile_options(${target} PRIVATE -Wduplicated-cond)
         endif()
 
+        # -------------------------------------------------------------------------
+        # Deprecation warnings: reported, but not fatal.
+        #
+        # ADR-015 Decision 3 (the deprecation policy) has two halves that
+        # pull in opposite directions:
+        #
+        #   * the *public* half — a deprecated symbol must warn at every
+        #     use site, so a host that has not migrated is told to;
+        #   * the *library* half — the library itself must be able to
+        #     name a deprecated symbol while the deprecation window is
+        #     open.  `plugins::IVideoCodec` is the case in point: it is
+        #     the deprecated compatibility shim of the split codec seam
+        #     (remote-desktop plan B1) and the engine resolves the
+        #     *combined* factory, so the engine, the codec modules and
+        #     the plugin registry all have to spell the type.
+        #
+        # With `-Werror` on, the library's own unavoidable spelling is a
+        # hard build failure: the deprecation becomes a build break
+        # instead of a migration hint, which is the opposite of what
+        # Decision 3 asks for.
+        #
+        # So the warning is *demoted*, not disabled: it is still printed
+        # at every use site (still greppable in the build log, still
+        # visible to a host that compiles the headers), but it does not
+        # fail the compile.  `-Wno-error=<warning>` is the per-warning
+        # demotion form, and — exactly as the conversion-warning note
+        # above records — GCC and Clang apply it regardless of whether
+        # it appears before or after `-Werror` on the command line.
+        #
+        # Verified against GCC 11.4 and Clang 14 (the two compilers the
+        # Linux, fuzz and sanitizer CI legs use):
+        #
+        #   -Wall -Wextra -Werror                        -> error: 'IVideoCodec' is deprecated
+        #   -Wall -Wextra -Werror -Wno-error=deprecated-declarations
+        #                                                  -> warning: 'IVideoCodec' is deprecated
+        #                                                  -> build succeeds
+        #
+        # The demotion is applied to every target that goes through this
+        # function, not to the whole tree, because the deprecated name
+        # appears in a **public header**: a translation unit that
+        # includes that header sees the warning whether or not it is
+        # built by `nimrtc_apply_options()`.  The header itself carries
+        # the demotion for the includers (see `video_codec.hpp`), which
+        # is what makes the warning survive all the way to a host.
+        # -------------------------------------------------------------------------
+        target_compile_options(${target} PRIVATE
+            -Wno-error=deprecated-declarations)
+
         # LENIENT mode: relax warnings that are endemic to test harnesses
         # but never appear in production src/ code. See header comment.
         # -Wno-pedantic is required because NimRTC's SCTP seam includes

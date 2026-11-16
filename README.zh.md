@@ -88,8 +88,18 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 | | | |
 |---|---|---|
 | 🎯 **编译期分层（L0–L3）** | 🔌 **公开 plugin 接口** | 🪶 **12.55 MB 静态库**（libwebrtc 150–250 MB）|
-| 🧩 **面向场景的 Profile，不 fork 主干** —— `call` / `transport` / `relay` / `agent` / `agent-gateway` / `agent-low-latency` / `relay-agent` / `teleop` / `live` | 🔁 **DTLS 后端可替换** —— wolfSSL（默认）↔ GMSSL（opt-in），API 不变 | 🛡️ **GM/T 国密路径** —— DTLS/TLCP 走 GMSSL（SRTP 仍为国际套件） |
+| 🧩 **面向场景的 Profile，不 fork 主干** —— `call` / `transport` / `relay` / `agent` / `agent-gateway` / `agent-low-latency` / `relay-agent` / `teleop` / `live`（外加 `remote-desktop`） | 🔁 **DTLS 后端可替换** —— wolfSSL（默认）↔ GMSSL（opt-in），API 不变 | 🛡️ **GM/T 国密路径** —— DTLS/TLCP 走 GMSSL（SRTP 仍为国际套件） |
 | 📡 **线缆级互通** —— Chrome（媒体 + WebTransport DataChannel） | 🏗️ **四平台 CI** —— Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **面向 AI Agent 的差异化** —— pre/post-3A PCM tap、ref_frame 时间线 |
+
+> **媒体层实际交付了什么**（下面任何一行都不会暗示树里并不存在的捆绑编解码器）：
+> Opus；H.264 走 vendored 的 **OpenH264** 软件编解码器与需手动打开的 **NVENC** 硬件路径；
+> AV1 *解码* 走 vendored 的 **dav1d** 与需手动打开的 **NVDEC**；H.265 / AV1 *编码* 只有
+> **NVENC** 一条路。**G.711 只做路由，不在树内编码**；**VP8 / VP9 只有 RTP 打包器**——
+> 树里既没有捆绑的 G.711，也没有捆绑的 VP8 / VP9。采集设备是全平台可用的 **synthetic**，
+> 外加 Windows 的 **DXGI** / **Windows Graphics Capture**、macOS 的 **ScreenCaptureKit**、
+> Linux 的 **PipeWire** / **X11**；渲染器是 **headless**、**pinned**、**D3D11**（Windows）、
+> **Metal**（macOS）、**EGL**（Linux）；音频设备是 **PortAudio** 加一个合成设备。所有硬件路径
+> 都挂在默认 **OFF** 的 `NIMRTC_PLUGINS_*` 开关后面。
 
 ---
 
@@ -311,7 +321,7 @@ profile 跳过 L2 编解码，见 `docs/zh/architecture.md` §7.1），原理就
                                     ▼
             ┌──────────────────────────────────────────────────┐
             │  L2  编解码 + 3A         （relay profile 跳过）     │
-            │  Opus / G.711 / VP8 / H.264 / H.265 / AV1 · 音频 3A 流水线 │
+            │  Opus · H.264(OpenH264/NVENC) · H.265/AV1(NVENC) · 音频 3A │
             └──────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -336,9 +346,10 @@ profile 跳过 L2 编解码，见 `docs/zh/architecture.md` §7.1），原理就
        │  PLUGIN 接口  （header-only，在 `src/plugins/`）       │
        │                                                       │
        │  ITransport · IICETransport · IRTP · ISDP · IJB       │
-       │  IAudio3A · ICodec                                    │
-       │  IVideoSource · IVideoSink · IDataChannel             │
-       │  IHwCodec · IHw3A                                     │
+       │  IAudio3A · ICodec · IAudioDecoder · IAudioReceiver   │
+       │  IVideoCapture · IVideoSource · IVideoEncoder/Decoder │
+       │  IVideoSink · IVideoBitrateController · IDataChannel  │
+       │  IAudioSource · IAudioSink · ISession · IDtmfCodec    │
        └──────────────────────────────────────────────────────┘
 ```
 
@@ -359,7 +370,7 @@ flowchart TB
     L1 --> L0["L0 - 字节 / 日志 / 时间 / 状态码"]
 
     L3 -. 编译期解析 .-> PAL["PAL - Plugin 适配层 / 零开销解析器"]
-    PAL --> PLG["Plugin 接口: ITransport, IICETransport, IRTP, ISDP, IJB, IAudio3A, ICodec, IVideoSource/Sink, IDataChannel, IHwCodec, IHw3A"]
+    PAL --> PLG["Plugin 接口: ITransport, IICETransport, IRTP, ISDP, IJB, IAudio3A, ICodec, IAudioDecoder, IAudioReceiver, IVideoCapture, IVideoSource, IVideoEncoder/Decoder, IVideoSink, IVideoBitrateController, IAudioSource, IAudioSink, IDataChannel, ISession, IDtmfCodec"]
 
     classDef profile fill:#fef3c7,stroke:#92400e,color:#1f2937
     classDef layer   fill:#dbeafe,stroke:#1e40af,color:#1f2937
@@ -377,7 +388,7 @@ flowchart TB
 |---|---|---|
 | **Profile** | `cmake/profiles/*.cmake` | 纯构建期选择：决定 L0–L3 哪些被链接、Plugin 走哪一套后端。**没有运行期分发**——选 `relay` 就是在构建时把 L2 整个砍掉。 |
 | **L3 Engine** | `src/engine/` | 唯一对外门面（`NimRTCEngine`）。把 Plugin 串起来；公开 API 里**不出现任何具体模块头文件**——见 [`ARCHITECTURE.md`](ARCHITECTURE.md) 的 Layout Invariant 4。 |
-| **L2 编解码 + 3A** | `src/modules/opus/`、`…/audio3a/`、`…/video_payload/` | 编解码与音频 3A 流水线。`relay` profile 不编 L2，二进制里编码面直接砍半。 |
+| **L2 编解码 + 3A** | `src/modules/opus/`、`…/audio3a/`、`…/video_payload/` | 编解码与音频 3A 流水线。`relay` profile 不编 L2，二进制里编码面直接砍半。**实际交付的是**：Opus（vendored `libopus`）；H.264 走 vendored 的 **OpenH264** 软件编解码器与 **NVENC** 硬件路径；H.265 与 AV1 走 **NVENC/NVDEC** 硬件路径，软件侧只有 *stub* 兜底；AV1 *解码*另有 vendored 的 **dav1d**。**没有捆绑 G.711 编解码器**（只做路由），**也没有捆绑 VP8/VP9 编解码器**（只有 RTP 打包器）。 |
 | **L1 协议 / 状态机** | `src/modules/{rtp,sdp,ice,dtls,srtp,jb,bwe}/` | 真正跟网络打交道的那一层。按 §11 vendoring 规则**自研**，不引入第三方协议栈。 |
 | **L0 原语** | `src/core/`、`src/log/` | 状态码、字节缓冲、单调时钟、日志。能 header-only 就 header-only。 |
 | **PAL** | `src/plugins/pal/` | 用一个小注册表把每个 Plugin 能力在编译期解析完；解析之后调用是直接的，零间接，对 Engine 来说公开 API 完全不变。见 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)。 |
@@ -481,6 +492,12 @@ NimRTC 几乎所有"可替换"的能力都通过 plugin 接口暴露（[`src/plu
 
 Plugin 是 NimRTC **可演进性**的核心机制：P0–P1 用内置实现，P2–P3 引入的差异化能力（双 3A tap、调度器内严格优先排序、ref_frame）也以 plugin 形式呈现（P2 `IJB::set_render_delivered`、P3 `IRTP::set_ref_frame`）。
 
+> **要写 plugin？** 从 [`docs/guides/plugin-author-guide.md`](docs/guides/plugin-author-guide.md)
+> 开始——采集、编解码、渲染、码率控制、音频设备这几道缝的实操指南（五步走流程、
+> 注册宏的准确写法、必须链接的 CMake target、零拷贝契约与工程规矩）。通用目录在
+> [`docs/plugin_author_guide.md`](docs/plugin_author_guide.md)，硬件后端那道缝在
+> [`docs/hw_plugin_seam.md`](docs/hw_plugin_seam.md)。
+
 ---
 
 ## 与同类项目的对比
@@ -520,8 +537,10 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | `relay-agent` | L0+L1+L3 | relay + AI Agent 混合（N:1），timeline 重新校准 |
 | `teleop` | L0+L1+L2+L3 | 机器人 / 具身智能遥操作 —— 调度器内严格优先排序 (DC-2 范围声明适用) |
 | `live` | L0+L1+L2+L3 | 单向直播 / 广播 |
+| `remote-desktop` | L0+L1+L2+L3 | 远程桌面场景 —— 屏幕内容（`video_content_type="screen"`）、720p 分辨率下限、平滑优先的阶梯、控制面走独立的 `raw-udp-arq` 栈。已落地在 `main`，尚未发版。 |
 
-> 完整矩阵（**已交付的 9 个 Profile**，含 JB / 3A / BWE / DC 逐字段取值）见
+> 完整矩阵（**10 个 Profile** —— v1.0.2 之前交付的 9 个，外加已落地在 `main` 的
+> `remote-desktop`；含 JB / 3A / BWE / DC 逐字段取值）见
 > [`docs/profiles.md`](docs/profiles.md)。`cloudgame`（云渲染 / 云游戏串流）是
 > **长线候选，不在已交付 Profile 集合内** —— 见
 > [`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md) §2 Track V。
@@ -600,10 +619,10 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | SFU-1 —— 进程内 SFU relay（`nimrtc_sfu` 模块，BUNDLE/rtcp-mux） | ❌ **已关闭 — NO** | 2026-10-19 关闭（BDFL：SFU 不是项目核心目标）；不在关键路径上。见 `docs/plan/v1.0-plan.md` §7 + §12.5。 |
 | DC-3 —— SFU relay 场景下的 DC 转发策略 | ❌ **已关闭 — NO** | 继承自 SFU-1（2026-10-19 关闭）。 |
 | BENCH-1 —— `sfu-relay` 基准 pps/Mbps | ❌ **已关闭 — NO** | 继承自 SFU-1（2026-10-19 关闭）。 |
-| H.264 硬件后端（NVENC / AMF / QSV / DXVA / VA-API / OpenH264 编码器与 DXVA 解码器） | ✅ | v0.9.2 |
-| H.264 硬件**解码** —— NVDEC（Win/Linux） | ✅ **已实现** —— `src/modules/nvcodec/` 提供真实的 CUVID 解码器（parser + decoder + NV12 surface → host 拷贝），通过运行时动态加载 `nvcuvid.dll` / `libnvcuvid.so` 驱动。`VideoToolbox`（macOS）与 `MediaCodec`（Android）仍**未实现** —— 后端条目保留以稳定 seam，但 `create()` 返回 `nullptr`、`available()` 返回 `false`；这两个平台请走软件 H.264 路径。见 [H.264 后端矩阵](docs/hw_plugin_seam.md#111-backend-matrix)。 | v1.1 |
-| H.265（HEVC）视频编解码 —— 端到端 | ✅ **已实现** —— `src/modules/h265/` 注册 id 为 `"h265"` 的 video-codec 插件（即 `EngineConfig::video_codec_name` 使用的拼写）。RTP 载荷格式遵循 **RFC 7798**（单 NAL 单元、AP type 48、FU type 49，其中 `FuType` 为 6 位）；SDP 参数同样遵循 RFC 7798（`profile-id`、`level-id`、`tier-flag`、`tx-mode="SRST"`、`sprop-vps` / `sprop-sps` / `sprop-pps`）。硬件编解码复用共享的 `nvcodec` 模块（NVENC / NVDEC）。 | v1.2 |
-| AV1 视频编解码 —— 端到端 | ✅ **已实现** —— `src/modules/av1/` 注册 id 为 `"av1"` 的 video-codec 插件。RTP 载荷格式遵循 **draft-ietf-payload-av1**（aggregation header、LEB128 长度、Annex-B 分帧、OBU 重组）；SDP 侧为 AV1 Unified Plan 的 `a=fmtp:` 字段。硬件编解码复用共享的 `nvcodec` 模块（NVENC / NVDEC）。 | v1.2 |
+| H.264 硬件后端（NVENC / AMF / QSV / DXVA / VA-API / OpenH264 编码器与 DXVA 解码器） | ⚠️ **需手动打开，不在默认构建里** —— 所有 `NIMRTC_PLUGINS_*` 开关默认 **OFF**，AMD / Intel / VA-API / DXVA 还额外需要 CMake 探测的厂商 SDK。真正的软件编解码器（vendored 的 OpenH264）挂在 `NIMRTC_PLUGINS_OPENH264=ON` 后面。见 [H.264 后端矩阵](docs/hw_plugin_seam.md#111-backend-matrix)。 | v0.9.2（seam id）；OpenH264 路径更晚 |
+| H.264 硬件**解码** —— NVDEC（Win/Linux）、VideoToolbox（macOS） | ✅ **已实现** —— `src/modules/nvcodec/` 提供真实的 CUVID 解码器（parser + decoder + NV12 surface → host 拷贝），通过运行时动态加载 `nvcuvid.dll` / `libnvcuvid.so` 驱动；Apple VideoToolbox 后端（`src/modules/nvcodec/src/videotoolbox_decoder.cpp`，基于 `VTDecompressionSession` + `CVPixelBuffer`）同样已实现。`MediaCodec`（Android）仍**未实现** —— 后端条目保留以稳定 seam，但 `create()` 返回 `nullptr`、`available()` 返回 `false`；该平台请走软件 H.264 路径。见 [H.264 后端矩阵](docs/hw_plugin_seam.md#111-backend-matrix)。 | v1.1（NVDEC）/ v1.4（VideoToolbox） |
+| H.265（HEVC）视频编解码 —— 端到端 | ⚠️ **已实现，但只有硬件路径或 stub** —— `src/modules/h265/` 注册 id 为 `"h265"` 的 video-codec 插件（即 `EngineConfig::video_codec_name` 使用的拼写）。RTP 载荷格式遵循 **RFC 7798**（单 NAL 单元、AP type 48、FU type 49，其中 `FuType` 为 6 位）；SDP 参数同样遵循 RFC 7798（`profile-id`、`level-id`、`tier-flag`、`tx-mode="SRST"`、`sprop-vps` / `sprop-sps` / `sprop-pps`）。树里**唯一的真实 H.265 编解码器是 NVENC / NVDEC 硬件路径**（`NIMRTC_PLUGINS_NVENC=ON` / `NIMRTC_PLUGINS_NVDEC=ON`）；**没有捆绑 H.265 软件编解码器** —— 没有硬件后端时模块回落到只吐合成码流的 *stub*，所以"H.265 可用"这句话只在有 NVIDIA 显卡的机器上成立。 | v1.2 |
+| AV1 视频编解码 —— 端到端 | ⚠️ **已实现，但编码只有硬件路径或 stub** —— `src/modules/av1/` 注册 id 为 `"av1"` 的 video-codec 插件。RTP 载荷格式遵循 **draft-ietf-payload-av1**（aggregation header、LEB128 长度、Annex-B 分帧、OBU 重组）；SDP 侧为 AV1 Unified Plan 的 `a=fmtp:` 字段。真实的 AV1 路径是 **NVENC / NVDEC** 硬件编解码与 vendored 的 **dav1d 软件解码器**（`NIMRTC_PLUGINS_DAV1D=ON`）；**没有捆绑 AV1 软件编码器** —— 软件编码路径是合成 stub。 | v1.2 |
 | Chrome ↔ NimRTC 媒体互通 e2e（Case D，四平台全绿） | ✅ | v0.11.0 |
 
 ### 已落地在 `main`，尚未发版
@@ -623,6 +642,14 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | 3A 与自身契约对齐（输入域电平表、遵循 VAD / 电平开关、真实 APM 参考信号、引擎不再改动调用方的 PCM） | ✅ 已落地 | v1.0.2 之后的修复 |
 | libsrtp 转为真正的 git submodule；vendor 清单区分已验证 submodule 与签入树 | ✅ 已落地 | v1.0.2 之后的杂项 |
 | 简化版 Goog-CC 风格 BWE（opt-in，默认仍走 AIMD；RTT + 丢包混合估计，不是完整 trendline 移植）、RTCP feedback 回环、netem 弱网基线、引擎级 `ref_frame` / video stats、GMSSL vendor + SRTP seam、引擎源码拆分 | ✅ 已落地 | v1.1 Tracks Q1 / Q3 / Q4 / T / V / X / R |
+| **远程桌面轨** —— 采集设备 seam（`IVideoCapture`），带 **synthetic** 设备与 Windows 的 **DXGI Desktop Duplication** / **Windows Graphics Capture** 后端，以及 macOS **ScreenCaptureKit**、Linux **PipeWire** / **X11** 适配器；采集 id 为 `windows-dxgi` / `windows-wgc` / `macos-screencapturekit` / `linux-pipewire` / `linux-x11` / `synthetic` | ✅ 已落地 | remote-desktop plan A1–A8 |
+| **视频 sink seam + 渲染器** —— `IVideoSink` 增加 **GPU surface 交付路径**（`GpuBuffer`）；已交付的渲染器是 `headless`、`pinned`、**`d3d11`**（Windows）、**`metal`**（macOS）、**`egl`**（Linux）。`d3d11` / `metal` / `egl` 三个工厂在全平台注册，配置里点名能解析上，但在不匹配的平台 `open()` 返回 `kErrUnsupported` | ✅ 已落地 | remote-desktop plan E1–E8 |
+| **编解码 seam 拆分 + 后端选择器** —— `IVideoEncoder` / `IVideoDecoder`（合并的 `IVideoCodec` 现已是废弃的兼容壳），外加 `EngineConfig::video_codec_backend` 的 `auto` / `hardware` / `software`。真实的软件编解码器是 vendored 的 **OpenH264**（H.264）与 **dav1d**（AV1 解码）；H.265 与 AV1 *编码* 只有 **NVENC** 一条路，合成 stub 始终作为兜底 | ✅ 已落地 | remote-desktop plan B1–B4 |
+| **视频码率控制器** —— `IVideoBitrateController` seam 与 `video-bitrate-control` 模块：分辨率 / 帧率 / 码率阶梯、分辨率下限、关键帧开销预算。编码器保持**被动**——由引擎把控制器给的档位换算成 `VideoEncoderParams` 再推下去 | ✅ 已落地 | remote-desktop plan D1–D4 |
+| **音频设备层** —— `IAudioSource` / `IAudioSink` seam 与 `audio_device` 模块（**PortAudio** 后端 + 测试用的合成设备） | ✅ 已落地 | remote-desktop plan F1–F2 |
+| **`remote-desktop` Profile + profile schema v1.2** —— `profiles/remote-desktop.json`（屏幕内容、720p 下限、平滑优先阶梯、控制面独立栈）与增量的 [`profiles/schema/profile-v1.2.json`](profiles/schema/profile-v1.2.json) | ✅ 已落地 | remote-desktop plan K3–K4 |
+| **信令指南 + 参考信令服务** —— [`docs/guides/remote-desktop.md`](docs/guides/remote-desktop.md) 与 [`examples/remote-desktop/`](examples/remote-desktop/) 下的 Python 参考实现 | ✅ 已落地 | remote-desktop plan I1–I2 |
+| **采集 / 编码预算基准** —— [`tools/benchmark_capture_encode.py`](tools/benchmark_capture_encode.py) 与已落盘产物 [`docs/benchmarks/capture_encode_windows_x86_64.json`](docs/benchmarks/capture_encode_windows_x86_64.json) | ✅ 已落地 | remote-desktop plan J5 |
 | OHOS Stage 1 工具链实证（`debug.ohos-arm64` 零 error、无未解符号） | ⏸️ 阻塞 —— 本机无 OHOS SDK | v1.1 Track O1 |
 
 > v1.0.2 是**已发布的 Stable** 版本 —— 公共 API 按 ADR-015 冻结
@@ -651,6 +678,18 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 
 详见 [CHANGELOG](CHANGELOG.md) "Platform support matrix"。
 
+**设备后端是分平台的**（引擎跨平台，*设备* 不跨平台）：
+
+| 设备层 | Windows | Linux | macOS |
+|---|---|---|---|
+| **视频采集** | `windows-dxgi`（DXGI Desktop Duplication）、`windows-wgc`（Windows Graphics Capture）、`synthetic` | `linux-pipewire`（XDG Desktop Portal / Wayland）、`linux-x11`、`synthetic` | `macos-screencapturekit`、`synthetic` |
+| **视频渲染** | `d3d11`、`headless`、`pinned` | `egl`、`headless`、`pinned` | `metal`、`headless`、`pinned` |
+| **音频设备** | `portaudio`（WASAPI / MME / DSound / ASIO）、`synthetic` | `portaudio`（ALSA / JACK / PulseAudio）、`synthetic` | `portaudio`（Core Audio）、`synthetic` |
+
+`d3d11` / `metal` / `egl` 三个工厂在**所有**平台注册，配置里点名能解析上，
+但在非对应平台上 `open()` 返回 `kErrUnsupported` —— 渲染器是 Windows / macOS / Linux
+各自的能力，不是跨平台通用能力。测试套件在所有平台跑的是 **synthetic** 采集与音频设备。
+
 ---
 
 ## 构建 & CI
@@ -675,11 +714,16 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | `NIMRTC_PLUGINS_QSV` | OFF | Intel QSV via libvpl/oneVPL |
 | `NIMRTC_PLUGINS_DXVA` | OFF | Microsoft DXVA/MF（Windows） |
 | `NIMRTC_PLUGINS_VAAPI` | OFF | Linux VA-API |
-| `NIMRTC_PLUGINS_OPENH264` | OFF | OpenH264 软件回退 |
+| `NIMRTC_PLUGINS_OPENH264` | OFF | OpenH264 **软件** H.264 编码器 + 解码器 —— 真实的软件编解码器（vendored `src/third_party/openh264/`）；不开它 H.264 路径就回落到合成 stub |
+| `NIMRTC_PLUGINS_DAV1D` | OFF | dav1d **软件** AV1 **解码器**（vendored `src/third_party/dav1d/`）—— 没有捆绑的 AV1 软件**编码器** |
+| `NIMRTC_VENDORED_LIBYUV` | **ON** | vendored 的 libyuv SIMD 缩放器；关掉后模块照常编译，缩放器报告"不可用" |
 
 > 另有按模块的 `NIMRTC_MODULE_*` 开关（RTP、SDP、JB、JB_STRATEGY、BWE、AUDIO3A、ICE、SRTP、
 > DTLS、OPUS、SCHED、DATACHANNEL、SESSION、ASSEMBLY、VIDEO_*），全部默认 **ON**；
-> 见根目录 `CMakeLists.txt`。
+> 见根目录 `CMakeLists.txt`。远程桌面相关模块（`NIMRTC_MODULE_VIDEO_CAPTURE`、
+> `NIMRTC_MODULE_VIDEO_SINK`、`NIMRTC_MODULE_VIDEO_BITRATE_CONTROL`、
+> `NIMRTC_MODULE_AUDIO_DEVICE`、`NIMRTC_MODULE_RD_INPUT`、`NIMRTC_MODULE_RD_QOE`）
+> 遵循同样的规则。
 
 ### 目录结构
 
@@ -693,8 +737,9 @@ nimrtc/
 │   ├── demo-p2p/              # 完整 P2P 客户端 demo
 │   ├── demo-wtserver/         # WebTransport / QUIC 服务端（Case E 对端）
 │   ├── demo-agent-gateway/    # PCM tap → ASR/LLM mock，基于 `agent-gateway` profile
+│   ├── remote-desktop/        # 远程桌面场景的参考信令服务与客户端
 │   └── wasm-demo/             # /wasm/ 落地页
-├── profiles/                  # Profile 库 —— 每个已交付 Profile 一个 JSON（9 个）
+├── profiles/                  # Profile 库 —— 每个已交付 Profile 一个 JSON（10 个）
 ├── src/
 │   ├── core/                  # bytes.hpp、log、time、status codes（L0）
 │   ├── log/                   # Logger 实现
@@ -704,7 +749,7 @@ nimrtc/
 │   ├── transport/             # 传输栈 + 策略（webrtc-classic、raw-udp-arq、sfu-relay）
 │   ├── raw_udp/               # Raw UDP 传输
 │   ├── web_transport/         # WebTransport / QUIC 会话（msquic）
-│   ├── modules/               # 25 个自包含模块（见下）
+│   ├── modules/               # 40 个自包含模块（见下）
 │   ├── plugins/               # 公开 plugin 接口（ADR-001）
 │   └── third_party/           # Vendored 依赖（见下表）
 ├── tests/                     # 跨模块 gtest 集成测试
@@ -714,13 +759,17 @@ nimrtc/
 └── .github/workflows/         # ci.yml · interop.yml · release.yml · wasm-demo-pages.yml
 ```
 
-`src/modules/` 下是 24 个自包含模块 —— 每个都有独立的
+`src/modules/` 下是 40 个自包含模块 —— 每个都有独立的
 `CMakeLists.txt` + `include/` + `src/` + `tests/`：
 
-`assembly` · `audio3a` · `bwe` · `datachannel` · `dtls` · `h264` · `ice` · `jb` ·
-`jb_strategy` · `opus` · `rtp` · `sched` · `sdp` · `session` · `srtp` · `video_frame` ·
+`assembly` · `audio3a` · `audio_device` · `audio_rx` · `av1` · `bwe` ·
+`datachannel` · `dtls` · `dtmf` · `h264` · `h265` · `ice` · `jb` ·
+`jb_strategy` · `net_feedback` · `nvcodec` · `opus` · `pacing` · `raw_udp` ·
+`rd_input` · `rd_qoe` · `rtp` · `sched` · `sctp` · `sdp` · `session` · `srtp` ·
+`transport` · `video_bitrate_control` · `video_capture` · `video_frame` ·
 `video_jb` · `video_payload` · `video_pipeline` · `video_rtcp_feedback` ·
-`video_sdp_attributes` · `video_sink` · `video_source` · `video_stats`
+`video_sdp_attributes` · `video_sink` · `video_source` · `video_stats` ·
+`web_transport`
 
 ### Vendored 第三方版本
 
@@ -739,8 +788,18 @@ nimrtc/
 | `libjuice` | master | `src/third_party/libjuice/src` | ❌ 签入源码树（含本地 SO_REUSEADDR 补丁） |
 | `mbedtls` | 4.2.0 | `src/third_party/mbedtls/src` | ❌ 仅归档 —— 不再链接 |
 | `webrtc_audio_processing` | master | `src/third_party/webrtc_audio_processing` | ❌ 构建时拉取（Meson），在树内打补丁 |
+| `nv_codec_headers` | n13.1.15.0 | `src/third_party/nv_codec_headers` | ❌ 签入的 header-only 源码树（锁定 NVENC / NVDEC 的结构体 ABI） |
+| `openh264` | v2.6.0 | `src/third_party/openh264/src` | ✅ 是（BSD-2-Clause；真实的软件 H.264 编解码器） |
+| `dav1d` | v1.5.1 | `src/third_party/dav1d/src` | ✅ 是（BSD-2-Clause；真实的软件 AV1 **解码器**） |
+| `libyuv` | master（LIBYUV_VERSION 1982） | `src/third_party/libyuv/src` | ✅ 是（BSD-3-Clause；SIMD 缩放器） |
+| `portaudio` | master | `src/third_party/portaudio/src` | ✅ 是（MIT；音频设备后端） |
+| `libsamplerate` | master（0.2.2-20） | `src/third_party/libsamplerate/src` | ✅ 是（BSD-2-Clause；采样率转换器） |
 
 > `usrsctp` 也 vendor 在 `src/third_party/usrsctp` 下，供 SCTP seam 使用。
+>
+> `openh264` 与 `dav1d` 是**可选**的（`NIMRTC_PLUGINS_OPENH264` /
+> `NIMRTC_PLUGINS_DAV1D`，默认都是 **OFF**）；`libyuv`、`portaudio`、`libsamplerate`
+> 默认 **ON**。它们**都没有系统库回退**（AGENTS.md L5）。
 
 ---
 
@@ -811,6 +870,9 @@ python tools/check_prerequisites.py --compiler  # 仅校验编译器
 - **架构决策记录**：[`docs/adr/`](docs/adr/)（中文摘要，代码/标识符英文）。
 - **RFC**：[`docs/rfcs/`](docs/rfcs/) —— 正式设计记录。
   - [RFC 001：PCM tap](docs/rfcs/rfc-001-pcm-tap.md) —— 定稿。
+- **实践指南**：[`docs/guides/`](docs/guides/) —— 按任务组织的实操文档：
+  - [Plugin 作者指南](docs/guides/plugin-author-guide.md) —— 写一个采集 / 编解码 / 渲染 / 音频设备 / 码率控制 plugin
+  - [远程桌面信令](docs/guides/remote-desktop.md) —— 会话与信令这道缝
 - **独立文档站**：docs-zh.nimrtc.dev —— 规划中，**尚未上线**。目前可访问的公开产物是
   [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/) 上的在线 demo。
 

@@ -219,6 +219,15 @@ if(NIMRTC_MODULE_AV1 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/av1/CMakeLists.txt"
     add_subdirectory(av1)
 endif()
 
+# Remote-desktop plan B11 — the VP9 codec module.  It carries the
+# *optional* software VP9 encoder (the vendored libvpx, which is
+# option-gated behind NIMRTC_VENDORED_LIBVPX and defaults OFF).  The
+# module itself is self-contained: it depends on nimrtc::core,
+# nimrtc::plugins and nimrtc::video_frame only.
+if(NIMRTC_MODULE_VP9 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vp9/CMakeLists.txt")
+    add_subdirectory(vp9)
+endif()
+
 # -----------------------------------------------------------------------------
 # Video R2 modules — must each be self-contained, no cross-module deps
 # unless explicitly listed in the module's own CMakeLists.txt.
@@ -264,6 +273,72 @@ endif()
 
 if(NIMRTC_MODULE_VIDEO_SINK)
     add_subdirectory(video_sink)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop control plane — the input module (plan Track G).
+#
+# Self-contained: it depends on nimrtc::core only, and it registers no
+# plugin (G3 says it is "a module, not a seam" — the transport is a
+# DataChannel and only the payload format is NimRTC's).  The engine wiring
+# for the control path is a separate item (G1 / G2) and does not live here.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_RD_INPUT)
+    add_subdirectory(rd_input)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop control plane — the input-injection module (plan Track G).
+#
+# The device side of the control plane: the module that actually makes the
+# remote operating system believe that a key was pressed.  It consumes the
+# rd_input vocabulary and depends on nothing else, so it is self-contained.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_RD_INPUT_INJECT)
+    add_subdirectory(rd_input_inject)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track D — the video rate controller (D1 / D2 / D3 / D4).
+#
+# Self-contained: it depends on nimrtc::core + nimrtc::plugins (the seam it
+# implements) and on nothing else.  The engine wiring — resolving the
+# controller through the registry and pushing its level into the encoder's
+# parameter set — lives in the engine.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_BITRATE_CONTROL)
+    add_subdirectory(video_bitrate_control)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track J — the QoE metrics module (J3 / J6).
+#
+# The *metrics* are self-contained (they depend on nimrtc::core only), but
+# the engine may not include a concrete module's header (Layout Invariant 4
+# / ADR-025), so the module also ships a thin adapter that implements the
+# `plugins::IQoeCollector` seam from src/plugins/.  The adapter adds no
+# policy: it is a translation layer, so there is exactly one implementation
+# of each metric in the tree.
+#
+# The engine resolves the adapter through the registry's qoe-collector slot
+# (`EngineConfig::qoe_collector_name`) and pushes the presented-frame
+# events into it.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_RD_QOE)
+    add_subdirectory(rd_qoe)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track F — the audio-device module (F1's seams are in
+# src/plugins/; this is their implementation).
+#
+# Self-contained: it depends on nimrtc::core + nimrtc::plugins (the seams
+# it implements) and on the vendored PortAudio.  The engine wiring for the
+# audio-device path (plan F3 — reporting the played-out samples to the 3A)
+# is a separate item and does not live here.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_AUDIO_DEVICE)
+    add_subdirectory(audio_device)
 endif()
 
 # CTest discovery: enable_testing() at this level so that each module's

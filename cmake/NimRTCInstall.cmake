@@ -73,6 +73,9 @@ set(_nimrtc_install_headers
   "${CMAKE_SOURCE_DIR}/src/modules/video_rtcp_feedback/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+  "${CMAKE_SOURCE_DIR}/src/modules/audio_device/include"
+  "${CMAKE_SOURCE_DIR}/src/modules/rd_input/include"
+  "${CMAKE_SOURCE_DIR}/src/modules/rd_qoe/include"
 )
 
 foreach(_inc IN LISTS _nimrtc_install_headers)
@@ -119,6 +122,9 @@ set(_nimrtc_install_shorts
   video_rtcp_feedback
   video_pipeline
   video_sink
+  audio_device
+  rd_input
+  rd_qoe
   sctp
   dtls_seam
   raw_udp

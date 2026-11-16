@@ -20,9 +20,9 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     const auto now = core::SteadyClock::now();
     const auto elapsed =
         std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - impl_->sr_last_sent).count();
+            now - impl_->timeline.sr_last_sent).count();
     if (elapsed < static_cast<std::int64_t>(config_.sr_period_ms)) return;
-    impl_->sr_last_sent = now;
+    impl_->timeline.sr_last_sent = now;
 
     // No audio has gone out yet — an SR with a zero RTP timestamp and a
     // zero packet count describes no media position, and would poison the
@@ -69,7 +69,7 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     // the SR would be silently dropped.
     core::ByteSpan out(sr_bytes.data(), sr_bytes.size());
     std::vector<std::uint8_t> enc;
-    if (impl_->srtp_installed && impl_->srtp) {
+    if (impl_->security.srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(impl_->audio_state.audio_ssrc,
                                               /*outgoing=*/true);
         if (!sess) return;   // SRTP installed but no keying yet — skip.

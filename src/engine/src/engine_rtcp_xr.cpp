@@ -111,7 +111,7 @@ bool NimRTCEngine::send_rtcp_packet(std::uint32_t ssrc,
     // report it is the engine's own RTCP SSRC (RFC 3550 §6.1); for a
     // feedback message it is the SSRC of the *media* sender the message
     // is about (RFC 4585 §6.1).
-    if (impl_->srtp_installed && impl_->srtp) {
+    if (impl_->security.srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(ssrc, /*outgoing=*/true);
         if (!sess) return false;   // SRTP installed but no keying yet — skip.
         auto r = sess->protect_rtcp(out);

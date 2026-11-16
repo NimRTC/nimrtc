@@ -38,6 +38,12 @@
  *   | `detail::TimelineState`         | `engine_timeline_state.hpp`   |
  *   | `detail::XrState`               | `engine_xr_state.hpp`         |
  *   | `detail::RefFrameTable`         | `engine_ref_frame_table.hpp`  |
+ *   | `detail::RenderState`           | `engine_render_state.hpp`     |
+ *   | `detail::ControlChannelInbox`   | `engine_control_inbox.hpp`    |
+ *   | `detail::ControlChannelSeam`    | `engine_control_seam.hpp`     |
+ *   | `detail::QoeSeam`               | `engine_qoe_seam.hpp`         |
+ *   | `detail::FeedbackState`         | `engine_feedback_state.hpp`   |
+ *   | `detail::SecurityState`         | `engine_security_state.hpp`   |
  *
  * The rule is simple: a member that only one feature reads or writes
  * belongs to that feature's collaborator, not to `Impl`.  The engine's
@@ -87,10 +93,16 @@
 #include "audio_routing.hpp"
 #include "bandwidth_allocation.hpp"
 #include "engine_audio_state.hpp"
+#include "engine_control_inbox.hpp"
+#include "engine_control_seam.hpp"
+#include "engine_feedback_state.hpp"
+#include "engine_qoe_seam.hpp"
 #include "engine_rtcp_helpers.hpp"
 #include "engine_ref_frame_table.hpp"
+#include "engine_render_state.hpp"
 #include "engine_scratch.hpp"
 #include "engine_sdp_helpers.hpp"
+#include "engine_security_state.hpp"
 #include "engine_session_state.hpp"
 #include "engine_timeline_state.hpp"
 #include "engine_video_state.hpp"
@@ -110,6 +122,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <set>
@@ -142,17 +155,10 @@
 // included to avoid a PUBLIC link dependency on make_transport_instance().
 #include <nimrtc/transport/transport_stack.hpp>
 #include <nimrtc/transport/transport_plugin.hpp>
-// The H.264 codec module is *not* included here.  It used to be, behind
-// `NIMRTC_HAS_H264`, purely so its `register_default_plugins()` symbol
-// would be visible to the linker -- the engine uses no type from it.
-// ADR-025 Decision 1 called that include "a link-time registration
-// convenience, not a type dependency", and said it was scheduled for
-// removal when the engine's default-registrar table was split out of
-// `engine_impl.hpp` (remediation plan D1).  That split has landed:
-// the registrar table now lives in `src/core/src/pal_default_registrars.cpp`
-// and lists `nimrtc::h264::register_default_plugins` there, so the
-// engine does not need the header to pull the symbol in.  The engine
-// reaches the H.264 codec through the registry's video-codec slot.
+// The H.264 codec module is *not* included here: the engine uses no type
+// from it, and the registrar table lives in `pal_default_registrars.cpp`.
+// ADR-025 Decision 1 scheduled the removal; `tools/check_engine_layering.py`
+// now enforces it (the rationale is recorded there).
 
 // Concrete module headers — required by NimRTCEngine::Impl which lives in
 // this translation unit.  The public header (engine.hpp) does NOT include
@@ -265,34 +271,10 @@ struct NimRTCEngine::Impl {
     // the media `ITransportStack` (see `Impl::session` below, built by
     // `make_transport_instance()` in `init_modules_once()`).
     //
-    // Why a weak_ptr (not `unique_ptr<IDtlsSession>` or raw pointer)?
-    //   - Pre-Slice-7.6 PR3 (v0.12.0), the engine built DTLS itself
-    //     via `reg.get_dtls_session("wolfssl")` and stored it in a
-    //     `unique_ptr`. The Slice 7.6 refactor moves that construction
-    //     into `WebRtcClassicStackFactory` (the "webrtc-classic" stack
-    //     factory), which produces a `WebRtcClassicStack` that owns
-    //     the DTLS session. The engine no longer builds DTLS
-    //     independently — the stack's factory does, and the engine
-    //     reaches the resulting session through the stack's
-    //     `dtls_weak()` accessor.
-    //   - Storing a `unique_ptr<dtls>` AND a stack-owned DTLS
-    //     session would double-free on destruction.  Storing a raw
-    //     pointer is safe (no ownership) but introduces the UAF class:
-    //     if the engine dereferences the pointer after the stack dies,
-    //     it reads freed memory.  weak_ptr resolves both: the stack
-    //     keeps ownership via its internal `shared_ptr`, and the
-    //     engine's `weak_ptr.lock()` returns nullptr once the stack
-    //     releases that shared_ptr (i.e. on `close()`).
-    //
-    // Lifetime: `impl_->session.media_stack` is destroyed in
-    // `delete impl_` (which `~NimRTCEngine` runs before its own
-    // members are destroyed).
-    //
-    // v0.12.0 P0: is_open() guards prevent post-close UAF on the API
-    // surface.  v0.13.0 (this change): changed to weak_ptr so
-    // .lock() returns nullptr automatically after close(), eliminating
-    // the UAF class entirely.  All callers now use:
-    //   if (auto* d = impl_->dtls.lock().get()) { d->X(); }
+    // It is a weak_ptr: storing an owning `unique_ptr` here would
+    // double-free on destruction, and a raw pointer would be a
+    // use-after-free once the stack dies.  `lock()` returns nullptr
+    // after `close()`, so there is no post-close dereference.
     std::weak_ptr<nimrtc::dtls::IDtlsSession>  dtls;
     std::unique_ptr<srtp::SrtpContext> srtp;
 
@@ -307,54 +289,31 @@ struct NimRTCEngine::Impl {
     // the field).
     //
     // For the 4 browser-interop strategies (browser-call, agent-gateway,
-    // sfu-relay, cross-network-peer):
-    //   - `session.media_stack`  → WebRtcClassicStack (owns ICE / DTLS / RTP / SCTP)
-    //   - `session.control_stack` → null (browser-call / sfu-relay / cross-network-peer)
-    //                              RawUdpArqStack (agent-gateway — high-freq control)
+    // sfu-relay, cross-network-peer) the media stack is a
+    // WebRtcClassicStack (owning ICE / DTLS / RTP / SCTP) and the
+    // control stack is null — except for agent-gateway, which gets a
+    // RawUdpArqStack for its high-frequency control traffic.
     //
-    // For teleop-ultra-low-latency (§5.3 Rule 2):
-    //   - `session.media_stack`  → RawUdpArqStack (no DTLS — not browser-interop)
-    //   - `session.control_stack` → RawUdpArqStack
-    //   - `impl_->dtls` = nullptr (no DTLS in media path for this strategy)
-    //   - Audio pipeline falls back to null-encoder; ICE/DTLS work via
-    //     the control stack's raw-UDP ARQ
+    // For teleop-ultra-low-latency (§5.3 Rule 2) both stacks are
+    // RawUdpArqStack, `impl_->dtls` is nullptr (no DTLS in the media
+    // path), and the audio pipeline falls back to a null encoder.
     TransportSession session;
 
     // ---- The DTLS / SRTP install state --------------------------------
-    bool            dtls_active_inbound = false;
-    bool            srtp_installed      = false;
-    int             srtp_stats_drop     = 0;
-    nimrtc::dtls::DtlsState last_dtls_state = nimrtc::dtls::DtlsState::Closed;
-
-    // ---- Network feedback loop (v1.2.0 M1, F2/F6) ----------------------
     //
-    // The loop is: inbound RTCP -> engine demux -> collector -> snapshot
-    // -> IBwe::on_feedback().  These two counters make the loop
-    // observable: `net_feedback_blocks` counts the RTCP blocks that were
-    // routed to the collector, `bwe_feedback_samples` counts the
-    // aggregated snapshots that were actually handed to the estimator.
-    //
-    // The last two fields are the de-duplication state: a snapshot is
-    // fed only when it carries new information (its timestamp moved),
-    // so the estimator sees one sample per feedback report rather than
-    // one per engine tick.
-    std::uint64_t net_feedback_blocks   = 0;
-    std::uint64_t bwe_feedback_samples  = 0;
-    core::TimePoint last_fed_feedback_ts{};
-    bool           has_fed_feedback     = false;
+    // The DTLS handshake trace, the SRTP installation flag and the SRTP
+    // drop counter are one feature — the transport security — so they
+    // live in one collaborator rather than as loose members here.
+    // See `engine_security_state.hpp`.
+    detail::SecurityState security;
 
-    // True once the engine has reported that the transport-cc path was
-    // required but is unavailable (ADR-018 Decision 2's "fail loudly"
-    // mode).  The report is made once per session.
-    bool           transport_cc_unavailable_reported = false;
-
-    // ---- RTCP Extended Reports (v1.2.0, session plan X1) ---------------
+    // ---- The RTCP feedback / BWE / pacing state ------------------------
     //
-    // The number of inbound RTCP XR sub-packets that were routed to the
-    // XR consumer.  It is the observable that proves the wiring is
-    // closed: a peer that sends extended reports and a counter that
-    // stays at zero mean the routing is broken.
-    std::uint64_t xr_report_blocks = 0;
+    // The network-feedback counters, the XR routing counter and the
+    // pacing split are all "what the engine observed on the RTCP path",
+    // so they live in one collaborator rather than as loose members
+    // here.  See `engine_feedback_state.hpp`.
+    detail::FeedbackState feedback;
 
     // ---- The negotiated RTCP XR / TMMBR state --------------------------
     //
@@ -364,13 +323,6 @@ struct NimRTCEngine::Impl {
     // and they only make sense together with the state they gate.
     detail::XrState xr;
 
-    // ---- Pacing split (v1.2.0 M3, P2) ----------------------------------
-    //
-    // The demand list of the bandwidth split, kept as a member so that
-    // the per-tick split does not allocate a vector every time.  The
-    // contents are rewritten (never reallocated) on each tick.
-    std::vector<detail::BandwidthDemand> pacing_demands_;
-
     // ---- The feature-scoped state --------------------------------------
     //
     // Every member that belongs to exactly one feature lives in the
@@ -379,6 +331,39 @@ struct NimRTCEngine::Impl {
     detail::VideoState   video_state;
     detail::SessionState session_state;
     detail::ScratchBuffers scratch;
+
+    // ---- The receive-side render state (remote-desktop plan E5 / E6 / E7
+    // / E9) -------------------------------------------------------
+    //
+    // The render clock (E5), the input-echo state (E6), the presentation
+    // configuration (E7) and the displayed-frame record (E9) are one
+    // feature — the receive / presentation plane — so they live in one
+    // collaborator rather than as loose members here.  See
+    // `engine_render_state.hpp`.
+    detail::RenderState render;
+
+    // ---- The remote-desktop control channel (plan G1 / G2 / G6) ---------
+    //
+    // The channel's framing and outbound queue live in the `rd_input`
+    // module, reached through the `plugins::IControlChannel` seam; the
+    // engine owns the transport it rides on.  See
+    // `engine_control_seam.hpp`.
+
+    // The channel's engine-side inbox: the lock that guards the control
+    // path and the queue of messages that arrived but have not been
+    // delivered to the host yet.  See `engine_control_inbox.hpp`.
+    detail::ControlChannelInbox control_inbox;
+    // The control channel itself, resolved through the
+    // `plugins::IControlChannel` seam (the framing lives in the
+    // `rd_input` module — see `engine_control_seam.hpp`).
+    detail::ControlChannelSeam control_seam;
+
+    // ---- The QoE collector (plan J3 / J6) -------------------------------
+    //
+    // The metrics live in the `rd_qoe` module, reached through the
+    // `plugins::IQoeCollector` seam; the engine pushes the events it
+    // knows about into it.  See `engine_qoe_seam.hpp`.
+    detail::QoeSeam qoe;
 
     // ---- Cross-end timeline (ADR-017) ---------------------------------
     //
@@ -391,11 +376,12 @@ struct NimRTCEngine::Impl {
     detail::TimelineState timeline;
 
     // ---- Outbound Sender Report state ----------------------------------
-    // `sr_*` carry the values an SR body reports for the audio stream
-    // (RFC 3550 §6.4.1 sender info).  Video is folded into the same SR via
-    // report blocks only when a video sender is active; the audio stream is
-    // the SR's own media source because it is always the first one out.
-    std::chrono::steady_clock::time_point sr_last_sent{};
+    // `sr_last_sent` carries the values an SR body reports for the audio
+    // stream (RFC 3550 §6.4.1 sender info).  Video is folded into the
+    // same SR via report blocks only when a video sender is active; the
+    // audio stream is the SR's own media source because it is always the
+    // first one out.  The timestamp itself lives in `TimelineState`,
+    // next to the rest of the ADR-017 timeline.
 };
 
 }  // namespace nimrtc::engine

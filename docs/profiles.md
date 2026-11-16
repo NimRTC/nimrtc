@@ -6,7 +6,7 @@ Single-page index of every Profile shipped with NimRTC. Profiles are the
 designed to be safely round-tripped across processes, persisted to disk,
 and diff-reviewed in pull requests.
 
-## Profile matrix (9 profiles)
+## Profile matrix (10 profiles)
 
 | name | use case | jb | audio3a | codec | bwe | datachannel | distinguishing feature |
 |------|----------|----|---------|-------|-----|-------------|------------------------|
@@ -19,6 +19,7 @@ and diff-reviewed in pull requests.
 | `relay-agent` | relay + AI Agent hybrid (N:1) | none (relay) | webrtc_apm (Agent side) | none (relay) | none (relay) | yes | `relay_enabled`+`agent_gateway_enabled` markers; timeline re-calibration on egress |
 | `agent-gateway` | server-side Agent media gateway | adaptive / low_latency / 30 ms | webrtc_apm (tap surface) | opus | aimd (.5/5 Mbps) | yes | exposes pre/post-3A PCM tap for ASR / wake-word / VAD |
 | `agent-low-latency` | Agent SDK's lowest-latency variant | adaptive / low_latency / 20 ms | webrtc_apm (AGC off) | opus (FEC off) | aimd (.5/5 Mbps) | yes | `agent_low_latency` marker; AGC level estimator off; Opus FEC off |
+| `remote-desktop` | remote-desktop scene (screen + control) | adaptive / low_latency / 30 ms | webrtc_apm | opus | aimd (2/20 Mbps) | yes | `video_content_type="screen"`; 720p resolution floor; smoothness-first ladder; control on a separate `raw-udp-arq` stack |
 
 > **Not shipped: `cloudgame`** (cloud rendering / streaming). It is a long-term
 > candidate, not part of the official Profile set — `profiles/cloudgame.json`
@@ -77,6 +78,18 @@ level estimator off (signalled via the `agent_low_latency` marker — AGC's
 variable compute cost breaks sub-frame latency tracking), Opus FEC off
 (prefer application-layer retransmission).
 
+**`remote-desktop`** — An operator drives a remote machine's desktop. The
+media plane carries the remote **screen** (`video_content_type="screen"`),
+the control plane carries mouse / keyboard events on its **own**
+`raw-udp-arq` stack so a saturated video path cannot starve the input
+stream. The ladder is smoothness-first with a 720p resolution floor — a
+remote-desktop user reads text, so dropping below 720p destroys the
+product. The profile also **declares the per-stream bandwidth shares**
+(`video_stream_weights`): the screen gets weight 3 and a camera thumbnail
+weight 1, so the picture the operator reads survives the link while the
+thumbnail does not crowd it out. See the remote-desktop plan
+(`docs/plan/remote-desktop-plan.md`) K3 / D5.
+
 ## Schema version
 
 - **v1.0** — `call` / `live` / `transport` / `agent` / `teleop` / `relay`.
@@ -87,6 +100,27 @@ variable compute cost breaks sub-frame latency tracking), Opus FEC off
   `max_sessions_per_engine` / `audio3a_name_explicit`. Loader-agnostic —
   the C++ loader ignores them (see ADR-010 §"Schema v1.1 incremental
   fields"). Engines that care consult these markers at composition time.
+- **v1.2** (v1.4.0) — adds `remote-desktop` and the **additive** v1.2
+  video-scene keys `video_codec_preference` / `video_resolution_floor` /
+  `video_ladder_mode` / `video_content_type` / `video_stream_weights`.
+  The schema lives at
+  [`profiles/schema/profile-v1.2.json`](../profiles/schema/profile-v1.2.json).
+  All five keys are **optional**: a v1.1 profile that omits them loads
+  unchanged and yields the engine defaults (codec preference `"h264"`,
+  resolution floor `"720p"`, ladder mode `"quality"`, content type
+  `"camera"`, and an even bandwidth split). The ladder-mode vocabulary and
+  the per-profile defaults are tabulated in
+  `docs/plan/video-pipeline-v2-plan.md` §B.7.3 (OD-3(a)); the content-type
+  vocabulary follows ADR-022.
+  `video_stream_weights` is an **object**: the key is the video stream's
+  stable id (`"default"`, `"screen"`, `"camera"`, ...) and the value is
+  that stream's relative weight in the bandwidth split (an integer in
+  0..255; 0 means "this stream takes nothing from the pool", and the
+  default weight is 1 — an even split). The declaration is applied to the
+  default stream at `open()` and to an extra stream when that stream is
+  created; `NimRTCEngine::set_video_stream_weight()` overrides it
+  afterwards. A declaration for a stream the session never creates is
+  inert, not an error.
 
 ## How to use
 

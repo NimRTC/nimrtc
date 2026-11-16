@@ -78,6 +78,11 @@ TEST(BwePluginSeam, UnknownIdReturnsNullptr) {
 }
 
 TEST(BwePluginSeam, ListBwesContainsAimd) {
+    // Each GTest case is registered as its own CTest entry and therefore
+    // runs in a fresh process — the registry starts empty here, so the
+    // default registrar must be invoked explicitly (it is idempotent).
+    nimrtc::bwe::register_default_plugins();
+
     auto& reg = core::PluginRegistry::instance();
     auto ids = reg.list_bwes();
     bool found = false;

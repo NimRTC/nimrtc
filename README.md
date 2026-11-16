@@ -92,8 +92,21 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 | | | |
 |---|---|---|
 | 🎯 **Compile-time layered (L0–L3)** | 🔌 **Public plugin interfaces** | 🪶 **12.55 MB static lib** (vs libwebrtc 150–250 MB) |
-| 🧩 **Profiles for scenes, not forks** — `call` / `transport` / `relay` / `agent` / `agent-gateway` / `agent-low-latency` / `relay-agent` / `teleop` / `live` | 🔁 **Swappable DTLS backend** — wolfSSL (default) ↔ GMSSL (opt-in), public API unchanged | 🛡️ **GM/T crypto path** — DTLS/TLCP via GMSSL (SRTP still uses the international suites) |
+| 🧩 **Profiles for scenes, not forks** — `call` / `transport` / `relay` / `agent` / `agent-gateway` / `agent-low-latency` / `relay-agent` / `teleop` / `live` (+ `remote-desktop`) | 🔁 **Swappable DTLS backend** — wolfSSL (default) ↔ GMSSL (opt-in), public API unchanged | 🛡️ **GM/T crypto path** — DTLS/TLCP via GMSSL (SRTP still uses the international suites) |
 | 📡 **Wire-level interop** — Chrome (Case D media + Case E via WebTransport JS API) | 🏗️ **4-platform CI** — Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **Differentiated for AI Agent** — pre/post-3A PCM tap, ref_frame timeline |
+
+> **What the media layer actually ships** (no row above implies a bundled codec
+> that is not in the tree): Opus; H.264 through the vendored **OpenH264** software
+> codec and the opt-in **NVENC** hardware path; AV1 *decode* through the vendored
+> **dav1d** and the opt-in **NVDEC**; H.265 / AV1 *encode* through the opt-in
+> **NVENC** only. **G.711 is routed, not encoded here**, and **VP8 / VP9 are RTP
+> packetizers only** — there is no bundled G.711, VP8 or VP9 codec. The capture
+> devices are **synthetic** (everywhere) plus **DXGI** / **Windows Graphics
+> Capture** (Windows), **ScreenCaptureKit** (macOS) and **PipeWire** / **X11**
+> (Linux); the renderers are **headless**, **pinned**, **D3D11** (Windows),
+> **Metal** (macOS) and **EGL** (Linux); the audio devices are **PortAudio**
+> plus a synthetic device. Every hardware path is behind a `NIMRTC_PLUGINS_*`
+> switch that defaults **OFF**.
 
 ---
 
@@ -320,7 +333,7 @@ window closed as NO (BDFL, 2026-10-19; see `docs/plan/v1.0-plan.md` §7 + §12.5
                                     ▼
             ┌──────────────────────────────────────────────────┐
             │  L2  Codecs + 3A          (skipped by `relay`)       │
-            │  Opus / G.711 / VP8 / H.264 / H.265 / AV1 · audio 3A  │
+            │  Opus · H.264(OpenH264/NVENC) · H.265/AV1 (NVENC) · 3A  │
             └──────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -346,9 +359,10 @@ window closed as NO (BDFL, 2026-10-19; see `docs/plan/v1.0-plan.md` §7 + §12.5
        │  PLUGIN INTERFACES  (header-only, in `src/plugins/`)   │
        │                                                       │
        │  ITransport · IICETransport · IRTP · ISDP · IJB       │
-       │  IAudio3A · ICodec                                    │
-       │  IVideoSource · IVideoSink · IDataChannel             │
-       │  IHwCodec · IHw3A                                     │
+       │  IAudio3A · ICodec · IAudioDecoder · IAudioReceiver   │
+       │  IVideoCapture · IVideoSource · IVideoEncoder/Decoder │
+       │  IVideoSink · IVideoBitrateController · IDataChannel  │
+       │  IAudioSource · IAudioSink · ISession · IDtmfCodec    │
        └──────────────────────────────────────────────────────┘
 ```
 
@@ -369,7 +383,7 @@ flowchart TB
     L1 --> L0["L0 - Bytes / log / time / status codes"]
 
     L3 -. resolved at build time .-> PAL["PAL - Plugin Adaptation Layer / zero-overhead resolver"]
-    PAL --> PLG["Plugin interfaces: ITransport, IICETransport, IRTP, ISDP, IJB, IAudio3A, ICodec, IVideoSource/Sink, IDataChannel, IHwCodec, IHw3A"]
+    PAL --> PLG["Plugin interfaces: ITransport, IICETransport, IRTP, ISDP, IJB, IAudio3A, ICodec, IAudioDecoder, IAudioReceiver, IVideoCapture, IVideoSource, IVideoEncoder/Decoder, IVideoSink, IVideoBitrateController, IAudioSource, IAudioSink, IDataChannel, ISession, IDtmfCodec"]
 
     classDef profile fill:#fef3c7,stroke:#92400e,color:#1f2937
     classDef layer   fill:#dbeafe,stroke:#1e40af,color:#1f2937
@@ -387,7 +401,7 @@ flowchart TB
 |---|---|---|
 | **Profile** | `cmake/profiles/*.cmake` | A pure build-time selection: which of L0–L3 are linked, which plugin backends are picked. No runtime dispatch — selecting `relay` literally omits L2 from the binary. |
 | **L3 Engine** | `src/engine/` | The single public façade (`NimRTCEngine`). Wires plugins together; contains **no concrete module headers** in its API — see Layout Invariant 4 in [`ARCHITECTURE.md`](ARCHITECTURE.md). |
-| **L2 Codecs + 3A** | `src/modules/opus/`, `…/audio3a/`, `…/video_payload/` | Encode/decode and the audio 3A pipeline. The `relay` profile compiles without L2, halving the codec surface in the resulting binary. |
+| **L2 Codecs + 3A** | `src/modules/opus/`, `…/audio3a/`, `…/video_payload/` | Encode/decode and the audio 3A pipeline. The `relay` profile compiles without L2, halving the codec surface in the resulting binary. **What actually ships:** Opus (vendored `libopus`); H.264 via the vendored **OpenH264** software codec and the **NVENC** hardware path; H.265 and AV1 via the **NVENC/NVDEC** hardware path plus a *stub* software fallback; AV1 *decode* also via the vendored **dav1d**. There is **no bundled G.711 codec** (the payload is routed, not encoded here) and **no bundled VP8/VP9 codec** (those are RTP packetizers only). |
 | **L1 Wire / state** | `src/modules/{rtp,sdp,ice,dtls,srtp,jb,bwe}/` | The protocols and state machines that talk to the network. In-house (not vendored) per the §11 vendoring rule. |
 | **L0 Primitives** | `src/core/`, `src/log/` | Status codes, byte buffers, monotonic time, logging. Header-only where possible. |
 | **PAL** | `src/plugins/pal/` | Resolves every plugin capability at build time via a small registry. After resolution, plugin calls are direct (zero indirection), so the public API surface is unchanged from the engine’s point of view. See [ADR-009](docs/adr/ADR-009-pal-slice-1.md). |
@@ -467,6 +481,38 @@ Track A baselines are transport-floor numbers, not engine glass-to-glass claims.
 
 See [`tools/benchmark_size.py`](tools/benchmark_size.py), [`tools/benchmark_latency.py`](tools/benchmark_latency.py), [`tools/benchmark_dc.py`](tools/benchmark_dc.py), [`tools/benchmark_weaknet.py`](tools/benchmark_weaknet.py), and [`tools/benchmark_weaknet_netem.sh`](tools/benchmark_weaknet_netem.sh) for the measurement tools.
 
+### Capture / encode budget (remote-desktop plan J5)
+
+The remote-desktop plan's §B.6 makes the per-frame CPU budget an acceptance criterion, so the numbers are measured rather than asserted. [`tools/benchmark_capture_encode.py`](tools/benchmark_capture_encode.py) drives the real engine (the portable synthetic capture device → colour conversion → H.264 encode → RTP packetize) and reads the engine's own per-stage instrumentation. The committed artifact is [`docs/benchmarks/capture_encode_windows_x86_64.json`](docs/benchmarks/capture_encode_windows_x86_64.json).
+
+Measured on the reference machine (Windows 10 x86_64, 12th Gen Intel Core i5-12400F, 6C/12T, NVIDIA GeForce RTX 3060), 1080p30:
+
+| Path | Backend | capture | convert | encode | packetize | **total** | §B.6 total budget |
+|---|---|---|---|---|---|---|---|
+| Hardware | `nvenc` | 0.32 ms | 3.95 ms | **3.06 ms** | 0.01 ms | **7.34 ms** | ≤ 8 ms |
+| Software | `openh264` | 0.34 ms | 4.63 ms | **22.08 ms** | 0.01 ms | **27.05 ms** | ≤ 55 ms |
+
+The hardware encoder is **~7.2× cheaper per frame** than the software fallback on the same machine — the evidence for the plan's hardware-first default. Capture rate on the portable device at 1080p: **~257 fps (124 fps/megapixel)**.
+
+> Reproduce with `cmake --build <build-dir> --target bench_capture_encode` then `python tools/benchmark_capture_encode.py --build-dir <build-dir> --out <path>`. The hardware row needs a build with `-DNIMRTC_PLUGINS_NVENC=ON` (and `-DNIMRTC_PLUGINS_NVDEC=ON`); without it the harness records that no hardware encoder was available rather than a fabricated number. The checked-in JSON is one local sample, not a pass/fail threshold — the software path's `convert` stage exceeds the §B.6 line on this machine because the synthetic device delivers packed BGRA on the CPU path (no zero-copy capture device), and that is reported, not hidden.
+
+### Remote-desktop response curve (remote-desktop plan J4 / J6)
+
+A remote-desktop session is judged on *feel*, not on throughput, so the weak-network benchmark reports the **response curve** rather than a throughput number: the ladder level vs. time, the delivered fps vs. time, the cumulative freeze count vs. time, and the latency percentiles vs. time. [`tools/benchmark_remote_desktop.py`](tools/benchmark_remote_desktop.py) runs a deterministic (seeded) synthetic remote-desktop scenario — a 30 fps source, the plan's monotone bitrate ladder, a rate-limited link with loss and jitter, a bounded transmit queue, a decoder and a display — and writes the committed artifact [`docs/benchmarks/remote_desktop_weaknet_windows_x86_64.json`](docs/benchmarks/remote_desktop_weaknet_windows_x86_64.json).
+
+The scenario walks the link through four phases (20 Mbps → 3 Mbps → 1 Mbps → 20 Mbps) and the curve shows the ladder's reaction:
+
+| Phase | Capacity | Delivered fps | Ladder level | Latency p50 | Freezes (cumulative) |
+|---|---|---|---|---|---|
+| clean | 20 Mbps | ~28.5 | 2 → 4 | ~22 ms | 0 |
+| congested | 3 Mbps | ~23.5 | 4 → 1 | ~179 ms | 8 |
+| collapse | 1 Mbps | ~10.8 | 1 → 0 | ~231 ms | 40 |
+| recovery | 20 Mbps | ~26.2 | 0 → 4 | ~29 ms | 41 |
+
+The ladder steps down under congestion and climbs back when the link frees up, the freezes accumulate while the link is collapsing, and the input-to-photon latency (J6 — the operator's input event to the frame that reflects it) is reported alongside: p50 ~56 ms, p95 ~452 ms over the whole run.
+
+> Reproduce with `python tools/benchmark_remote_desktop.py` (add `--dry-run` to print the summary without writing the artifact). The run is **deterministic** — the RNG is seeded, so re-running produces the same numbers and the committed artifact doubles as a regression baseline. These are the numbers of a *model*, not of a real session; the artifact's `notes` say so. The QoE metrics themselves live in the self-contained `src/modules/rd_qoe/` module (the freeze accounting, the sharpness proxy, the bounded end-to-end latency percentiles, the viewer's frame rate, and the input-to-photon pairing).
+
 ---
 
 ## Plugin Architecture
@@ -484,6 +530,14 @@ NimRTC exposes nearly every "swappable" capability through plugin interfaces def
 **Comparison baseline:** GStreamer / FFmpeg / OBS / PipeWire all use plugin architectures — but in the **WebRTC** ecosystem (libwebrtc / Pion / LiveKit / mediasoup / janus), only Pion and libwebrtc internally have similar abstractions. **NimRTC exposes them publicly and runs both P2P and `relay` on the same set of interfaces** (the `relay` profile skips L2 codecs; a from-scratch SFU module is *not* a deliverable — see `docs/plan/v1.0-plan.md` §7).
 
 Plugins are the evolution mechanism: P0–P1 use built-in implementations; P2–P3 differentiating features (dual 3A tap, intra-scheduler strict-priority ordering, ref_frame timeline) also ship as plugins (`IJB::set_render_delivered`, `IRTP::set_ref_frame`).
+
+> **Writing a plug-in?** Start with
+> [`docs/guides/plugin-author-guide.md`](docs/guides/plugin-author-guide.md) — the
+> hands-on guide to the capture, codec, sink, rate-controller and audio-device
+> seams (the five-step recipe, the exact registration macros, the CMake target to
+> link, the zero-copy contract and the house rules). The general catalogue is
+> [`docs/plugin_author_guide.md`](docs/plugin_author_guide.md); the hardware
+> backend seam is [`docs/hw_plugin_seam.md`](docs/hw_plugin_seam.md).
 
 ---
 
@@ -526,8 +580,10 @@ Profiles are **compile-time configurations**, not runtime dispatch. Format: see 
 | `relay-agent` | L0+L1+L3 | Relay + AI Agent hybrid (N:1), timeline re-calibration |
 | `teleop` | L0+L1+L2+L3 | Robot / embodied-AI teleoperation — intra-scheduler strict-priority ordering (DC-2 scope note applies) |
 | `live` | L0+L1+L2+L3 | One-way broadcast / live streaming |
+| `remote-desktop` | L0+L1+L2+L3 | Remote-desktop scene — screen content (`video_content_type="screen"`), 720p resolution floor, smoothness-first ladder, control plane on a separate `raw-udp-arq` stack. Landed on `main`, not yet published. |
 
-> Full matrix (9 shipped profiles, with per-field JB / 3A / BWE / DC settings) lives in
+> Full matrix (10 profiles — 9 shipped through v1.0.2 plus `remote-desktop`, which
+> landed on `main` — with per-field JB / 3A / BWE / DC settings) lives in
 > [`docs/profiles.md`](docs/profiles.md). `cloudgame` (cloud rendering / streaming) is a
 > **long-term candidate and is not in the shipped Profile set** — see
 > [`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md) §2 Track V.
@@ -608,10 +664,10 @@ yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651
 | SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ❌ **Closed — NO** | Closed 2026-10-19 (BDFL: SFU is not a project core goal); off the critical path. See `docs/plan/v1.0-plan.md` §7 + §12.5. |
 | DC-3 — DC forwarding policy in SFU relay context | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
 | BENCH-1 — `sfu-relay` benchmark pps/Mbps | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
-| H.264 hardware backends — NVENC encoder (Win/Linux), AMF encoder (Win), QSV encoder (Win/Linux), VA-API encoder (Linux), DXVA decoder (Win), OpenH264 software fallback | ✅ | v0.9.2 |
-| H.264 hardware **decoding** — NVDEC (Win/Linux) | ✅ **implemented** — `src/modules/nvcodec/` ships a real CUVID decoder (parser + decoder + NV12 surface → host copy), driven by runtime dynamic loading of `nvcuvid.dll` / `libnvcuvid.so`. `VideoToolbox` (macOS) and `MediaCodec` (Android) remain **not implemented** — the backend entries exist so the seam stays stable, but `create()` returns `nullptr` and `available()` returns `false`; use the software H.264 path there. See the [H.264 backend matrix](docs/hw_plugin_seam.md#111-backend-matrix). | v1.1 |
-| H.265 (HEVC) video codec — end to end | ✅ **implemented** — `src/modules/h265/` registers a video-codec plugin under the id `"h265"` (the spelling `EngineConfig::video_codec_name` uses). The RTP payload format is **RFC 7798** (single NAL unit, AP type 48, FU type 49 with a 6-bit `FuType`), and the SDP parameters are RFC 7798 too (`profile-id`, `level-id`, `tier-flag`, `tx-mode="SRST"`, `sprop-vps` / `sprop-sps` / `sprop-pps`). Hardware encode/decode rides the shared `nvcodec` module (NVENC / NVDEC). | v1.2 |
-| AV1 video codec — end to end | ✅ **implemented** — `src/modules/av1/` registers a video-codec plugin under the id `"av1"`. The RTP payload format is **draft-ietf-payload-av1** (aggregation header, LEB128 lengths, Annex-B framing, OBU reassembly). The SDP side is the AV1 Unified Plan `a=fmtp:` body. Hardware encode/decode rides the shared `nvcodec` module (NVENC / NVDEC). | v1.2 |
+| H.264 hardware backends — NVENC encoder (Win/Linux), AMF encoder (Win), QSV encoder (Win/Linux), VA-API encoder (Linux), DXVA decoder (Win), OpenH264 software fallback | ⚠️ **opt-in, not in the default build** — every `NIMRTC_PLUGINS_*` switch is **OFF** by default and the AMD / Intel / VA-API / DXVA paths additionally need the vendor SDK the CMake probe looks for. The **real** software codec (the vendored OpenH264) is behind `NIMRTC_PLUGINS_OPENH264=ON`. See the [H.264 backend matrix](docs/hw_plugin_seam.md#111-backend-matrix). | v0.9.2 (the seam ids); the OpenH264 path is later |
+| H.264 hardware **decoding** — NVDEC (Win/Linux), VideoToolbox (macOS) | ✅ **implemented** — `src/modules/nvcodec/` ships a real CUVID decoder (parser + decoder + NV12 surface → host copy), driven by runtime dynamic loading of `nvcuvid.dll` / `libnvcuvid.so`, **and** the Apple VideoToolbox backend (`src/modules/nvcodec/src/videotoolbox_decoder.cpp`, against `VTDecompressionSession` + `CVPixelBuffer`). `MediaCodec` (Android) remains **not implemented** — the backend entry exists so the seam stays stable, but `create()` returns `nullptr` and `available()` returns `false`; use the software H.264 path there. See the [H.264 backend matrix](docs/hw_plugin_seam.md#111-backend-matrix). | v1.1 (NVDEC) / v1.4 (VideoToolbox) |
+| H.265 (HEVC) video codec — end to end | ⚠️ **implemented, but hardware- or stub-only** — `src/modules/h265/` registers a video-codec plugin under the id `"h265"` (the spelling `EngineConfig::video_codec_name` uses). The RTP payload format is **RFC 7798** (single NAL unit, AP type 48, FU type 49 with a 6-bit `FuType`), and the SDP parameters are RFC 7798 too (`profile-id`, `level-id`, `tier-flag`, `tx-mode="SRST"`, `sprop-vps` / `sprop-sps` / `sprop-pps`). The **only real H.265 codec in the tree is the NVENC / NVDEC hardware path** (`NIMRTC_PLUGINS_NVENC=ON` / `NIMRTC_PLUGINS_NVDEC=ON`); there is **no bundled H.265 software codec** — without a hardware backend the module falls back to a *stub* that emits a synthetic bitstream, so "H.265 works" is only true on a machine with an NVIDIA GPU. | v1.2 |
+| AV1 video codec — end to end | ⚠️ **implemented, but hardware- or stub-only for encode** — `src/modules/av1/` registers a video-codec plugin under the id `"av1"`. The RTP payload format is **draft-ietf-payload-av1** (aggregation header, LEB128 lengths, Annex-B framing, OBU reassembly). The SDP side is the AV1 Unified Plan `a=fmtp:` body. The **real** AV1 paths are the **NVENC / NVDEC hardware** encode/decode and the vendored **dav1d software decoder** (`NIMRTC_PLUGINS_DAV1D=ON`); there is **no bundled AV1 software encoder** — the software encode path is the synthetic stub. | v1.2 |
 
 ### Landed on `main`, not yet published
 
@@ -631,6 +687,14 @@ has not closed.
 | 3A stage brought in line with its own contract (input-domain level meters, honoured VAD / level flags, real APM reference signal, engine no longer mutates the caller's PCM) | ✅ landed | post-v1.0.2 fix |
 | libsrtp converted to a real git submodule; the vendor manifest now distinguishes verified submodules from checked-in trees | ✅ landed | post-v1.0.2 chore |
 | Simplified Goog-CC-style BWE (opt-in, AIMD stays the default; delay + loss hybrid estimation, not a full trendline port), RTCP feedback loop, netem weak-network baselines, engine-level `ref_frame` / video stats, GMSSL vendoring + SRTP seam, engine source split | ✅ landed | v1.1 Tracks Q1 / Q3 / Q4 / T / V / X / R |
+| **Remote-desktop track** — the capture-device seam (`IVideoCapture`) with the **synthetic** device plus the **Windows DXGI Desktop Duplication** and **Windows Graphics Capture** backends, the **macOS ScreenCaptureKit** and **Linux PipeWire / X11** adapters, and the `windows-dxgi` / `windows-wgc` / `macos-screencapturekit` / `linux-pipewire` / `linux-x11` / `synthetic` capture ids | ✅ landed | remote-desktop plan A1–A8 |
+| **Video sink seam + renderers** — `IVideoSink` gains the **GPU-surface delivery path** (`GpuBuffer`); the shipped renderers are `headless`, `pinned`, **`d3d11`** (Windows), **`metal`** (macOS) and **`egl`** (Linux). The `d3d11` / `metal` / `egl` factories exist on every platform so a configuration naming them resolves, but on a non-matching platform `open()` reports `kErrUnsupported` | ✅ landed | remote-desktop plan E1–E8 |
+| **Codec seam split + backend selector** — `IVideoEncoder` / `IVideoDecoder` (the combined `IVideoCodec` is now a deprecated compatibility shim), plus `EngineConfig::video_codec_backend` = `auto` / `hardware` / `software`. The real software codecs are the vendored **OpenH264** (H.264) and **dav1d** (AV1 decode); H.265 and AV1 *encode* are **NVENC-only**, and the synthetic stubs remain the always-available fallback | ✅ landed | remote-desktop plan B1–B4 |
+| **Video rate controller** — the `IVideoBitrateController` seam and the `video-bitrate-control` module: the resolution / fps / bitrate ladder, the resolution floor and the keyframe-cost budget. The encoder stays **passive** — the engine turns the controller's level into a `VideoEncoderParams` and pushes it | ✅ landed | remote-desktop plan D1–D4 |
+| **Audio device layer** — the `IAudioSource` / `IAudioSink` seams and the `audio_device` module with the **PortAudio** backend plus the synthetic device the tests run on | ✅ landed | remote-desktop plan F1–F2 |
+| **`remote-desktop` Profile + profile schema v1.2** — `profiles/remote-desktop.json` (screen content, 720p floor, smoothness ladder, control on a separate stack) and the additive [`profiles/schema/profile-v1.2.json`](profiles/schema/profile-v1.2.json) | ✅ landed | remote-desktop plan K3–K4 |
+| **Signalling guide + reference signalling service** — [`docs/guides/remote-desktop.md`](docs/guides/remote-desktop.md) and the Python reference service under [`examples/remote-desktop/`](examples/remote-desktop/) | ✅ landed | remote-desktop plan I1–I2 |
+| **Capture / encode budget benchmark** — [`tools/benchmark_capture_encode.py`](tools/benchmark_capture_encode.py) and the committed artifact [`docs/benchmarks/capture_encode_windows_x86_64.json`](docs/benchmarks/capture_encode_windows_x86_64.json) | ✅ landed | remote-desktop plan J5 |
 | OHOS Stage 1 toolchain proof (`debug.ohos-arm64` zero errors, no unresolved symbols) | ⏸️ blocked — no OHOS SDK on this host | v1.1 Track O1 |
 
 > v1.0.2 is the **published Stable** release — public API frozen per ADR-015
@@ -660,6 +724,21 @@ has not closed.
 
 Details in [CHANGELOG](CHANGELOG.md) "Platform support matrix".
 
+**Device backends are platform-specific** (the *engine* is cross-platform; the
+*devices* are not):
+
+| Device layer | Windows | Linux | macOS |
+|---|---|---|---|
+| **Video capture** | `windows-dxgi` (DXGI Desktop Duplication), `windows-wgc` (Windows Graphics Capture), `synthetic` | `linux-pipewire` (XDG Desktop Portal / Wayland), `linux-x11`, `synthetic` | `macos-screencapturekit`, `synthetic` |
+| **Video renderer** | `d3d11`, `headless`, `pinned` | `egl`, `headless`, `pinned` | `metal`, `headless`, `pinned` |
+| **Audio device** | `portaudio` (WASAPI / MME / DSound / ASIO), `synthetic` | `portaudio` (ALSA / JACK / PulseAudio), `synthetic` | `portaudio` (Core Audio), `synthetic` |
+
+The `d3d11` / `metal` / `egl` factories are registered on **every** platform so a
+configuration naming one resolves, but on a non-matching platform `open()` reports
+`kErrUnsupported` — the renderer is a Windows / macOS / Linux capability, not a
+cross-platform one. The **synthetic** capture and audio devices are the ones the
+test suite runs on, on every leg.
+
 ---
 
 ## Build & CI
@@ -684,11 +763,16 @@ Details in [CHANGELOG](CHANGELOG.md) "Platform support matrix".
 | `NIMRTC_PLUGINS_QSV` | OFF | Intel QSV via libvpl/oneVPL |
 | `NIMRTC_PLUGINS_DXVA` | OFF | Microsoft DXVA/MF (Windows) |
 | `NIMRTC_PLUGINS_VAAPI` | OFF | Linux VA-API |
-| `NIMRTC_PLUGINS_OPENH264` | OFF | OpenH264 software fallback |
+| `NIMRTC_PLUGINS_OPENH264` | OFF | OpenH264 **software** H.264 encoder + decoder — the real software codec (vendored `src/third_party/openh264/`); without it the H.264 path falls back to the synthetic stub |
+| `NIMRTC_PLUGINS_DAV1D` | OFF | dav1d **software** AV1 **decoder** (vendored `src/third_party/dav1d/`) — there is no bundled AV1 software *encoder* |
+| `NIMRTC_VENDORED_LIBYUV` | **ON** | The vendored libyuv SIMD scaler; with it off the module still compiles and the scaler reports "unavailable" |
 
 > Per-module `NIMRTC_MODULE_*` switches (RTP, SDP, JB, JB_STRATEGY, BWE, AUDIO3A, ICE, SRTP,
 > DTLS, OPUS, SCHED, DATACHANNEL, SESSION, ASSEMBLY, VIDEO_*) are also available and all
-> default to **ON**; see the root `CMakeLists.txt`.
+> default to **ON**; see the root `CMakeLists.txt`. The remote-desktop modules
+> (`NIMRTC_MODULE_VIDEO_CAPTURE`, `NIMRTC_MODULE_VIDEO_SINK`,
+> `NIMRTC_MODULE_VIDEO_BITRATE_CONTROL`, `NIMRTC_MODULE_AUDIO_DEVICE`,
+> `NIMRTC_MODULE_RD_INPUT`, `NIMRTC_MODULE_RD_QOE`) follow the same rule.
 
 ### Repository layout
 
@@ -702,8 +786,9 @@ nimrtc/
 │   ├── demo-p2p/              # Full P2P client demo
 │   ├── demo-wtserver/         # WebTransport / QUIC server (Case E peer)
 │   ├── demo-agent-gateway/    # PCM tap → ASR/LLM mock on the `agent-gateway` profile
+│   ├── remote-desktop/        # Reference signalling service + client for the remote-desktop scene
 │   └── wasm-demo/             # /wasm/ landing page
-├── profiles/                  # Profile library — one JSON per shipped Profile (9)
+├── profiles/                  # Profile library — one JSON per shipped Profile (10)
 ├── src/
 │   ├── core/                  # bytes.hpp, log, time, status codes (L0)
 │   ├── log/                   # Logger implementation
@@ -713,7 +798,7 @@ nimrtc/
 │   ├── transport/             # Transport stacks + strategies (webrtc-classic, raw-udp-arq, sfu-relay)
 │   ├── raw_udp/              # Raw UDP transport
 │   ├── web_transport/         # WebTransport / QUIC session (msquic)
-│   ├── modules/               # 24 self-contained modules (see below)
+│   ├── modules/               # 40 self-contained modules (see below)
 │   ├── plugins/               # Public plugin interfaces (ADR-001)
 │   └── third_party/           # Vendored deps (see table below)
 ├── tests/                     # Cross-module gtest integration tests
@@ -723,13 +808,17 @@ nimrtc/
 └── .github/workflows/         # ci.yml · interop.yml · release.yml · wasm-demo-pages.yml
 ```
 
-The `src/modules/` tree holds 24 self-contained modules — each with its own
+The `src/modules/` tree holds 40 self-contained modules — each with its own
 `CMakeLists.txt` + `include/` + `src/` + `tests/`:
 
-`assembly` · `audio3a` · `bwe` · `datachannel` · `dtls` · `h264` · `ice` · `jb` ·
-`jb_strategy` · `opus` · `rtp` · `sched` · `sdp` · `session` · `srtp` · `video_frame` ·
+`assembly` · `audio3a` · `audio_device` · `audio_rx` · `av1` · `bwe` ·
+`datachannel` · `dtls` · `dtmf` · `h264` · `h265` · `ice` · `jb` ·
+`jb_strategy` · `net_feedback` · `nvcodec` · `opus` · `pacing` · `raw_udp` ·
+`rd_input` · `rd_qoe` · `rtp` · `sched` · `sctp` · `sdp` · `session` · `srtp` ·
+`transport` · `video_bitrate_control` · `video_capture` · `video_frame` ·
 `video_jb` · `video_payload` · `video_pipeline` · `video_rtcp_feedback` ·
-`video_sdp_attributes` · `video_sink` · `video_source` · `video_stats`
+`video_sdp_attributes` · `video_sink` · `video_source` · `video_stats` ·
+`web_transport`
 
 ### Vendored third-party versions
 
@@ -748,8 +837,18 @@ Pinned in [`src/third_party/vendor.json`](src/third_party/vendor.json) (SHA-veri
 | `libjuice` | master | `src/third_party/libjuice/src` | ❌ checked-in tree (has a local SO_REUSEADDR patch) |
 | `mbedtls` | 4.2.0 | `src/third_party/mbedtls/src` | ❌ archival only — no longer linked |
 | `webrtc_audio_processing` | master | `src/third_party/webrtc_audio_processing` | ❌ fetched at build time (Meson), patched in-tree |
+| `nv_codec_headers` | n13.1.15.0 | `src/third_party/nv_codec_headers` | ❌ checked-in header-only tree (pins the NVENC / NVDEC struct ABI) |
+| `openh264` | v2.6.0 | `src/third_party/openh264/src` | ✅ yes (BSD-2-Clause; the real software H.264 codec) |
+| `dav1d` | v1.5.1 | `src/third_party/dav1d/src` | ✅ yes (BSD-2-Clause; the real software AV1 **decoder**) |
+| `libyuv` | master (LIBYUV_VERSION 1982) | `src/third_party/libyuv/src` | ✅ yes (BSD-3-Clause; the SIMD scaler) |
+| `portaudio` | master | `src/third_party/portaudio/src` | ✅ yes (MIT; the audio-device backend) |
+| `libsamplerate` | master (0.2.2-20) | `src/third_party/libsamplerate/src` | ✅ yes (BSD-2-Clause; the sample-rate converter) |
 
 > `usrsctp` is also vendored under `src/third_party/usrsctp` for the SCTP seam.
+>
+> `openh264` and `dav1d` are **opt-in** (`NIMRTC_PLUGINS_OPENH264` / `NIMRTC_PLUGINS_DAV1D`,
+> both default **OFF**); `libyuv`, `portaudio` and `libsamplerate` default **ON**.
+> There is **no system fallback** for any of them (AGENTS.md L5).
 
 ---
 
@@ -820,6 +919,9 @@ python tools/check_prerequisites.py --compiler  # compiler only
 - **Architecture decisions:** [`docs/adr/`](docs/adr/) (Chinese summaries, code/identifiers in English).
 - **RFCs:** [`docs/rfcs/`](docs/rfcs/) — formal design records.
   - [RFC 001: PCM tap](docs/rfcs/rfc-001-pcm-tap.md) — Final
+- **Guides:** [`docs/guides/`](docs/guides/) — hands-on, task-shaped documents:
+  - [Plugin author guide](docs/guides/plugin-author-guide.md) — write a capture / codec / sink / audio-device / rate-controller plug-in
+  - [Remote-desktop signalling](docs/guides/remote-desktop.md) — the session and signalling seam
 - **Standalone docs site:** docs-zh.nimrtc.dev — planned, **not live yet**. The live demo at
   [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/) is the currently
   reachable public artifact.

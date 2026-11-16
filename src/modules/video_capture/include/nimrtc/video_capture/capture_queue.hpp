@@ -311,7 +311,7 @@ public:
         out.capture_ts_us = popped_.ts;
         out.frame_seq     = popped_.seq;
         out.dirty         = std::move(popped_.dirty);
-        out.gpu_surface   = popped_.surface;
+        out.set_gpu_surface(popped_.surface);
         out.has_gpu_handle = popped_.surface.backend !=
                                  video_frame::GpuBackend::kNone &&
                              popped_.surface.handle != nullptr;
@@ -347,7 +347,7 @@ public:
         out.capture_ts_us = f.ts;
         out.frame_seq     = f.seq;
         out.dirty         = f.dirty;
-        out.gpu_surface   = f.surface;
+        out.set_gpu_surface(f.surface);
         out.has_gpu_handle = f.surface.backend !=
                                  video_frame::GpuBackend::kNone &&
                              f.surface.handle != nullptr;

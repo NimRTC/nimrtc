@@ -52,6 +52,41 @@ if(COMMAND gtest_discover_tests)
 endif()
 
 # -----------------------------------------------------------------------------
+# test_openh264_software — the REAL software H.264 codec (remote-desktop
+# plan WP-B).  Only built when the vendored OpenH264 source tree is
+# present and NIMRTC_PLUGINS_OPENH264=ON; otherwise the synthetic stub
+# stays in charge and there is nothing to test here.
+# -----------------------------------------------------------------------------
+if(NIMRTC_PLUGINS_OPENH264 AND NIMRTC_VENDORED_OPENH264 AND
+   EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/openh264/src/codec/api/wels/codec_api.h")
+    add_executable(test_openh264_software test_openh264_software.cpp)
+
+    set_target_properties(test_openh264_software PROPERTIES
+        VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+    nimrtc_apply_options(test_openh264_software LENIENT)
+
+    target_link_libraries(test_openh264_software PRIVATE
+        nimrtc::h264
+        nimrtc::video_frame
+        nimrtc::video_payload
+        nimrtc::core
+        nimrtc::plugins
+        GTest::gtest_main
+        GTest::gtest)
+
+    add_test(NAME modules_h264_tests_test_openh264_software
+             COMMAND test_openh264_software)
+    set_tests_properties(modules_h264_tests_test_openh264_software PROPERTIES TIMEOUT 60)
+
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(test_openh264_software
+            PROPERTIES TIMEOUT 60
+            DISCOVERY_TIMEOUT 10)
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
 # test_hw_backends — HW backend registry + helper unit tests
 # -----------------------------------------------------------------------------
 # This test file accesses the private header src/hw_backend_base.hpp via the

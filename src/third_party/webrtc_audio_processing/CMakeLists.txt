@@ -102,19 +102,52 @@ if(NOT _apm_lib)
     #     keeps working, and emit a STATUS message so the user sees why
     #     audio3a will run as the built-in stub.
     if(NIMRTC_VENDORED_WEBRTC_APM)
-        message(FATAL_ERROR
-            "WebRTC APM pre-built library not found.  Looked for any of:\n"
-            "  ${_apm_dir}/libwebrtc-audio-processing-2.a\n"
-            "  ${_apm_dir}/libwebrtc-audio-processing-2${CMAKE_STATIC_LIBRARY_SUFFIX}\n"
-            "\n"
-            "Run the build script first:\n"
-            "  Windows: build\\build_webrtc_apm.cmd\n"
-            "  Linux:   ./build/build_webrtc_apm.sh\n"
-            "\n"
-            "The script:\n"
-            "  1. Clones https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing\n"
-            "  2. Configures with meson (with abseil-cpp subproject)\n"
-            "  3. Builds the static library + abseil-cpp")
+        # Is the prebuilt *buildable* here at all?  The APM source tree
+        # is cloned at build time by tools/fetch_webrtc_apm.py, so on a
+        # fresh clone it is simply absent.  In that state the prebuilt
+        # can never appear, and failing the configure would make a
+        # plain `cmake -S . -B build` impossible -- which is a worse
+        # outcome than running without 3A.
+        #
+        # So the rule is:
+        #   * the source IS present  -> the user can run the build
+        #     script, so a missing prebuilt IS an error (it means the
+        #     script was started and did not finish).
+        #   * the source is NOT present -> the prebuilt is unreachable
+        #     in this tree; fall back to the stub with a STATUS message
+        #     and tell the user how to opt in.
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/meson.build")
+            message(FATAL_ERROR
+                "WebRTC APM pre-built library not found.  Looked for any of:\n"
+                "  ${_apm_dir}/libwebrtc-audio-processing-2.a\n"
+                "  ${_apm_dir}/libwebrtc-audio-processing-2${CMAKE_STATIC_LIBRARY_SUFFIX}\n"
+                "\n"
+                "Run the build script first:\n"
+                "  Windows: build\\build_webrtc_apm.cmd\n"
+                "  Linux:   ./build/build_webrtc_apm.sh\n"
+                "\n"
+                "The script:\n"
+                "  1. Clones https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing\n"
+                "  2. Configures with meson (with abseil-cpp subproject)\n"
+                "  3. Builds the static library + abseil-cpp")
+        else()
+            message(STATUS
+                "WebRTC APM pre-built library not found, and the APM source "
+                "tree is not present either (it is cloned at build time by "
+                "tools/fetch_webrtc_apm.py), so the prebuilt cannot be "
+                "built in this tree.  Defining a stub "
+                "nimrtc_vendor_webrtc_apm INTERFACE target so audio3a can "
+                "still link; AEC/ANS/AGC/VAD will fall back to the built-in "
+                "stub implementation.  Run `python tools/fetch_webrtc_apm.py` "
+                "and reconfigure to enable real 3A processing.")
+            if(NOT TARGET nimrtc_vendor_webrtc_apm)
+                add_library(nimrtc_vendor_webrtc_apm INTERFACE)
+            endif()
+            if(NOT TARGET nimrtc::vendor::webrtc_apm)
+                add_library(nimrtc::vendor::webrtc_apm ALIAS nimrtc_vendor_webrtc_apm)
+            endif()
+            return()
+        endif()
     else()
         message(STATUS
             "WebRTC APM pre-built library not found, and "

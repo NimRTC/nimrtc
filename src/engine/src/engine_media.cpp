@@ -12,7 +12,27 @@
 // is the session's *reserved* stream.
 #include "bandwidth_allocation.hpp"
 
+// Remote-desktop plan B12 / B13: the ONE place the engine computes the
+// encoder's parameter set.
+#include "engine_video_params.hpp"
+
+// Remote-desktop plan H1 / H2: the staging step is shared by every
+// video send path (the default stream's and each extra stream's), so
+// the colour-space rule lives in one header rather than in this
+// translation unit's anonymous namespace.
+#include "engine_video_staging.hpp"
+
+// ADR-025 Decision 4: the RTP packet building is concentrated in the
+// `detail::RtpPacketizer` collaborator, so this file never names a
+// concrete `rtp::` type.
+#include "rtp_packetizer.hpp"
+
 namespace nimrtc::engine {
+
+// The staging step's names are used unqualified below; they come from
+// the shared collaborator (see the include above).
+using detail::ConversionKind;
+using detail::stage_source_frame;
 
 namespace {
 
@@ -31,143 +51,6 @@ constexpr int kDefaultAudioBitrateStereoBps = 64000;
  *  the scheduler's pool, so the protected packet fits without a
  *  reallocation. */
 constexpr std::size_t kSrtpAuthTagBytes = 10;
-
-/** Copy one plane row-block from a caller-owned source into a staged buffer.
- *
- *  @param dst        Destination plane base (already offset to the plane).
- *  @param dst_stride Destination row stride in bytes.
- *  @param src        Source plane base.
- *  @param src_stride Source row stride in bytes.
- *  @param rows       Number of rows to copy.
- *  @param row_bytes  Number of bytes to copy per row.
- */
-void copy_plane_rows(std::uint8_t* dst, std::int32_t dst_stride,
-                     const std::uint8_t* src, std::int32_t src_stride,
-                     std::uint32_t rows, std::size_t row_bytes) noexcept {
-    if (!dst || !src || rows == 0 || row_bytes == 0) return;
-
-    // The strides are signed because a layout can describe a bottom-up
-    // plane (row 0 at the highest address).  Keep the arithmetic signed
-    // so that case works, instead of narrowing them to size_t and
-    // wrapping a negative stride into a huge offset.
-    const std::ptrdiff_t d_step = dst_stride;
-    const std::ptrdiff_t s_step = src_stride;
-    std::uint8_t* d = dst;
-    const std::uint8_t* s = src;
-    for (std::uint32_t row = 0; row < rows; ++row) {
-        std::memcpy(d, s, row_bytes);
-        d += d_step;
-        s += s_step;
-    }
-}
-
-/** Stage a caller-owned `plugins::VideoSourceFrame` into an owned
- *  `video_frame::VideoFrameBuffer` that the codec can read.
- *
- *  Why this exists: the plugin-level `VideoSourceFrame` is a *view* — its
- *  `plane_*` pointers belong to the source and are only valid for the
- *  duration of the callback.  The codec seam, in contrast, takes a
- *  `plugins::VideoFrame` whose `buffer` is a refcounted
- *  `VideoFrameBuffer` that must stay alive across the `encode()` call.
- *  Software codecs can ignore the pixels entirely, but a hardware encoder
- *  (NVENC) reads them: with a null `buffer` it rejects the frame with
- *  `kErrInvalidParam`.  So the engine owns the copy.
- *
- *  The staged buffer always uses the *codec-facing* pixel format (I420 by
- *  default) rather than the source's own format, so a source that emits
- *  NV12 is converted once here instead of forcing every codec to handle
- *  both layouts.
- *
- *  Note on `plane_offset_*`: the plugin producers (e.g. the memory video
- *  source) already resolve the offsets into the `plane_y/u/v` pointers, so
- *  the pointers are treated as absolute plane bases here and the offset
- *  fields are ignored — adding them again would read past the plane.
- *
- *  @param frame  Caller-owned source frame (planes valid for this call).
- *  @param fmt    Target pixel format for the staged buffer.
- *  @param pool   Pool the staged buffer's storage comes from (Phase 3 / C1).
- *  @return The staged buffer, or nullptr when the frame cannot be staged
- *          (no planes, zero dimensions, or an unsupported source format).
- */
-std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
-        const plugins::VideoSourceFrame& frame,
-        plugins::VideoPixelFormat fmt,
-        video_frame::VideoFrameBufferPool& pool) noexcept {
-    if (frame.width == 0 || frame.height == 0) return nullptr;
-    if (!frame.plane_y) return nullptr;
-
-    // Only I420-family sources can be staged without a colour-space
-    // conversion.  Packed formats (BGRA / RGBA) would need a YUV matrix
-    // the engine does not own — the caller must convert first.
-    const bool source_is_nv12 = frame.format == plugins::VideoPixelFormat::kNV12;
-    const bool source_is_planar_420 =
-        frame.format == plugins::VideoPixelFormat::kI420
-     || frame.format == plugins::VideoPixelFormat::kYV12
-     || source_is_nv12
-     || frame.format == plugins::VideoPixelFormat::kUnknown;
-    if (!source_is_planar_420) return nullptr;
-
-    // The target must be a planar 4:2:0 layout — that is what every
-    // hardware encoder consumes today.
-    if (fmt != plugins::VideoPixelFormat::kI420
-     && fmt != plugins::VideoPixelFormat::kYV12) {
-        return nullptr;
-    }
-
-    const auto layout = video_frame::compute_layout(fmt, frame.width, frame.height);
-    if (layout.buffer_size == 0) return nullptr;
-
-    // Phase 3 / C1: take the storage from the pool instead of allocating
-    // a fresh frame-sized block per frame.  At 1080p30 that was a ~3 MB
-    // allocation *and* a ~3 MB memset every 33 ms, on top of the copy the
-    // staging itself does.
-    auto staged = pool.acquire(layout);
-    if (!staged) return nullptr;
-
-    const std::uint32_t half_w = (frame.width + 1u) / 2u;
-    const std::uint32_t half_h = (frame.height + 1u) / 2u;
-
-    // The source strides default to a tight packing when the producer did
-    // not set them (e.g. a hand-built test frame).
-    const std::int32_t src_stride_y = frame.stride_y > 0
-        ? frame.stride_y : static_cast<std::int32_t>(frame.width);
-    // NV12's chroma plane is interleaved, so one row of it spans the full
-    // width; a planar 4:2:0 chroma row spans half the width.
-    const std::int32_t src_stride_c = frame.stride_u > 0
-        ? frame.stride_u
-        : static_cast<std::int32_t>(source_is_nv12 ? frame.width : half_w);
-
-    if (source_is_nv12) {
-        // NV12 source: one interleaved UV plane.  De-interleave it into the
-        // staged I420 U and V planes (this also copies the luma plane).
-        if (!frame.plane_u) return nullptr;
-        video_frame::convert_nv12_to_i420(
-            frame.width, frame.height,
-            frame.plane_y, src_stride_y,
-            frame.plane_u, src_stride_c,
-            staged->plane(0), layout.strides[0],
-            staged->plane(1), layout.strides[1],
-            staged->plane(2), layout.strides[2]);
-        return staged;
-    }
-
-    // I420 / YV12 source: three separate planes.
-    if (!frame.plane_u || !frame.plane_v) return nullptr;
-
-    // ---- Luma ---------------------------------------------------------------
-    copy_plane_rows(staged->plane(0), layout.strides[0],
-                    frame.plane_y, src_stride_y,
-                    frame.height, frame.width);
-
-    // ---- Chroma -------------------------------------------------------------
-    copy_plane_rows(staged->plane(1), layout.strides[1],
-                    frame.plane_u, src_stride_c,
-                    half_h, half_w);
-    copy_plane_rows(staged->plane(2), layout.strides[2],
-                    frame.plane_v, src_stride_c,
-                    half_h, half_w);
-    return staged;
-}
 
 } // anonymous namespace
 
@@ -467,6 +350,27 @@ void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame
     if (audio3a_plugin_) {
         audio3a_plugin_->set_render_delivered(samples_per_ch);
     }
+
+    // ---- The audio side of the render clock (remote-desktop plan E5) ---
+    //
+    // The video half of the A/V sync compares the picture's capture
+    // instant with the *sound* that is at the speaker now.  The sound's
+    // capture instant is the peer's capture timestamp of the frame that
+    // was just played out — the same ADR-017 reconstruction the
+    // detailed audio callback publishes.
+    //
+    // It is recorded here (rather than in the detailed callback) because
+    // the detailed callback is optional — a host that did not install
+    // it would otherwise silently lose the audio reference and the
+    // render clock would never align anything.
+    {
+        const std::int64_t capture_us = audio_capture_time_us(
+            impl_ != nullptr ? impl_->audio_state.audio_rx.ssrc : 0,
+            frame.rtp_timestamp);
+        if (capture_us != 0) {
+            impl_->render.audio_playout_capture_us = capture_us;
+        }
+    }
 }
 
 
@@ -522,6 +426,29 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // starts from a clean slate.
     impl_->video_state.video_stats.ensure_created();
 
+    // Remote-desktop plan H1: the video stream set's clock starts with
+    // the session, so the per-stream rates (H4) are measured against a
+    // well-defined origin from the first frame on.
+    impl_->video_state.video_streams.mark_started(detail::steady_now_us());
+
+    // Remote-desktop plan D5: the profile may declare the *default*
+    // stream's share.  The declaration is applied here — at open(), when
+    // the default stream becomes real — and `set_video_stream_weight()`
+    // overrides it afterwards.
+    //
+    // A weight of 0 for the default stream is refused for the same
+    // reason `set_video_stream_weight()` refuses it: the default stream
+    // is the session's primary video path, and a host that wants it to
+    // sit out must remove the video path, not mute it.
+    {
+        const auto declared = config_.video_stream_weights.find(
+            std::string(detail::kDefaultVideoStreamId));
+        if (declared != config_.video_stream_weights.end() &&
+            declared->second > 0) {
+            impl_->video_state.video_streams.default_weight = declared->second;
+        }
+    }
+
     // ---- Our RTCP feedback SSRC (v1.1 Q3) ---------------------------------
     //
     // RFC 3550 §6.1 identifies the sender of an RTCP packet by its SSRC.
@@ -535,11 +462,10 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         if (impl_->video_state.video_feedback_ssrc_ == 0) impl_->video_state.video_feedback_ssrc_ = 1;
     }
 
-    // The capture *device* is created at the very end of this function,
-    // by `init_video_capture()` (remote-desktop plan A10).  It cannot be
-    // created here: the device is turned into a frame stream by the
-    // capture module's shared adapter, and that adapter needs the codec
-    // and the sender to already exist.
+    // The capture *device* is created here, with the rest of the video
+    // plugins (remote-desktop plan A10).  It cannot be created earlier
+    // than the codec: the zero-copy seam needs the device's GPU context
+    // to open the encoder's session on the *same* device.
     //
     // The capture seam is *optional*: an empty video_capture_name means
     // "the host feeds frames itself", which is the normal case.  A
@@ -548,6 +474,129 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // is reported as an error rather than silently downgraded to "no
     // capture device".  Silently ignoring it would turn a typo into a
     // session that quietly never produces a frame.
+    //
+    // Note that the capture device is NOT wired into the encoder here.
+    // The engine hands the device to the host through video_capture();
+    // turning a device into a frame stream is an adapter's job, and the
+    // automatic capture → encoder pump is remote-desktop plan item A10.
+    if (!config_.video_capture_name.empty() && !video_capture_) {
+        // The capture request comes from the host (`EngineConfig::
+        // video_capture_config`).  It is handed to the device verbatim:
+        // the device owns the negotiation, and the engine must not
+        // second-guess which display or which size the host meant.
+        //
+        // One exception: `EngineConfig::video_zero_copy` asks the *send*
+        // path to avoid a host copy, which only makes sense if the
+        // capture side can deliver a GPU surface too.  When the host
+        // left the format's `zero_copy` flag alone and asked for
+        // zero-copy, the request says so — and a device that cannot do
+        // it is reported at `open()` time, which is exactly what the
+        // check below is for.
+        plugins::CaptureConfig capture_cfg = config_.video_capture_config;
+        if (capture_cfg.format.zero_copy == false && config_.video_zero_copy) {
+            capture_cfg.format.zero_copy = true;
+        }
+
+        (void)pal::make_plugin<&pal::resolve_video_capture>(
+            config_.video_capture_name,
+            video_capture_,
+            std::move(capture_cfg),
+            {.err_open_failed = core::kVideoCaptureOpenFailed,
+             .err_missing = core::kVideoCapturePluginMissing,
+             .open_fail_mode = pal::PluginFailureMode::Error,
+             .missing_mode = pal::PluginFailureMode::Error,
+             .on_error = on_error_,
+             // The capture device knows *why* it refused -- another
+             // program holds the desktop-duplication slot, the display
+             // does not support duplication, the consent prompt was
+             // declined -- and that reason is what the operator can act
+             // on.  It is read while the device is still alive.
+             .open_failure_detail =
+                 [](const void* plugin) -> std::string {
+                     if (plugin == nullptr) return {};
+                     return static_cast<const plugins::IVideoCapture*>(plugin)
+                         ->last_error_message();
+                 }});
+    }
+
+
+    // ---- The capture request vs. the device's capabilities ---------------
+    //
+    // The frozen `CaptureCapabilities` / `CaptureFormat` semantics
+    // (remote-desktop plan A1) are checked HERE, at `open()` time.  An
+    // unsupported combination — a zero-copy format on a device that
+    // cannot do zero-copy, dirty-rect metadata the device does not
+    // produce, a size above the device's maximum — is a *configuration*
+    // condition, and reporting it up front is the whole point: the
+    // alternative is a session that opens cleanly and never produces a
+    // frame, which is indistinguishable from a broken peer.
+    if (video_capture_) {
+        const plugins::CaptureCapabilities caps = video_capture_->capabilities();
+        // The *request* is what is checked — not the negotiated result.
+        // The negotiated format is by construction within the device's
+        // capabilities (the device would have refused otherwise); the
+        // request is what can be wrong.
+        const plugins::CaptureConfig& requested = config_.video_capture_config;
+
+        std::vector<plugins::CaptureFormat> offered;
+        if (!requested.device_id.empty()) {
+            offered = video_capture_->supported_formats(requested.device_id);
+        }
+
+        // The zero-copy request derived from `EngineConfig::video_zero_copy`
+        // has to be part of what is checked, so the check sees the same
+        // request the device was given.
+        plugins::CaptureConfig effective = requested;
+        if (!effective.format.zero_copy && config_.video_zero_copy) {
+            effective.format.zero_copy = true;
+        }
+
+        const detail::CaptureCapabilityCheck check =
+            detail::check_capture_capabilities(caps, effective, offered);
+        if (!check.ok()) {
+            const std::string msg =
+                std::string{"engine: the capture device '"} +
+                config_.video_capture_name +
+                "' does not support the requested configuration (" +
+                std::string{detail::capture_violation_name(check.violation)} +
+                "); the request is refused before the first frame.";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kVideoCaptureUnsupported, msg);
+        }
+    }
+
+    // ---- The shared GPU device (remote-desktop plan B10) ----------------
+    //
+    // The zero-copy capture seam has two halves, and they are established
+    // at two different moments — because the codec's own capability is
+    // only known once the codec exists.
+    //
+    //   1. **Before** the codec is created: the capture device publishes
+    //      the D3D11 device its surfaces live on (`gpu_context()`).  The
+    //      codec has to open its encode session on **that** device:
+    //      NVENC registers the input surface per session and the driver
+    //      refuses a texture that was created on a different
+    //      `ID3D11Device` — even on the same physical adapter — with
+    //      `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9).  So the
+    //      context is put into the codec's config *before* the codec is
+    //      created, and the codec adopts it.
+    //
+    //   2. **After** the codec is created: the capture device's GPU
+    //      callback is attached to the mailbox (see
+    //      `wire_capture_gpu_callback()` below).  The callback runs on
+    //      the **capture device's own thread**; the codec may only be
+    //      touched on the **tick thread** (RD-6).  The mailbox is the
+    //      boundary between the two (see `engine_gpu_mailbox.hpp`).
+    //
+    // A capture device that publishes no context (the CPU-only devices)
+    // simply does not get the seam: the codec opens its own device and
+    // the pump falls back to the CPU path.  That is the pre-B10
+    // behaviour, and it is honest.
+    plugins::GpuContext capture_gpu_context{};
+    impl_->video_state.capture_gpu_wired = false;
+    if (video_capture_ && video_capture_->supports_gpu_frames()) {
+        capture_gpu_context = video_capture_->gpu_context();
+    }
 
     // ---- Video Sink --------------------------------------------------------
     if (!video_sink_) {
@@ -557,12 +606,69 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         (void)pal::make_plugin<&pal::resolve_video_sink>(
             config_.video_sink_name,
             video_sink_,
-            plugins::VideoSinkConfig{},                  // default config
+            resolve_sink_config(),                    // plan E7: the presentation
             {.err_open_failed = core::kVideoSinkOpenFailed,
              .err_missing = core::kVideoSinkPluginMissing,
              .open_fail_mode = pal::PluginFailureMode::Error,
              .missing_mode = pal::PluginFailureMode::Error,
              .on_error = on_error_});
+    }
+
+    // ---- Video Bitrate Controller (remote-desktop plan D1) -----------------
+    //
+    // The ladder is resolved through the registry's
+    // video-bitrate-controller slot, never by naming a concrete module
+    // (Layout Invariant 4).  An empty id means "no controller": the
+    // encoder then keeps the bitrate it was configured with, which is
+    // the pre-D4 behaviour.
+    if (!video_bitrate_controller_ && !config_.video_bitrate_controller_name.empty()) {
+        plugins::VideoBitrateControllerConfig bcfg{};
+        bcfg.mode               = config_.video_ladder_mode;
+        bcfg.source_width       = config_.video_width;
+        bcfg.source_height      = config_.video_height;
+        bcfg.source_fps         = config_.video_fps;
+        bcfg.min_height         = config_.video_resolution_floor_height;
+        if (config_.video_start_bitrate_bps > 0) {
+            bcfg.source_bitrate_bps = config_.video_start_bitrate_bps;
+        }
+
+        const auto* factory =
+            pal::resolve_video_bitrate_controller(
+                config_.video_bitrate_controller_name);
+        if (factory == nullptr) {
+            if (on_error_) {
+                on_error_(core::kEngineInvalidParam,
+                          "engine: no video bitrate controller plugin named '" +
+                              config_.video_bitrate_controller_name + "'");
+            }
+            impl_->session_state.last_open_rc = core::kEngineInvalidParam;
+            shutdown_video_plugins();
+            return core::kEngineInvalidParam;
+        }
+
+        std::unique_ptr<plugins::IVideoBitrateController> owned(
+            factory->create(bcfg));
+        if (!owned) {
+            if (on_error_) {
+                on_error_(core::kEngineInvalidParam,
+                          "engine: the video bitrate controller plugin "
+                          "failed to create a controller");
+            }
+            impl_->session_state.last_open_rc = core::kEngineInvalidParam;
+            shutdown_video_plugins();
+            return core::kEngineInvalidParam;
+        }
+        if (owned->open() != plugins::kOk) {
+            if (on_error_) {
+                on_error_(core::kEngineInvalidParam,
+                          "engine: the video bitrate controller plugin "
+                          "failed to open");
+            }
+            impl_->session_state.last_open_rc = core::kEngineInvalidParam;
+            shutdown_video_plugins();
+            return core::kEngineInvalidParam;
+        }
+        video_bitrate_controller_ = std::move(owned);
     }
 
     // ---- Video Source ------------------------------------------------------
@@ -601,22 +707,72 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     detail::VideoCodecFamily codec_family =
         detail::codec_family_from_plugin_id(config_.video_codec_name);
 
+    // The values the capability check (B1) compares against.  They are
+    // captured before the config object is moved into the factory,
+    // because after the move the config is in a moved-from state.
+    const std::uint32_t want_bitrate_bps = 1'000'000;
+    const plugins::VideoPixelFormat want_pixel_format =
+        plugins::VideoPixelFormat::kI420;
+
+    // ---- The backend preference (remote-desktop plan B2) ------------------
+    //
+    // `EngineConfig::video_codec_backend` says which *class* of backend
+    // to use: hardware only, software only, or (the default) "hardware
+    // first, software as the fallback".
+    //
+    // An unrecognised spelling is an error rather than a silent
+    // fallback: a host that wrote "hardwre" and got software would have
+    // a 1080p30 budget it cannot meet, and would not know why.
+    //
+    // It is parsed *here*, before the codec is created, because the
+    // "hardware only could not be honoured" diagnosis below needs the
+    // answer even when there is no codec to ask.
+    plugins::VideoCodecBackendPreference backend_pref =
+        plugins::VideoCodecBackendPreference::kAuto;
+    if (!plugins::parse_video_codec_backend_preference(
+            config_.video_codec_backend, backend_pref)) {
+        const std::string msg =
+            std::string{"engine: the video codec backend preference '"} +
+            config_.video_codec_backend +
+            "' is not one of 'auto', 'hardware', 'software'";
+        core::log::Logger::instance().error(msg);
+        if (on_error_) on_error_(core::kEngineInvalidParam, msg);
+        impl_->session_state.last_open_rc = core::kEngineInvalidParam;
+        shutdown_video_plugins();
+        return core::kEngineInvalidParam;
+    }
+
     if (!config_.video_codec_name.empty() && !video_codec_) {
         plugins::VideoCodecConfig cfg{};
         cfg.width = config_.video_width;
         cfg.height = config_.video_height;
         cfg.fps = config_.video_fps;
-        cfg.bitrate_bps = 1'000'000;
+        cfg.bitrate_bps = want_bitrate_bps;
         cfg.keyframe_interval = 60;
-        cfg.pixel_format = plugins::VideoPixelFormat::kI420;
+        cfg.pixel_format = want_pixel_format;
         cfg.codec = detail::codec_kind_of(codec_family);
         cfg.payload_type = config_.video_receiver_tuning.payload_type;
         cfg.name = config_.video_codec_name;
+
+        // Plan B10: the codec opens its session on the *capture's* device
+        // when the capture device publishes one.  This has to happen
+        // before the codec is created — the session is opened in
+        // `open()`, and the device is fixed for the session's lifetime.
+        cfg.gpu_context = capture_gpu_context;
+
+        cfg.backend_preference = backend_pref;
+        impl_->video_state.video_codec_backend_preference = backend_pref;
+
         // The backend policy (plan B2) travels with the config because
         // the *selection* happens inside the codec module, which owns
         // the backend table.  The engine is the one that knows the
         // host's intent.
-        cfg.backend_policy = config_.video_codec_backend;
+        //
+        // The two spellings of the same intent are filled from the one
+        // answer: the seam keeps `VideoCodecBackendPreference` (the
+        // longer name) and the module reads `CodecBackend`; they are
+        // filled in step here so the two can never disagree.
+        cfg.backend_policy = static_cast<plugins::CodecBackend>(backend_pref);
         // The content hint and the colour description (plan B7 / C5)
         // ride along so the encoder can be tuned for screen content
         // from the very first frame — a screen encoder that starts with
@@ -625,7 +781,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         cfg.content_hint = config_.video_content_hint;
         cfg.color_range  = config_.video_color_range;
         cfg.color_matrix = config_.video_color_matrix;
-        (void)pal::make_plugin<&pal::resolve_video_codec>(
+        const bool codec_created = pal::make_plugin<&pal::resolve_video_codec>(
             config_.video_codec_name,
             video_codec_,
             std::move(cfg),
@@ -635,20 +791,145 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
              .missing_mode = pal::PluginFailureMode::Error,
              .on_error = on_error_});
 
-        // A `hardware` policy that could not be honoured is a *hard*
-        // error (plan B2): the host said "hardware only", and a silent
-        // software fallback would show up much later as a CPU
-        // saturation the host never asked for.
-        if (video_codec_ == nullptr &&
-            config_.video_codec_backend == plugins::CodecBackend::kHardware) {
+        // Plan B2: the codec could not be created.  When the host pinned
+        // a backend class, the reason is almost always "no backend of
+        // that class exists here" — and that deserves its own message,
+        // because the generic "plugin missing" wording sends the reader
+        // looking for a *registration* problem that does not exist.
+        if (!codec_created && !video_codec_ &&
+            backend_pref != plugins::VideoCodecBackendPreference::kAuto) {
             const std::string msg =
-                std::string{"engine: the video codec policy is 'hardware', "
-                            "but no hardware encoder is available for '"}
-                + config_.video_codec_name
-                + "' (the software path was NOT used)";
+                std::string{"engine: the video codec backend class '"} +
+                std::string{plugins::video_codec_backend_preference_name(
+                    backend_pref)} +
+                "' is not available on this machine (the codec plugin '" +
+                config_.video_codec_name +
+                "' could not satisfy it). Use 'auto' to fall back to "
+                "software automatically.";
             core::log::Logger::instance().error(msg);
-            if (on_error_) on_error_(core::kVideoCodecOpenFailed, msg);
+            if (on_error_) on_error_(core::kVideoCodecPluginMissing, msg);
+            impl_->session_state.last_open_rc = core::kVideoCodecPluginMissing;
+            shutdown_video_plugins();
+            return core::kVideoCodecPluginMissing;
         }
+
+        // ---- The GPU callback → the mailbox (remote-desktop plan B10) ----
+        //
+        // This is the second half of the seam, and it happens **here**,
+        // after the codec exists — because the decision depends on the
+        // codec's own capability, and that is only known once the codec
+        // is open.
+        //
+        // The rule is simple and it is not negotiable: **the callback is
+        // attached only when the codec can actually consume a surface.**
+        //
+        // Attaching it unconditionally would be a trap.  The plug-in
+        // contract says that *with* a GPU callback attached the device
+        // delivers the surface inside the callback and does **not** push
+        // the frame through the CPU copy queue — the pixels are not
+        // available anywhere else.  So a codec that cannot take a
+        // surface (a software encoder, say) would leave the session with
+        // **no picture at all**: the frames would be delivered, dropped
+        // by the pump, and there would be no CPU mirror to fall back to.
+        //
+        // Leaving the callback unattached is the honest alternative: the
+        // device stages to the host and fills its ordinary queue, the
+        // pump takes the CPU path, and the picture still arrives.
+        wire_capture_gpu_callback();
+    }
+
+    // ---- The capability check (remote-desktop plan B1) ----------------------
+    //
+    // B1's acceptance criterion says it in one sentence:
+    //
+    //   > "the engine rejects an unsupported resolution at `open()` with a
+    //   >  clear error instead of failing at the first frame"
+    //
+    // The capability query is what makes that possible.  Without it the
+    // engine had no idea what the codec could do, so an impossible
+    // request (4096x2160 on a codec that tops out at 1920x1080) was
+    // accepted at `open()` and only failed on the *first frame* — which
+    // reads, to the host, like a network problem.
+    //
+    // The check runs after the codec is open (an unopened codec cannot
+    // be asked about its limits) and before the codec family is
+    // resolved, so the failure is reported at the right place in the
+    // sequence: the session does not start with a codec that cannot
+    // deliver what was asked for.
+    if (video_codec_) {
+        const plugins::VideoCodecCapabilities caps = video_codec_->capabilities();
+        const std::uint32_t want_w = config_.video_width;
+        const std::uint32_t want_h = config_.video_height;
+        const std::uint32_t want_fps = config_.video_fps;
+
+        const bool bad_size = want_w != 0 && want_h != 0 &&
+                              !caps.accepts_size(want_w, want_h);
+        const bool bad_fps  = !caps.accepts_fps(want_fps);
+        const bool bad_rate = !caps.accepts_bitrate(want_bitrate_bps);
+        const bool bad_fmt  = !caps.accepts_pixel_format(want_pixel_format);
+
+        if (bad_size || bad_fps || bad_rate || bad_fmt) {
+            std::string why;
+            if (bad_size) {
+                why = std::string{"the requested resolution "} +
+                      std::to_string(want_w) + "x" + std::to_string(want_h) +
+                      " is outside the codec's supported range";
+                if (caps.max_width != 0 || caps.max_height != 0) {
+                    why += std::string{" (maximum "} +
+                           std::to_string(caps.max_width) + "x" +
+                           std::to_string(caps.max_height) + ")";
+                }
+            } else if (bad_fps) {
+                why = std::string{"the requested frame rate "} +
+                      std::to_string(want_fps) +
+                      " fps exceeds the codec's maximum";
+                if (caps.max_fps != 0) {
+                    why += std::string{" (maximum "} + std::to_string(caps.max_fps) +
+                           " fps)";
+                }
+            } else if (bad_rate) {
+                why = std::string{"the requested bitrate "} +
+                      std::to_string(want_bitrate_bps) +
+                      " bps exceeds the codec's maximum";
+                if (caps.max_bitrate_bps != 0) {
+                    why += std::string{" (maximum "} +
+                           std::to_string(caps.max_bitrate_bps) + " bps)";
+                }
+            } else {
+                why = "the requested pixel format is not accepted by the codec";
+            }
+
+            const std::string msg =
+                std::string{"engine: the video codec '"} +
+                config_.video_codec_name + "' cannot deliver the requested "
+                "stream: " + why +
+                ". The request is rejected at open() rather than failing at "
+                "the first frame.";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kVideoCodecUnsupported, msg);
+            impl_->session_state.last_open_rc = core::kVideoCodecUnsupported;
+            shutdown_video_plugins();
+            return core::kVideoCodecUnsupported;
+        }
+    }
+
+    // A `hardware` policy that could not be honoured is a *hard* error
+    // (plan B2): the host said "hardware only", and a silent software
+    // fallback would show up much later as a CPU saturation the host
+    // never asked for.
+    //
+    // It is diagnosed *outside* the capability check: the capability
+    // check only runs when there *is* a codec, and this is precisely
+    // the case where there is none.
+    if (video_codec_ == nullptr &&
+        backend_pref == plugins::VideoCodecBackendPreference::kHardware) {
+        const std::string msg =
+            std::string{"engine: the video codec policy is 'hardware', "
+                        "but no hardware encoder is available for '"}
+            + config_.video_codec_name
+            + "' (the software path was NOT used)";
+        core::log::Logger::instance().error(msg);
+        if (on_error_) on_error_(core::kVideoCodecOpenFailed, msg);
     }
 
     // The instantiated codec is the authority on the codec family.  A
@@ -745,6 +1026,108 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
              .open_fail_mode = pal::PluginFailureMode::Error,
              .missing_mode = pal::PluginFailureMode::Error,
              .on_error = on_error_});
+
+        // ---- The key-frame storm limiter (remote-desktop plan B14) ------
+        //
+        // The limiter is configured here, once, because the policy is a
+        // property of the *session* (how much of the link a key frame
+        // may cost), not of a particular PLI.  The sender arbitrates;
+        // the engine only owns the policy.
+        if (video_sender_) {
+            video_sender_->set_keyframe_limiter_config(
+                config_.video_keyframe_limiter);
+        }
+
+        // ---- The incremental (dirty-rect) encode mechanism (plan B9) -----
+        //
+        // The content type and the opt-in flag are handed to the sender,
+        // which hosts the arbiter (it sits next to the encoder and needs
+        // the codec's capability).  The engine pushes the dirty
+        // rectangles to it from the capture pump.
+        if (video_sender_) {
+            video_sender_->set_content_type(config_.video_content_type);
+            video_sender_->set_incremental_encode_enabled(
+                config_.video_incremental_encode);
+            // The sender's arbiter pushes the incremental request to the
+            // encoder, so it needs the encoder's pointer.  The codec
+            // plugin was created earlier in this function, so it exists.
+            video_sender_->set_incremental_encoder(video_codec_.get());
+        }
+    }
+
+    // ---- The decoded-frame delivery path (remote-desktop plan E1) --------
+    //
+    // The sink may implement the CPU path, the GPU path, or both.  The
+    // engine decides **once**, here at `open()` time, which route a
+    // decoded frame takes:
+    //
+    //   GPU path  — the decoder produces a native surface and the sink
+    //               presents it (no host copy).  Requires *both* the
+    //               decoder's `supports_zero_copy_decode()` and the
+    //               sink's `supports_gpu_render()`.
+    //   CPU path  — the decoder writes host pixels.  The universal
+    //               fallback; requires the sink's
+    //               `supports_cpu_render()`.
+    //
+    // The rule itself lives in `video_render_path.hpp` as a pure
+    // function, so every combination is unit-tested without an engine.
+    //
+    // An *incompatible* pair — a sink that can take neither — is
+    // reported here, at `open()` time, as `kVideoSinkIncompatible`.
+    // Reporting it later (on the first frame) would mean a session that
+    // looks healthy and displays nothing at all.
+    //
+    // This block sits *after* the codec was created: the decoder's
+    // capability is one of the three inputs.
+    {
+        detail::VideoRenderPathInputs inputs;
+        inputs.decoder_zero_copy =
+            video_codec_ && video_codec_->supports_zero_copy_decode();
+        inputs.sink_gpu_render = video_sink_ && video_sink_->supports_gpu_render();
+        inputs.sink_cpu_render = video_sink_ && video_sink_->supports_cpu_render();
+
+        const detail::VideoRenderPath path =
+            detail::decide_video_render_path(inputs);
+        impl_->video_state.video_render_path = path;
+
+        if (path == detail::VideoRenderPath::kIncompatible) {
+            const std::string msg =
+                std::string{"engine: the video sink '"} +
+                config_.video_sink_name +
+                "' cannot accept the decoded frames this session produces: "
+                "it accepts neither host-memory frames "
+                "(supports_cpu_render() == false) nor GPU surfaces "
+                "(supports_gpu_render() == false), and the codec "
+                "'" + config_.video_codec_name +
+                "' does not report zero-copy decode support.";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kVideoSinkIncompatible, msg);
+        } else if (path == detail::VideoRenderPath::kGpuSurface) {
+            // The GPU path needs a surface to decode into.  The codec
+            // owns that pool (`output_pool()`), and the contract says it
+            // is pre-allocated in the steady state.  A codec that
+            // claims zero-copy decode support but publishes no pool
+            // cannot actually deliver a surface — the path is
+            // downgraded to the CPU staging path rather than failing
+            // on every frame.
+            impl_->video_state.video_decode_pool = video_codec_->output_pool();
+            if (impl_->video_state.video_decode_pool) {
+                core::log::Logger::instance().info(
+                    "engine: the decoded-frame delivery path is the GPU "
+                    "surface path (no host copy)");
+            } else {
+                impl_->video_state.video_render_path =
+                    detail::VideoRenderPath::kCpuStaging;
+                core::log::Logger::instance().warn(
+                    "engine: the codec reports zero-copy decode support but "
+                    "publishes no output pool — the decoded-frame delivery "
+                    "path falls back to the CPU staging path");
+            }
+        } else {
+            core::log::Logger::instance().info(
+                "engine: the decoded-frame delivery path is the CPU "
+                "staging path");
+        }
     }
 
     // ========================================================================
@@ -763,151 +1146,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // Users drive video through send_video() — see engine.hpp.
 
     if (video_sender_) {
-        // video_sender packet callback: build RTP header → SRTP protect → enqueue
-        video_sender_->set_packet_callback(
-            [this](plugins::BufferView payload,
-                                          std::uint32_t rtp_ts,
-                                          std::uint16_t seq,
-                                          bool marker) {
-                // ---- Build the RTP packet (rtp::PacketBuilder) -----------------
-                //
-                // The video path used to hand-assemble the 12-byte RTP
-                // header and hard-code "no extensions" (X=0).  That left
-                // the video stream without the ADR-017 abs-send-time
-                // extension, so the receiver-side timeline had no
-                // send-instant for video and the bandwidth estimator
-                // could not correlate video packets with their wall
-                // clock send time.  The audio path already used
-                // `rtp::PacketBuilder`; both paths now share it, so a
-                // fix to the RTP header lands in one place.
-                //
-                // The payload type is the *negotiated* one (C9 / C11):
-                // it is the number the description exchange settled on,
-                // so the peer recognises the stream.  Before a
-                // negotiation happened the locally configured number is
-                // the fallback, which keeps a host that drives the
-                // engine without SDP working.
-                const std::uint8_t negotiated_pt =
-                    impl_->video_state.negotiated_video_pt.load(std::memory_order_relaxed);
-                const std::uint8_t local_pt =
-                    impl_->video_state.video_payload_type != 0
-                        ? impl_->video_state.video_payload_type
-                        : config_.video_sender_tuning.payload_type;
-                const std::uint8_t pt = negotiated_pt != 0 ? negotiated_pt : local_pt;
-
-                rtp::PacketBuilder pb;
-                pb.set_ssrc(config_.video_sender_tuning.ssrc)
-                  .set_seq(seq)
-                  .set_timestamp(rtp_ts)
-                  .set_payload_type(pt)
-                  .set_marker(marker);
-
-                // ---- Cross-end timeline: stamp abs-send-time (ADR-017) --------
-                // Same contract as the audio path: only when the seam is
-                // on *and* the extension id was negotiated (the id is set
-                // by create_offer() / set_remote_description()).  The
-                // monotonic reading is taken once and serves both the
-                // abs-send-time encoder and the Sender Report's
-                // instant-vs-timestamp pairing.
-                if (config_.timeline_enabled) {
-                    const std::int64_t steady_us =
-                        std::chrono::duration_cast<std::chrono::microseconds>(
-                            core::SteadyClock::now().time_since_epoch()).count();
-                    impl_->video_state.video_last_send_unix_us =
-                        impl_->timeline.boot_epoch_offset_us + steady_us;
-                    if (impl_->timeline.local_abs_send_time_id != 0) {
-                        const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
-                            std::chrono::microseconds{steady_us},
-                            impl_->timeline.monotonic_origin_ntp64);
-                        pb.set_abs_send_time(rtp::AbsSendTime{ast24},
-                                             impl_->timeline.local_abs_send_time_id);
-                    }
-                }
-
-                pb.set_payload(core::ByteSpan(payload.data(), payload.size()));
-
-                // ---- Serialise into the reusable scratch (Phase 3 / C4) ------
-                //
-                // Same reasoning as the audio path: `pb.build()` would
-                // allocate a fresh buffer per video packet.  The scratch is
-                // read immediately below — the bytes are copied into the
-                // scheduler's pooled outbound buffer — so it never escapes
-                // this callback.
-                const std::size_t built_size = pb.compute_size();
-                if (impl_->scratch.video_rtp_scratch.size() < built_size) {
-                    impl_->scratch.video_rtp_scratch.resize(built_size);
-                }
-                const std::size_t built_written =
-                    pb.build_into(impl_->scratch.video_rtp_scratch.data(),
-                                  impl_->scratch.video_rtp_scratch.size());
-                if (built_written == 0) {
-                    if (on_error_) {
-                        on_error_(core::kVideoEncodeFailed,
-                                  "video send: the RTP packet could not be built");
-                    }
-                    return;
-                }
-
-                // ---- Assemble full RTP packet ----------------------------------
-                // The buffer comes from the scheduler's packet pool (P1
-                // hardening, 2026-11-09): it is handed back to the pool
-                // once the packet has been drained and dispatched, so the
-                // steady-state send path performs no heap allocation.
-                //
-                // Phase 3: when there is NO scheduler (the "transport"
-                // profile, where the engine writes straight to ICE) the
-                // packet used to be built in a fresh local vector — one
-                // heap allocation per packet, forever.  The transport
-                // `send()` is a synchronous write (the bytes do not
-                // escape the call), so the engine's own scratch buffer
-                // can hold it.
-                std::vector<std::uint8_t>& rtp_pkt = scheduler_
-                    ? impl_->scratch.video_pkt_pooled
-                    : impl_->scratch.video_pkt_scratch;
-                if (scheduler_) {
-                    rtp_pkt = scheduler_->acquire_packet_buffer(
-                        built_written + kSrtpAuthTagBytes);
-                }
-                rtp_pkt.assign(impl_->scratch.video_rtp_scratch.begin(),
-                               impl_->scratch.video_rtp_scratch.begin() +
-                                   static_cast<std::ptrdiff_t>(built_written));
-
-                // ---- SRTP protect (if DTLS is connected) ----------------------
-                if (impl_->srtp_installed && impl_->srtp) {
-                    auto* sess = impl_->srtp->get_session(
-                        config_.video_sender_tuning.ssrc, /*outgoing=*/true);
-                    if (!sess) {
-                        // SRTP not ready — drop this packet silently.
-                        return;
-                    }
-                    core::ByteSpan span(rtp_pkt.data(), rtp_pkt.size());
-                    auto enc = sess->protect_rtp(span,
-                        config_.video_sender_tuning.ssrc, rtp_ts);
-                    if (!enc) return;
-                    rtp_pkt.assign(enc.value().data(),
-                                   enc.value().data() + enc.value().size());
-                }
-
-                // ---- Enqueue to scheduler (move, P0#3) or send directly -------
-                plugins::Priority prio = plugins::Priority::kVideo;
-                if (marker && impl_->video_state.video_keyframe_pending_.load(std::memory_order_acquire)) {
-                    prio = plugins::Priority::kVideoKeyframe;
-                    impl_->video_state.video_keyframe_pending_.store(false, std::memory_order_release);
-                }
-
-                // v1.1 V1: count emitted RTP packets/bytes (post-protect size).
-                ++impl_->video_state.video_packets_sent;
-                impl_->video_state.video_bytes_sent += rtp_pkt.size();
-
-                if (scheduler_) {
-                    scheduler_->enqueue_owned(prio,
-                                              std::move(rtp_pkt),
-                                              plugins::Addr{});
-                } else if (ice_t_) {
-                    plugins::BufferView bv{rtp_pkt.data(), rtp_pkt.size()};
-                    ice_t_->send(bv, {});
-                }
-            });
+        wire_default_sender();
     }
 
     // ---- Video receive pipeline: receiver → codec → sink
@@ -961,7 +1200,89 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // Decode + render if the codec and sink are available.
                 if (!video_codec_ || !video_sink_) return;
 
+                // ---- The delivery path (remote-desktop plan E1) --------------
+                //
+                // Two routes, decided at `open()` time (see
+                // `video_render_path.hpp`):
+                //
+                //   GPU path — the decoder fills a native surface and the
+                //             sink presents it.  No host copy.
+                //   CPU path — the decoder writes host pixels.
+                //
+                // The GPU branch is attempted first; when it cannot run
+                // (no pool, no surface, the decoder refuses) the frame
+                // falls back to the CPU path, which is the universal
+                // fallback every codec implements.
+                if (impl_->video_state.video_render_path ==
+                    detail::VideoRenderPath::kGpuSurface) {
+                    // ---- The render clock (remote-desktop plan E5) ---------
+                    //
+                    // The clock decides *before* the frame is decoded: a
+                    // frame that has to be dropped is dropped without
+                    // paying for the decode, and a frame that has to be
+                    // held is held before the decode so the hold does
+                    // not add to the decode's latency.
+                    std::int64_t hold_us = 0;
+                    if (!apply_render_sync(
+                            static_cast<std::int64_t>(enc.info.capture_ts_us),
+                            &hold_us)) {
+                        impl_->video_state.video_stats.on_frame_dropped(
+                            detail::VideoDropReason::kDecoderError);
+                        return;
+                    }
+
+                    const plugins::Status gpu_rc = render_decoded_gpu_frame(
+                        enc, static_cast<std::int64_t>(enc.info.capture_ts_us));
+                    if (gpu_rc == plugins::kOk) {
+                        ++impl_->video_state.video_rx_gpu_frames;
+                        impl_->video_state.video_stats.on_frame_decoded(
+                            static_cast<std::int64_t>(enc.info.capture_ts_us));
+                        impl_->video_state.video_stats.on_frame_rendered(
+                            static_cast<std::int64_t>(enc.info.capture_ts_us));
+                        // Plan E9: the frame reached the sink — record
+                        // what the operator is now looking at.
+                        note_displayed_frame(
+                            static_cast<std::int64_t>(enc.info.capture_ts_us),
+                            enc.info.frame_seq);
+                        // Plan J3: the frame reached the viewer — feed the
+                        // QoE collector's end-to-end latency and the
+                        // presented frame rate.
+                        note_frame_presented(
+                            static_cast<std::int64_t>(enc.info.capture_ts_us),
+                            enc.info.frame_seq,
+                            static_cast<double>(config_.video_fps));
+                        return;
+                    }
+                    // The GPU path could not deliver this frame.  Fall
+                    // through to the CPU path, which is exactly what the
+                    // fallback is for — but count the miss so the host
+                    // can see that the GPU path is not working.
+                    ++impl_->video_state.video_zero_copy_fallbacks;
+                }
+
                 // ---- Resolve the decoded geometry ------------------------------
+                //
+                // ---- The render clock (remote-desktop plan E5) ---------------
+                //
+                // The CPU path asks the render clock *before* the decode,
+                // for the same reason the GPU path does: a frame that has
+                // to be dropped should not pay for the decode, and a
+                // frame that has to be held should be held before the
+                // decode so the hold does not add to the decode's own
+                // latency.
+                {
+                    std::int64_t hold_us = 0;
+                    if (!apply_render_sync(
+                            static_cast<std::int64_t>(enc.info.capture_ts_us),
+                            &hold_us)) {
+                        impl_->video_state.video_stats.on_frame_dropped(
+                            detail::VideoDropReason::kDecoderError);
+                        // Plan J3: the frame never reached the viewer.
+                        note_frame_dropped();
+                        return;
+                    }
+                }
+
                 //
                 // The decode buffers must match the *actual* geometry of
                 // the incoming frame, not a hard-coded 640×480.  Two
@@ -997,13 +1318,31 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
 
                 // Decode with no caller-supplied buffers: the codec
                 // allocates (and knows) the native geometry.
-                if (video_codec_->decode(enc, raw_out, nullptr) != plugins::kOk) {
+                //
+                // Plan J1: the decode stage's own cost.
+                const auto decode_start = std::chrono::steady_clock::now();
+                const auto decode_rc = video_codec_->decode(enc, raw_out, nullptr);
+                const auto decode_end = std::chrono::steady_clock::now();
+                impl_->video_state.stage_timings.record(
+                    Stage::kDecode,
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            decode_end - decode_start).count()));
+                if (decode_rc != plugins::kOk) {
                     // The decoder refused the frame.  That is a
                     // decoder-side drop (Phase 4.2 / D2), and it is
                     // counted as such so a host can see a stream that
                     // arrives but never decodes.
                     impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kDecoderError);
+                    // A frame the decoder refuses is the receiver's
+                    // signal that it needs a new IDR: the picture's
+                    // reference frame never arrived, or the decoder
+                    // never saw the parameter sets at all.  The
+                    // jitter buffer cannot see this (the frame
+                    // assembled perfectly), so the request has to be
+                    // raised here.
+                    request_keyframe_on_decode_failure();
                     return;
                 }
 
@@ -1038,8 +1377,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 };
 
                 // Render to sink.
-                plugins::VideoSourceFrame sink_frame{};
-                sink_frame.width   = w;
+                plugins::VideoSourceFrame sink_frame{};                sink_frame.width   = w;
                 sink_frame.height  = h;
                 // The format follows the codec's actual output layout, not
                 // a hard-coded I420: an NV12 decoder produces an NV12
@@ -1057,28 +1395,130 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 sink_frame.frame_seq     = enc.info.frame_seq;
                 sink_frame.rtp_timestamp = enc.info.rtp_timestamp;
 
+                // Plan J1: the render stage's timer starts here.
+                const auto render_start = std::chrono::steady_clock::now();
+
                 const plugins::Status render_rc = video_sink_->render(sink_frame);
+                // Plan J1: the render stage — the sink's own cost, which
+                // on the GPU path is the present and on the CPU path is
+                // the pixel copy into the window.
+                impl_->video_state.stage_timings.record(
+                    Stage::kRender,
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            render_start).count()));
                 // Phase 4.2 / D2: the frame reached the sink.  This is
                 // the "rendered" event — the freeze detector in the
                 // stats sink measures the gap between two of these.
                 if (render_rc == plugins::kOk) {
                     impl_->video_state.video_stats.on_frame_rendered(
                         static_cast<std::int64_t>(enc.info.capture_ts_us));
+                    // Plan E9: the frame reached the sink — record what
+                    // the operator is now looking at, so a host can
+                    // answer "the user clicked on what they were
+                    // looking at".
+                    note_displayed_frame(
+                        static_cast<std::int64_t>(enc.info.capture_ts_us),
+                        enc.info.frame_seq);
+                    // Plan J3: the frame reached the viewer — feed the
+                    // QoE collector's end-to-end latency and the presented
+                    // frame rate.
+                    note_frame_presented(
+                        static_cast<std::int64_t>(enc.info.capture_ts_us),
+                        enc.info.frame_seq,
+                        static_cast<double>(config_.video_fps));
                 } else {
                     impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kDecoderError);
                 }
+                ++impl_->video_state.video_rx_cpu_frames;
             });
     }
 
-    // ---- Video capture device (remote-desktop plan A10) ----------------
+    // ---- The capture pump (remote-desktop plan A10) --------------------
     //
-    // The capture device is set up *last*, because the pump drives the
-    // codec and the sender: the device must not be able to deliver a
-    // frame before those two exist.
-    init_video_capture();
+    // The capture *device* was created above, with the rest of the video
+    // plugins, and the zero-copy callback was wired there.  What is left
+    // is the pump itself, which the tick thread drives: it pops at most
+    // one frame per tick from the device's bounded queue and hands it to
+    // the encoder.
+    //
+    // The pump needs the codec and the sender to already exist -- which
+    // they do, they were created above -- so nothing more has to happen
+    // here.
 
     return plugins::kOk;
+}
+
+
+plugins::Status NimRTCEngine::render_decoded_gpu_frame(
+        const plugins::EncodedVideoFrame& enc,
+        std::int64_t capture_ts_us) noexcept {
+    if (!video_codec_ || !video_sink_) return plugins::kErrNotReady;
+
+    // The surface comes from the codec's own output pool — the codec
+    // knows the native geometry and the backend-specific allocation
+    // (D3D11 texture, VA surface, ...).  Without a pool there is
+    // nowhere to decode into.
+    const std::shared_ptr<plugins::GpuBufferPool>& pool =
+        impl_->video_state.video_decode_pool;
+    if (!pool) return plugins::kErrUnsupported;
+
+    const plugins::VideoCodecConfig codec_cfg = video_codec_->config();
+    const std::uint32_t w = codec_cfg.width;
+    const std::uint32_t h = codec_cfg.height;
+    if (w == 0 || h == 0) return plugins::kErrUnsupported;
+
+    plugins::GpuBuffer* surface = pool->acquire(w, h, codec_cfg.pixel_format);
+    if (!surface) return plugins::kErrHardwareError;
+
+    // The decoder acquires one reference on the surface it fills (see
+    // `IVideoCodec::decode_zero_copy()`), and the engine needs one of
+    // its own to hold the surface across the `render()` call.  So the
+    // count goes: 1 (the pool's) → 2 (the decoder's) → 3 (the engine's).
+    // The engine releases its own reference when the frame is done.
+    surface->acquire_ref();
+
+    // Plan J1: the GPU decode's own cost.
+    const auto gpu_decode_start = std::chrono::steady_clock::now();
+    const plugins::Status decode_rc =
+        video_codec_->decode_zero_copy(enc, *surface);
+    impl_->video_state.stage_timings.record(
+        Stage::kDecode,
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - gpu_decode_start).count()));
+    if (decode_rc != plugins::kOk) {
+        surface->release_ref();   // the engine's reference
+        surface->release_ref();   // the pool's reference
+        // Same signal as on the CPU path: the decoder refused the
+        // picture, so the peer has to send a new IDR.
+        request_keyframe_on_decode_failure();
+        return decode_rc;
+    }
+
+    // The timeline metadata travels with the frame so a sink that paces
+    // or timestamps its output has what it needs.
+    plugins::VideoFrameInfo info{};
+    info.capture_ts_us = capture_ts_us;
+    info.frame_seq     = enc.info.frame_seq;
+    info.rtp_timestamp = enc.info.rtp_timestamp;
+
+    // Plan J1: the GPU path's decode + render costs.
+    const auto gpu_start = std::chrono::steady_clock::now();
+    const plugins::Status render_rc = video_sink_->render(*surface, info);
+    impl_->video_state.stage_timings.record(
+        Stage::kRender,
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - gpu_start).count()));
+
+    // The engine's reference goes away; the decoder's stays until the
+    // next decode (that is the documented contract).
+    surface->release_ref();
+
+    return render_rc;
 }
 
 
@@ -1088,30 +1528,36 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
         p.reset();
     };
     stop_video();   // stop video source if running
-    // Remote-desktop plan A10: close the capture device *before* the
-    // codec and the sender, so the pump cannot be mid-encode when the
-    // encoder disappears.
-    // The capture device (remote-desktop plan A1) is a *device*: it may
-    // own an OS handle (a DXGI duplication, a PipeWire stream), so it
-    // has to be closed explicitly rather than merely dropped.
-    // `shutdown_video_capture()` closes it (through the adapter that
-    // drives its lifecycle), so it is not closed a second time here.
-    shutdown_video_capture();
     close_all(video_source_);
     close_all(video_sink_);
     close_all(video_receiver_);
     close_all(video_sender_);
     close_all(video_codec_);
+    // Remote-desktop plan D1: the rate controller closes with the rest
+    // of the video plugins.
+    close_all(video_bitrate_controller_);
     // The video-quality statistics sink (Phase 4.2 / D2) is *not* a
     // plugin -- it has no open()/close().  Resetting it here clears the
     // per-session counters so a re-open() does not report the previous
     // session's freezes and drops.
     impl_->video_state.video_stats.reset();
-    // The capture device (remote-desktop plan A1) is *not* closed here:
-    // `shutdown_video_capture()` above already closed it through the
-    // adapter that owns its lifecycle, and reset the pointer.  Closing
-    // it a second time is the bug the adapter was introduced to fix
-    // (remote-desktop plan A1 / A10).
+    // The capture device (remote-desktop plan A1) is a *device*: it may
+    // own an OS handle (a DXGI duplication, a PipeWire stream), so it
+    // has to be closed explicitly rather than merely dropped.
+    //
+    // It is closed **last**, after the GPU mailbox has been cleared: the
+    // device's producer thread pushes into that mailbox, and a pending
+    // frame would hold a `GpuBuffer` whose texture belongs to the
+    // device that is about to be torn down.  Clearing it first drops
+    // that reference while the device is still alive.
+    impl_->video_state.gpu_mailbox.clear();
+    impl_->video_state.capture_gpu_wired = false;
+    close_all(video_capture_);
+    // Remote-desktop plan H1 / H2: the *extra* video streams own their
+    // own plugin instances, so they are closed with the rest of the
+    // video plugins.  (The default stream's instances are the members
+    // closed above.)
+    shutdown_extra_video_streams();
 }
 
 
@@ -1272,12 +1718,12 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
                 ? impl_->audio_state.negotiated_audio_pt
                 : config_.audio_codec.payload_type;
 
-        rtp::PacketBuilder pb;
-        pb.set_ssrc(impl_->audio_state.audio_ssrc)
-          .set_seq(impl_->audio_state.audio_seq++)
-          .set_timestamp(impl_->audio_state.audio_ts)
-          .set_payload_type(outbound_pt)
-          .set_marker(false);
+        detail::RtpPacketSpec spec;
+        spec.ssrc         = impl_->audio_state.audio_ssrc;
+        spec.seq          = impl_->audio_state.audio_seq++;
+        spec.timestamp    = impl_->audio_state.audio_ts;
+        spec.payload_type = outbound_pt;
+        spec.marker       = false;
 
     // ---- Cross-end timeline: stamp abs-send-time (ADR-017) ---------------
     // Only when the seam is on *and* the id was negotiated. The encoded
@@ -1307,28 +1753,28 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         // the same basis the abs-send-time encoder uses.
         impl_->audio_state.audio_last_send_unix_us = impl_->timeline.boot_epoch_offset_us + steady_us;
         if (impl_->timeline.local_abs_send_time_id != 0) {
-            const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
+            spec.abs_send_time_ext_id = impl_->timeline.local_abs_send_time_id;
+            spec.abs_send_time_24mhz = detail::RtpPacketizer::encode_abs_send_time_24(
                 std::chrono::microseconds{steady_us},
-                impl_->timeline.monotonic_origin_ntp64);
-            pb.set_abs_send_time(rtp::AbsSendTime{ast24},
-                                 impl_->timeline.local_abs_send_time_id);
+                impl_->timeline.boot_epoch_offset_us);
         }
     }
 
-        pb.set_payload(core::ByteSpan(impl_->scratch.audio_codec_pkt.data(), codec_len));
+        spec.payload = core::ByteSpan(impl_->scratch.audio_codec_pkt.data(), codec_len);
 
         // ---- Serialise into the reusable scratch (Phase 3 / C4) --------------
         //
-        // `pb.build()` would allocate a fresh buffer for every audio
-        // packet.  `build_into()` writes into the engine's per-session
-        // scratch instead, so the steady-state send path performs no heap
-        // allocation for the RTP header + payload copy.
-        const std::size_t pkt_size = pb.compute_size();
+        // The packetizer writes into the engine's per-session scratch
+        // instead of allocating a fresh buffer for every audio packet, so
+        // the steady-state send path performs no heap allocation for the
+        // RTP header + payload copy.
+        const std::size_t pkt_size = detail::RtpPacketizer::compute_size(spec);
         if (impl_->scratch.audio_rtp_scratch.size() < pkt_size) {
             impl_->scratch.audio_rtp_scratch.resize(pkt_size);
         }
         const std::size_t pkt_written =
-            pb.build_into(impl_->scratch.audio_rtp_scratch.data(),
+            detail::RtpPacketizer::build_into(spec,
+                          impl_->scratch.audio_rtp_scratch.data(),
                           impl_->scratch.audio_rtp_scratch.size());
         if (pkt_written == 0) {
             report_error(core::kAudioEncodeFailed,
@@ -1377,7 +1823,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
                 pkt_span.size() + kSrtpAuthTagBytes);
         }
         core::ByteSpan out_payload(pkt_span.data(), pkt_span.size());
-        if (impl_->srtp_installed && impl_->srtp) {
+        if (impl_->security.srtp_installed && impl_->srtp) {
             auto* sess = impl_->srtp->get_session(impl_->audio_state.audio_ssrc,
                                                    /*outgoing=*/true);
             if (!sess) {
@@ -1449,7 +1895,9 @@ plugins::Status NimRTCEngine::start_video() noexcept {
         video_source_->start();
         return plugins::kOk;
     }
-    if (video_capture_source_) {
+    // A capture device needs no start: it was opened with the rest of
+    // the video plugins, and the pump drives it from the tick thread.
+    if (video_capture_) {
         return plugins::kOk;
     }
     return plugins::kErrNotReady;
@@ -1470,42 +1918,211 @@ plugins::Status NimRTCEngine::send_video(
     const plugins::VideoSourceFrame& frame) noexcept {
     if (!is_open()) return plugins::kErrNotReady;
     if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
+    return encode_and_send_video_frame(frame);
+}
+
+
+// ---------------------------------------------------------------------------
+// The encoder's parameter set (remote-desktop plan B12 / B13)
+// ---------------------------------------------------------------------------
+//
+// The engine computes the parameters in one place (see
+// `engine_video_params.hpp`) and pushes them to the codec here.  This
+// function is the *only* place the engine talks to the codec about
+// "what should you be producing" — the bitrate controller, the ladder
+// and the capture pump all reach the codec through it.
+//
+// The push is skipped in the steady state: the parameters are recomputed
+// and compared with the ones in force, and only a real difference
+// triggers a `set_params()` call.  That keeps the per-frame cost at two
+// integer compares.
+
+void NimRTCEngine::apply_video_encoder_params(
+    const plugins::VideoSourceFrame& frame) noexcept {
+    if (!video_codec_) return;
+
+    auto& vstate = impl_->video_state;
+
+    // ---- The inputs -------------------------------------------------------
+    //
+    // The *configured* geometry is the starting point.  But the frame in
+    // hand is the authority on what is actually being sent: the ladder
+    // may have stepped the resolution down, or the capture device may
+    // have renegotiated.  When the frame disagrees with the
+    // configuration, the frame wins — it is what the peer will receive.
+    detail::VideoEncoderParamInputs in;
+    in.width  = config_.video_width;
+    in.height = config_.video_height;
+    in.fps    = config_.video_fps;
+    // The bitrate comes from the codec's own configuration: the engine
+    // does not run a video rate controller yet (the ladder / BWE work is
+    // plan item D1–D4, in M3), so the codec's current value *is* the
+    // value in force.  Reading it back keeps this function from
+    // clobbering a bitrate the host set on the codec directly.
+    in.bitrate_bps = video_codec_->config().bitrate_bps;
+    in.keyframe_interval = 60;
+    in.pixel_format = video_codec_->config().pixel_format;
+    in.content_hint = config_.video_content_hint;
+    // The colour description comes from the *frame*: the picture's own
+    // colour description is what the encoder has to code (plan C5).
+    in.color = frame.color;
+
+    // The ROI (plan C4): the host's rectangle is in *capture* pixels.
+    // The capture resolution is the frame's own size — the frame knows
+    // what it is — and the scaling into the output resolution happens in
+    // `compute_video_encoder_params()`, so the ROI survives a ladder
+    // resolution change.
+    in.roi = config_.video_roi;
+    in.capture_width = frame.width;
+    in.capture_height = frame.height;
+
+    if (frame.width != 0 && frame.height != 0) {
+        in.width  = frame.width;
+        in.height = frame.height;
+    }
+
+    // ---- The rate controller's level (remote-desktop plan D4) -----------
+    //
+    // The controller owns the ladder; the engine turns its level into
+    // the encoder's parameter set.  The controller's *target bitrate*
+    // is what reaches the encoder — the bitrate the codec is asked to
+    // produce, not only the pacer rate (plan D4's acceptance).
+    //
+    // The geometry comes from the controller too, but only when the
+    // controller actually moved it: the frame in hand is still the
+    // authority on what is being sent (a capture device may renegotiate
+    // at any time, and the frame knows).
+    if (video_bitrate_controller_) {
+        const plugins::VideoLadderLevel level =
+            video_bitrate_controller_->current_level();
+        if (level.bitrate_bps > 0) {
+            in.bitrate_bps = level.bitrate_bps;
+        }
+        if (level.fps > 0) {
+            in.fps = level.fps;
+        }
+        // The controller only overrides the geometry when the *ladder*
+        // says so.  A controller that has not moved keeps the frame's
+        // geometry.
+        if (vstate.video_encoder_params_set &&
+            (level.width != vstate.video_encoder_params.width ||
+             level.height != vstate.video_encoder_params.height)) {
+            in.width  = level.width;
+            in.height = level.height;
+        }
+    }
+
+    const plugins::VideoEncoderParams wanted =
+        detail::compute_video_encoder_params(in);
+
+    // ---- Has anything changed? --------------------------------------------
+    //
+    // Before the first push there is nothing to compare against, so the
+    // parameters are pushed unconditionally.  The codec was already
+    // configured with the same geometry at `open()` time, so this is a
+    // no-op for the codec — but it establishes the baseline the
+    // comparison uses.
+    if (vstate.video_encoder_params_set &&
+        vstate.video_encoder_params.width  == wanted.width  &&
+        vstate.video_encoder_params.height == wanted.height &&
+        vstate.video_encoder_params.fps == wanted.fps &&
+        vstate.video_encoder_params.bitrate_bps == wanted.bitrate_bps &&
+        vstate.video_encoder_params.keyframe_interval == wanted.keyframe_interval &&
+        vstate.video_encoder_params.pixel_format == wanted.pixel_format &&
+        vstate.video_encoder_params.content_hint == wanted.content_hint &&
+        vstate.video_encoder_params.qp == wanted.qp &&
+        vstate.video_encoder_params.color.range == wanted.color.range &&
+        vstate.video_encoder_params.color.matrix == wanted.color.matrix) {
+        return;
+    }
+
+    // ---- A geometry change is a parameter-set change (B13) ----------------
+    //
+    // The peer cannot decode a frame whose geometry its parameter sets
+    // do not describe.  The encoder must therefore restart and emit the
+    // new parameter set with the next frame — no PLI round-trip.
+    const bool restart =
+        vstate.video_encoder_params_set &&
+        detail::video_params_need_restart(vstate.video_encoder_params, wanted);
+
+    const plugins::Status rc = video_codec_->set_params(wanted);
+    if (rc != plugins::kOk) {
+        core::log::Logger::instance().warn(
+            "engine: the video codec rejected the parameter set "
+            "(the encoder keeps its previous parameters)");
+        return;
+    }
+
+    vstate.video_encoder_params     = wanted;
+    vstate.video_encoder_params_set = true;
+
+    if (restart) {
+        ++vstate.video_encoder_restarts;
+        core::log::Logger::instance().info(
+            "engine: the video geometry changed to " +
+            std::to_string(wanted.width) + "x" +
+            std::to_string(wanted.height) +
+            " — the encoder restarted and the new parameter set travels "
+            "with the next frame");
+    }
+}
+
+
+    plugins::Status NimRTCEngine::encode_and_send_video_frame(
+    const plugins::VideoSourceFrame& frame) noexcept {
+    if (!is_open()) return plugins::kErrNotReady;
+    if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
+
+    // ---- The parameter set (remote-desktop plan B12 / B13) ---------------
+    //
+    // The engine computes the encoder's parameters in ONE place and
+    // pushes them here, before the frame is encoded.  Two things can
+    // make the parameters change:
+    //
+    //   1. the host changed the configuration (rare — the ladder and
+    //      the bitrate controller both go through this path);
+    //   2. the *geometry* of the frame changed (the ladder stepped
+    //      down, or the capture device renegotiated).
+    //
+    // Case 2 is the one that matters for correctness (B13): a geometry
+    // change is a parameter-set change, so the encoder must restart and
+    // emit the new SPS / PPS with this frame.  Without it the peer's
+    // decoder is looking at a frame whose size its parameter sets do
+    // not describe, and the picture breaks until the next PLI.
+    //
+    // The check is cheap (two integer compares) and happens on the tick
+    // thread, so it costs nothing in the steady state.
+    apply_video_encoder_params(frame);
 
     // ---- The GPU surface the frame carries -------------------------------
     //
     // Two producers can hand the engine a picture that lives in GPU
     // memory, and they spell it differently:
     //
-    //   - the *capture seam* (remote-desktop plan B10) fills in
-    //     `VideoSourceFrame::gpu_surface`, a full
-    //     `video_frame::GpuHandle` that also carries the **device** the
-    //     surface belongs to.  That is a promise: the picture is in GPU
-    //     memory and there is no CPU copy to fall back to.
+    //   - the *capture seam* (remote-desktop plan B10) hands the engine
+    //     a `GpuHandle` -- the picture is in GPU memory and there is no
+    //     CPU copy of it to fall back to.  That is a *promise*, and the
+    //     frame says so with `capture_surface_contract`.
     //
     //   - a Phase-3 / C3 source fills in the flat `gpu_backend` /
-    //     `gpu_handle` / `gpu_pitch_bytes` fields.  Those carry no
-    //     device token, and the host opts into them explicitly through
+    //     `gpu_handle` / `gpu_pitch_bytes` fields.  Those are an
+    //     *opt-in* optimisation, and the host turns them on with
     //     `EngineConfig::video_zero_copy`.
     //
     // The engine normalises both into one `GpuHandle` so the rest of the
     // path has a single shape, but keeps the two *contracts* distinct.
     video_frame::GpuHandle surface{};
-    bool surface_is_capture_contract = false;
-    if (frame.gpu_surface.backend != video_frame::GpuBackend::kNone &&
-        frame.gpu_surface.handle != nullptr) {
-        surface = frame.gpu_surface;
-        surface_is_capture_contract = true;
-    } else if (frame.has_gpu_handle()) {
-        surface.backend           = frame.gpu_backend;
-        surface.handle            = frame.gpu_handle;
-        surface.native_pitch_bytes = frame.gpu_pitch_bytes;
-        surface.native_fd         = -1;
-        // `device` stays null: the flat fields cannot carry it.
+    if (frame.has_gpu_handle()) {
+        surface = frame.gpu_surface();
     }
 
     const bool frame_has_gpu =
         surface.backend != video_frame::GpuBackend::kNone &&
         surface.handle != nullptr;
+    // The capture contract only counts when there *is* a surface: a
+    // promise about a picture that is not there promises nothing.
+    const bool surface_is_capture_contract =
+        frame.capture_surface_contract && frame_has_gpu;
     const bool has_cpu_pixels  = frame.plane_y != nullptr;
     const bool zero_copy_capable = video_codec_->supports_zero_copy_encode();
 
@@ -1603,14 +2220,43 @@ plugins::Status NimRTCEngine::send_video(
                 return plugins::kErrUnsupported;
             }
             ++impl_->video_state.video_zero_copy_fallbacks;
+            core::log::Logger::instance().warn(
+                "engine: the zero-copy encode failed — falling back "
+                "to the CPU staging path");
+
         }
     }
 
     if (!encoded_ok) {
-        // The codec-facing pixel format comes from the codec's own config
+        // Codec-facing pixel format comes from the codec's own config
         // (I420 for every backend today).
         const auto codec_fmt = video_codec_->config().pixel_format;
-        raw.buffer = stage_source_frame(frame, codec_fmt, impl_->scratch.video_frame_pool);
+        // Plan J1: the conversion stage — the colour transform and the
+        // copy the engine does to get the source's pixels into a
+        // codec-facing buffer.  On the zero-copy path this stage does
+        // not exist, which is exactly what the budget wants to see: a
+        // zero sample count.
+        const auto convert_start = std::chrono::steady_clock::now();
+        ConversionKind conv_kind = ConversionKind::kNone;
+        raw.buffer = stage_source_frame(frame, codec_fmt,
+                                        impl_->scratch.video_frame_pool,
+                                        &conv_kind);
+        const auto convert_end = std::chrono::steady_clock::now();
+        impl_->video_state.stage_timings.record(
+            Stage::kConvert,
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    convert_end - convert_start).count()));
+        // Plan C3: report the format work that was done, so a host can
+        // see whether the conversion is costing anything — and see it
+        // stay at zero on the zero-copy path.
+        if (conv_kind == ConversionKind::kConvert) {
+            ++impl_->video_state.video_format_conversions;
+        } else if (conv_kind == ConversionKind::kCopy) {
+            ++impl_->video_state.video_format_copies;
+        }
+        impl_->video_state.video_format_canonical = codec_fmt;
+        impl_->video_state.video_format_source    = frame.format;
         if (!raw.buffer) {
             // The frame cannot be staged (no planes, zero dimensions, or a
             // packed source format).  Software codecs can still encode a
@@ -1618,7 +2264,7 @@ plugins::Status NimRTCEngine::send_video(
             // the codec decide -- a hardware codec will report the failure
             // through its own error path.
             core::log::Logger::instance().warn(
-                "send_video: the source frame could not be staged into a "
+                "engine: the source frame could not be staged into a "
                 "codec-facing pixel buffer (the encoder receives no pixels)");
         }
 
@@ -1631,28 +2277,82 @@ plugins::Status NimRTCEngine::send_video(
         if (impl_->scratch.video_enc_buf.capacity() < kInitialVideoEncCap) {
             impl_->scratch.video_enc_buf.reserve(kInitialVideoEncCap);
         }
-        const auto enc_rc = video_codec_->encode(raw,
-                                                 impl_->scratch.video_enc_buf.data(),
-                                                 impl_->scratch.video_enc_buf.capacity(),
-                                                 encoded);
-        ++impl_->video_state.video_staged_frames;
-        if (enc_rc != plugins::kOk) {
-            // Codec may need a larger buffer than reserved (e.g. very high
-            // bitrate IDR).  Resize to the codec's expected capacity and retry
-            // exactly once to avoid an unbounded loop on a misbehaving codec.
-            const std::size_t needed = encoded.payload.size();
-            if (needed == 0 || needed > impl_->scratch.video_enc_buf.capacity() * 4) {
-                return plugins::kErrInternal;  // give up on pathological sizes
-            }
-            impl_->scratch.video_enc_buf.reserve(needed);
-            if (video_codec_->encode(raw,
-                                     impl_->scratch.video_enc_buf.data(),
-                                     impl_->scratch.video_enc_buf.capacity(),
-                                     encoded) != plugins::kOk) {
-                return plugins::kErrInternal;
+        // Plan J1: the encode stage's own cost.  The codec is the stage
+        // the plan's budget is really about ("capture → encode →
+        // packetize"), and the codec already reports its own latency in
+        // `VideoCodecStats::encode_latency_us_total` — but that number
+        // is the codec's *self-report*, measured from inside the codec.
+        // The engine's measurement brackets the whole call, so a codec
+        // that lies about its own latency cannot hide from the budget.
+        std::uint64_t encode_ns = 0;
+        {
+            const auto enc_start = std::chrono::steady_clock::now();
+            const auto enc_rc = video_codec_->encode(raw,
+                                                     impl_->scratch.video_enc_buf.data(),
+                                                     impl_->scratch.video_enc_buf.capacity(),
+                                                     encoded);
+            const auto enc_end = std::chrono::steady_clock::now();
+            encode_ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    enc_end - enc_start).count());
+            if (enc_rc != plugins::kOk) {
+                // Codec may need a larger buffer than reserved (e.g. very high
+                // bitrate IDR).  Resize to the codec's expected capacity and retry
+                // exactly once to avoid an unbounded loop on a misbehaving codec.
+                const std::size_t needed = encoded.payload.size();
+                if (needed == 0 || needed > impl_->scratch.video_enc_buf.capacity() * 4) {
+                    impl_->video_state.stage_timings.record(Stage::kEncode, encode_ns);
+                    return plugins::kErrInternal;  // give up on pathological sizes
+                }
+                impl_->scratch.video_enc_buf.reserve(needed);
+                const auto retry_start = std::chrono::steady_clock::now();
+                const auto retry_rc = video_codec_->encode(raw,
+                                                          impl_->scratch.video_enc_buf.data(),
+                                                          impl_->scratch.video_enc_buf.capacity(),
+                                                          encoded);
+                const auto retry_end = std::chrono::steady_clock::now();
+                encode_ns += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        retry_end - retry_start).count());
+                impl_->video_state.stage_timings.record(Stage::kEncode, encode_ns);
+                if (retry_rc != plugins::kOk) {
+                    return plugins::kErrInternal;
+                }
+            } else {
+                impl_->video_state.stage_timings.record(Stage::kEncode, encode_ns);
+                // The frame was staged through the CPU and encoded: the
+                // counterpart of `video_zero_copy_frames`, so a host can
+                // see the split between the two paths.
+                ++impl_->video_state.video_staged_frames;
             }
         }
+    } else {
+        // The zero-copy path: the codec consumed a native GPU handle, so
+        // there was no staging copy — but the *encode* still costs time,
+        // and the budget is about the whole stage.  Measure it here too,
+        // or the hardware path would look artificially free.
+        impl_->video_state.stage_timings.record(Stage::kEncode, 0);
+        // Plan C3: no format work happened at all on this path — the
+        // picture reached the encoder as the native surface the device
+        // produced.
+        ++impl_->video_state.video_format_zero_copy;
+        impl_->video_state.video_format_source = frame.format;
     }
+
+    // The tail of this function is shared with the zero-copy pump (plan
+    // B10): the GPU path encodes on its own and then needs exactly the
+    // same push.  Sharing the tail is what keeps the two paths from
+    // drifting apart.
+    return push_encoded_video_frame(encoded, frame.rtp_timestamp,
+                                    frame.frame_seq, frame.capture_ts_us);
+}
+
+plugins::Status NimRTCEngine::push_encoded_video_frame(
+    const plugins::EncodedVideoFrame& encoded,
+    std::uint32_t rtp_timestamp,
+    std::uint32_t frame_seq,
+    std::int64_t capture_ts_us) noexcept {
+    if (!video_sender_) return plugins::kErrNotReady;
 
     // Mark keyframe so the sender packet callback gives it kVideoKeyframe
     // priority (consumed on the marker=true packet).
@@ -1665,20 +2365,32 @@ plugins::Status NimRTCEngine::send_video(
     // how much detail the encoder had to drop to hit the bitrate — so it
     // belongs to the outbound stream, not to the inbound one.
     impl_->video_state.video_stats.on_frame_encoded(
-        static_cast<std::int64_t>(encoded.info.capture_ts_us),
+        static_cast<std::int64_t>(capture_ts_us),
         static_cast<std::uint32_t>(encoded.payload.size()),
         encoded.is_keyframe,
         static_cast<int>(encoded.qp));
 
     // Packetize (the sender's packet callback handles RTP header assembly
     // + SRTP protect + scheduler enqueue).
-    const auto push_rc = video_sender_->push_frame(encoded, frame.rtp_timestamp);
+    //
+    // Plan J1: the packetize stage is the third term of the plan's
+    // budget ("capture → encode → packetize").  It is measured around
+    // the whole `push_frame` call, so it covers the RTP header assembly,
+    // the STAP-A / FU-A fragmentation and the SRTP protection.
+    const auto packetize_start = std::chrono::steady_clock::now();
+    const auto push_rc = video_sender_->push_frame(encoded, rtp_timestamp);
+    const auto packetize_end = std::chrono::steady_clock::now();
+    impl_->video_state.stage_timings.record(
+        Stage::kPacketize,
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                packetize_end - packetize_start).count()));
     if (push_rc == plugins::kOk) {
         // v1.1 V1: one encoded frame accepted by the sender pipeline.
         ++impl_->video_state.video_frames_sent;
         // v1.1 T1: record the outbound ref_frame mapping (id == frame_seq).
-        record_video_ref_frame(static_cast<std::uint64_t>(frame.frame_seq),
-                               static_cast<std::int64_t>(frame.capture_ts_us));
+        record_video_ref_frame(static_cast<std::uint64_t>(frame_seq),
+                               static_cast<std::int64_t>(capture_ts_us));
     }
     return push_rc;
 }
@@ -1711,7 +2423,6 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
             }
         }
     }
-
     // The peer's Sender Report is parsed whether or not the cross-end
     // timeline is enabled: the report's *LSR* field (the middle 32
     // bits of the peer's NTP timestamp) is a fact about the wire that
@@ -1783,7 +2494,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
                                                  blk.packet, now);
-                    ++impl_->net_feedback_blocks;
+                    ++impl_->feedback.net_feedback_blocks;
                 }
                 break;
 
@@ -1814,7 +2525,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
                                                  blk.packet, now);
-                    ++impl_->net_feedback_blocks;
+                    ++impl_->feedback.net_feedback_blocks;
                 }
                 break;
 
@@ -1841,7 +2552,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
                                                  blk.packet, now);
-                    ++impl_->net_feedback_blocks;
+                    ++impl_->feedback.net_feedback_blocks;
                 }
                 break;
 
@@ -1853,7 +2564,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 // its business.
                 if (xr_report_) {
                     xr_report_->on_rtcp_block(blk.payload_type, blk.packet, now);
-                    ++impl_->xr_report_blocks;
+                    ++impl_->feedback.xr_report_blocks;
                 }
                 // The Receiver Reference Time block (BT = 4) is the
                 // one block that needs the *engine's* attention: our
@@ -1869,6 +2580,101 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 break;
         }
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// The key-frame storm limiter (remote-desktop plan B14)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::retry_pending_keyframe() noexcept {
+    if (!video_sender_ || !video_codec_) return;
+
+    // The limiter *defers* a request that arrives too soon after the
+    // last one, and it **holds** it rather than dropping it: the peer
+    // may only ask once, and the picture still has to recover.
+    //
+    // The retry happens here, in the tick, because the limiter owns no
+    // clock — the engine does.  When the limiter grants the held
+    // request, it publishes it through the same door an inbound PLI
+    // uses, so there is exactly one place that arms the encoder.
+    if (!video_sender_->keyframe_request_pending()) return;
+
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    const std::uint32_t granted = video_sender_->retry_pending_keyframe(now_us);
+    if (granted == 0) return;
+
+    // The grant is now in the sender's request counter; drain it through
+    // the same path the inbound-feedback path uses.
+    const std::uint32_t keyframe_requests =
+        video_sender_->take_keyframe_requests();
+    if (keyframe_requests > 0) {
+        impl_->video_state.video_keyframes_applied += keyframe_requests;
+        (void)video_codec_->force_keyframe();
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// The decoder-driven key-frame request
+// ---------------------------------------------------------------------------
+//
+// A frame the decoder refuses is the receiver's own statement that it
+// needs a new IDR: the picture's reference frame never arrived, or — the
+// case that bites hardest — the decoder never saw the codec's parameter
+// sets (SPS / PPS) and therefore has no decoder context to work with.
+//
+// The jitter buffer cannot raise this request: the frame assembled
+// *perfectly* as far as the RTP layer is concerned (every packet
+// arrived, the access unit is complete), and only the codec knows that
+// the bitstream is undecodable.  Without this path a stream that
+// arrives but never decodes stays undecoded until the sender's periodic
+// IDR comes around — GOP frames later, which on a static desktop is
+// tens of seconds.
+//
+// The request is throttled by the engine: the failure repeats on
+// *every* subsequent P-frame, so an unthrottled request would be a PLI
+// storm.  The peer's own key-frame storm limiter (remote-desktop plan
+// B14) bounds the other side of the loop; this bounds ours.
+void NimRTCEngine::request_keyframe_on_decode_failure() noexcept {
+    if (!video_receiver_) return;
+
+    auto& vstate = impl_->video_state;
+
+    // ---- The throttle ------------------------------------------------------
+    //
+    // The interval matches the key-frame limiter's own default (250 ms —
+    // RFC 5104 §4.3.1.1's "about 4 Hz"), so the two ends of the loop agree
+    // on the rate: the request is sent at most four times a second, and
+    // the peer produces at most four IDRs a second in answer.
+    constexpr std::int64_t kMinRequestIntervalUs = 250'000;
+
+    const std::int64_t now_us = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    if (vstate.video_last_decode_keyframe_us != 0 &&
+        now_us - vstate.video_last_decode_keyframe_us < kMinRequestIntervalUs) {
+        return;
+    }
+    vstate.video_last_decode_keyframe_us = now_us;
+
+    // ---- The report --------------------------------------------------------
+    //
+    // The report goes through the *same* door the jitter buffer's own
+    // loss report uses (`queue_video_feedback()`), so the RTCP bytes
+    // are produced by the receiver plugin and the engine only carries
+    // them.  The engine never builds an RTCP packet itself.
+    plugins::VideoFeedbackReport report{};
+    report.want_keyframe = true;
+
+    core::log::Logger::instance().info(
+        "engine[video]: the decoder refused a frame — requesting a key "
+        "frame from the peer");
+
+    queue_video_feedback(report);
 }
 
 
@@ -1944,7 +2750,7 @@ void NimRTCEngine::flush_video_feedback() noexcept {
     // produce a packet the peer's unprotect_rtcp rejects.
     core::ByteSpan out(buf.data(), written);
     std::vector<std::uint8_t> enc;
-    if (impl_->srtp_installed && impl_->srtp) {
+    if (impl_->security.srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(
             config_.video_sender_tuning.ssrc, /*outgoing=*/true);
         if (!sess) return;   // SRTP installed but no keying yet — skip.
@@ -2174,7 +2980,7 @@ void NimRTCEngine::apply_audio_bitrate(int target, int current,
 NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
 
     Stats out;
-    out.srtp_drops = impl_->srtp_stats_drop;
+    out.srtp_drops = impl_->security.srtp_stats_drop;
     // v1.1 V1: cumulative video counters (additive; zero when unused).
     out.video_frames_sent       = impl_->video_state.video_frames_sent;
     out.video_packets_sent      = impl_->video_state.video_packets_sent;
@@ -2184,9 +2990,19 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_keyframes_q       = impl_->video_state.video_keyframes_q;
     out.video_feedback_applied  = impl_->video_state.video_feedback_applied;
     out.video_keyframes_applied = impl_->video_state.video_keyframes_applied;
+
+    // Remote-desktop plan H4: the per-stream statistics list.  The flat
+    // `video_*` fields above describe the **default** stream; the list
+    // carries one entry per *active* stream (the default one included),
+    // each with its own bitrate, ladder level, keyframe rate and backend
+    // id.
+    append_video_stream_stats(out.video_streams);
     // Phase 3 / C3: the zero-copy path counters.
     out.video_zero_copy_frames    = impl_->video_state.video_zero_copy_frames;
     out.video_zero_copy_fallbacks = impl_->video_state.video_zero_copy_fallbacks;
+    // Remote-desktop plan E1: the receive-side delivery-path counters.
+    out.video_rx_gpu_frames       = impl_->video_state.video_rx_gpu_frames;
+    out.video_rx_cpu_frames       = impl_->video_state.video_rx_cpu_frames;
 
     // ---- Video quality statistics (Phase 4.2 / D2) ----------------------
     //
@@ -2269,10 +3085,10 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // v1.2.0 M1: the feedback loop's own counters.  `bwe_feedback_samples`
     // staying at zero means the loop is not closed — the estimator is
     // never fed, so the bandwidth target never moves.
-    out.net_feedback_blocks   = impl_->net_feedback_blocks;
-    out.bwe_feedback_samples  = impl_->bwe_feedback_samples;
+    out.net_feedback_blocks   = impl_->feedback.net_feedback_blocks;
+    out.bwe_feedback_samples  = impl_->feedback.bwe_feedback_samples;
     // v1.2.0 (session plan X1): the XR routing counter.
-    out.xr_report_blocks      = impl_->xr_report_blocks;
+    out.xr_report_blocks      = impl_->feedback.xr_report_blocks;
     if (bwe_) {
         out.bandwidth_estimate_bps = bwe_->estimate().target_bitrate_bps;
     }
@@ -2331,7 +3147,347 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         static_cast<std::uint32_t>(audio_bitrate_current_bps_ > 0
                                        ? audio_bitrate_current_bps_
                                        : 0);
+
+    // ---- Capture statistics (remote-desktop plan A11) --------------------
+    //
+    // The capture device's own counters, reported verbatim.  The device
+    // is the only party that knows how many frames it produced and how
+    // many its bounded queue had to drop, so the engine does not
+    // re-derive them — it asks.
+    if (video_capture_) {
+        const plugins::CaptureStats cs = video_capture_->stats();
+        out.video_capture_device_frames_captured  = cs.frames_captured;
+        out.video_capture_device_frames_dropped   = cs.frames_dropped;
+        out.video_capture_device_error_count      = cs.device_errors;
+        out.video_capture_device_restarts         = cs.device_restarts;
+        out.video_capture_device_format_changes   = cs.format_changes;
+        out.video_capture_device_bytes_copied     = cs.bytes_copied;
+        out.video_capture_device_frames_zero_copy = cs.frames_zero_copy;
+        out.video_capture_device_frames_cpu_staged = cs.frames_cpu_staged;
+    }
+
+    // ---- The capture → engine pump (remote-desktop plan A10) ------------
+    out.video_capture_pumped_frames   = impl_->video_state.video_capture_pumped_frames;
+    out.video_capture_pump_errors     = impl_->video_state.video_capture_pump_errors;
+    out.video_capture_pumped_metadata = impl_->video_state.video_capture_pumped_metadata;
+
+    // ---- The zero-copy seam (remote-desktop plan B10) ------------------
+    //
+    // `video_capture_gpu_wired` says whether the engine attached the
+    // capture device's GPU callback at all; the two counters say what
+    // happened afterwards.  Together they are the observable proof of
+    // the seam: `gpu_frames` moving while `bytes_copied` stays at zero.
+    out.video_capture_gpu_wired  = impl_->video_state.capture_gpu_wired;
+    out.video_capture_gpu_frames = impl_->video_state.video_capture_gpu_frames;
+    out.video_capture_gpu_errors = impl_->video_state.video_capture_gpu_errors;
+
+    // ---- Format normalisation (remote-desktop plan C3) ------------------
+    //
+    // The conversion count is the number a host reads to decide whether
+    // the pipeline is doing colour work it does not need to.  On the
+    // zero-copy path it stays at zero.
+    out.video_format_conversions = impl_->video_state.video_format_conversions;
+    out.video_format_copies      = impl_->video_state.video_format_copies;
+    out.video_format_zero_copy   = impl_->video_state.video_format_zero_copy;
+    out.video_format_canonical   =
+        std::string{plugins::pixel_format_name(
+            impl_->video_state.video_format_canonical)};
+    out.video_format_source =
+        std::string{plugins::pixel_format_name(
+            impl_->video_state.video_format_source)};
+
+    // ---- Codec telemetry (remote-desktop plan B15) ------------------------
+    //
+    // The codec knows which backend it is, whether that backend is
+    // hardware, and how long its encodes take.  The engine reports the
+    // answers rather than guessing them from the plugin id.
+    if (video_codec_) {
+        out.video_codec_backend = std::string{video_codec_->backend_id()};
+        out.video_codec_hardware_accelerated = video_codec_->is_hardware_accelerated();
+        out.video_codec_backend_preference =
+            std::string{plugins::video_codec_backend_preference_name(
+                impl_->video_state.video_codec_backend_preference)};
+
+        const plugins::VideoCodecStats cs = video_codec_->stats();
+        out.video_codec_frames_zero_copy = cs.frames_encoded_zero_copy;
+        out.video_codec_frames_staged   = cs.frames_encoded_staged;
+        out.video_codec_keyframes       = cs.keyframes_encoded;
+        out.video_codec_bytes_copied    = cs.bytes_copied;
+        out.video_codec_encode_latency_max_us = cs.encode_latency_us_max;
+        if (cs.frames_encoded > 0 && cs.encode_latency_us_total > 0) {
+            out.video_codec_encode_latency_avg_us =
+                cs.encode_latency_us_total / cs.frames_encoded;
+        }
+    }
+
+    // ---- Sink statistics (remote-desktop plan A11 / E8) ------------------
+    //
+    // The sink's counters are the renderer's own: how many frames it
+    // drew, how many it had to drop under back-pressure, and the rate
+    // the presentation clock actually achieved.
+    if (video_sink_) {
+        const plugins::VideoSinkStats ss = video_sink_->stats();
+        out.video_sink_frames_rendered        = ss.frames_rendered;
+        out.video_sink_frames_dropped         = ss.frames_dropped;
+        out.video_sink_frames_dropped_present = ss.frames_dropped_present;
+        out.video_sink_frames_presented        = ss.frames_presented;
+        out.video_sink_render_errors          = ss.render_errors;
+        out.video_sink_present_fps             = ss.present_fps;
+    }
+
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    //
+    // The sender owns the limiter, so the engine asks it for the
+    // counters rather than keeping its own copy.  The counters are what
+    // make the limiter observable: a host sees the requests the peer
+    // made, how many were granted, how many were held back, and how
+    // many bypassed the limiter because they carried the parameter sets.
+    if (video_sender_) {
+        const plugins::VideoSenderStats ss = video_sender_->stats();
+        out.video_keyframes_limiter_requests = ss.keyframe_requests;
+        out.video_keyframes_granted          = ss.keyframes_granted;
+        out.video_keyframes_deferred         = ss.keyframes_deferred;
+        out.video_keyframes_rejected         = ss.keyframes_rejected;
+        out.video_keyframes_forced           = ss.keyframes_forced;
+
+        // ---- The incremental (dirty-rect) encode (plan B9) --------------
+        const plugins::VideoIncrementalStats is = video_sender_->incremental_stats();
+        out.video_incremental_frames_seen = is.frames_seen;
+        out.video_incremental_unchanged   = is.frames_unchanged;
+        out.video_incremental_encoded     = is.frames_incremental;
+        out.video_incremental_full        = is.frames_full;
+        out.video_incremental_fallbacks   = is.fallback_keyframes;
+        out.video_incremental_skipped     = is.skipped_not_screen;
+    }
+    out.video_region_refreshes_sent =
+        impl_->video_state.video_region_refreshes_sent;
+
+    // The outbound video bitrate: the encoded bytes over the last
+    // second, as measured by the video-quality sink's bitrate window.
+    if (impl_->video_state.video_stats.active()) {
+        out.video_tx_bitrate_bps =
+            impl_->video_state.video_stats.snapshot_tx().current_bitrate_bps;
+    }
+
+    // ---- The per-stage CPU-time instrumentation (plan J1) ---------------
+    //
+    // The engine's own measurement of each pipeline stage, reported
+    // verbatim.  This is the number §B.6's budget is written against —
+    // without it the budget is a sentence in a document rather than
+    // something the code checks.
+    {
+        const auto& t = impl_->video_state.stage_timings;
+
+        const auto fill = [&t](Stage stage, Stats::StageTiming& dst) {
+            dst.samples = t.samples(stage);
+            dst.mean_us = t.mean_us(stage);
+            dst.p95_us  = t.percentile_us(stage, 95);
+            dst.max_us  = t.max_us(stage);
+            dst.total_us = t.total_us(stage);
+            // The exact (nanosecond) view, so a sub-microsecond stage is
+            // not reported as "free".
+            dst.mean_ns  = t.mean_ns(stage);
+            dst.max_ns   = t.max_ns(stage);
+            dst.total_ns = t.total_ns(stage);
+        };
+
+        fill(Stage::kCapture,   out.video_stage_capture);
+        fill(Stage::kConvert,   out.video_stage_convert);
+        fill(Stage::kEncode,    out.video_stage_encode);
+        fill(Stage::kPacketize, out.video_stage_packetize);
+        fill(Stage::kDecode,    out.video_stage_decode);
+        fill(Stage::kRender,    out.video_stage_render);
+
+        // The budget is written against the *outbound* chain
+        // (capture → encode → packetize), so that is what the total
+        // sums: the convert stage is in the middle because the plan's
+        // chain has it there, and on the zero-copy path it is zero —
+        // which is the point.
+        out.video_stage_total_us =
+            out.video_stage_capture.mean_us + out.video_stage_convert.mean_us +
+            out.video_stage_encode.mean_us + out.video_stage_packetize.mean_us;
+        out.video_stage_total_p95_us =
+            out.video_stage_capture.p95_us + out.video_stage_convert.p95_us +
+            out.video_stage_encode.p95_us + out.video_stage_packetize.p95_us;
+    }
+
+    // ---- The render clock (remote-desktop plan E5) -----------------------
+    //
+    // The counters the render clock keeps: how many frames it presented,
+    // dropped for sync and held back, and how much hold time it
+    // promised.  They come from the controller — the engine does not
+    // re-derive them.
+    out.video_sync = video_sync_stats();
+
+    // ---- The QoE metrics (remote-desktop plan J3 / J6) -------------------
+    //
+    // The snapshot comes from the collector the engine resolved through
+    // the `plugins::IQoeCollector` seam.  When no collector is configured
+    // the snapshot carries the frame counters (which the engine keeps
+    // anyway) and zeroes for the metrics — the honest answer to "what was
+    // the latency percentile?" when it was not measured.
+    if (impl_ != nullptr) {
+        out.qoe = impl_->qoe.snapshot();
+    }
+
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// The default stream's RTP send path
+// ---------------------------------------------------------------------------
+//
+// The default stream is the legacy single-stream path, so its packet
+// callback carries the pre-H1 behaviour verbatim.  It lives in its own
+// method (rather than inline in init_video_plugins()) because a codec
+// swap rebuilds the sender, and the rebuilt sender needs the very same
+// callback -- see set_video_codec(stream_id, name).
+void NimRTCEngine::wire_default_sender() noexcept {
+    if (!video_sender_) return;
+    video_sender_->set_packet_callback(
+        [this](plugins::BufferView payload,
+               std::uint32_t rtp_ts,
+               std::uint16_t seq,
+               bool marker) {
+            // ---- Build the RTP packet (rtp::PacketBuilder) -----------------
+            //
+            // The video path used to hand-assemble the 12-byte RTP
+            // header and hard-code "no extensions" (X=0).  That left
+            // the video stream without the ADR-017 abs-send-time
+            // extension, so the receiver-side timeline had no
+            // send-instant for video and the bandwidth estimator
+            // could not correlate video packets with their wall
+            // clock send time.  The audio path already used
+            // `rtp::PacketBuilder`; both paths now share it, so a
+            // fix to the RTP header lands in one place.
+            //
+            // The payload type is the *negotiated* one (C9 / C11):
+            // it is the number the description exchange settled on,
+            // so the peer recognises the stream.  Before a
+            // negotiation happened the locally configured number is
+            // the fallback, which keeps a host that drives the
+            // engine without SDP working.
+            const std::uint8_t negotiated_pt =
+                impl_->video_state.negotiated_video_pt.load(std::memory_order_relaxed);
+            const std::uint8_t local_pt =
+                impl_->video_state.video_payload_type != 0
+                    ? impl_->video_state.video_payload_type
+                    : config_.video_sender_tuning.payload_type;
+            const std::uint8_t pt = negotiated_pt != 0 ? negotiated_pt : local_pt;
+
+            detail::RtpPacketSpec spec;
+            spec.ssrc         = config_.video_sender_tuning.ssrc;
+            spec.seq          = seq;
+            spec.timestamp    = rtp_ts;
+            spec.payload_type = pt;
+            spec.marker       = marker;
+
+            // ---- Cross-end timeline: stamp abs-send-time (ADR-017) --------
+            // Same contract as the audio path: only when the seam is
+            // on *and* the extension id was negotiated (the id is set
+            // by create_offer() / set_remote_description()).  The
+            // monotonic reading is taken once and serves both the
+            // abs-send-time encoder and the Sender Report's
+            // instant-vs-timestamp pairing.
+            if (config_.timeline_enabled) {
+                const std::int64_t steady_us =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        core::SteadyClock::now().time_since_epoch()).count();
+                impl_->video_state.video_last_send_unix_us =
+                    impl_->timeline.boot_epoch_offset_us + steady_us;
+                if (impl_->timeline.local_abs_send_time_id != 0) {
+                    spec.abs_send_time_ext_id = impl_->timeline.local_abs_send_time_id;
+                    spec.abs_send_time_24mhz = detail::RtpPacketizer::encode_abs_send_time_24(
+                        std::chrono::microseconds{steady_us},
+                        impl_->timeline.boot_epoch_offset_us);
+                }
+            }
+
+            spec.payload = core::ByteSpan(payload.data(), payload.size());
+
+            // ---- Serialise into the reusable scratch (Phase 3 / C4) ------
+            //
+            // Same reasoning as the audio path: `pb.build()` would
+            // allocate a fresh buffer per video packet.  The scratch is
+            // read immediately below — the bytes are copied into the
+            // scheduler's pooled outbound buffer — so it never escapes
+            // this callback.
+            const std::size_t built_size = detail::RtpPacketizer::compute_size(spec);
+            if (impl_->scratch.video_rtp_scratch.size() < built_size) {
+                impl_->scratch.video_rtp_scratch.resize(built_size);
+            }
+            const std::size_t built_written =
+                detail::RtpPacketizer::build_into(spec,
+                    impl_->scratch.video_rtp_scratch.data(),
+                    impl_->scratch.video_rtp_scratch.size());
+            if (built_written == 0) {
+                if (on_error_) {
+                    on_error_(core::kVideoEncodeFailed,
+                              "video send: the RTP packet could not be built");
+                }
+                return;
+            }
+
+            // ---- Assemble full RTP packet ----------------------------------
+            // The buffer comes from the scheduler's packet pool (P1
+            // hardening, 2026-11-09): it is handed back to the pool
+            // once the packet has been drained and dispatched, so the
+            // steady-state send path performs no heap allocation.
+            //
+            // Phase 3: when there is NO scheduler (the "transport"
+            // profile, where the engine writes straight to ICE) the
+            // packet used to be built in a fresh local vector — one
+            // heap allocation per packet, forever.  The transport
+            // `send()` is a synchronous write (the bytes do not
+            // escape the call), so the engine's own scratch buffer
+            // can hold it.
+            std::vector<std::uint8_t>& rtp_pkt = scheduler_
+                ? impl_->scratch.video_pkt_pooled
+                : impl_->scratch.video_pkt_scratch;
+            if (scheduler_) {
+                rtp_pkt = scheduler_->acquire_packet_buffer(
+                    built_written + kSrtpAuthTagBytes);
+            }
+            rtp_pkt.assign(impl_->scratch.video_rtp_scratch.begin(),
+                           impl_->scratch.video_rtp_scratch.begin() +
+                               static_cast<std::ptrdiff_t>(built_written));
+
+            // ---- SRTP protect (if DTLS is connected) ----------------------
+            if (impl_->security.srtp_installed && impl_->srtp) {
+                auto* sess = impl_->srtp->get_session(
+                    config_.video_sender_tuning.ssrc, /*outgoing=*/true);
+                if (!sess) {
+                    // SRTP not ready — drop this packet silently.
+                    return;
+                }
+                core::ByteSpan span(rtp_pkt.data(), rtp_pkt.size());
+                auto enc = sess->protect_rtp(span,
+                    config_.video_sender_tuning.ssrc, rtp_ts);
+                if (!enc) return;
+                rtp_pkt.assign(enc.value().data(),
+                               enc.value().data() + enc.value().size());
+            }
+
+            // ---- Enqueue to scheduler (move, P0#3) or send directly -------
+            plugins::Priority prio = plugins::Priority::kVideo;
+            if (marker && impl_->video_state.video_keyframe_pending_.load(std::memory_order_acquire)) {
+                prio = plugins::Priority::kVideoKeyframe;
+                impl_->video_state.video_keyframe_pending_.store(false, std::memory_order_release);
+            }
+
+            // v1.1 V1: count emitted RTP packets/bytes (post-protect size).
+            ++impl_->video_state.video_packets_sent;
+            impl_->video_state.video_bytes_sent += rtp_pkt.size();
+
+            if (scheduler_) {
+                scheduler_->enqueue_owned(prio,
+                                          std::move(rtp_pkt),
+                                          plugins::Addr{});
+            } else if (ice_t_) {
+                plugins::BufferView bv{rtp_pkt.data(), rtp_pkt.size()};
+                ice_t_->send(bv, {});
+            }
+        });
 }
 
 }  // namespace nimrtc::engine

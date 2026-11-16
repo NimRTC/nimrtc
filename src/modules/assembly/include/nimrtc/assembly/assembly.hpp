@@ -423,6 +423,89 @@ struct NIMRTC_API_STABLE Profile {
     /// additive on top of v1.0 — see `docs/plan/transport-strategies.md`.
     TransportSection transport;
 
+    // ---- v1.2 additive: video scene configuration ---------------------------
+    //
+    // These four fields are the **additive** v1.2 keys of the Profile
+    // schema (`profiles/schema/profile-v1.2.json`). Every one of them is
+    // **optional** in the JSON: a v1.1 profile that omits them loads with
+    // the defaults below, so the schema change is strictly additive
+    // (see `docs/adr/ADR-010-profile-json-format.md` §"Schema v1.1
+    // incremental fields" for the same pattern).
+    //
+    // The engine's own default — when no profile is loaded — is the
+    // *quality-first* ladder mode, the same default the video pipeline
+    // plan fixes in `docs/plan/video-pipeline-v2-plan.md` §B.7.3
+    // (OD-3(a)).
+
+    /// Preferred video codec for this scene, as a codec id ("h264",
+    /// "h265", "av1", "vp8", "vp9"). It is a **preference**, not a
+    /// requirement: the negotiated codec is the one both peers support.
+    /// For a screen-content scene the preference drives the encoder's
+    /// screen-coding tools — see the remote-desktop plan's B8
+    /// ("screen-content codec preference") and ADR-022 (screen content
+    /// as a content type).
+    std::string video_codec_preference = "h264";
+
+    /// The adaptation ladder's **resolution floor**: the lowest
+    /// resolution the ladder may step down to. A scene that reads text
+    /// (remote desktop) cannot fall below the floor without destroying
+    /// the product, so the floor is per-scene configuration rather than a
+    /// hard-coded ladder constant — see the remote-desktop plan's D2
+    /// ("screen-specific ladder entries") and §B.6's software-path rule.
+    std::string video_resolution_floor = "720p";
+
+    /// The ladder's adaptation mode: "quality" (quality-first — spend
+    /// the budget on resolution / fidelity) or "smoothness"
+    /// (smoothness-first — spend it on frame rate). The per-profile
+    /// defaults are tabulated in `docs/plan/video-pipeline-v2-plan.md`
+    /// §B.7.3 (OD-3(a)); the engine default is quality-first. The chosen
+    /// mode is what reaches the encoder — see the remote-desktop plan's
+    /// D4 ("video bitrate reaches the encoder").
+    std::string video_ladder_mode = "quality";
+
+    /// The content type of the video source: "camera" or "screen". It
+    /// tells the engine that a screen capture is **not** "a camera with
+    /// a huge resolution" — the screen-coding tools, the content hint and
+    /// the ROI handling are selected from it. See ADR-022 (screen content
+    /// as a content type) and the remote-desktop plan's RD-3.
+    std::string video_content_type = "camera";
+
+    // ---- v1.2 additive: the declared per-stream bandwidth shares ---------
+    //
+    // Remote-desktop plan D5: "the remote-desktop profile declares the
+    // shares".  The session's bandwidth estimate is divided between the
+    // video streams by *weight*, and the rule itself lives in exactly one
+    // place (`src/engine/src/bandwidth_allocation.hpp`) — the same rule
+    // the audio path uses.  This map is the **declaration** side of that
+    // rule: it says which stream deserves which share, declaratively,
+    // before the session exists.
+    //
+    // The key is the stream's stable id ("default", "screen", "camera",
+    // ...) — the same id `NimRTCEngine::add_video_stream()` takes — and
+    // the value is the stream's relative weight.  A weight of 0 means
+    // "this stream takes nothing from the pool".  The default weight is
+    // 1, so an undeclared stream splits the pool evenly.
+    //
+    // The map is **declarative, not constructive**: a declaration for a
+    // stream the session never creates is simply inert (it is not an
+    // error — the profile describes a scene, and the host chooses which
+    // of the scene's streams to actually run).  A declaration for the
+    // *default* stream is honoured at open(); a declaration for an extra
+    // stream is honoured when that stream is created.
+    //
+    // The runtime override (`NimRTCEngine::set_video_stream_weight()`)
+    // always wins over the declaration: the declaration is the *default*
+    // the session starts from, not a lock.
+    //
+    // The default member initializer is load-bearing: the profile
+    // constants below are *designated initializers*, and GCC's
+    // `-Wmissing-field-initializers` (which the project builds with
+    // `-Werror`) rejects a designated initializer that mentions a
+    // non-aggregate member with `= {}` unless the member carries a
+    // default member initializer.  Without it, every profile that says
+    // ".video_stream_weights = {}" fails to compile on GCC.
+    std::map<std::string, std::uint32_t> video_stream_weights{};
+
     // ---- v1.2 additive: video shaping --------------------------------------
     ///
     /// Optional. When the entire `video` block is absent from the JSON,

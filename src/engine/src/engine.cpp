@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file src/engine/src/engine.cpp
  * @brief NimRTCEngine — wires ICE + SDP + RTP + JB + Audio3A + DTLS + SRTP + Opus.
  *
@@ -195,6 +195,25 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     // list and the track API reports "no session".
     resolve_session_model();
 
+    // ---- The remote-desktop control channel (plan G1 / G2) -------------
+    //
+    // The channel is resolved through the registry's control-channel
+    // slot (`EngineConfig::control_channel_name`), so the engine never
+    // includes a concrete module's header (Layout Invariant 4).  It is
+    // resolved *after* the transport session exists, because the
+    // transport selection (the DTLS app-data seam vs. the control
+    // stack's raw-UDP path) depends on it.
+    if (const uint32_t rc = resolve_control_channel(); rc != 0) return rc;
+
+    // ---- The QoE collector (plan J3 / J6) -------------------------------
+    //
+    // The collector is resolved through the registry's qoe-collector
+    // slot (`EngineConfig::qoe_collector_name`), so the engine never
+    // includes a concrete module's header (Layout Invariant 4).  It is
+    // off by default: a session that does not ask for the metrics does
+    // not pay for the reservoir.
+    if (const uint32_t rc = resolve_qoe_collector(); rc != 0) return rc;
+
     return 0;
 }
 
@@ -353,7 +372,7 @@ uint32_t NimRTCEngine::open() noexcept {
                                            .count();
         impl_->timeline.sr_tracker.set_monotonic_origin(
             impl_->timeline.monotonic_origin_ntp64);
-        impl_->sr_last_sent = steady_now;   // first SR fires one period in
+        impl_->timeline.sr_last_sent = steady_now;   // first SR fires one period in
         if (config_.timeline_enabled) {
             core::log::Logger::instance().info(
                 "engine[timeline]: abs-send-time + Sender Reports enabled "
@@ -370,6 +389,10 @@ uint32_t NimRTCEngine::open() noexcept {
 
 void NimRTCEngine::close() noexcept {
     if (state_ != State::kOpen) return;
+    // Plan J3 / J6: the QoE collector is closed with the session — the
+    // metrics are a property of the session, and a closed session's
+    // reservoir is not worth keeping.
+    impl_->qoe.close();
     if (ice_t_) ice_t_->close();
     if (audio3a_plugin_) audio3a_plugin_->close();
     if (codec_plugin_) codec_plugin_->close();
@@ -846,7 +869,7 @@ bool NimRTCEngine::is_ice_connected() const noexcept {
 
 
 bool NimRTCEngine::srtp_installed() const noexcept {
-    return impl_->srtp_installed;
+    return impl_->security.srtp_installed;
 }
 
 

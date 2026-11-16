@@ -46,6 +46,7 @@ const std::vector<std::string>& builtin_profile_names() {
     static const std::vector<std::string> names = {
         "call", "live", "transport", "agent", "teleop",
         "relay", "relay-agent", "agent-gateway", "agent-low-latency",
+        "remote-desktop",
     };
     return names;
 }
@@ -332,4 +333,191 @@ TEST(AssemblyBridgeTest, EveryBuiltInProfileConvertsWithoutThrowing) {
             (void)cfg;
         }) << name;
     }
+}
+
+// =============================================================================
+// 7. The v1.2 video-scene keys reach the engine
+// =============================================================================
+//
+// The four v1.2 video-scene keys used to be parsed, serialised and
+// JSON-round-tripped — and then **silently dropped**: nothing carried
+// them from the Profile to the `EngineConfig`.  A remote-desktop profile
+// that said "screen content, 720p floor, smoothness ladder" therefore
+// produced an engine that knew none of it.
+//
+// These tests pin the wiring.  They are the *negative* control for the
+// whole class of bug: the JSON loader is already tested (the keys
+// round-trip), and the Profile defaults are already tested — what was
+// missing is the assertion that the values arrive at the engine.
+
+TEST(AssemblyBridgeTest, RemoteDesktopVideoSceneReachesTheEngine) {
+    const Profile& p = nimrtc::assembly::kProfileRemoteDesktop;
+
+    // The Profile says ...
+    EXPECT_EQ(p.video_content_type, "screen");
+    EXPECT_EQ(p.video_resolution_floor, "720p");
+    EXPECT_EQ(p.video_ladder_mode, "smoothness");
+    EXPECT_EQ(p.video_codec_preference, "h264");
+
+    // ... and the engine is told.
+    const auto cfg = nimrtc::assembly::to_engine_config(p);
+    EXPECT_EQ(cfg.video_content_hint,
+              nimrtc::plugins::VideoEncoderParams::ContentHint::kText);
+    EXPECT_EQ(cfg.video_resolution_floor_height, 720u);
+    EXPECT_EQ(cfg.video_ladder_mode,
+              nimrtc::plugins::VideoLadderMode::kSmoothness);
+    EXPECT_EQ(cfg.video_codec_name, "h264");
+}
+
+TEST(AssemblyBridgeTest, ACameraProfileKeepsTheCameraDefaults) {
+    // The converse: a camera scene must NOT be handed the screen-content
+    // hint.  ADR-022 is explicit that a screen capture is not "a camera
+    // with a huge resolution" — treating one as the other is the bug.
+    const Profile& p = nimrtc::assembly::kProfileCall;
+
+    const auto cfg = nimrtc::assembly::to_engine_config(p);
+    EXPECT_EQ(cfg.video_content_hint,
+              nimrtc::plugins::VideoEncoderParams::ContentHint::kUnspecified);
+    EXPECT_EQ(cfg.video_ladder_mode,
+              nimrtc::plugins::VideoLadderMode::kQuality);
+}
+
+TEST(AssemblyBridgeTest, TheVideoSceneValuesAreCarriedVerbatim) {
+    // A synthetic profile with non-default values: the bridge must not
+    // normalise, clamp or reinterpret them.
+    Profile p;
+    p.video_content_type     = "screen";
+    p.video_resolution_floor = "1080p";
+    p.video_ladder_mode      = "smoothness";
+    p.video_codec_preference = "av1";
+
+    const auto cfg = nimrtc::assembly::to_engine_config(p);
+    EXPECT_EQ(cfg.video_content_hint,
+              nimrtc::plugins::VideoEncoderParams::ContentHint::kText);
+    EXPECT_EQ(cfg.video_resolution_floor_height, 1080u);
+    EXPECT_EQ(cfg.video_ladder_mode,
+              nimrtc::plugins::VideoLadderMode::kSmoothness);
+    EXPECT_EQ(cfg.video_codec_name, "av1");
+}
+
+// -----------------------------------------------------------------------------
+// The vocabulary resolvers
+// -----------------------------------------------------------------------------
+
+TEST(AssemblyBridgeTest, LadderModeResolverAcceptsTheSchemaVocabulary) {
+    using nimrtc::assembly::video_ladder_mode_of;
+    EXPECT_EQ(video_ladder_mode_of("quality"),
+              nimrtc::plugins::VideoLadderMode::kQuality);
+    EXPECT_EQ(video_ladder_mode_of("smoothness"),
+              nimrtc::plugins::VideoLadderMode::kSmoothness);
+    // An unknown name falls back to the engine's default rather than
+    // failing the whole bridge.
+    EXPECT_EQ(video_ladder_mode_of("bogus"),
+              nimrtc::plugins::VideoLadderMode::kQuality);
+    EXPECT_EQ(video_ladder_mode_of(""),
+              nimrtc::plugins::VideoLadderMode::kQuality);
+}
+
+TEST(AssemblyBridgeTest, ResolutionFloorResolverAcceptsTheSchemaVocabulary) {
+    using nimrtc::assembly::video_resolution_floor_height_of;
+    EXPECT_EQ(video_resolution_floor_height_of("360p"),  360u);
+    EXPECT_EQ(video_resolution_floor_height_of("480p"),  480u);
+    EXPECT_EQ(video_resolution_floor_height_of("720p"),  720u);
+    EXPECT_EQ(video_resolution_floor_height_of("1080p"), 1080u);
+    EXPECT_EQ(video_resolution_floor_height_of("1440p"), 1440u);
+    EXPECT_EQ(video_resolution_floor_height_of("2160p"), 2160u);
+    // An unresolvable floor is "no floor" (0), not a guess.
+    EXPECT_EQ(video_resolution_floor_height_of("bogus"), 0u);
+    EXPECT_EQ(video_resolution_floor_height_of(""),        0u);
+}
+
+TEST(AssemblyBridgeTest, ContentTypeResolverMapsScreenOntoTheTextHint) {
+    using nimrtc::assembly::video_content_hint_of;
+    using ContentHint = nimrtc::plugins::VideoEncoderParams::ContentHint;
+    EXPECT_EQ(video_content_hint_of("screen"), ContentHint::kText);
+    EXPECT_EQ(video_content_hint_of("camera"), ContentHint::kUnspecified);
+    // An unknown scene is treated as camera content — the conservative
+    // reading: the encoder spends its budget on motion, which is the
+    // behaviour a camera stream already gets.
+    EXPECT_EQ(video_content_hint_of("bogus"), ContentHint::kUnspecified);
+    EXPECT_EQ(video_content_hint_of(""),      ContentHint::kUnspecified);
+}
+
+// -----------------------------------------------------------------------------
+// The guards
+// -----------------------------------------------------------------------------
+
+TEST(AssemblyBridgeTest, AnEmptyCodecPreferenceDoesNotClobberTheHostCodec) {
+    // An empty `video_codec_name` means "no video codec" to the engine,
+    // so an empty preference must not silently disable a codec the host
+    // configured.
+    nimrtc::engine::EngineConfig cfg;
+    cfg.video_codec_name = "h264";
+
+    Profile p;
+    p.video_codec_preference = "";
+
+    const auto merged = nimrtc::assembly::to_engine_config(p, cfg);
+    EXPECT_EQ(merged.video_codec_name, "h264");
+}
+
+TEST(AssemblyBridgeTest, ANonEmptyCodecPreferenceSelectsTheCodec) {
+    Profile p;
+    p.video_codec_preference = "av1";
+
+    const auto cfg = nimrtc::assembly::to_engine_config(p);
+    EXPECT_EQ(cfg.video_codec_name, "av1");
+}
+
+// -----------------------------------------------------------------------------
+// 8. The declared per-stream bandwidth shares (plan D5)
+// -----------------------------------------------------------------------------
+//
+// The plan's D5 row says "the remote-desktop profile declares the
+// shares".  These tests pin the three hops the declaration makes: the
+// **Profile** holds it, the **bridge** carries it, and the **JSON
+// loader** reads it back.
+
+TEST(AssemblyBridgeTest, TheRemoteDesktopProfileDeclaresTheShares) {
+    const Profile& p = nimrtc::assembly::kProfileRemoteDesktop;
+
+    // The screen is the picture the operator reads, so it gets the
+    // larger share; the camera thumbnail is a convenience.
+    ASSERT_EQ(p.video_stream_weights.count("default"), 1u);
+    ASSERT_EQ(p.video_stream_weights.count("camera"), 1u);
+    EXPECT_EQ(p.video_stream_weights.at("default"), 3u);
+    EXPECT_EQ(p.video_stream_weights.at("camera"), 1u);
+}
+
+TEST(AssemblyBridgeTest, TheDeclaredSharesReachTheEngineConfig) {
+    const Profile& p = nimrtc::assembly::kProfileRemoteDesktop;
+
+    const auto cfg = nimrtc::assembly::to_engine_config(p);
+    EXPECT_EQ(cfg.video_stream_weights.size(), 2u);
+    EXPECT_EQ(cfg.video_stream_weights.at("default"), 3u);
+    EXPECT_EQ(cfg.video_stream_weights.at("camera"), 1u);
+}
+
+TEST(AssemblyBridgeTest, AnUndeclaredProfileCarriesNoShares) {
+    // A profile that does not declare any shares leaves the engine's own
+    // default in place: every stream splits the pool evenly.
+    const Profile& p = nimrtc::assembly::kProfileCall;
+
+    EXPECT_TRUE(p.video_stream_weights.empty());
+
+    const auto cfg = nimrtc::assembly::to_engine_config(p);
+    EXPECT_TRUE(cfg.video_stream_weights.empty());
+}
+
+TEST(AssemblyBridgeTest, TheDeclaredSharesAreCarriedVerbatim) {
+    // The bridge does not normalise, clamp or reinterpret the
+    // declaration: it copies it.
+    Profile p;
+    p.video_stream_weights = {{"default", 5}, {"camera", 2}, {"thumb", 0}};
+
+    const auto cfg = nimrtc::assembly::to_engine_config(p);
+    ASSERT_EQ(cfg.video_stream_weights.size(), 3u);
+    EXPECT_EQ(cfg.video_stream_weights.at("default"), 5u);
+    EXPECT_EQ(cfg.video_stream_weights.at("camera"), 2u);
+    EXPECT_EQ(cfg.video_stream_weights.at("thumb"), 0u);
 }

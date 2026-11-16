@@ -15,6 +15,9 @@
 add_library(nimrtc_video_pipeline STATIC
     src/video_pipeline.cpp
     src/video_pipeline_plugin.cpp     # adapter wrapping concrete → plugins::IVideo{Rx,Tx}
+    src/keyframe_limiter.cpp          # the key-frame storm limiter (plan B14)
+    src/incremental_encode.cpp        # the dirty-rect incremental encode (plan B9)
+    src/roi.cpp                      # the region-of-interest (plan C4)
     )
 
 nimrtc_apply_options(nimrtc_video_pipeline)

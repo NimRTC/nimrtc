@@ -352,6 +352,16 @@ plugins::IVideoCodec* H265PluginFactory::create(plugins::VideoCodecConfig cfg) c
     }
 
     if (!encoder && !decoder) {
+        // The backend preference could not be satisfied (plan B2).
+        if (cfg.backend_preference != plugins::VideoCodecBackendPreference::kAuto) {
+            core::log::Logger::instance().error(
+                std::string{"h265: no "} +
+                std::string{plugins::video_codec_backend_preference_name(
+                    cfg.backend_preference)} +
+                " codec backend is available on this machine — the "
+                "requested backend class cannot be satisfied");
+            return nullptr;
+        }
         // Last-resort fallback (the selector should always return at
         // least the stub).
         return new CodecPluginAdapter(std::move(cfg));
@@ -360,6 +370,15 @@ plugins::IVideoCodec* H265PluginFactory::create(plugins::VideoCodecConfig cfg) c
     if (!decoder) {
         // An encoder without a decoder: the receive path is unusable, but
         // the send path still works.
+        if (cfg.backend_preference != plugins::VideoCodecBackendPreference::kAuto) {
+            core::log::Logger::instance().error(
+                std::string{"h265: no "} +
+                std::string{plugins::video_codec_backend_preference_name(
+                    cfg.backend_preference)} +
+                " decoder backend is available on this machine — the "
+                "requested backend class cannot be satisfied");
+            return nullptr;
+        }
         core::log::Logger::instance().warn(
             "h265: no decoder backend available — the codec can encode only");
         return encoder.release();
@@ -367,6 +386,15 @@ plugins::IVideoCodec* H265PluginFactory::create(plugins::VideoCodecConfig cfg) c
 
     if (!encoder) {
         // A decoder without an encoder: the send path is unusable.
+        if (cfg.backend_preference != plugins::VideoCodecBackendPreference::kAuto) {
+            core::log::Logger::instance().error(
+                std::string{"h265: no "} +
+                std::string{plugins::video_codec_backend_preference_name(
+                    cfg.backend_preference)} +
+                " encoder backend is available on this machine — the "
+                "requested backend class cannot be satisfied");
+            return nullptr;
+        }
         core::log::Logger::instance().warn(
             "h265: no encoder backend available — the codec can decode only");
         return decoder.release();

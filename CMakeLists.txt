@@ -46,6 +46,12 @@ option(NIMRTC_BUILD_BRIDGE_TESTS
        "Build Chrome↔NimRTC interop bridge (tests/wolfssl_dtls/bridge/)"
        OFF)
 option(NIMRTC_VENDORED         "Use vendored third-party libraries" ON)
+# Remote-desktop plan Track F (F5) — libsamplerate (BSD-2-Clause) provides
+# the audio sample-rate conversion behind audio_device::Resampler.  Turning
+# it OFF selects the pure-C++ linear-interpolation fallback; no system
+# samplerate is ever linked (AGENTS.md L5).
+option(NIMRTC_VENDORED_LIBSAMPLERATE
+       "Use vendored libsamplerate for audio resampling" ON)
 option(NIMRTC_ASAN             "Enable AddressSanitizer"           OFF)
 option(NIMRTC_UBSAN            "Enable UndefinedBehaviorSanitizer" OFF)
 option(NIMRTC_TSAN             "Enable ThreadSanitizer"            OFF)
@@ -86,11 +92,12 @@ option(NIMRTC_PLUGINS_QSV    "Build Intel Quick Sync (libvpl/MediaSDK) H.264 enc
 option(NIMRTC_PLUGINS_DXVA   "Build Microsoft DXVA H.264 decoder"                                   OFF)
 option(NIMRTC_PLUGINS_VAAPI  "Build VA-API H.264 encoder (Linux Intel/AMD)"                          OFF)
 option(NIMRTC_PLUGINS_NVDEC  "Build NVIDIA NVDEC H.264 decoder"                                     OFF)
-option(NIMRTC_PLUGINS_OPENH264 "Build OpenH264 software H.264 encoder"                              OFF)
+option(NIMRTC_PLUGINS_OPENH264 "Build OpenH264 software H.264 encoder + decoder"                     OFF)
+option(NIMRTC_PLUGINS_DAV1D    "Build dav1d software AV1 decoder"                                    OFF)
 
 # Helper that prints a one-liner summary at the end of CMake configure.
 set(_nimrtc_hw_summary "")
-foreach(_hw NVENC AMF QSV DXVA VAAPI NVDEC OPENH264)
+foreach(_hw NVENC AMF QSV DXVA VAAPI NVDEC OPENH264 DAV1D)
     if(NIMRTC_PLUGINS_${_hw})
         set(_nimrtc_hw_summary "${_nimrtc_hw_summary} ${_hw}")
     endif()
@@ -155,6 +162,11 @@ option(NIMRTC_MODULE_NVCODEC       "Build shared NVIDIA codec module (NVENC / NV
 # codec families from one copy of the driver code.
 option(NIMRTC_MODULE_H265          "Build H.265 module (codec plugin + hardware backend table)" ON)
 option(NIMRTC_MODULE_AV1           "Build AV1 module (codec plugin + hardware backend table)" ON)
+# The VP9 codec module (remote-desktop plan B11).  It carries the
+# *optional* software VP9 encoder (the vendored libvpx), which is
+# option-gated and defaults OFF.  The module itself is always built —
+# it ships the stub decoder and the backend table.
+option(NIMRTC_MODULE_VP9           "Build VP9 module (stub decoder + optional libvpx encoder)" ON)
 # Video R2:
 option(NIMRTC_MODULE_VIDEO_SDP_ATTRIBUTES
        "Build video SDP attribute module (H.264/VP8/VP9 fmtp parsing)" ON)
@@ -171,6 +183,37 @@ option(NIMRTC_MODULE_VIDEO_PIPELINE
        "Build video pipeline module (VideoReceiver/VideoSender glue)" ON)
 option(NIMRTC_MODULE_VIDEO_SINK
        "Build video sink module (headless / pinned render sinks)" ON)
+# Remote-desktop plan Track G (G3 / G4 / G7): the remote-desktop input
+# module — the input event codec, the pointer coalescer / rate limiter and
+# the input safety filter.  A module, not a seam: the control transport is
+# a DataChannel and only the payload format is NimRTC's.
+option(NIMRTC_MODULE_RD_INPUT
+       "Build remote-desktop input module (event codec, coalescer, safety filter)" ON)
+# Remote-desktop plan Track G (the device side of the control plane): the
+# OS input-injection module — the platform-neutral key layout and the
+# Windows / macOS / Linux injection backends.  A module, not a seam: it
+# is driven by the example application, not by the engine.
+option(NIMRTC_MODULE_RD_INPUT_INJECT
+       "Build remote-desktop input-injection module (SendInput / CGEvent / XTest)" ON)
+# Remote-desktop plan Track F (F2): the audio-device module — the
+# PortAudio-backed capture + playback devices, the shared ring buffer
+# and the synthetic device the module's tests run on.
+option(NIMRTC_MODULE_AUDIO_DEVICE
+       "Build audio device module (PortAudio capture/playback + synthetic device)" ON)
+# Remote-desktop plan D1 / D2 / D3 / D4: the video rate controller — the
+# resolution / frame-rate / bitrate ladder, the resolution floor and the
+# keyframe-cost budget.  A module implementing the `IVideoBitrateController`
+# seam; the engine drives it and pushes the resulting level into the
+# encoder's parameter set.
+option(NIMRTC_MODULE_VIDEO_BITRATE_CONTROL
+       "Build video bitrate control module (the resolution / fps / bitrate ladder)" ON)
+# Remote-desktop plan Track J (J3 / J6): the QoE metrics module — the
+# freeze accounting, the sharpness proxy, the end-to-end latency
+# percentiles and the input-to-photon measurement.  A module, not a seam:
+# the collector is *fed* by the host and never pulls from the engine, so
+# it stays decoupled and unit-testable.
+option(NIMRTC_MODULE_RD_QOE
+       "Build remote-desktop QoE module (freeze / sharpness / latency / input-to-photon metrics)" ON)
 
 # Vendored libwebrtc-audio-processing-2.a (audio3a WebRTC APM wrapper) is
 # pre-built with MinGW/gcc in Release /MD mode.  When MSVC links it into a
@@ -221,6 +264,7 @@ endif()
 
 include(NimRTCOptions)        # sets C++ standard + warnings + visibility
 include(NimRTCVendored)       # declares vendor library targets (no-op if unused)
+include(NimRTCRuntime)        # declares the runtime staging helpers
 include(NimRTCTest)            # declares nimrtc_add_test() (no-op if tests OFF)
 
 # -----------------------------------------------------------------------------
@@ -244,6 +288,26 @@ if(NIMRTC_UBSAN)
 endif()
 if(NIMRTC_TSAN)
     nimrtc_enable_sanitizer(thread)
+endif()
+
+# -----------------------------------------------------------------------------
+# CTest enablement.
+#
+# `include(CTest)` must run BEFORE the vendored third-party subdirectories
+# are added: several upstream projects force `BUILD_TESTING` off in their
+# own cache scope (SVT-AV1's wrapper does it with `set(... CACHE ... FORCE)`),
+# and `include(CTest)` reads `BUILD_TESTING` to decide whether to call
+# `enable_testing()`.  When it ran after them, the top-level
+# CTestTestfile.cmake was never written and `ctest` reported
+# "No tests were found" in that build tree — even though every test
+# binary had been built.
+#
+# `include(CTest)` also defines the `BUILD_TESTING` option (default ON), so
+# it is declared here explicitly with NimRTC's own switch as the default.
+# -----------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    option(BUILD_TESTING "Build the unit tests" ON)
+    include(CTest)              # wires up enable_testing() + ctest discovery
 endif()
 
 # HW codec plugin SDK detection (NVENC/AMF/QSV/DXVA/VA-API/NVDEC).
@@ -321,7 +385,6 @@ add_subdirectory(src/engine)   # Composition layer (wires plugins together)
 
 # Tests
 if(NIMRTC_BUILD_TESTS)
-    include(CTest)              # wires up enable_testing() + ctest discovery
     add_subdirectory(tests)
 
     # Post-configure hook: rewrite every CTestTestfile.cmake so plain

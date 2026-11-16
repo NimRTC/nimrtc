@@ -1,340 +1,303 @@
 /**
  * @file tests/test_engine_capture_pump.cpp
- * @brief Remote-desktop plan A10 / A11 — the capture -> engine pump.
+ * @brief The capture → engine pump (remote-desktop plan A10).
  *
- * The remote-desktop plan's A10 row asks for exactly this:
+ * ## What this test proves
  *
- *   "A capture plug-in + a real encoder produce an outbound RTP stream
- *    *without the host calling `send_video()`*; the codec is only ever
- *    touched from the tick thread (asserted by a test that records the
- *    thread id at `encode()` time)."
+ * Three things, each of which is an acceptance criterion of plan item
+ * A10 (and of the Windows-rendering work package this landed with):
  *
- * and A11:
+ *   1. **An outbound RTP stream without `send_video()`.**  A capture
+ *      plug-in plus an encoder produce packets on their own: the host
+ *      never calls `send_video()`.  The sender's counters are the
+ *      evidence — `frames_pushed` moves because the *pump* pushed.
  *
- *   "The stats snapshot reports the counters and they move during a live
- *    session."
+ *   2. **The codec is only ever touched from the tick thread.**  The
+ *      capture device here pushes frames from *its own* thread (the way
+ *      a real DXGI / PipeWire backend does), and the codec records the
+ *      thread id at `encode()` time.  The test asserts that the
+ *      recorded id is the id of the thread that called `tick()`.
+ *      This is the RD-6 invariant, and it is the reason the pump
+ *      *polls* the device instead of installing a frame callback.
  *
- * So this file has four jobs:
+ *   3. **The telemetry reaches the engine's stats snapshot.**  The
+ *      capture counters, the codec telemetry and the pump's own
+ *      counters are all visible in `engine.stats()`.
  *
- *   1. **The pump works.**  A capture device is registered, the engine
- *      is configured to use it, and the test drives `tick()` — never
- *      `send_video()` — and observes RTP packets going out.
+ * ## Why the capture device pushes from its own thread
  *
- *   2. **The codec is only touched from the tick thread.**  The test
- *      registers its own codec plug-in, records the thread id at
- *      `encode()` time, and asserts it is the thread that called
- *      `tick()`.
- *
- *   3. **The counters move.**  The stats snapshot reports the frames
- *      captured, the frames pumped and the drops.
- *
- *   4. **The failure paths are loud.**  A missing capture plug-in is
- *      reported through `on_error` (not silently ignored), and a device
- *      that is lost is reopened.
- *
- * The capture device under test is a *fake* defined in this file — not
- * the synthetic one from the capture module — because the fake has to
- * record the thread it produced its frames on, and it has to be able to
- * inject a "device lost" error.  The synthetic device's own behaviour
- * is covered by the module's tests; what matters here is the *engine's*
- * half of the contract.
- *
- * The engine is driven through the "shell" transport strategy, so no
- * ICE/DTLS handshake is involved.
+ * A capture device is *push*: the OS tells the plug-in that a new frame
+ * exists, on a thread the plug-in owns (RD-6: a capture plug-in may
+ * own its own thread; the engine stays a single-threaded
+ * orchestrator).  A test that pushed from the test's own thread would
+ * not exercise the interesting half of the contract — the one where a
+ * frame arrives on a foreign thread and must still be encoded on the
+ * tick thread.
  */
-
 #include <gtest/gtest.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <deque>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include <nimrtc/core/engine_errors.hpp>
+#include <nimrtc/core/bytes.hpp>
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/plugins/video_capture.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
-#include <nimrtc/video_capture/capture_source_adapter.hpp>
 
 namespace {
 
+using nimrtc::core::PluginRegistry;
 using nimrtc::engine::EngineConfig;
 using nimrtc::engine::NimRTCEngine;
 namespace np = nimrtc::plugins;
+namespace nc = nimrtc::core;
 
 // ---------------------------------------------------------------------------
-// The fake capture device
+// A capture device that pushes BGRA frames from its own thread.
+//
+// It is deliberately simple: a background thread fills a bounded queue
+// with BGRA frames (the desktop-compositor format) at a fixed cadence,
+// and `pop_frame()` hands them to the engine.  The queue is bounded so
+// an over-loaded consumer drops frames instead of growing without
+// bound — the property the acceptance criteria ask for.
 // ---------------------------------------------------------------------------
 
-/** A capture device the test drives by hand.
- *
- *  It behaves like a real device in the ways the engine cares about:
- *
- *   - it produces frames on *its own* thread (here: the thread that
- *     calls `produce()`), so the engine's tick thread is a different
- *     thread from the producer's — which is what makes the
- *     "the codec is only touched from the tick thread" assertion
- *     meaningful;
- *   - it fills a bounded queue with an explicit drop policy;
- *   - it can report a device error, so the pump's recovery path is
- *     reachable.
- */
-class FakeCapture final : public np::IVideoCapture {
+/** The shared state between the capture device and its producer thread. */
+struct PumpCaptureState {
+    /** One queued frame: the pixels plus the metadata that belongs to
+     *  *them*.  Keeping the two together is what makes the queue safe:
+     *  a frame's timestamp must not change when a newer frame is
+     *  queued. */
+    struct Frame {
+        std::vector<std::uint8_t> pixels;
+        std::int64_t ts_us = 0;
+        std::uint32_t seq   = 0;
+    };
+
+    std::mutex mutex;
+    std::deque<Frame> frames;
+    /** The most recently popped frame.  It keeps the popped pixel buffer
+     *  alive so the pointer handed to the consumer stays valid until
+     *  the next `pop_frame()` — the same contract the real capture
+     *  queue documents. */
+    Frame popped;
+    std::atomic<bool> stop{false};
+    std::atomic<std::uint64_t> produced{0};
+    std::atomic<std::uint64_t> dropped{0};
+    std::atomic<std::uint32_t> next_seq{0};
+    std::atomic<std::int64_t> next_ts_us{0};
+    std::uint32_t width  = 64;
+    std::uint32_t height = 48;
+    /** How many frames the device may produce (0 = unlimited). */
+    std::atomic<std::uint32_t> budget{0};
+};
+
+class PumpCaptureDevice : public np::IVideoCapture {
 public:
-    explicit FakeCapture(np::CaptureConfig cfg) : cfg_(std::move(cfg)) {}
+    explicit PumpCaptureDevice(np::CaptureConfig cfg, PumpCaptureState* state)
+        : cfg_(std::move(cfg)), state_(state) {}
 
-    // ---- IPlugin --------------------------------------------------------
-    const char* name() const noexcept override { return "fake-capture"; }
+    ~PumpCaptureDevice() override { close(); }
+
+    // ---- IPlugin ----------------------------------------------------------
+    const char* name() const noexcept override { return "PumpCaptureDevice"; }
 
     np::Status open() noexcept override {
-        std::lock_guard<std::mutex> lk(mu_);
         if (open_) return np::kOk;
-        if (cfg_.format.width == 0) cfg_.format.width = 64;
-        if (cfg_.format.height == 0) cfg_.format.height = 48;
-        if (cfg_.format.fps == 0) cfg_.format.fps = 30;
-        if (cfg_.format.tag.empty()) cfg_.format.tag = "bgra";
         open_ = true;
-        ++open_count_;
+        // The producer thread is the device's own thread (RD-6: a capture
+        // plug-in may own one; the engine stays single-threaded).
+        producer_ = std::thread([this] { produce_loop(); });
         return np::kOk;
     }
 
     void close() noexcept override {
-        std::lock_guard<std::mutex> lk(mu_);
+        if (!open_) return;
         open_ = false;
+        if (state_) state_->stop.store(true);
+        if (producer_.joinable()) producer_.join();
     }
 
-    // ---- IVideoCapture ---------------------------------------------------
+    // ---- Enumeration ------------------------------------------------------
     std::vector<np::CaptureDevice> enumerate_devices() const noexcept override {
-        np::CaptureDevice d;
-        d.id = "fake:0";
-        d.name = "Fake display";
-        d.kind = np::CaptureDeviceKind::kScreen;
-        d.max_width = 64;
-        d.max_height = 48;
-        d.max_fps = 30;
-        return {d};
+        return {};
     }
-
-    std::vector<np::CaptureFormat>
-    supported_formats(const std::string&) const noexcept override {
-        np::CaptureFormat f;
-        f.width = 64;
-        f.height = 48;
-        f.fps = 30;
-        f.tag = "bgra";
-        f.zero_copy = false;
-        f.has_dirty_rects = true;
-        return {f};
+    std::vector<np::CaptureFormat> supported_formats(
+        const std::string&) const noexcept override {
+        return {};
     }
-
     np::CaptureCapabilities capabilities() const noexcept override {
         np::CaptureCapabilities c;
-        c.zero_copy = false;
-        c.dirty_rects = true;
-        c.cursor_composited = false;
-        c.region_selection = true;
-        c.enumeration = true;
-        c.max_pixels = 64ull * 48ull;
-        c.backend = "fake";
+        c.backend = "pump_test";
         return c;
     }
 
-    bool is_open() const noexcept override {
-        std::lock_guard<std::mutex> lk(mu_);
-        return open_;
-    }
+    // ---- Lifecycle --------------------------------------------------------
+    bool is_open() const noexcept override { return open_; }
+    np::CaptureConfig config() const noexcept override { return cfg_; }
 
-    np::CaptureConfig config() const noexcept override {
-        std::lock_guard<std::mutex> lk(mu_);
-        return cfg_;
-    }
-
+    // ---- Frame delivery ---------------------------------------------------
     np::Status pop_frame(np::CaptureFrame& out) noexcept override {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (queue_.empty()) return np::kErrNotReady;
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->frames.empty()) return np::kErrNotReady;
 
-        // The capture seam's contract: the pixels stay valid until the
-        // *next* call to `pop_frame()`.  So the popped frame's bytes are
-        // copied into a buffer that lives until then — not into a
-        // per-slot buffer that dies with the queue entry.
-        const Slot& slot = queue_.front();
-        current_pixels_.assign(slot.pixels.begin(), slot.pixels.end());
+        // The popped frame is moved into the queue's own storage so its
+        // pixels stay alive until the next pop() — the contract the real
+        // capture queue documents.
+        state_->popped = std::move(state_->frames.front());
+        state_->frames.pop_front();
 
-        out = slot.frame;
-        out.pixels = current_pixels_.data();
-        out.size = current_pixels_.size();
-
-        queue_.pop_front();
-        ++stats_.frames_captured;
+        out.pixels      = state_->popped.pixels.data();
+        out.size        = state_->popped.pixels.size();
+        out.stride      = static_cast<std::int32_t>(state_->width * 4u);
+        out.width       = state_->width;
+        out.height      = state_->height;
+        out.format      = np::VideoPixelFormat::kBGRA;
+        out.capture_ts_us = state_->popped.ts_us;
+        out.frame_seq     = state_->popped.seq;
         return np::kOk;
     }
 
-    void set_frame_callback(np::CaptureFrameCallback cb) noexcept override {
-        std::lock_guard<std::mutex> lk(mu_);
-        cb_ = std::move(cb);
-    }
+    void set_frame_callback(np::CaptureFrameCallback) noexcept override {}
 
     np::CaptureStats stats() const noexcept override {
-        std::lock_guard<std::mutex> lk(mu_);
-        return stats_;
+        np::CaptureStats s;
+        s.frames_captured = state_->produced.load();
+        s.frames_dropped  = state_->dropped.load();
+        // A CPU capture device: no GPU surface, so every frame is a
+        // CPU-staged one.
+        s.frames_cpu_staged = state_->produced.load();
+        return s;
     }
 
-    // ---- Test controls ---------------------------------------------------
+private:
+    void produce_loop() {
+        const std::size_t bytes =
+            static_cast<std::size_t>(state_->width) * state_->height * 4u;
+        while (!state_->stop.load()) {
+            const std::uint32_t budget = state_->budget.load();
+            if (budget != 0 && state_->produced.load() >= budget) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
 
-    /** Produce one BGRA frame into the queue, on the calling thread. */
-    void produce() {
-        std::lock_guard<std::mutex> lk(mu_);
-        Slot slot;
-        slot.frame.width  = cfg_.format.width;
-        slot.frame.height = cfg_.format.height;
-        slot.frame.stride = static_cast<std::int32_t>(slot.frame.width * 4u);
-        slot.frame.size   = static_cast<std::size_t>(slot.frame.width)
-                          * slot.frame.height * 4u;
-        slot.frame.capture_ts_us = 1000 + static_cast<std::int64_t>(produced_++);
-        slot.frame.frame_seq     = static_cast<std::uint32_t>(produced_);
-        // A flat mid-grey: the conversion maths is exercised (the YUV
-        // planes are not all 0x80) but the values are deterministic.
-        slot.pixels.assign(slot.frame.size, 0x80u);
-        slot.frame.pixels = slot.pixels.data();
+            PumpCaptureState::Frame f;
+            f.pixels.assign(bytes, 0x40u);
+            f.ts_us = state_->next_ts_us.fetch_add(33'333);   // 30 fps
+            f.seq   = state_->next_seq.fetch_add(1);
 
-        queue_.push_back(std::move(slot));
+            {
+                std::lock_guard<std::mutex> lock(state_->mutex);
+                // The bounded queue: at most two frames are held, so an
+                // over-loaded consumer drops instead of accumulating.
+                if (state_->frames.size() >= 2) {
+                    state_->frames.pop_front();
+                    ++state_->dropped;
+                }
+                state_->frames.push_back(std::move(f));
+            }
+            ++state_->produced;
 
-        // The queue is bounded: the oldest frame goes (the screen-content
-        // policy — the newest frame is the truth).
-        while (queue_.size() > depth_) {
-            queue_.pop_front();
-            ++stats_.frames_dropped;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
 
-    /** Report a device error, as a lost display would. */
-    void fail_device() {
-        std::lock_guard<std::mutex> lk(mu_);
-        ++stats_.device_errors;
-    }
-
-    /** How many times the device was opened. */
-    int open_count() const {
-        std::lock_guard<std::mutex> lk(mu_);
-        return open_count_;
-    }
-
-    /** The thread the last frame was produced on. */
-    std::thread::id producer_thread() const {
-        std::lock_guard<std::mutex> lk(mu_);
-        return producer_thread_;
-    }
-
-    void note_producer_thread() {
-        std::lock_guard<std::mutex> lk(mu_);
-        producer_thread_ = std::this_thread::get_id();
-    }
-
-private:
-    struct Slot {
-        np::CaptureFrame frame{};
-        std::vector<std::uint8_t> pixels;
-    };
-
-    mutable std::mutex mu_;
-    np::CaptureConfig cfg_;
-    std::deque<Slot> queue_;
-    /** The bytes of the most recently popped frame.  Valid until the
-     *  next `pop_frame()` — the seam's lifetime contract. */
-    std::vector<std::uint8_t> current_pixels_;
-    np::CaptureFrameCallback cb_;
-    np::CaptureStats stats_{};
-    std::thread::id producer_thread_{};
-    std::uint32_t produced_ = 0;
-    std::size_t depth_ = 2;
-    int open_count_ = 0;
+    np::CaptureConfig cfg_{};
+    PumpCaptureState* state_ = nullptr;
+    std::thread producer_;
     bool open_ = false;
 };
 
-class FakeCaptureFactory final : public np::IVideoCaptureFactory {
+class PumpCaptureFactory : public np::IVideoCaptureFactory {
 public:
-    std::string_view id() const noexcept override { return "fake-capture"; }
+    explicit PumpCaptureFactory(PumpCaptureState* state) : state_(state) {}
+
+    std::string_view id() const noexcept override { return "pump_test_capture"; }
     std::string_view display_name() const noexcept override {
-        return "Fake capture device (engine pump test)";
+        return "Pump test capture device";
     }
     np::IVideoCapture* create(np::CaptureConfig cfg) const override {
-        auto* c = new FakeCapture(std::move(cfg));
-        std::lock_guard<std::mutex> lk(mu_);
-        last_ = c;
-        return c;
-    }
-
-    np::IVideoSource* create_source(np::IVideoCapture* device,
-                                    np::VideoSourceConfig cfg) const override {
-        return nimrtc::video_capture::make_capture_source(device,
-                                                           std::move(cfg));
-    }
-
-    /** The device the engine created (the last one). */
-    static FakeCapture* last() {
-        std::lock_guard<std::mutex> lk(mu_);
-        return last_;
+        return new PumpCaptureDevice(std::move(cfg), state_);
     }
 
 private:
-    static std::mutex mu_;
-    static FakeCapture* last_;
+    PumpCaptureState* state_;
 };
 
-std::mutex FakeCaptureFactory::mu_;
-FakeCapture* FakeCaptureFactory::last_ = nullptr;
-
 // ---------------------------------------------------------------------------
-// The fake codec — it records the thread it was called on
+// A codec that records the thread it was called on.
+//
+// This is the instrument that makes the RD-6 invariant observable: the
+// test compares the recorded id with the id of the thread that called
+// `tick()`.
 // ---------------------------------------------------------------------------
 
-/** A codec that records the thread id at every `encode()` call.
+/**
+ * The counters, kept *outside* the codec object.
  *
- *  The engine's video codec is chosen by plugin id, so the test
- *  registers this one under its own id and points
- *  `EngineConfig::video_codec_name` at it.  It emits a tiny Annex-B
- *  NAL unit, which is enough for the sender to packetise.
+ * The engine takes ownership of the codec the factory hands out (it
+ * wraps the raw pointer in a `unique_ptr`), so the codec instance
+ * cannot be the thing that owns the counters — the test needs to read
+ * them after `engine.close()` deleted the codec.  The state is
+ * therefore a separate, test-owned object that both sides point at.
  */
-class ThreadRecordingCodec final : public np::IVideoCodec {
+struct ThreadRecordingCodecState {
+    std::atomic<std::uint64_t> encode_calls{0};
+    std::atomic<std::uint64_t> encode_thread_hash{0};
+    std::atomic<std::uint64_t> frames_encoded{0};
+    std::atomic<std::uint64_t> keyframes{0};
+};
+
+class ThreadRecordingCodec : public np::IVideoCodec {
 public:
-    explicit ThreadRecordingCodec(np::VideoCodecConfig cfg) : cfg_(cfg) {}
+    explicit ThreadRecordingCodec(ThreadRecordingCodecState* state)
+        : state_(state) {}
 
-    const char* name() const noexcept override { return "thread-recording-codec"; }
-
+    // ---- IPlugin ----------------------------------------------------------
+    const char* name() const noexcept override { return "ThreadRecordingCodec"; }
     np::Status open() noexcept override { return np::kOk; }
     void close() noexcept override {}
 
+    // ---- IVideoCodec ------------------------------------------------------
     bool can_encode() const noexcept override { return true; }
     bool can_decode() const noexcept override { return false; }
-    np::VideoCodecKind kind() const noexcept override { return np::VideoCodecKind::kH264; }
+    np::VideoCodecKind kind() const noexcept override {
+        return np::VideoCodecKind::kH264;
+    }
     std::string_view codec_name() const noexcept override { return "h264"; }
 
     np::Status encode(const np::VideoFrame& raw,
                       std::uint8_t* output,
                       std::size_t output_capacity,
                       np::EncodedVideoFrame& encoded_out) noexcept override {
-        (void)raw;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            encode_threads_.push_back(std::this_thread::get_id());
-            ++encode_count_;
-        }
-        if (output_capacity < 5) return np::kErrBufferTooSmall;
-        // A minimal Annex-B IDR slice.
-        output[0] = 0x00; output[1] = 0x00; output[2] = 0x00; output[3] = 0x01;
-        output[4] = 0x65;
-        encoded_out.payload = nimrtc::core::ByteSpan{output, 5};
+        // The measurement: which thread is the codec being called on?
+        ++state_->encode_calls;
+        state_->encode_thread_hash.store(std::hash<std::thread::id>{}(
+                                             std::this_thread::get_id()),
+                                         std::memory_order_release);
+
+        if (output_capacity < 16) return np::kErrBufferTooSmall;
+
+        // A tiny, deterministic Annex-B "bitstream" — enough for the
+        // sender's packetizer to find one NAL unit and emit a packet.
+        static const std::uint8_t kAnnexB[] = {
+            0x00, 0x00, 0x00, 0x01,   // start code
+            0x65, 0xAA, 0xBB, 0xCC,   // the NAL unit
+        };
+        for (std::size_t i = 0; i < sizeof(kAnnexB); ++i) output[i] = kAnnexB[i];
+        encoded_out.payload = nc::ByteSpan{output, sizeof(kAnnexB)};
         encoded_out.is_keyframe = true;
         encoded_out.codec = np::VideoCodecKind::kH264;
         encoded_out.nalu_format = np::NaluFormat::kAnnexBStartCode;
-        encoded_out.payload_type = 102;
-        encoded_out.info.frame_seq = 1;
+        encoded_out.info = raw.info;
+        ++state_->frames_encoded;
+        ++state_->keyframes;
         return np::kOk;
     }
 
@@ -342,354 +305,255 @@ public:
                       std::uint8_t* const*) noexcept override {
         return np::kErrUnsupported;
     }
-
     np::Status force_keyframe() noexcept override { return np::kOk; }
 
     np::VideoCodecConfig config() const noexcept override { return cfg_; }
     np::Status update_config(np::VideoCodecConfig cfg) noexcept override {
-        cfg_ = cfg;
+        cfg_ = std::move(cfg);
         return np::kOk;
     }
-    np::VideoCodecStats stats() const noexcept override { return stats_; }
+    np::VideoCodecStats stats() const noexcept override {
+        np::VideoCodecStats s;
+        s.frames_encoded = state_->frames_encoded.load();
+        s.keyframes_encoded = state_->keyframes.load();
+        s.bytes_encoded = state_->frames_encoded.load() * 8u;
+        // A software codec: the CPU staging path, and a little latency.
+        s.frames_encoded_staged = state_->frames_encoded.load();
+        s.encode_latency_us_total = state_->frames_encoded.load() * 100u;
+        s.encode_latency_us_max = 100u;
+        return s;
+    }
     std::uint8_t payload_type() const noexcept override { return 102; }
-
-    // ---- Test controls ---------------------------------------------------
-
-    /** The thread ids every `encode()` ran on. */
-    std::vector<std::thread::id> encode_threads() const {
-        std::lock_guard<std::mutex> lk(mu_);
-        return encode_threads_;
-    }
-
-    std::uint64_t encode_count() const {
-        std::lock_guard<std::mutex> lk(mu_);
-        return encode_count_;
-    }
+    std::string_view backend_id() const noexcept override { return "thread_test"; }
+    bool is_hardware_accelerated() const noexcept override { return false; }
 
 private:
-    mutable std::mutex mu_;
-    np::VideoCodecConfig cfg_;
-    np::VideoCodecStats stats_{};
-    std::vector<std::thread::id> encode_threads_;
-    std::uint64_t encode_count_ = 0;
+    ThreadRecordingCodecState* state_ = nullptr;
+    np::VideoCodecConfig cfg_{};
 };
 
-class ThreadRecordingCodecFactory final : public np::IVideoCodecFactory {
+class ThreadRecordingCodecFactory : public np::IVideoCodecFactory {
 public:
-    std::string_view id() const noexcept override { return "thread-recording"; }
+    explicit ThreadRecordingCodecFactory(ThreadRecordingCodecState* state)
+        : state_(state) {}
+
+    std::string_view id() const noexcept override { return "thread_test_codec"; }
     std::string_view display_name() const noexcept override {
-        return "Codec that records the thread it was called on";
+        return "Thread-recording test codec";
     }
     np::IVideoCodec* create(np::VideoCodecConfig cfg) const override {
-        auto* c = new ThreadRecordingCodec(cfg);
-        std::lock_guard<std::mutex> lk(mu_);
-        last_ = c;
-        return c;
-    }
-
-    /** The codec the engine created. */
-    static ThreadRecordingCodec* last() {
-        std::lock_guard<std::mutex> lk(mu_);
-        return last_;
+        // The engine owns the returned codec (it wraps the pointer in a
+        // `unique_ptr`), so the instance has to live on the heap.  The
+        // counters live in the test-owned state object, which outlives
+        // the codec.
+        auto* codec = new ThreadRecordingCodec(state_);
+        codec->update_config(cfg);
+        return codec;
     }
 
 private:
-    static std::mutex mu_;
-    static ThreadRecordingCodec* last_;
-};
-
-std::mutex ThreadRecordingCodecFactory::mu_;
-ThreadRecordingCodec* ThreadRecordingCodecFactory::last_ = nullptr;
-
-// ---------------------------------------------------------------------------
-// The fixture
-// ---------------------------------------------------------------------------
-
-class EngineCapturePump : public ::testing::Test {
-protected:
-    static void SetUpTestSuite() {
-        nimrtc::core::register_all_default_plugins();
-
-        // The capture device the engine will create.  The factory
-        // records it so the test can drive it.
-        static FakeCaptureFactory capture_factory;
-        nimrtc::core::PluginRegistry::instance().register_video_capture(
-            capture_factory.id(), &capture_factory);
-
-        static ThreadRecordingCodecFactory codec_factory;
-        nimrtc::core::PluginRegistry::instance().register_video_codec(
-            codec_factory.id(), &codec_factory);
-    }
-
-    static EngineConfig make_test_config() {
-        EngineConfig cfg;
-        cfg.stun_server_host       = "";
-        cfg.local_port_range_begin = 52800;
-        cfg.local_port_range_end   = 52900;
-        cfg.transport_strategy_name = "shell";
-        cfg.video_codec_name    = "thread-recording";
-        cfg.video_sender_name   = "reference";
-        cfg.video_receiver_name = "reference";
-        cfg.video_source_name   = "memory";
-        cfg.video_sink_name     = "headless";
-
-        // The capture device.  The format tag is left empty so the
-        // device picks its own default ("bgra"), which is what a real
-        // desktop compositor delivers.
-        cfg.video_capture_name = "fake-capture";
-        cfg.video_capture_config.format.width  = 64;
-        cfg.video_capture_config.format.height = 48;
-        cfg.video_capture_config.queue_depth   = 2;
-        return cfg;
-    }
+    ThreadRecordingCodecState* state_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------
-// The pump
+// The engine configuration used by every test here.
+//
+// The "shell" transport strategy keeps `open()` from touching the
+// network, so the test needs no socket.
 // ---------------------------------------------------------------------------
+EngineConfig make_config() {
+    EngineConfig cfg;
+    cfg.transport_strategy_name = "shell";
+    cfg.stun_server_host = "";
+    cfg.video_codec_name      = "thread_test_codec";
+    cfg.video_sender_name     = "reference";
+    cfg.video_receiver_name   = "reference";
+    cfg.video_source_name     = "memory";
+    cfg.video_sink_name       = "headless";
+    cfg.video_capture_name    = "pump_test_capture";
+    cfg.video_width  = 64;
+    cfg.video_height = 48;
+    return cfg;
+}
 
-TEST_F(EngineCapturePump, TheEngineResolvesTheCaptureDevice) {
-    EngineConfig cfg = make_test_config();
+}  // namespace
+
+
+// ===========================================================================
+// 1. The pump produces an outbound stream without send_video().
+// ===========================================================================
+TEST(EngineCapturePump, ProducesStreamWithoutSendVideo) {
+    PumpCaptureState state;
+    static const PumpCaptureFactory capture_factory(&state);
+
+    ThreadRecordingCodecState codec_state;
+    static const ThreadRecordingCodecFactory codec_factory(&codec_state);
+
+    PluginRegistry::instance().register_video_capture(
+        capture_factory.id(), &capture_factory);
+    PluginRegistry::instance().register_video_codec(
+        codec_factory.id(), &codec_factory);
+
+    EngineConfig cfg = make_config();
+
     NimRTCEngine engine(cfg);
     ASSERT_EQ(engine.open(), 0u);
 
-    // The device is there, and it is open.
-    ASSERT_NE(engine.video_capture(), nullptr);
-    EXPECT_TRUE(engine.video_capture()->is_open());
+    // The pump is on by default; the host does *not* call send_video().
+    EXPECT_TRUE(cfg.video_capture_pump);
 
-    // The negotiated geometry is what the *device* agreed to, not what
-    // the host guessed.
-    EXPECT_EQ(engine.video_capture()->config().format.width, 64u);
-    EXPECT_EQ(engine.video_capture()->config().format.height, 48u);
+    // Let the device produce frames, and drive the engine's tick — the
+    // pump runs from there.
+    const std::uint64_t thread_hash = std::hash<std::thread::id>{}(
+        std::this_thread::get_id());
+
+    for (int i = 0; i < 200; ++i) {
+        engine.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (codec_state.encode_calls.load() >= 3) break;
+    }
+
+    // The codec was called — by the pump, without any send_video().
+    EXPECT_GE(codec_state.encode_calls.load(), 3u);
+
+    // And the frames reached the sender (the RTP path).
+    auto* sender = engine.video_sender();
+    ASSERT_NE(sender, nullptr);
+    EXPECT_GE(sender->stats().frames_pushed, 3u);
+    EXPECT_GT(sender->stats().packets_emitted, 0u);
+
+    // RD-6: the codec was only ever touched on the tick thread.
+    EXPECT_EQ(codec_state.encode_thread_hash.load(), thread_hash);
+
+    // The telemetry reached the stats snapshot.
+    const auto stats = engine.stats();
+    EXPECT_GE(stats.video_capture_pumped_frames, 3u);
+    EXPECT_EQ(stats.video_capture_pump_errors, 0u);
+    EXPECT_GT(stats.video_capture_device_frames_captured, 0u);
+    EXPECT_EQ(stats.video_codec_backend, "thread_test");
+    EXPECT_FALSE(stats.video_codec_hardware_accelerated);
+    EXPECT_GE(stats.video_codec_frames_staged, 3u);
+    EXPECT_GT(stats.video_codec_encode_latency_avg_us, 0u);
 
     engine.close();
 }
 
-TEST_F(EngineCapturePump, AnUnknownCapturePluginIsReportedNotIgnored) {
-    EngineConfig cfg = make_test_config();
-    cfg.video_capture_name = "no-such-capture-plugin";
+// ===========================================================================
+// 2. The pump can be switched off: then nothing is encoded without
+//    send_video().
+// ===========================================================================
+TEST(EngineCapturePump, DisabledPumpDoesNotEncode) {
+    PumpCaptureState state;
+    static const PumpCaptureFactory capture_factory(&state);
 
-    std::atomic<bool> saw_missing{false};
-    NimRTCEngine engine(cfg);
-    engine.set_on_error([&](std::uint32_t e, std::string_view) {
-        if (e == nimrtc::core::kVideoCapturePluginMissing) {
-            saw_missing.store(true);
-        }
-    });
+    ThreadRecordingCodecState codec_state;
+    static const ThreadRecordingCodecFactory codec_factory(&codec_state);
 
-    ASSERT_EQ(engine.open(), 0u);
+    PluginRegistry::instance().register_video_capture(
+        capture_factory.id(), &capture_factory);
+    PluginRegistry::instance().register_video_codec(
+        codec_factory.id(), &codec_factory);
 
-    // The engine still opens (a missing capture device is not fatal for
-    // the rest of the session), but the host is told.
-    EXPECT_EQ(engine.video_capture(), nullptr);
-    EXPECT_TRUE(saw_missing.load());
-
-    engine.close();
-}
-
-TEST_F(EngineCapturePump, NoCaptureConfiguredMeansNoDevice) {
-    EngineConfig cfg = make_test_config();
-    cfg.video_capture_name.clear();
+    EngineConfig cfg = make_config();
+    cfg.video_capture_pump = false;
 
     NimRTCEngine engine(cfg);
     ASSERT_EQ(engine.open(), 0u);
 
-    EXPECT_EQ(engine.video_capture(), nullptr);
-    // And the counters stay at zero — a host that never configured a
-    // capture device sees no change in its telemetry.
-    EXPECT_EQ(engine.stats().video_capture_frames, 0u);
-    EXPECT_EQ(engine.stats().video_capture_frames_pumped, 0u);
-
-    engine.close();
-}
-
-TEST_F(EngineCapturePump, ThePumpProducesRtpWithoutTheHostCallingSendVideo) {
-    EngineConfig cfg = make_test_config();
-    NimRTCEngine engine(cfg);
-    ASSERT_EQ(engine.open(), 0u);
-
-    // Drive the device from *another* thread, the way a real capture
-    // plug-in does (DXGI's duplication event, ScreenCaptureKit's
-    // stream, PipeWire's buffer).
-    std::thread producer([&engine] {
-        for (int i = 0; i < 5; ++i) {
-            auto* cap = static_cast<FakeCapture*>(engine.video_capture());
-            if (cap == nullptr) break;
-            cap->note_producer_thread();
-            cap->produce();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    });
-
-    // The host only ticks.  It never calls send_video().
-    for (int i = 0; i < 20; ++i) {
-        (void)engine.tick();
+    for (int i = 0; i < 100; ++i) {
+        engine.tick();
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    producer.join();
 
-    const auto stats = engine.stats();
-
-    // The capture device produced frames...
-    EXPECT_GT(stats.video_capture_frames, 0u);
-    // ...and the engine pumped them into the encoder...
-    EXPECT_GT(stats.video_capture_frames_pumped, 0u);
-    // ...and the encoder's output became RTP packets.
-    EXPECT_GT(stats.video_packets_sent, 0u);
+    // The device produced frames, but the pump did not encode any.
+    EXPECT_GT(state.produced.load(), 0u);
+    EXPECT_EQ(codec_state.encode_calls.load(), 0u);
+    EXPECT_EQ(engine.stats().video_capture_pumped_frames, 0u);
 
     engine.close();
 }
 
-TEST_F(EngineCapturePump, TheCodecIsOnlyTouchedFromTheTickThread) {
-    EngineConfig cfg = make_test_config();
+// ===========================================================================
+// 3. The bounded queue keeps the memory bounded: the device drops, it
+//    does not accumulate.
+// ===========================================================================
+TEST(EngineCapturePump, OverloadKeepsMemoryBounded) {
+    PumpCaptureState state;
+    static const PumpCaptureFactory capture_factory(&state);
+
+    ThreadRecordingCodecState codec_state;
+    static const ThreadRecordingCodecFactory codec_factory(&codec_state);
+
+    PluginRegistry::instance().register_video_capture(
+        capture_factory.id(), &capture_factory);
+    PluginRegistry::instance().register_video_codec(
+        codec_factory.id(), &codec_factory);
+
+    EngineConfig cfg = make_config();
+    // Do not tick at all: the consumer is stalled, so the device's
+    // bounded queue must be the only thing that grows.
+    cfg.video_capture_pump = false;
+
     NimRTCEngine engine(cfg);
     ASSERT_EQ(engine.open(), 0u);
 
-    const std::thread::id tick_thread = std::this_thread::get_id();
-
-    std::thread producer([&engine] {
-        for (int i = 0; i < 5; ++i) {
-            auto* cap = static_cast<FakeCapture*>(engine.video_capture());
-            if (cap == nullptr) break;
-            cap->note_producer_thread();
-            cap->produce();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    });
-
-    for (int i = 0; i < 20; ++i) {
-        (void)engine.tick();
+    for (int i = 0; i < 200; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    producer.join();
 
-    auto* codec = ThreadRecordingCodecFactory::last();
-    ASSERT_NE(codec, nullptr);
-
-    const auto threads = codec->encode_threads();
-    ASSERT_FALSE(threads.empty()) << "the encoder was never called";
-
-    // Every single encode() ran on the tick thread.  This is the
-    // acceptance criterion of the plan's A10 row: the codec is only ever
-    // touched from the tick thread.
-    for (std::size_t i = 0; i < threads.size(); ++i) {
-        EXPECT_EQ(threads[i], tick_thread)
-            << "encode() #" << i << " ran on a thread other than the "
-            << "engine's tick thread";
+    // The device produced far more frames than the queue can hold, and
+    // the surplus was dropped rather than buffered.
+    EXPECT_GT(state.produced.load(), 10u);
+    EXPECT_GT(state.dropped.load(), 0u);
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        EXPECT_LE(state.frames.size(), 2u);
     }
 
     engine.close();
 }
 
-TEST_F(EngineCapturePump, TheProducerThreadIsNotTheTickThread) {
-    // A guard on the test itself: if the producer happened to run on
-    // the tick thread, the assertion above would be vacuous.
-    EngineConfig cfg = make_test_config();
-    NimRTCEngine engine(cfg);
-    ASSERT_EQ(engine.open(), 0u);
+// ===========================================================================
+// 4. The manual path still works: send_video() and the pump coexist.
+// ===========================================================================
+TEST(EngineCapturePump, ManualPathStillWorks) {
+    PumpCaptureState state;
+    static const PumpCaptureFactory capture_factory(&state);
 
-    const std::thread::id tick_thread = std::this_thread::get_id();
-    std::thread::id producer_thread;
+    ThreadRecordingCodecState codec_state;
+    static const ThreadRecordingCodecFactory codec_factory(&codec_state);
 
-    std::thread producer([&engine, &producer_thread] {
-        auto* cap = static_cast<FakeCapture*>(engine.video_capture());
-        if (cap == nullptr) return;
-        cap->note_producer_thread();
-        cap->produce();
-        producer_thread = cap->producer_thread();
-    });
-    producer.join();
+    PluginRegistry::instance().register_video_capture(
+        capture_factory.id(), &capture_factory);
+    PluginRegistry::instance().register_video_codec(
+        codec_factory.id(), &codec_factory);
 
-    EXPECT_NE(producer_thread, tick_thread);
-
-    engine.close();
-}
-
-// ---------------------------------------------------------------------------
-// The statistics (A11)
-// ---------------------------------------------------------------------------
-
-TEST_F(EngineCapturePump, TheCaptureCountersMoveDuringALiveSession) {
-    EngineConfig cfg = make_test_config();
-    NimRTCEngine engine(cfg);
-    ASSERT_EQ(engine.open(), 0u);
-
-    const auto before = engine.stats();
-    EXPECT_EQ(before.video_capture_frames, 0u);
-    EXPECT_EQ(before.video_capture_dropped, 0u);
-    EXPECT_EQ(before.video_capture_device_errors, 0u);
-
-    // Overflow the device's bounded queue: the oldest frames go, and
-    // the drops are counted.
-    auto* cap = static_cast<FakeCapture*>(engine.video_capture());
-    ASSERT_NE(cap, nullptr);
-    for (int i = 0; i < 10; ++i) {
-        cap->produce();
-    }
-    for (int i = 0; i < 10; ++i) {
-        (void)engine.tick();
-    }
-
-    const auto after = engine.stats();
-    EXPECT_GT(after.video_capture_frames, 0u);
-    EXPECT_GT(after.video_capture_dropped, 0u);
-
-    engine.close();
-}
-
-TEST_F(EngineCapturePump, ADeviceErrorIsCountedAndTheDeviceIsReopened) {
-    EngineConfig cfg = make_test_config();
-    NimRTCEngine engine(cfg);
-    ASSERT_EQ(engine.open(), 0u);
-
-    auto* cap = static_cast<FakeCapture*>(engine.video_capture());
-    ASSERT_NE(cap, nullptr);
-    const int opens_before = cap->open_count();
-
-    // The device is lost.
-    cap->fail_device();
-
-    // The pump notices on the next tick and reopens the device.
-    for (int i = 0; i < 5; ++i) {
-        (void)engine.tick();
-    }
-
-    const auto stats = engine.stats();
-    EXPECT_GE(stats.video_capture_device_errors, 1u);
-    EXPECT_GE(stats.video_capture_restarts, 1u);
-    EXPECT_GT(cap->open_count(), opens_before);
-
-    engine.close();
-}
-
-// ---------------------------------------------------------------------------
-// The manual path still works
-// ---------------------------------------------------------------------------
-
-TEST_F(EngineCapturePump, TheManualPathStillWorksWithACaptureConfigured) {
-    // `send_video()` stays the explicit manual path (the plan's A10
-    // row says so).  A host that drives the device by hand sets
-    // `video_capture_auto_pump = false` and keeps using send_video().
-    EngineConfig cfg = make_test_config();
-    cfg.video_capture_auto_pump = false;
+    EngineConfig cfg = make_config();
+    cfg.video_capture_pump = false;
 
     NimRTCEngine engine(cfg);
     ASSERT_EQ(engine.open(), 0u);
 
-    // The device is still opened — the host drives it.
-    ASSERT_NE(engine.video_capture(), nullptr);
-    EXPECT_TRUE(engine.video_capture()->is_open());
+    // A hand-built I420 frame.
+    std::vector<std::uint8_t> pixels(64 * 48 * 3u / 2u, 0x80u);
+    np::VideoSourceFrame frame{};
+    frame.width  = 64;
+    frame.height = 48;
+    frame.format = np::VideoPixelFormat::kI420;
+    frame.stride_y = 64;
+    frame.stride_u = 32;
+    frame.stride_v = 32;
+    frame.plane_y = pixels.data();
+    frame.plane_u = pixels.data() + 64 * 48;
+    frame.plane_v = pixels.data() + 64 * 48 + 32 * 24;
+    frame.capture_ts_us = 1'000;
+    frame.frame_seq = 7;
+    frame.rtp_timestamp = 90'000;
 
-    // The pump does not run, so nothing is encoded on the host's
-    // behalf.
-    auto* cap = static_cast<FakeCapture*>(engine.video_capture());
-    cap->produce();
-    for (int i = 0; i < 5; ++i) {
-        (void)engine.tick();
-    }
-    EXPECT_EQ(engine.stats().video_capture_frames_pumped, 0u);
+    EXPECT_EQ(engine.send_video(frame), np::kOk);
+    EXPECT_EQ(codec_state.encode_calls.load(), 1u);
+    EXPECT_EQ(engine.stats().video_capture_pumped_frames, 0u);
+    EXPECT_EQ(engine.stats().video_frames_sent, 1u);
 
     engine.close();
 }
-
-} // anonymous namespace

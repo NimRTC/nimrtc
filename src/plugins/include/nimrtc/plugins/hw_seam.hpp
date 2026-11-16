@@ -81,6 +81,7 @@ enum class NIMRTC_API_STABLE HwBackend : std::uint16_t {
     AndroidCamera2   = 12,   // Android Camera2 capture
     OpenH264         = 100,  // software but HW-tuned
     Libvpx           = 101,
+    Dav1d            = 102,  // software AV1 decoder (dav1d)
     Custom           = 0xFFFE,
     Unknown          = 0xFFFF,
 };
@@ -104,6 +105,7 @@ inline constexpr NIMRTC_API_STABLE std::string_view hw_backend_name(HwBackend b)
         case HwBackend::AndroidCamera2:  return "android-camera2";
         case HwBackend::OpenH264:        return "openh264";
         case HwBackend::Libvpx:          return "libvpx";
+        case HwBackend::Dav1d:           return "dav1d";
         case HwBackend::Custom:          return "custom";
         case HwBackend::Unknown:         return "unknown";
     }

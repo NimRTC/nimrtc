@@ -266,12 +266,113 @@ endfunction()
 
 function(nimrtc_link_openh264 target)
     if(NIMRTC_PLUGINS_OPENH264)
-        # Real OpenH264 binding would link against libopenh264; for now
-        # the source file is a stub that delegates to CodecPluginAdapter.
-        target_compile_definitions(${target} PRIVATE NIMRTC_PLUGINS_OPENH264_ON=1)
+        # The real OpenH264 binding: the vendored source build of Cisco's
+        # codec (BSD-2-Clause).  The link helper is what decides whether
+        # the real codec or the "unavailable" path gets compiled in —
+        # see nimrtc_link_vendor_openh264() in cmake/NimRTCVendored.cmake.
+        nimrtc_link_vendor_openh264(${target})
+        # The plugin source is compiled ONLY when the vendored build is
+        # really there: the vendored switch off, or the submodule not
+        # populated, means there is no codec to link against — the
+        # registry then falls through to the software stub.
+        if(NIMRTC_VENDORED_OPENH264 AND TARGET nimrtc_vendor_openh264 AND
+           EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/openh264/src/codec/api/wels/codec_api.h")
+            target_compile_definitions(${target} PRIVATE NIMRTC_PLUGINS_OPENH264_ON=1)
+            target_include_directories(${target} PRIVATE
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src")
+            target_sources(${target} PRIVATE
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src/openh264_encoder.cpp")
+        endif()
+    endif()
+endfunction()
+
+function(nimrtc_link_dav1d target)
+    if(NIMRTC_PLUGINS_DAV1D)
+        # The real dav1d binding: the vendored source build of VideoLAN's
+        # AV1 decoder (BSD-2-Clause).  dav1d is decode-only, so only the
+        # decoder source is added.
+        nimrtc_link_vendor_dav1d(${target})
+        if(NIMRTC_VENDORED_DAV1D AND TARGET nimrtc_vendor_dav1d AND
+           EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/dav1d/src/include/dav1d/dav1d.h")
+            target_compile_definitions(${target} PRIVATE NIMRTC_PLUGINS_DAV1D_ON=1)
+            target_include_directories(${target} PRIVATE
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/av1/src")
+            target_sources(${target} PRIVATE
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/av1/src/dav1d_decoder.cpp")
+        endif()
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan B11 — the optional software AV1 encoder (SVT-AV1).
+#
+# SVT-AV1 is the *only* cross-platform software AV1 encoder that carries
+# the screen-content tools (intra block copy) a remote control needs, so
+# it is the plan's software fallback.  It is vendored behind
+# NIMRTC_VENDORED_SVT_AV1, which defaults OFF (the build is heavy, and
+# upstream's x86 fast paths need NASM on Windows — see the R-11 note in
+# src/third_party/svt-av1/CMakeLists.txt: the build degrades to the
+# portable C path rather than failing).
+#
+# With the option OFF the `svt_av1` row is *absent* from the AV1 backend
+# registry — that is the plan's B11 acceptance ("the build still
+# configures and the plug-in is absent"), not "the plug-in is present but
+# unavailable".
+# -----------------------------------------------------------------------------
+function(nimrtc_link_svt_av1 target)
+    if(NIMRTC_VENDORED_SVT_AV1_AVAILABLE AND TARGET nimrtc_vendor_svt_av1 AND
+       EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/svt-av1/src/Source/API/EbSvtAv1Enc.h")
+        # Link the vendored static library and compile the encoder body.
+        nimrtc_link_vendor_svt_av1(${target})
+        # PUBLIC, not PRIVATE: the module's own tests assert on the
+        # presence/absence of the `svt_av1` row, and that assertion is
+        # written as a `#if defined(NIMRTC_PLUGINS_SVT_AV1_ON)` — so the
+        # test translation unit has to see the same define the module was
+        # compiled with.
+        target_compile_definitions(${target} PUBLIC NIMRTC_PLUGINS_SVT_AV1_ON=1)
         target_include_directories(${target} PRIVATE
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src")
-        target_sources(${target} PRIVATE
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src/openh264_encoder.cpp")
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/av1/src")
+    else()
+        message(STATUS "  SVT-AV1           : not built — the software AV1 "
+                       "encoder is absent from the registry")
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan B11 — libvpx (the optional software VP8 / VP9 codec).
+#
+# libvpx is the reference VP9 implementation and the only permissively
+# licensed VP9 encoder that clears the plan's RD-2 licence filter
+# (BSD-3-Clause).  It is vendored behind NIMRTC_VENDORED_LIBVPX, which
+# defaults OFF.
+#
+# R-11: upstream's `rtcd.pl` code generators need a perl interpreter,
+# which a stock Windows CI host does not carry.  The wrapper in
+# src/third_party/libvpx/CMakeLists.txt probes for perl and degrades to
+# an empty INTERFACE target when it is absent — so the *build* never
+# fails; only the codec is missing.  This helper mirrors that: it
+# compiles the encoder body only when the vendored build is really
+# there, and the `libvpx_vp9` row is *absent* from the registry
+# otherwise (the plan's B11 acceptance).
+# -----------------------------------------------------------------------------
+function(nimrtc_link_libvpx target)
+    # The wrapper reports whether it actually built the codec.  Without
+    # this the *degraded* case (option ON but no perl on the host) would
+    # still compile the encoder body and fail to find the libvpx headers.
+    if(NIMRTC_VENDORED_LIBVPX_AVAILABLE AND TARGET nimrtc_vendor_libvpx AND
+       EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/libvpx/src/vpx/vpx_encoder.h")
+        # Link the vendored static library and compile the encoder body.
+        nimrtc_link_vendor_libvpx(${target})
+        # PUBLIC, not PRIVATE: the module's own tests assert on the
+        # presence/absence of the `libvpx_vp9` row, and that assertion is
+        # written as a `#if defined(NIMRTC_PLUGINS_LIBVPX_ON)` — so the
+        # test translation unit has to see the same define the module was
+        # compiled with.
+        target_compile_definitions(${target} PUBLIC NIMRTC_PLUGINS_LIBVPX_ON=1)
+        target_include_directories(${target} PRIVATE
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/vp9/src")
+    else()
+        message(STATUS "  libvpx            : not built — the software VP9 "
+                       "encoder is absent from the registry")
     endif()
 endfunction()

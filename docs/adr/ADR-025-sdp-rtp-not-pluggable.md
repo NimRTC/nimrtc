@@ -148,10 +148,45 @@ The plan (§4.5) requires the `rtp::` usage to be concentrated into a single
 engine file — `src/engine/src/rtp_packetizer.cpp` — so that the exception
 has a visible boundary.
 
-This is **not yet done**: the `rtp::` usage currently spans 10 engine
-files. It is a prerequisite for the D1 engine split (§4.3), which is the
-work that extracts the packetizer into a collaborator class. This ADR
-records the requirement; the concentration lands with D1.
+**This landed with D1 (2026-11-15).** The engine's *outbound* RTP packet
+building now happens in one place: the private collaborator
+`detail::RtpPacketizer` (`src/engine/src/rtp_packetizer.hpp` /
+`.cpp`). Four call sites used to name `rtp::PacketBuilder` directly —
+the audio path, the DTMF path, the default video stream's packet
+callback, and the extra video streams' packet callback — and all four now
+go through the collaborator.
+
+The collaborator's header contains **no** `rtp::` type: it describes a
+packet in plain scalars and a byte span, and the concrete
+`rtp::PacketBuilder` lives in the one `.cpp`. That is what lets the
+engine's internal headers include it without dragging the concrete RTP
+module in with it.
+
+**What the concentration covers, and what it does not.** The engine uses
+the RTP module for two distinct concerns, and the plan (§4.3) gives each
+of them its own collaborator:
+
+- **building** outbound packets — `RtpPacketizer`, which is what this
+  decision is about. The engine must not hand-assemble an RTP header
+  anywhere else: a fix to the header format has to land in one place, or
+  the audio path and the video path drift apart.
+- **parsing** inbound packets and RTCP — `rtp::demux_rtcp()`,
+  `rtp::Parser`, the XR blocks. Those live in their own module surfaces
+  (`nimrtc/rtp/rtcp*.hpp`) and are the *receive* side; concentrating them
+  is the `rtcp_processor` collaborator's job, which the plan names as
+  separate work.
+
+**The guard.** `tools/check_engine_layering.py` now enforces the
+concentration on top of the module-level exemption list, at the *symbol*
+level: `rtp::PacketBuilder` may be named in exactly one engine file,
+`rtp_packetizer.cpp`. The symbol level (rather than the header level) is
+deliberate — the module-level rule cannot express this at all, because
+`nimrtc/rtp/packet.hpp` is allowed *everywhere* as far as the exemption
+list is concerned; and a header-level rule would also forbid the
+receive-side parser, which is not what this decision asks for. The scan
+strips comments and string literals first, so a *mention* of the symbol
+in a doc comment is not a violation — a guard that fires on a mention is a
+guard people learn to silence with a reworded comment.
 
 ## Consequences
 
@@ -183,9 +218,10 @@ records the requirement; the concentration lands with D1.
 
 | Item | Where | Status |
 |---|---|---|
-| Concentrate the `rtp::` usage into `rtp_packetizer.cpp` | §4.3 / D1 | Pending (blocked on the engine split) |
+| Concentrate the `rtp::` usage into `rtp_packetizer.cpp` | §4.3 / D1 | **Done** (the outbound packet building; the receive side is the `rtcp_processor` collaborator's separate work) |
 | Mark the residual SDP seam interface deprecated | §2.1 / Q2 | **Done** (`plugins/sdp.hpp`) |
 | Add a CI guard that flags new concrete-module includes in `src/engine/` | Phase 4 | **Done** (`tools/check_engine_layering.py`, wired into `.github/workflows/ci.yml` with a `--self-test`) |
+| Enforce the Decision 4 concentration mechanically | Phase 4 | **Done** (the same guard, second rule: `rtp::PacketBuilder` is named in `rtp_packetizer.cpp` only) |
 
 ## Alternatives considered
 

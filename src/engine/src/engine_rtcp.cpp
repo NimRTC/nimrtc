@@ -248,7 +248,7 @@ void NimRTCEngine::maybe_send_receiver_report() noexcept {
     // would produce a packet the peer's unprotect_rtcp rejects.
     core::ByteSpan out(rr_bytes.data(), rr_bytes.size());
     std::vector<std::uint8_t> enc;
-    if (impl_->srtp_installed && impl_->srtp) {
+    if (impl_->security.srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(impl_->audio_state.rtcp_sender_ssrc_,
                                               /*outgoing=*/true);
         if (!sess) return;   // SRTP installed but no keying yet — skip.

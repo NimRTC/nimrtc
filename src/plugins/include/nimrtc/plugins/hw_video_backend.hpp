@@ -54,6 +54,24 @@
 namespace nimrtc::plugins {
 
 // ---------------------------------------------------------------------------
+// The compatibility shim, named from inside the library
+//
+// `IVideoCodec` is the deprecated compatibility shim (remote-desktop plan
+// B1, ADR-015 Decision 3), and this header is the registry seam that
+// hands it out -- the engine resolves the *combined* factory and drives
+// one codec instance in both directions.  So the library has to name
+// the shim here, and naming it trips `-Wdeprecated-declarations`
+// (GCC/Clang) / `C4996` (MSVC).
+//
+// The suppression is scoped to the two backend descriptors and nothing
+// else, so a host that spells the symbol still gets the warning.  The
+// deprecation itself is untouched: it is still scheduled for removal
+// after one MINOR cycle.
+// ---------------------------------------------------------------------------
+
+NIMRTC_SUPPRESS_DEPRECATION_BEGIN
+
+// ---------------------------------------------------------------------------
 // Backend descriptor — a single (id, available, priority, create, kind) entry
 // ---------------------------------------------------------------------------
 
@@ -94,6 +112,23 @@ struct NIMRTC_API_STABLE VideoEncoderBackend {
     /// Runtime probe — should NOT instantiate heavy resources; just
     /// check whether the HW/driver/library is reachable on this device.
     std::function<bool(const VideoCodecConfig&)> available;
+
+    /// Optional human-readable reason why this backend is *not* available.
+    ///
+    /// The remote-desktop plan's B5 / B6 acceptance is "unsupported
+    /// combinations are **explicitly reported**, not silently ignored" — a
+    /// backend that exists in the table but not in the silicon (or whose
+    /// body is not implemented, or whose platform SDK is absent) must be
+    /// able to say *why*.
+    ///
+    /// When this is set and `available()` returns false, the caller may
+    /// invoke it to obtain the reason.  When it is empty (the default),
+    /// the backend simply reports "not available" without elaboration.
+    ///
+    /// The probe is allowed to consult `cfg` — a backend may be
+    /// unavailable for *this* configuration (e.g. a resolution the
+    /// hardware cannot do) rather than on this host at all.
+    std::function<std::string(const VideoCodecConfig&)> unavailable_reason;
 
     /// Factory function — must return a fully-constructed (but not yet
     /// `open()`-ed) IVideoCodec instance. Selector owns lifetime.
@@ -149,8 +184,15 @@ struct NIMRTC_API_STABLE VideoDecoderBackend {
     std::function<std::shared_ptr<GpuBufferPool>(VideoCodecConfig)> pool_factory;
 
     std::function<bool(const VideoCodecConfig&)> available;
+
+    /// Mirrors `VideoEncoderBackend::unavailable_reason` — the optional
+    /// human-readable explanation of why this decoder is not usable.
+    std::function<std::string(const VideoCodecConfig&)> unavailable_reason;
+
     std::function<std::unique_ptr<IVideoCodec>(VideoCodecConfig)> create;
 };
+
+NIMRTC_SUPPRESS_DEPRECATION_END
 
 // ---------------------------------------------------------------------------
 // Selector — ordered list of backends + selection policy
@@ -200,14 +242,26 @@ public:
     /// Select an encoder matching the codec kind and (optionally) preferred id.
     /// Returns nullptr ONLY if no backends are registered at all — a built-in
     /// "stub" backend is always present as ultimate fallback.
+    ///
+    /// The `preference` is the plan's B2 knob.  In `kHardware` /
+    /// `kSoftware` mode the ineligible backends are *not* eligible, and
+    /// the selection returns nullptr rather than handing back one of
+    /// them — a host that asked for hardware must not silently get
+    /// software.
     const VideoEncoderBackend* select_encoder(VideoCodecKind kind,
                                               std::string_view preferred_id
-                                                  = std::string_view{}) const noexcept;
+                                                  = std::string_view{},
+                                              VideoCodecBackendPreference preference
+                                                  = VideoCodecBackendPreference::kAuto)
+        const noexcept;
 
     /// Same semantics for decoders.
     const VideoDecoderBackend* select_decoder(VideoCodecKind kind,
                                               std::string_view preferred_id
-                                                  = std::string_view{}) const noexcept;
+                                                  = std::string_view{},
+                                              VideoCodecBackendPreference preference
+                                                  = VideoCodecBackendPreference::kAuto)
+        const noexcept;
 
     /// Select an encoder under an explicit backend policy (plan B2).
     ///
@@ -245,6 +299,23 @@ public:
 
     /// Force-clear all registered backends. Test-only.
     void clear_for_tests() noexcept;
+
+    /**
+     * @brief Force-clear the backends of one codec family. Test-only.
+     *
+     * `clear_for_tests()` empties the *whole* registry, and the modules
+     * register their backends exactly once (the registrar is guarded by
+     * a one-shot flag) — so a test that calls it permanently removes the
+     * real backends for the rest of the process, and any later test that
+     * opens a real engine breaks.
+     *
+     * This overload is the surgical version: it removes only the
+     * backends of one codec family, which lets a test install its own
+     * fakes without touching the backends other tests need.
+     *
+     * @param kind  The codec family to clear.
+     */
+    void clear_for_kind_for_tests(VideoCodecKind kind) noexcept;
 
 private:
     HwVideoBackendRegistry() = default;

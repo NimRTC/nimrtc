@@ -1152,3 +1152,147 @@ TEST(VideoPipeline, SenderKeyframePendingIsOneShot) {
     EXPECT_FALSE(tx.keyframe_pending());
     EXPECT_EQ(tx.stats().frames_marked_as_keyframe, 1u);
 }
+
+// ===========================================================================
+// 19. Sender: the marker bit marks the LAST packet of the frame, not the
+//     last packet of every NAL group.
+//
+// The regression this guards is the one that broke the hardware path
+// end-to-end: an NVENC IDR frame carries `SPS | PPS | <oversized IDR
+// slice>`.  The SPS and the PPS are aggregated into one STAP-A packet,
+// the slice is fragmented into FU-A packets.  A marker on the STAP-A made
+// the receiver believe the frame was complete after "SPS + PPS", so the
+// IDR slice that followed was discarded and the decoder never saw a
+// picture.
+// ===========================================================================
+
+TEST(VideoPipeline, SenderMarkerOnlyOnLastPacketOfFrame) {
+    SenderConfig sc;
+    sc.codec        = video_frame::CodecKind::kH264;
+    sc.ssrc         = kSsrc;
+    sc.payload_type = kPt;
+    sc.mtu          = 1200;
+
+    VideoSender tx(sc);
+    PacketRecorder pr;
+    tx.set_packet_callback(pr.as_callback());
+
+    // SPS (small) + PPS (small) + an IDR slice that exceeds the MTU.
+    std::vector<std::uint8_t> sps = {0x67, 0x42, 0x00, 0x1E};
+    std::vector<std::uint8_t> pps = {0x68, 0xCE, 0x38, 0x80};
+    std::vector<std::uint8_t> slice;
+    slice.push_back(0x65);                       // IDR header
+    for (int i = 0; i < 4000; ++i) {
+        slice.push_back(static_cast<std::uint8_t>(i & 0xFF));
+    }
+
+    std::vector<std::uint8_t> ann;
+    const std::uint8_t sc4[4] = {0x00, 0x00, 0x00, 0x01};
+    ann.insert(ann.end(), sc4, sc4 + 4);
+    ann.insert(ann.end(), sps.begin(), sps.end());
+    ann.insert(ann.end(), sc4, sc4 + 4);
+    ann.insert(ann.end(), pps.begin(), pps.end());
+    ann.insert(ann.end(), sc4, sc4 + 4);
+    ann.insert(ann.end(), slice.begin(), slice.end());
+
+    video_frame::EncodedVideoFrame f{};
+    f.codec        = video_frame::CodecKind::kH264;
+    f.nalu_format  = video_frame::NaluFormat::kAnnexBStartCode;
+    f.payload      = core::ByteSpan{ann.data(), ann.size()};
+    f.is_keyframe  = true;
+
+    ASSERT_TRUE(tx.push_frame(f, 1000, 90000, 1).ok());
+
+    auto pkts = pr.snapshot();
+    // The frame is a STAP-A (SPS + PPS) followed by several FU-A fragments.
+    ASSERT_GE(pkts.size(), 2u);
+    // The first packet is the STAP-A (indicator type 24) and it is NOT
+    // the last packet of the frame, so it must NOT carry the marker.
+    EXPECT_EQ(pkts[0].payload[0] & 0x1F, 24);
+    EXPECT_FALSE(pkts[0].marker);
+    // Only the very last packet carries the marker.
+    for (std::size_t i = 0; i + 1 < pkts.size(); ++i) {
+        EXPECT_FALSE(pkts[i].marker);
+    }
+    EXPECT_TRUE(pkts.back().marker);
+}
+
+// ===========================================================================
+// 20. End-to-end: the NVENC-shaped IDR frame (SPS | PPS | big slice)
+//     reaches the receiver as ONE complete frame that contains the slice.
+// ===========================================================================
+
+TEST(VideoPipeline, EndToEndNvEncShapedIdrFrame) {
+    SenderConfig sc;
+    sc.codec        = video_frame::CodecKind::kH264;
+    sc.ssrc         = kSsrc;
+    sc.payload_type = kPt;
+    sc.mtu          = 1200;
+
+    VideoSender tx(sc);
+    PacketRecorder pr;
+    tx.set_packet_callback(pr.as_callback());
+
+    std::vector<std::uint8_t> sps = {0x67, 0x42, 0x00, 0x1E};
+    std::vector<std::uint8_t> pps = {0x68, 0xCE, 0x38, 0x80};
+    std::vector<std::uint8_t> slice;
+    slice.push_back(0x65);
+    for (int i = 0; i < 4000; ++i) {
+        slice.push_back(static_cast<std::uint8_t>(i & 0xFF));
+    }
+
+    std::vector<std::uint8_t> ann;
+    const std::uint8_t sc4[4] = {0x00, 0x00, 0x00, 0x01};
+    ann.insert(ann.end(), sc4, sc4 + 4);
+    ann.insert(ann.end(), sps.begin(), sps.end());
+    ann.insert(ann.end(), sc4, sc4 + 4);
+    ann.insert(ann.end(), pps.begin(), pps.end());
+    ann.insert(ann.end(), sc4, sc4 + 4);
+    ann.insert(ann.end(), slice.begin(), slice.end());
+
+    video_frame::EncodedVideoFrame f{};
+    f.codec        = video_frame::CodecKind::kH264;
+    f.nalu_format  = video_frame::NaluFormat::kAnnexBStartCode;
+    f.payload      = core::ByteSpan{ann.data(), ann.size()};
+    f.is_keyframe  = true;
+
+    ASSERT_TRUE(tx.push_frame(f, 1000, 90000, 1).ok());
+    auto sent = pr.snapshot();
+    ASSERT_GE(sent.size(), 2u);
+
+    ReceiverConfig rc;
+    rc.codec        = video_frame::CodecKind::kH264;
+    rc.ssrc         = kSsrc;
+    rc.payload_type = kPt;
+    VideoReceiver rx(rc);
+    FrameRecorder rec;
+    rx.set_frame_callback(rec.as_callback());
+
+    std::uint32_t arrival_us = 0;
+    for (const auto& p : sent) {
+        auto rtp_bytes = make_rtp(p.seq, p.rtp_ts, p.marker, kPt, kSsrc,
+                                  core::ByteSpan{p.payload.data(),
+                                                 p.payload.size()});
+        EXPECT_TRUE(rx.push_rtp(parse_rtp(rtp_bytes), arrival_us));
+        arrival_us += 1000;
+    }
+
+    // Exactly one frame, and it carries the whole picture: the SPS, the
+    // PPS *and* the IDR slice.  Before the marker fix the receiver
+    // emitted "SPS + PPS" as the frame and threw the slice away.
+    auto recs = rec.snapshot();
+    ASSERT_EQ(recs.size(), 1u);
+
+    std::vector<std::uint8_t> expected;
+    expected.insert(expected.end(), sc4, sc4 + 4);
+    expected.insert(expected.end(), sps.begin(), sps.end());
+    expected.insert(expected.end(), sc4, sc4 + 4);
+    expected.insert(expected.end(), pps.begin(), pps.end());
+    expected.insert(expected.end(), sc4, sc4 + 4);
+    expected.insert(expected.end(), slice.begin(), slice.end());
+
+    ASSERT_EQ(recs[0].frame.payload.size(), expected.size());
+    EXPECT_EQ(std::memcmp(recs[0].frame.payload.data(),
+                          expected.data(), expected.size()), 0);
+    EXPECT_TRUE(recs[0].frame.is_keyframe);
+}

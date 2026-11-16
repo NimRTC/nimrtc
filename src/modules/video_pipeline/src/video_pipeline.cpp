@@ -51,6 +51,7 @@
 #include <nimrtc/core/log.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <unordered_set>
 #include <vector>
@@ -748,6 +749,29 @@ struct VideoSender::Impl {
     std::uint16_t next_seq = 0;
     bool          keyframe_pending = false;
 
+    // ---- The key-frame storm limiter (remote-desktop plan B14) ----------
+    //
+    // The limiter sits between "a key frame was asked for" and "the
+    // encoder is armed".  A burst of PLIs therefore produces ONE key
+    // frame, not N — and the counters say how many were granted, held
+    // back and dropped.
+    //
+    // The limiter is built around the `FirCoalescer`, which is the
+    // mechanism plan B14 says was "finally wired into the engine": the
+    // coalescer owns the per-media-SSRC interval gate (RFC 5104
+    // §4.3.1.1) and the limiter consults it.
+    video_rtcp_feedback::FirCoalescer coalescer{0};
+    KeyframeLimiter limiter{coalescer, KeyframeLimiterConfig{}};
+
+    // ---- The incremental (dirty-rect) encode driver (plan B9) -----------
+    //
+    // The driver owns the controller (the arbiter) and does the three
+    // things that have to happen together for the mechanism to be worth
+    // anything: it asks the controller what to do with the frame's dirty
+    // rectangles, it pushes the resulting request to the encoder, and it
+    // builds the region-refresh message the peer needs.
+    IncrementalEncodeDriver incremental;
+
     // Reusable scratch buffer for emitted packet payloads.
     std::vector<std::uint8_t> scratch;
 
@@ -810,6 +834,12 @@ struct VideoSender::Impl {
 
     explicit Impl(SenderConfig c) : cfg(std::move(c)) {
         next_seq = cfg.initial_seq;
+        // The coalescer is per-media-SSRC (RFC 5104 §4.3.1.1), so it
+        // must know which stream it is guarding.
+        coalescer = video_rtcp_feedback::FirCoalescer(cfg.ssrc);
+        KeyframeLimiterConfig lim_cfg{};
+        lim_cfg.media_ssrc = cfg.ssrc;
+        limiter = KeyframeLimiter(coalescer, lim_cfg);
         rtx_cache.resize(cfg.retransmit_cache_packets);
         // Pre-size every retransmission slot to the MTU so caching a packet
         // is a memcpy into an existing buffer, not a fresh allocation.
@@ -897,6 +927,31 @@ struct VideoSender::Impl {
             use_fua[i] = nalus[i].size() > cfg.mtu;
         }
 
+        // ---- The marker bit (RFC 6184 §5.1) --------------------------------
+        //
+        // The marker marks the LAST packet of a *frame* — that is, the
+        // packet that carries the frame's LAST NAL unit.  It does **not**
+        // mark the last packet of every NAL group.
+        //
+        // Getting this wrong is not cosmetic.  The jitter buffer groups
+        // the packets of a frame by RTP timestamp and uses the marker bit
+        // to decide that a frame is complete, so a marker on an
+        // intermediate packet makes the receiver emit a *truncated* frame
+        // and then discard everything that arrives after it.
+        //
+        // The case that bites is the classic NVENC output: an IDR frame
+        // that carries `SPS | PPS | <oversized IDR slice>`.  The SPS and
+        // the PPS are small, so they are aggregated into one STAP-A
+        // packet, while the slice is fragmented into FU-A packets.  The
+        // STAP-A is *not* the last packet of the frame — but a marker
+        // there made the receiver emit "SPS + PPS" as if it were the
+        // whole picture, and the IDR slice that followed was dropped
+        // because its frame had already been played out.
+        //
+        // `last_nalu` is therefore the index of the frame's last NAL unit:
+        // the marker goes on the packet that carries it.
+        const std::size_t last_nalu = nalus.size() - 1;
+
         // Walk through nalus; for each, either emit FU-A fragments OR
         // try to bundle with neighbouring small NALUs into a STAP-A.
         std::size_t i = 0;
@@ -935,7 +990,8 @@ struct VideoSender::Impl {
                     fua_buf[0] = static_cast<std::uint8_t>(
                         (fua_buf[0] & ~kNriMask) | ((nri & 0x03) << 5));
                     emit(core::ByteSpan{fua_buf.data(), wrote},
-                         rtp_ts, /*marker=*/end);
+                         rtp_ts,
+                         /*marker=*/end && (i == last_nalu));
                     offset += this_len;
                 }
                 stats.fua_frames_packetized++;
@@ -973,16 +1029,21 @@ struct VideoSender::Impl {
                 const std::size_t wrote = build_stap_a(
                     group.data(), group.size(),
                     core::MutableByteSpan{group_out.data(), group_out.size()});
+                // The group spans the NAL units [i, j) — the marker goes on
+                // the packet only when the group carries the frame's LAST
+                // NAL unit (see the marker note above).
+                const bool group_is_last = (j - 1 == last_nalu);
                 if (wrote == 0) {
                     // STAP-A build failed (e.g. too big).  Fall back to
                     // single NALUs one by one.
-                    for (auto& g : group) {
-                        emit(g, rtp_ts, /*marker=*/false);
+                    for (std::size_t k = 0; k < group.size(); ++k) {
+                        emit(group[k], rtp_ts,
+                             /*marker=*/(i + k == last_nalu));
                         stats.single_nal_frames_packetized++;
                     }
                 } else {
                     emit(core::ByteSpan{group_out.data(), wrote},
-                         rtp_ts, /*marker=*/true);
+                         rtp_ts, /*marker=*/group_is_last);
                     stats.stapa_frames_packetized++;
                 }
                 i = j;
@@ -991,7 +1052,7 @@ struct VideoSender::Impl {
 
             // group.size() == 1: emit single NALU.
             if (group.size() == 1) {
-                emit(group[0], rtp_ts, /*marker=*/true);
+                emit(group[0], rtp_ts, /*marker=*/(i == last_nalu));
                 stats.single_nal_frames_packetized++;
                 i = j;
                 continue;
@@ -1276,6 +1337,127 @@ bool VideoSender::keyframe_pending() const noexcept {
     return impl_->keyframe_pending;
 }
 
+void VideoSender::set_keyframe_limiter_config(
+        KeyframeLimiterConfig cfg) noexcept {
+    impl_->limiter.configure(cfg);
+}
+
+KeyframeLimiterConfig VideoSender::keyframe_limiter_config() const noexcept {
+    return impl_->limiter.config();
+}
+
+KeyframeDecision VideoSender::request_keyframe(KeyframeReason reason,
+                                                std::int64_t now_us,
+                                                bool carries_parameter_sets) noexcept {
+    auto& s = *impl_;
+    const KeyframeDecision decision =
+        s.limiter.request(reason, now_us, carries_parameter_sets);
+
+    // Mirror the limiter's counters into the sender's stats, so a host
+    // that only reads the sender's counters still sees the limiter
+    // working.
+    const KeyframeLimiterStats ls = s.limiter.stats();
+    s.stats.keyframe_requests = ls.requests;
+    s.stats.keyframes_granted = ls.granted;
+    s.stats.keyframes_deferred = ls.deferred;
+    s.stats.keyframes_rejected = ls.rejected;
+    s.stats.keyframes_forced  = ls.forced_grants;
+
+    if (decision == KeyframeDecision::kGranted) {
+        // Arm the encoder-side marker.  The *encoder* produces the IDR;
+        // the packetizer cannot.
+        s.keyframe_pending = true;
+        s.stats.force_keyframe_calls++;
+    }
+    return decision;
+}
+
+KeyframeLimiterStats VideoSender::keyframe_limiter_stats() const noexcept {
+    return impl_->limiter.stats();
+}
+
+bool VideoSender::keyframe_request_pending() const noexcept {
+    return impl_->limiter.pending();
+}
+
+std::uint32_t VideoSender::retry_pending_keyframe(std::int64_t now_us) noexcept {
+    auto& s = *impl_;
+    if (!s.limiter.pending()) return 0;
+
+    // Re-offer the held request.  The limiter arbitrates again: if the
+    // minimum interval still has not elapsed, the request stays held
+    // and the next tick tries again — which is the whole point of
+    // *holding* rather than dropping it.
+    const KeyframeDecision decision =
+        s.limiter.request(KeyframeReason::kPli, now_us);
+
+    // Mirror the limiter's counters into the sender's stats, so a host
+    // that only reads the sender's counters still sees the limiter
+    // working.
+    const KeyframeLimiterStats ls = s.limiter.stats();
+    s.stats.keyframe_requests = ls.requests;
+    s.stats.keyframes_granted = ls.granted;
+    s.stats.keyframes_deferred = ls.deferred;
+    s.stats.keyframes_rejected = ls.rejected;
+    s.stats.keyframes_forced  = ls.forced_grants;
+
+    if (decision != KeyframeDecision::kGranted) return 0;
+
+    // The grant is published through the *same* path an inbound PLI
+    // takes, so the engine has one place that arms the encoder.
+    s.keyframe_pending = true;
+    s.stats.force_keyframe_calls++;
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// The incremental (dirty-rect) encode mechanism (remote-desktop plan B9)
+// ---------------------------------------------------------------------------
+
+void VideoSender::set_content_type(VideoContentType type) noexcept {
+    impl_->incremental.controller().set_content_type(type);
+}
+
+VideoContentType VideoSender::content_type() const noexcept {
+    return impl_->incremental.controller().content_type();
+}
+
+void VideoSender::set_incremental_encode_enabled(bool enabled) noexcept {
+    impl_->incremental.controller().set_enabled(enabled);
+}
+
+bool VideoSender::incremental_encode_enabled() const noexcept {
+    return impl_->incremental.controller().enabled();
+}
+
+IncrementalDecision VideoSender::offer_dirty_region(
+        const std::vector<plugins::VideoRegion>& dirty,
+        bool full_frame) noexcept {
+    // The driver pushes the request to the encoder and builds the
+    // region-refresh message; the controller counts the decision.
+    return impl_->incremental.on_frame_dirty(dirty, full_frame);
+}
+
+core::ByteSpan VideoSender::take_region_refresh() noexcept {
+    const core::ByteBuffer& buf = impl_->incremental.last_region_refresh();
+    if (buf.empty()) return {};
+    return core::ByteSpan{buf.data(), buf.size()};
+}
+
+IncrementalEncodeStats VideoSender::incremental_stats() const noexcept {
+    return impl_->incremental.stats();
+}
+
+void VideoSender::set_incremental_encoder(plugins::IVideoEncoder* encoder) noexcept {
+    impl_->incremental.set_encoder(encoder);
+}
+
+void VideoSender::set_region_refresh_ssrcs(std::uint32_t media_ssrc,
+                                            std::uint32_t feedback_ssrc) noexcept {
+    impl_->incremental.set_media_ssrc(media_ssrc);
+    impl_->incremental.set_feedback_ssrc(feedback_ssrc);
+}
+
 bool VideoSender::retransmit(std::uint16_t seq) noexcept {
     auto& s = *impl_;
     const Impl::CachedPacket* p = s.find_cached(seq);
@@ -1315,6 +1497,12 @@ std::uint16_t VideoSender::next_seq() const noexcept {
 // ===========================================================================
 
 namespace fb = video_rtcp_feedback;
+
+std::int64_t monotonic_now_us() noexcept {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 std::size_t feedback_rtcp_size(const ReceiverFeedback& feedback) noexcept {
     std::size_t n = 0;
@@ -1367,6 +1555,12 @@ std::size_t build_feedback_rtcp(core::MutableByteSpan output,
 
 core::Result<int> apply_feedback_rtcp(VideoSender& sender,
                                       core::ByteSpan rtcp) noexcept {
+    return apply_feedback_rtcp(sender, rtcp, monotonic_now_us());
+}
+
+core::Result<int> apply_feedback_rtcp(VideoSender& sender,
+                                      core::ByteSpan rtcp,
+                                      std::int64_t now_us) noexcept {
     int actions = 0;
     std::size_t offset = 0;
 
@@ -1418,7 +1612,11 @@ core::Result<int> apply_feedback_rtcp(VideoSender& sender,
                 return core::Result<int>::fail(parsed.error().code(),
                                                 parsed.error().message());
             }
-            sender.force_keyframe();
+            // The key-frame storm limiter (plan B14) arbitrates: a burst
+            // of PLIs produces ONE key frame, not N.  The request is
+            // still counted as an action — the feedback *was* handled —
+            // but only a granted request arms the encoder.
+            (void)sender.request_keyframe(KeyframeReason::kPli, now_us);
             ++actions;
         } else if (pt == fb::kPsfbPt && fmt == fb::kFmtFir) {
             if (packet_size < fb::kPliPacketSize) {
@@ -1431,8 +1629,13 @@ core::Result<int> apply_feedback_rtcp(VideoSender& sender,
                 return core::Result<int>::fail(parsed.error().code(),
                                                 parsed.error().message());
             }
-            sender.force_keyframe();
+            (void)sender.request_keyframe(KeyframeReason::kFir, now_us);
             ++actions;
+        } else if (pt == fb::kAppPt && fb::is_region_refresh(packet)) {
+            // A region-refresh message (plan B9) travels from the sender
+            // to the peer, so the *receiving* side is what acts on it.
+            // The video pipeline's sender has nothing to do with it —
+            // but it must not be mistaken for a protocol error.
         }
         // Other feedback kinds (REMB, transport-cc, …) are ignored on
         // purpose — the video pipeline has no use for them.  The same

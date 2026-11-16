@@ -237,6 +237,61 @@ TEST(H264Fmtp, LevelAsymmetryAllowedBooleanFalse) {
     EXPECT_FALSE(*r.value().level_asymmetry_allowed);
 }
 
+// -----------------------------------------------------------------------------
+// The content hint (remote-desktop plan B7)
+// -----------------------------------------------------------------------------
+
+TEST(ContentHint, ParsesTheThreeRfc8692Values) {
+    // RFC 8692 §3 defines exactly three: "motion", "detail" and "text".
+    for (const char* value : {"motion", "detail", "text"}) {
+        auto r = parse_h264(std::string{"x-google-content-hint="} + value);
+        ASSERT_TRUE(r.ok()) << r.error().message();
+        ASSERT_TRUE(r.value().x_google_content_hint.has_value())
+            << "the hint '" << value << "' must be carried";
+        EXPECT_EQ(*r.value().x_google_content_hint, value);
+    }
+}
+
+TEST(ContentHint, DropsAnUnknownValue) {
+    // A value nobody can act on is worse than no value: it looks like
+    // an opinion the receiver cannot honour.
+    auto r = parse_h264("x-google-content-hint=nonsense");
+    ASSERT_TRUE(r.ok());
+    EXPECT_FALSE(r.value().x_google_content_hint.has_value());
+}
+
+TEST(ContentHint, IsAbsentWhenNotStated) {
+    auto r = parse_h264("profile-level-id=42e01f");
+    ASSERT_TRUE(r.ok());
+    EXPECT_FALSE(r.value().x_google_content_hint.has_value());
+    EXPECT_FALSE(r.value().has_any() && r.value().x_google_content_hint.has_value());
+}
+
+TEST(ContentHint, RoundtripsThroughTheFmtpBody) {
+    H264Fmtp in;
+    in.profile_level_id       = "42e01f";
+    in.packetization_mode     = PacketizationMode::kNonInterleaved;
+    in.x_google_content_hint  = "text";
+
+    const auto body = build_h264_fmtp(in);
+    EXPECT_NE(body.find("x-google-content-hint=text"), std::string::npos)
+        << "the hint must survive the build: " << body;
+
+    auto re_parsed = parse_h264(body);
+    ASSERT_TRUE(re_parsed.ok()) << re_parsed.error().message();
+    ASSERT_TRUE(re_parsed.value().x_google_content_hint.has_value());
+    EXPECT_EQ(*re_parsed.value().x_google_content_hint, "text");
+}
+
+TEST(ContentHint, TheBuiltBodyIsAbsentWhenThereIsNoOpinion) {
+    // "No opinion" must produce *no* attribute — an `x-google-content-hint`
+    // with an empty value is not a thing RFC 8692 defines.
+    H264Fmtp in;
+    in.profile_level_id = "42e01f";
+    const auto body = build_h264_fmtp(in);
+    EXPECT_EQ(body.find("x-google-content-hint"), std::string::npos) << body;
+}
+
 TEST(H264Fmtp, UnknownKeysIgnored) {
     // Permissive parse.
     auto r = parse_h264("max-fs=1200;unknown-key=hello");

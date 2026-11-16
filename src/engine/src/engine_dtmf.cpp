@@ -48,6 +48,11 @@
 
 #include "engine_impl.hpp"
 
+// ADR-025 Decision 4: the RTP packet building is concentrated in the
+// `detail::RtpPacketizer` collaborator, so this file never names a
+// concrete `rtp::` type.
+#include "rtp_packetizer.hpp"
+
 namespace nimrtc::engine {
 
 namespace {
@@ -295,25 +300,26 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
     // one: the event does not consume audio time, and advancing the
     // audio clock for a DTMF event would leave a gap in the media
     // timeline.
-    rtp::PacketBuilder pb;
-    pb.set_ssrc(impl_->audio_state.audio_ssrc)
-      .set_seq(impl_->audio_state.audio_seq++)
-      .set_timestamp(impl_->audio_state.audio_ts)
-      .set_payload_type(negotiated_dtmf_pt_)
-      .set_marker(marker);
+    detail::RtpPacketSpec spec;
+    spec.ssrc         = impl_->audio_state.audio_ssrc;
+    spec.seq          = impl_->audio_state.audio_seq++;
+    spec.timestamp    = impl_->audio_state.audio_ts;
+    spec.payload_type = negotiated_dtmf_pt_;
+    spec.marker       = marker;
 
-    pb.set_payload(core::ByteSpan(
+    spec.payload = core::ByteSpan(
         reinterpret_cast<const std::uint8_t*>(payload.data()),
-        payload.size()));
+        payload.size());
 
     // Serialise into the DTMF scratch (Phase 3 / C4) — see the note on
     // `Impl::dtmf_rtp_scratch` for why this is not the audio scratch.
-    const std::size_t pkt_size = pb.compute_size();
+    const std::size_t pkt_size = detail::RtpPacketizer::compute_size(spec);
     if (impl_->scratch.dtmf_rtp_scratch.size() < pkt_size) {
         impl_->scratch.dtmf_rtp_scratch.resize(pkt_size);
     }
     const std::size_t pkt_written =
-        pb.build_into(impl_->scratch.dtmf_rtp_scratch.data(),
+        detail::RtpPacketizer::build_into(spec,
+                      impl_->scratch.dtmf_rtp_scratch.data(),
                       impl_->scratch.dtmf_rtp_scratch.size());
     if (pkt_written == 0) {
         core::log::Logger::instance().error(
@@ -333,7 +339,7 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
     }
 
     const core::ByteSpan out_payload(pkt_span.data(), pkt_span.size());
-    if (impl_->srtp_installed && impl_->srtp) {
+    if (impl_->security.srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(impl_->audio_state.audio_ssrc,
                                                /*outgoing=*/true);
         if (!sess) return false;

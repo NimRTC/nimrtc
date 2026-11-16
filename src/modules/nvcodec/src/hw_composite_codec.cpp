@@ -112,6 +112,20 @@ bool HwCompositeCodec::supports_zero_copy_decode() const noexcept {
     return decoder_ && decoder_->supports_zero_copy_decode();
 }
 
+plugins::Status HwCompositeCodec::encode_zero_copy(
+        const plugins::GpuBuffer& gpu,
+        plugins::EncodedVideoFrame& encoded_out) noexcept {
+    if (!encoder_ || !encoder_->can_encode()) return plugins::kErrUnsupported;
+    return encoder_->encode_zero_copy(gpu, encoded_out);
+}
+
+plugins::Status HwCompositeCodec::decode_zero_copy(
+        const plugins::EncodedVideoFrame& encoded,
+        plugins::GpuBuffer& out_surface) noexcept {
+    if (!decoder_ || !decoder_->can_decode()) return plugins::kErrUnsupported;
+    return decoder_->decode_zero_copy(encoded, out_surface);
+}
+
 plugins::VideoCodecConfig HwCompositeCodec::config() const noexcept {
     // The encoder's configuration is the one that describes the outbound
     // stream, which is what a caller inspecting `config()` wants.
@@ -159,6 +173,17 @@ plugins::VideoCodecStats HwCompositeCodec::stats() const noexcept {
         out.bytes_encoded  = s.bytes_encoded;
         out.encode_errors  = s.encode_errors;
         out.frames_skipped += s.frames_skipped;
+        // The staged / zero-copy split is what tells a host *how* the
+        // picture reached the encoder.  A composite that dropped it
+        // would report "0 frames staged, 0 frames zero-copy" for every
+        // hardware session — which reads as "the encoder never ran".
+        out.frames_encoded_staged    = s.frames_encoded_staged;
+        out.frames_encoded_zero_copy = s.frames_encoded_zero_copy;
+        out.keyframes_encoded       = s.keyframes_encoded;
+        out.bytes_copied             = s.bytes_copied;
+        out.encode_latency_us_total  = s.encode_latency_us_total;
+        out.encode_latency_us_max    = s.encode_latency_us_max;
+
         // Remote-desktop plan B15: the telemetry fields travel with the
         // encoder's snapshot — they describe the *outbound* stream.
         out.backend_id             = s.backend_id;
@@ -185,6 +210,27 @@ std::uint8_t HwCompositeCodec::payload_type() const noexcept {
     if (encoder_) return encoder_->payload_type();
     if (decoder_) return decoder_->payload_type();
     return cfg_.payload_type != 0 ? cfg_.payload_type : std::uint8_t{102};
+}
+
+std::string_view HwCompositeCodec::backend_id() const noexcept {
+    // The encoder first, for the same reason `kind()` and `codec_name()`
+    // prefer it: the engine's codec telemetry describes the outbound
+    // stream.  A receive-only composite (encoder == nullptr) falls back
+    // to the decoder.
+    if (encoder_) return encoder_->backend_id();
+    if (decoder_) return decoder_->backend_id();
+    return "unknown";
+}
+
+bool HwCompositeCodec::is_hardware_accelerated() const noexcept {
+    // The *encoder* is the direction the engine's stats describe (and
+    // the direction §B.6's send-side budget is written against).  A
+    // composite with a hardware decoder and a software encoder is a
+    // software *send* path, and reporting it as accelerated would
+    // overstate what the machine is doing.
+    if (encoder_) return encoder_->is_hardware_accelerated();
+    if (decoder_) return decoder_->is_hardware_accelerated();
+    return false;
 }
 
 } // namespace nimrtc::nvcodec

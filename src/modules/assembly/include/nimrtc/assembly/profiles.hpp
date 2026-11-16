@@ -28,9 +28,15 @@
 //   relay-agent    — relay + AI-Agent hybrid: relay path no-3A, Agent side 3A on
 //   agent-gateway — server-side Agent media gateway with PCM tap surface
 //   agent-low-latency — Agent SDK's tightest-latency variant (20 ms JB)
+//   remote-desktop — remote-desktop scene: screen content + separate control stack
 //
 // v1.1 (v0.12.0): each kProfile* carries a `transport` section that
 // names the use-case strategy per `docs/plan/transport-strategies.md` §2.
+//
+// v1.2 (v1.4.0): each kProfile* may carry the four additive video-scene
+// keys (`video_codec_preference`, `video_resolution_floor`,
+// `video_ladder_mode`, `video_content_type`) per
+// `profiles/schema/profile-v1.2.json`.
 // =============================================================================
 
 #include <nimrtc/core/api_version.hpp>
@@ -108,6 +114,32 @@ inline TransportSection ts_cross_network_peer() {
     return t;
 }
 
+// Remote-desktop scene (v1.2): media on "webrtc-classic" (browser
+// interop on the operator side), control on a **separate** "raw-udp-arq"
+// stack with its own p99 budget, so a saturated video path cannot starve
+// the mouse / keyboard stream (RD-5 / G2).
+//
+// The declared strategy id is "agent-gateway" because that is the
+// canonical strategy whose requirements have exactly this shape
+// (browser interop + high-frequency control → media on webrtc-classic,
+// control on a separate raw-udp-arq stack — transport-strategies.md §2.3,
+// the Selector's §5.3 rule 1b).  The control-plane numbers are the
+// remote-desktop ones: 200 Hz input events, p99 ≤ 50 ms, and a 100 ms
+// TTL for the partial-reliable fallback.
+inline TransportSection ts_remote_desktop() {
+    TransportSection t;
+    t.strategy = "agent-gateway";
+    t.media.stack = "webrtc-classic";
+    t.media.max_p99_ms = 200;
+    t.control.enabled = true;
+    t.control.stack = "raw-udp-arq";
+    t.control.max_p99_ms = 50;
+    t.control.freq_hz = 200;
+    t.control.reliability = "reliable_ordered";
+    t.control.ttl_ms = 100;
+    return t;
+}
+
 inline TransportSection ts_sfu_agent() {
     // Composite: SFU media path = sfu-relay; Agent side control = raw-udp-arq.
     // The composite resolution is handled by the engine at open() time
@@ -174,6 +206,11 @@ inline const Profile kProfileCall = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,  // Opus
     .transport           = detail::ts_browser_call(200),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -224,7 +261,12 @@ inline const Profile kProfileLive = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
-    .transport           = detail::ts_browser_call(300),  // live = looser budget
+    .transport           = detail::ts_browser_call(300),  // live = looser budget,
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -264,6 +306,11 @@ inline const Profile kProfileTransport = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_sfu_relay(),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -315,6 +362,11 @@ inline const Profile kProfileAgent = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_agent_gateway(80),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -365,6 +417,11 @@ inline const Profile kProfileTeleop = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_teleop_ultra_low_latency(),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -410,6 +467,11 @@ inline const Profile kProfileRelay = Profile{
     .audio_channels      = 0,
     .audio_payload_type  = 0,
     .transport           = detail::ts_sfu_relay(),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -466,6 +528,11 @@ inline const Profile kProfileAgentGateway = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_agent_gateway(80),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -525,6 +592,11 @@ inline const Profile kProfileRelayAgent = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_sfu_agent(),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -583,38 +655,50 @@ inline const Profile kProfileAgentLowLatency = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
-    .transport           = detail::ts_agent_gateway(60),  // tighter than agent.json
+    .transport           = detail::ts_agent_gateway(60),  // tighter than agent.json,
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
-// kProfileRemoteDesktop — remote-desktop session (remote-desktop plan K3)
+// kProfileRemoteDesktop — remote-desktop scene (v1.2)
 // ---------------------------------------------------------------------------
 // Design notes (matches profiles/remote-desktop.json):
-//   - The transport strategy is `teleop-ultra-low-latency`: the media
-//     plane and the *control* plane (keyboard / mouse) are separate
-//     stacks with independent congestion control, so a saturated video
-//     path cannot starve the input events.  This is the plan's G2.
-//   - `datachannel_enabled = true`: the control plane rides the DataChannel
-//     until the side-stack is wired (the plan's G1).
-//   - `timeline_enabled = true`: the `ref_frame` binding ("what the operator
-//     saw when they clicked") is a product requirement, not a nicety.
-//   - The `video` section is the heart of the profile:
-//       * `codec_backend = "auto"` — hardware first (plan B2).  A
-//         software encode of a 4K desktop does not fit the CPU budget.
-//       * `codec_preference = ["av1", "h265", "h264"]` — the screen-content
-//         preference table (plan B8).  It is *configuration*, not a
-//         hard-coded branch.
-//       * `content_type = "screen"` — the encoder is told it is looking
-//         at screen content, not at a camera (plan B7).
-//       * `resolution_floor = [1280, 720]` — the ladder never crosses
-//         it (plan D2).  The floor is configuration because the right
-//         value depends on the machine class: 1080p on a
-//         hardware-encoding box, 720p on a software-only one.
-//       * `ladder_mode = "quality"` — screen content spends its budget
-//         on legibility, not on frame rate.
-//       * `color_range = "full"`, `color_matrix = "bt709"` — what a
-//         desktop compositor actually produces (plan C5).  Getting this
-//         wrong looks like "the codec is broken".
+//   - video_content_type = "screen": a screen capture is NOT "a camera
+//     with a huge resolution" — the content type selects the
+//     screen-coding tools and the content hint (ADR-022, RD-3).
+//   - video_codec_preference = "h264": the screen-content codec
+//     preference. A preference, not a requirement — the negotiated codec
+//     is the one both peers support (remote-desktop plan B8).
+//   - video_resolution_floor = "720p": the ladder never steps below
+//     720p. A remote-desktop user reads text; dropping to 480p destroys
+//     the product. The floor is per-scene configuration, not a
+//     hard-coded ladder constant (remote-desktop plan D2).
+//   - video_ladder_mode = "smoothness": smoothness-first adaptation —
+//     a late-but-fresh frame beats a sharp-but-stale one while the
+//     operator drags a window (video-pipeline-v2-plan §B.7.3 / OD-3(a)).
+//   - video_stream_weights: the declared per-stream bandwidth shares
+//     (remote-desktop plan D5). The screen gets 3, a camera thumbnail 1:
+//     the picture the operator reads must survive the link, the
+//     thumbnail need not. The declaration is a *starting* weight —
+//     NimRTCEngine::set_video_stream_weight() overrides it.
+//   - timeline_enabled = true: the input ↔ frame binding (G5) and the
+//     per-frame latency measurement (J1 / J5) need frame timestamps.
+//   - datachannel_enabled = true: out-of-band session data.
+//   - audio3a_name = "webrtc_apm": the operator may talk back and the
+//     remote machine's audio may come back, so AEC matters.
+//   - transport: media on "webrtc-classic" (browser interop on the
+//     operator side), control on a **separate** "raw-udp-arq" stack with
+//     its own p99 budget — a saturated video path cannot starve the
+//     mouse / keyboard stream (RD-5 / G2). The declared strategy id is
+//     "agent-gateway" because that is the canonical strategy whose
+//     requirements have exactly this shape (browser interop +
+//     high-frequency control → media on webrtc-classic, control on a
+//     separate raw-udp-arq stack; transport-strategies.md §2.3, the
+//     Selector's §5.3 rule 1b).
 // ---------------------------------------------------------------------------
 inline const Profile kProfileRemoteDesktop = Profile{
     .name                 = "remote-desktop",
@@ -631,7 +715,7 @@ inline const Profile kProfileRemoteDesktop = Profile{
     .scheduler            = {
         .enabled  = true,
         .strategy = SchedulerConfig::Strategy::kStrictPriority,
-        .control_weight     = 20,   // input events preempt the video stream
+        .control_weight     = 10,
         .audio_weight       = 8,
         .video_weight       = 4,
         .best_effort_weight = 1,
@@ -639,7 +723,7 @@ inline const Profile kProfileRemoteDesktop = Profile{
     .bwe = {
         .impl   = "aimd",
         .params = {
-            .initial_bitrate_bps = 4'000'000,
+            .initial_bitrate_bps = 2'000'000,
             .max_bitrate_bps     = 20'000'000,
         },
     },
@@ -653,7 +737,30 @@ inline const Profile kProfileRemoteDesktop = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
-    .transport           = detail::ts_teleop_ultra_low_latency(),
+    .transport           = detail::ts_remote_desktop(),
+    // v1.2 additive: video scene configuration.
+    .video_codec_preference = "h264",
+    .video_resolution_floor = "720p",
+    .video_ladder_mode      = "smoothness",
+    .video_content_type     = "screen",
+    // v1.2 additive: the declared per-stream bandwidth shares (plan D5).
+    // The screen is the picture the operator reads, so it gets the
+    // larger share; a camera thumbnail is a convenience and takes the
+    // smaller one.  A weight of 3 : 1 gives the screen three quarters
+    // of the elastic pool once the reserved audio has taken its share.
+    .video_stream_weights = {
+        {"default", 3},
+        {"camera",  1},
+    },
+    // v1.3 additive: the nested `video` block.  This is the *richer*
+    // spelling of the same scene: the codec **order** (AV1's screen
+    // tools first, then HEVC, then H.264), the backend policy, and the
+    // resolution floor in pixels (a 720p floor is the smallest picture
+    // in which text stays readable — plan D2).
+    //
+    // The colour description is the desktop one: a compositor delivers
+    // full-range BT.709, and coding it as limited-range BT.601 is what
+    // makes a "correct" stream look washed out (plan C5).
     .video = {
         .codec_name       = "",
         .codec_preference = {"av1", "h265", "h264"},

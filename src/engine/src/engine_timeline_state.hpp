@@ -129,6 +129,15 @@ struct TimelineState {
      *  belongs to, so a per-m-line table could not be consulted
      *  anyway. */
     std::unordered_map<std::uint8_t, std::uint32_t> remote_clock_rate_hz;
+
+    /** When the last outbound Sender Report went out (steady clock).
+     *
+     *  The engine emits an SR on the `EngineConfig::sr_period_ms`
+     *  cadence (RFC 3550 §6.4.1), so it needs to know when the last
+     *  one went out.  The timestamp is taken from the *packet's* send
+     *  instant, not from the moment the SR is emitted — see
+     *  `engine_timeline.cpp` for why the two must not be mixed. */
+    std::chrono::steady_clock::time_point sr_last_sent{};
 };
 
 }  // namespace nimrtc::engine::detail

@@ -7,15 +7,939 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Work that lands after `v1.1.0`.
->
-> The audio pipeline's development body lands here. Its work packages are
-> specified in `docs/plan/audio-pipeline-spec.md` and scheduled in
-> `docs/plan/audio-pipeline-dev-plan.md`; the ladder the owner fixed on
-> 2026-11-06 puts the whole audio body (WP-0 .. WP-11) into `v1.2.0`, so
-> nothing here is a feature release of the `v1.1` line.
+### Fixed
+
+- **The merge of the M1C platform capture layer onto the remote-desktop
+  branch.**  `origin/main` carried the M1C capture layer (Windows
+  Graphics Capture / DXGI Desktop Duplication, macOS ScreenCaptureKit,
+  Linux X11 + the XDG-desktop-portal PipeWire path) while this branch
+  carried the remote-desktop plan's M1–M4 work.  The two sides
+  implemented the *same* seams twice, so the merge had to pick one
+  implementation of each and reconcile the rest.
+
+  - **The capture seam keeps the M1C layer; the cursor layer keeps the
+    remote-desktop one.**  The M1C platform backends
+    (`windows_capture.hpp`, `unix_capture.hpp`) and the portable cursor
+    layer (`cursor_compositor.hpp` / `cursor_source.hpp`) are
+    complementary, not competing, so both stay.  The *older* duplicate
+    platform backends (`dxgi_desktop_dup.*`, `wgc_capture.*`,
+    `portal_capture.*`, `screen_capture_kit.*`, `x11_capture.*`,
+    `win_cursor_source.*`, `x11_cursor_source.*`) and the *duplicate*
+    cursor classes (`AlphaCursorCompositor`, `CursorState`) were dropped
+    — the M1C layer already provides them.
+
+  - **There is no capture → frame-stream adapter.**  The M1C layer
+    shipped a `CaptureSourceAdapter` between the capture device and the
+    frame stream; this branch's engine pump polls
+    `IVideoCapture::pop_frame()` and translates the frame inline, so the
+    adapter is redundant and was removed (`capture_source_adapter.hpp` /
+    `.cpp` and its test).  `IVideoCaptureFactory::create_source()` went
+    with it — the factory only creates *devices*.
+
+  - **The zero-copy decision is now explicit.**  `VideoSourceFrame` grew
+    `capture_surface_contract`: a capture device that negotiated a
+    zero-copy surface says so, and the engine then hands the surface to
+    the encoder **unconditionally** (there is no CPU copy to fall back
+    to).  A frame that merely carries a GPU handle — a host's own
+    surface — stays *opt-in*, governed by
+    `EngineConfig::video_zero_copy`, exactly as before.  Before this
+    distinction existed the two cases were indistinguishable, so a host
+    that turned the flag off still got the zero-copy path.
+
+  - **The GPU device token travels with the frame.**
+    `CaptureFrame` / `VideoSourceFrame` carry the device that owns the
+    surface, and `GpuHandle::device` is filled from it.  A surface is
+    meaningless without its device: NVENC registers the texture against
+    the device the session was opened with and refuses a texture from
+    another one.
+
+  - **A capture device that reports an error is closed before it is
+    reopened.**  `open()` on an already-open device is a no-op for most
+    backends, so the recovery used to be silently ineffective; the pump
+    now tears the device down and builds it up again.
+
+  - **The synthetic capture device advertises its dirty rectangles.**
+    The negotiated format said `has_dirty_rects = false` while the
+    frames carried the rectangles, so a consumer that trusted the
+    format would ignore metadata that was present and correct.
+
+  - **The public-header baseline moved from 189 to 190.**  The merge
+    added `video_capture/dirty_rect_diff.hpp` and
+    `core/gpu_device_registry.hpp` and removed
+    `video_capture/capture_source_adapter.hpp` — a net `+1`.
+
 
 ### Added
+
+- **The capture → encoder zero-copy seam (v1.3, remote-desktop plan
+  B10 / M1).**  The two halves of the zero-copy claim were each proven
+  on their own — the capture device delivers a GPU surface with
+  `bytes_copied == 0`, and NVENC consumes a registered DirectX surface
+  — but the *seam* between them was not.  And the seam is not "hand
+  the texture across": NVENC registers the DirectX input surface per
+  encode session, and the driver accepts the registration **only if the
+  texture was created on the same `ID3D11Device` the session was opened
+  with**.  A texture from a different device — even on the same
+  physical adapter — is refused with `NV_ENC_ERR_RESOURCE_REGISTER_FAILED`
+  (status 9).  So the seam is "**share the device** and hand the
+  texture across", and that is what landed.
+
+    - `video_frame::GpuContext` — a portable, refcounted *device* handle
+      (`backend` / `device` / `immediate` / `keepalive`), so a producer
+      can publish the device its surfaces live on without either side
+      including a platform header.  `plugins::` re-exports it, so
+      plug-in code stays in one namespace.
+    - `plugins::IVideoCapture` grew three **additive** virtuals:
+      `set_gpu_frame_callback()`, `gpu_context()` and
+      `supports_gpu_frames()`.  All three have default implementations,
+      so an existing capture plug-in compiles and runs unchanged; a
+      plug-in that does not implement them simply never delivers a
+      surface, and the engine falls back to the CPU path.
+    - `plugins::GpuCaptureFrame` carries a refcounted
+      `std::shared_ptr<video_frame::GpuBuffer>` plus the dirty
+      rectangles, the timestamps and the colour description (plan C5).
+      A *borrowed* handle would die with the next `pop_frame()`, which
+      is the wrong shape for a consumer that holds the surface across
+      its own async work.
+    - `plugins::VideoCodecConfig` gained `gpu_context`, and the engine
+      fills it from the capture device **before** the codec is opened —
+      the encode session has to live on the capture's device, so the
+      device has to be known before `open()`.
+    - The Windows DXGI / WGC backends publish their D3D11 device, and
+      their texture pool now tracks the **busy** slots (the
+      `weak_ptr` of the buffer it handed out) so a texture nobody has
+      released is never overwritten.
+    - `src/engine/src/engine_gpu_mailbox.hpp` — `detail::GpuFrameMailbox`,
+      a single-slot drop-oldest exchange.  The capture device delivers
+      on **its own thread**; the mailbox is the boundary that keeps the
+      codec on the **tick thread** (RD-6).  The newest frame is the
+      truth, so the stale one is dropped.
+    - The **engine** wires the seam together, in `init_video_plugins()`:
+      it attaches the capture device's GPU callback to the mailbox,
+      publishes the capture's `GpuContext` into
+      `VideoCodecConfig::gpu_context` **before** the codec is created
+      (the encode session has to live on the capture's device, so the
+      device has to be known before `open()`), and reports the seam's
+      counters in the stats snapshot.  On teardown the mailbox is
+      cleared **before** the capture device is closed, so a pending
+      frame never holds a texture that belongs to a device that is
+      going away.
+    - The NVENC encoder **adopts** the capture's device instead of
+      creating its own, verifies that the texture it was handed lives
+      on that device, and accepts the BGRA input the desktop compositor
+      produces natively (`DXGI_FORMAT_B8G8R8A8_UNORM` declared as
+      `NV_ENC_BUFFER_FORMAT_ARGB`) — no shader / VideoProcessor
+      conversion pass in between.
+    - `Stats::video_capture_gpu_frames` / `video_capture_gpu_errors` /
+      `video_capture_gpu_wired` expose the seam's own counters, so a
+      host can see the GPU path running (or not) rather than infer it.
+    - `tests/test_engine_capture_zero_copy.cpp` drives the **engine**
+      (not the two modules) and proves the four facts together: the
+      wiring happens, the codec receives the *capture's* device, the
+      surface reaches the encoder with `video_capture_bytes_copied == 0`
+      and `video_capture_frames_cpu_staged == 0`, and the codec is
+      called **only** from the tick thread.
+    - `tests/bench/bench_zc_seam.cpp` measures the driver-level seam on
+      real hardware: on the reference host NVENC accepts an NV12 and a
+      BGRA surface created on the session's own device and **refuses**
+      one created on another device (status 9) — which is exactly the
+      constraint the shared-device design exists to satisfy.
+
+- **The RTP packet builder moved into the engine (v1.4, ADR-025
+  Decision 4).**  The engine is exempt from Layout Invariant 4 for
+  `sdp::` and `rtp::` — but the exemption now has a *visible boundary*:
+  the outbound RTP packets are built in exactly one file,
+  `src/engine/src/rtp_packetizer.cpp`, and
+  `tools/check_engine_layering.py` enforces it at the symbol level
+  (`rtp::PacketBuilder` may only be named there).
+
+- **The session limits and the administrative kill switch (v1.4,
+  remote-desktop plan I6).**  The reference signalling service had no
+  bounds at all: every device that presented a pairing code got a
+  session, every session lived until the peer disconnected, and there was
+  no way for an operator to stop a session they did not want.  A service
+  that is shipped as the *reference implementation* is also the thing a
+  reader copies, so the bounds belong here.
+
+    - `examples/remote-desktop/signalling_core.py` gained the two
+      dataclasses `SessionLimits` (`max_concurrent_sessions`,
+      `max_concurrent_rooms`, `session_lifetime_s`, `idle_timeout_s`) and
+      `SessionPolicy` (`check_join`, `check_room_budget`,
+      `session_expired`, `engage_kill_switch`, `release_kill_switch`),
+      and `SignallingService` now enforces them: the join is refused
+      when the concurrency cap or the room budget is exhausted, the
+      session ends when its lifetime or its idle timeout expires, and
+      the kill switch pauses *new* joins without tearing down the live
+      ones — an administrative pause, not a disconnect.
+    - A session is **room-scoped**: the device and the viewer that join
+      the same room attach to the *same* session record, so a pair costs
+      one slot and a re-join with existing credentials does not consume a
+      second one.
+    - `examples/remote-desktop/signalling.py` runs a background reaper
+      that enforces the timeouts, and the server takes
+      `--max-sessions`, `--max-rooms`, `--session-lifetime` and
+      `--idle-timeout` on the command line.
+    - The idle timeout is driven by **real activity**: the media-plane
+      relay touches the session, so a session that is only relaying
+      frames stays alive and one that has gone quiet is reaped.
+    - Covered by `examples/remote-desktop/test_signalling.py`: the cap,
+      the slot release on disconnect, the re-join without a new budget,
+      the kill switch, the idle timeout, the hard session lifetime, the
+      room budget and the parameter validation.
+
+- **The capture / encode benchmark now measures the *real* platform
+  backends (v1.4, remote-desktop plan M1 / J5).**  The committed
+  artifact measured the portable synthetic capture device and the
+  encoder, but the plan's exit criterion asks for the *capture rate* of
+  the platform backends and for *evidence* that the GPU path is really
+  zero-copy.  Neither was measured, so the claim rested on the code
+  reading well.
+
+    - `tests/bench/bench_capture_encode.cpp` gained two measurements.
+      **The platform throughput** opens the real DXGI Desktop
+      Duplication and WGC devices, drives them through the
+      `IVideoCapture` seam, and reports the delivery rate over a
+      two-second window.  **The zero-copy probe** attaches a GPU
+      consumer exactly as a hardware encoder would and reads the
+      device's own counters, so the two can be cross-checked against
+      each other rather than against a claim.
+    - **Both backends deliver a frame only when the desktop *changes*.**
+      That is the point of a dirty-rect capture path, but it means a
+      rate cannot be measured on a static desktop.  The benchmark
+      therefore jiggles the mouse pointer during the window (restoring
+      the pointer's original position afterwards) and reads the
+      device's `frames_captured` counter across it.  A backend that
+      still delivers nothing is recorded as a *static-desktop
+      observation*, not as a zero-fps backend — the artifact never
+      claims a number it did not measure.
+    - **The measured result on the CI reference machine** (committed to
+      [`docs/benchmarks/capture_encode_windows_x86_64.json`](docs/benchmarks/capture_encode_windows_x86_64.json)):
+      at 1920×1080, **DXGI 64.2 fps (31.0 fps per megapixel)** and **WGC
+      49.8 fps (24.0 fps per megapixel)**; the zero-copy probe shows
+      **60 / 60 GPU frames with `bytes_copied == 0` for DXGI** and
+      **61 / 61 for WGC** — the pixels never entered host memory.
+    - `tools/benchmark_capture_encode.py` grew a `--platform-only` mode
+      that merges the platform sections into an existing artifact
+      instead of rewriting it, so a machine with real capture backends
+      but no hardware encoder SDK can contribute its evidence without
+      discarding the encode numbers another machine produced.  The
+      merged artifact records the contributing machine under
+      `platform_capture_machine`.
+    - Verified: full build clean, `ctest` **1966 / 1966 passing**, and the
+      signalling example's own suite **94 / 94 checks** passing.
+
+- **The QoE collector seam and the engine's QoE wiring (v1.4, remote-desktop
+  plan J3 / J6).**  The `rd_qoe` module shipped the *metrics* but nothing in
+  the product ever *fed* them: the engine's `Stats` carried the per-stream
+  counters and the per-stage timings, not the experience metrics, and the
+  input-to-photon latency — the number that actually decides whether a
+  remote-desktop session feels responsive — was not measured at all.  That
+  is the dead-module state the architecture-remediation plan D2 calls out:
+  a complete implementation with a full test suite that nothing calls.
+
+  The fix follows the shape every other pluggable family already uses: the
+  *contract* is a seam, the *implementation* is a module, and the engine
+  only ever talks to the seam.
+
+    - **New public API** (all `NIMRTC_API_STABLE`, all **additive**):
+      `src/plugins/include/nimrtc/plugins/qoe_collector.hpp` declares
+      `plugins::IQoeCollector` (the event sink + snapshot out),
+      `plugins::IQoeCollectorFactory`, `plugins::QoeConfig` (the reservoir
+      sizes — the collector's memory bound) and `plugins::QoeSnapshot` (the
+      flat value type the engine publishes).
+    - **The registry slot** `core::PluginRegistry::register_qoe_collector()`
+      / `get_qoe_collector()` / `list_qoe_collectors()`, the registrar
+      category, and the `NIMRTC_REGISTER_QOE_COLLECTOR` macro — the same
+      pattern as the control channel, the bitrate controller and the
+      capture device.
+    - **The module side**: `src/modules/rd_qoe/src/qoe_plugin.cpp` adapts
+      the existing `rd_qoe::QoeCollector` to the seam and registers under
+      the id `"rd-qoe"`.
+    - **The engine side**: `EngineConfig::qoe_collector_name` selects the
+      collector (empty = no QoE metrics; an **unknown id is a hard error**
+      at `open()` — the engine never falls back silently).
+      `NimRTCEngine::Stats` gained a `plugins::QoeSnapshot qoe` field.
+      The engine pushes the events it already knows about — a frame
+      reached the viewer, a frame was dropped, an input event went out —
+      and reads the aggregate back.
+    - **New public API** (all `NIMRTC_API_STABLE`):
+      `NimRTCEngine::send_input_event(payload, event_id)` sends an input
+      event over the control plane **and** stamps it for the
+      input-to-photon measurement.  The event is stamped only when the
+      control channel *accepted* it: a refused event never reached the
+      peer, so there is no honest latency to report for it.
+    - **The pairing** (J6): the engine pairs an event with the first
+      presented frame whose ref-frame id is **strictly greater** than the
+      event's — the operator acted on the frame they were looking at, so
+      the frame that reflects the action is a later frame in the same id
+      space.  An event that was *not* bound to a frame (id 0) pairs with
+      the next presented frame outright.
+    - **Honesty about what was measured**: without a collector the engine
+      still publishes the **frame counters** — the presented and dropped
+      frame counts, which it keeps anyway — and zeroes for the *metrics*,
+      which is the honest answer to "what was the latency percentile?"
+      when nothing measured it.
+    - New tests: `tests/test_engine_qoe.cpp` (8 cases — the registry
+      resolution, the presented-frame counting, the negative control that
+      proves the engine really feeds the collector, the unknown-id
+      configuration error, the input-to-photon measurement over the DTLS
+      app-data seam, the unbound-event pairing, the refused-event
+      exclusion and the empty-payload rejection) and
+      `src/modules/rd_qoe/tests/test_qoe_plugin.cpp` (the module-side
+      adapter).
+    - `tools/check_dead_modules.py`'s `PENDING_WIRING` list is now
+      **empty**: both `rd_input` and `rd_qoe` are reachable from the
+      composition root, so neither needs a waiver.
+
+
+- **The multi-stream video plane (v1.4, remote-desktop plan H1 / H2 / H4).**
+  The engine held exactly **one** of each video plugin
+  (`video_source_ / video_sink_ / video_receiver_ / video_sender_ /
+  video_codec_`) plus a single `video_sender_tuning.ssrc`, so a
+  remote-desktop product could not carry a screen stream *and* a camera
+  stream (or a thumbnail) in one session.  The video plane is now a
+  **stream set** keyed by a stable stream id.
+  - **New public API** (all `NIMRTC_API_STABLE`, all **additive** — the
+    single-stream call sites keep working unchanged, ADR-015 Decision 2):
+    `send_video(stream_id, frame)`, `set_video_source(stream_id, name)`,
+    `set_video_sink(stream_id, name)`, `set_video_codec(stream_id, name)`,
+    `add_video_stream(stream_id, codec_name = {})`,
+    `remove_video_stream(stream_id)` and `video_stream_ids()`.
+  - **The legacy single-stream path is the stream named `"default"`.**
+    It keeps the engine's own plugin members, and
+    `send_video("default", frame)` delegates to the very function
+    `send_video(frame)` calls — so the two paths cannot drift.
+  - **The stream id is a `std::string`** (`"default"`, `"screen"`,
+    `"camera"`, …), not an integer: it has to survive a
+    reconfiguration, be readable back from a host's configuration file,
+    and mean something to a human reading a log line.  It is mapped to
+    an SSRC and a payload type at creation time by a deterministic
+    FNV-1a hash with linear-probe collision resolution, so the *same*
+    id always maps to the *same* wire identity.
+  - **Each stream owns its own encoder, sender, receiver, decoder and
+    sink** (plan H2), resolved through the registry by id, each with its
+    own RTP packet callback (its own SSRC, its own payload type, its own
+    SRTP session).  Two streams may use different codecs in the same
+    session; a codec-family change rebuilds the stream's packetizer
+    (the packetizer is codec-aware) without changing the stream's
+    identity on the wire.
+  - **Per-stream statistics** (plan H4): `NimRTCEngine::Stats` gained
+    `std::vector<VideoStreamStats> video_streams`, one entry per
+    **active** stream (the default one included), each with its own
+    bitrate, ladder level, keyframe rate, backend id and frame / packet
+    counts.  The flat `Stats::video_*` fields are unchanged and still
+    describe the **default** stream.
+  - **D5 (per-stream bandwidth shares) now feeds the multi-stream
+    case**: `update_pacing_rates()` builds one reserved audio demand
+    plus **one elastic demand per active video stream**, so
+    `allocate_bandwidth()` splits the estimate between the streams; the
+    video *class* rate the pacer uses is the sum of the streams'
+    targets, and each stream's own share is written back to its state so
+    the pacer, the per-stream rate controller and the statistics all
+    read the same number.
+  - **H3 (simulcast) is deferred** and deliberately *not* implemented.
+    The model leaves the room for it (the per-stream state separates the
+    stream's *source* identity from its *encoding* list), and the
+    thumbnail case is served by an independent low-resolution capture —
+    i.e. a second stream.  See `docs/plan/remote-desktop-plan.md`
+    §Track H and Track X's X-2 row.
+  - New test: `tests/test_engine_multi_stream.cpp` (13 cases —
+    independent SSRCs and payload types, a stable id→SSRC mapping
+    across a reconfiguration, concurrent multi-stream flow, per-stream
+    codec instances, the per-stream statistics, the removal semantics,
+    and the unchanged legacy single-stream path and counters).
+
+- **The Apple VideoToolbox backend is real now, and the HEVC / AV1 tables
+  carry the non-NVIDIA rows (v1.4, remote-desktop plan B5a / B5 / B6).**
+  The H.264 table had exactly one hardware encoder per non-Apple
+  platform, and the HEVC and AV1 tables carried *only* the NVIDIA rows —
+  so a Mac had no hardware codec at all and a Linux / Windows host had no
+  way to say "this combination is unsupported".
+  - The shared `nvcodec` module gained the VideoToolbox integration:
+    `src/modules/nvcodec/src/videotoolbox_encoder.cpp` and
+    `videotoolbox_decoder.cpp`, written against `VTCompressionSession` /
+    `VTDecompressionSession` and `CVPixelBuffer`, and exposed through the
+    new public header `nimrtc/nvcodec/vt_backends.hpp`
+    (`vt_encoder_available()` / `make_vt_encoder()` /
+    `vt_decoder_available()` / `make_vt_decoder()` /
+    `vt_encoder_unavailable_reason()` / `vt_decoder_unavailable_reason()`,
+    all `NIMRTC_API_STABLE`).  The session code is **codec-parameterised**:
+    one code path serves H.264, HEVC and AV1, differing only in the
+    `CMVideoCodecType`.
+  - The availability probe is *honest*: it creates and tears down a real
+    compression session, so it answers for the **silicon**, not for the OS
+    version — and behind an explicit OS-version floor (macOS 10.9+ for
+    H.264, macOS 10.13+ for HEVC, macOS 14+ for AV1) whose violation is
+    reported as the reason rather than as an opaque `OSStatus`.  Note that
+    VideoToolbox exposes AV1 **decode** on M3-and-newer silicon but no
+    Apple chip has an AV1 hardware **encoder**, so the AV1 encoder row
+    reports "not available" on every current Mac.
+  - The zero-copy contract is `CVPixelBuffer` in → `CVPixelBuffer` out
+    (`plugins::GpuBackend::kAppleCFPixelBuffer`), and the rows set
+    `zero_copy_supported == true` — which is what plan B10 needs.
+  - The H.264, H.265 and AV1 tables each register a `videotoolbox_*` row
+    at **priority 400** (NVENC 450 > NVDEC 430 > MediaCodec 420 >
+    VideoToolbox 400 > AMF 380 > VA-API 360 > Quick Sync 340 > the
+    software rows 50 / 0), on *every* platform — the seam id and the
+    `HwBackend::VideoToolbox` kind stay stable across the tree, and the
+    probe is what decides usability.
+  - The HEVC table gained the VA-API, Quick Sync, AMF, VideoToolbox and
+    MediaCodec rows; the AV1 table gained the AMF, VA-API, MediaCodec and
+    VideoToolbox rows.  Each is registered unconditionally and reports
+    `available() == false` **with a non-empty reason** when the hardware,
+    the platform SDK or the implementation is absent — the plan's
+    "unsupported combinations are explicitly reported, not silently
+    ignored".
+  - The backend descriptor gained the optional
+    `unavailable_reason` field
+    (`std::function<std::string(const VideoCodecConfig&)>`) on both
+    `plugins::VideoEncoderBackend` and `plugins::VideoDecoderBackend`.
+  - New tests: `src/modules/h265/tests/test_hw_backends.cpp` and
+    `src/modules/av1/tests/test_hw_backends.cpp` (the whole table: the
+    row exists, the priority is defined, an unavailable row explains
+    itself, the priority ladder is ordered, and an unsatisfiable
+    *hardware* preference fails explicitly rather than falling back to
+    software), `src/modules/nvcodec/tests/test_vt_common.cpp` (the
+    platform-independent VideoToolbox plumbing: the AV1 low-overhead OBU
+    ↔ Annex-B conversion, the AVCC → Annex-B conversion, the Annex-B
+    scanner and the OS-version gate), and new cases in
+    `src/modules/h264/tests/test_hw_backends.cpp` for the VideoToolbox row.
+
+- **The video rate controller and its ladder (v1.4, remote-desktop plan D1 /
+  D2 / D3 / D4).**  The video path had no adaptation ladder at all: the
+  encoder's bitrate was written **once** at `open()` and never moved,
+  so a link that collapsed kept sending at the rate the session started
+  with.  The remote-desktop product needs the opposite — a picture that
+  keeps moving — and the plan forbids growing a *second* rate controller
+  (RD-9), so the video plan's ladder was finished and made reachable.
+  - A new plugin seam, `src/plugins/include/nimrtc/plugins/video_bitrate_controller.hpp`
+    (`NIMRTC_API_STABLE`): `IVideoBitrateController`
+    (`set_config()` / `config()`, `on_bandwidth_estimate()`,
+    `on_measured_bitrate()`, `on_keyframe_requested()`,
+    `current_level()`, `stats()`, `set_level()`), the
+    `IVideoBitrateControllerFactory`, `VideoLadderLevel`,
+    `VideoBitrateControllerConfig`, `VideoBitrateControllerStats` and the
+    `VideoLadderMode` enum (`kQuality` / `kSmoothness` — which end of the
+    ladder the controller gives up first, plan D2).
+  - The registry gains a **video-bitrate-controller slot**
+    (`register_video_bitrate_controller()` / `get_video_bitrate_controller()`)
+    and the macro `NIMRTC_REGISTER_VIDEO_BITRATE_CONTROLLER(id, factory_ptr)`.
+    The engine never names a concrete module (ADR-025 Layout Invariant 4);
+    it resolves the controller through the slot.
+  - The new module `src/modules/video_bitrate_control/` holds the built-in
+    implementation — `BitrateController`, the `Ladder` (an ordered list of
+    (width, height, fps, bitrate) levels with a default ladder and a
+    resolution floor) and the factory, which registers under the id
+    `"video-bitrate-control"`.  It is built by default
+    (`NIMRTC_MODULE_VIDEO_BITRATE_CONTROL`, default ON) and installs as
+    `nimrtc_video_bitrate_control` / `nimrtc::video_bitrate_control`.
+  - The engine's surface grows accordingly: `EngineConfig::video_bitrate_controller_name`
+    (empty = no controller, the pre-D4 behaviour),
+    `EngineConfig::video_ladder_mode`,
+    `EngineConfig::video_resolution_floor_height` and
+    `EngineConfig::video_start_bitrate_bps`, plus the
+    `NimRTCEngine::video_bitrate_controller()` accessor, so a host can
+    *drive* the controller (feed it its own bandwidth estimate, or
+    override the level) rather than only observe it.
+  - **The controller's target bitrate now reaches the encoder** (plan D4).
+    The engine reads the controller's current level on every frame and
+    pushes it into the encoder's parameter set, so a bandwidth change
+    moves the *codec's* configured bitrate — not only the pacer rate.
+  - A **resolution floor** is honoured: the ladder never steps below the
+    configured floor, because a remote-desktop user reads text and a
+    floor the machine cannot sustain is a floor the ladder breaks
+    anyway — so it is per-scene configuration (D2), not a hard-coded
+    ladder constant.
+  - Covered by `src/modules/video_bitrate_control/tests/test_video_bitrate_control.cpp`
+    and `tests/test_engine_video_bitrate_control.cpp`.
+
+- **The audio device seams and the PortAudio-backed device module (v1.4,
+  remote-desktop plan F1 / F2).**  The engine had a PCM contract
+  (`send_audio()` / `on_audio_frame()`) but no *device* seam, so a host
+  could not plug in a sound card without touching the engine, and
+  Windows / macOS / Linux each wanted their own backend implementation.
+  - Two new plugin seams, `src/plugins/include/nimrtc/plugins/audio_source.hpp`
+    and `audio_sink.hpp` (`NIMRTC_API_STABLE`): `IAudioSource` /
+    `IAudioSourceFactory` and `IAudioSink` / `IAudioSinkFactory`.  They
+    carry the device-format negotiation, the device enumeration and the
+    capability query; the engine's existing PCM contract is unchanged.
+  - `plugins::IAudioSink` gains two **additive** methods,
+    `queued_frames()` and `last_playback_us()` (plan F3).  Both have a
+    default implementation returning 0, so a third-party sink compiles
+    unchanged.  They exist because a host that drives the AEC reference
+    must know how far behind the loudspeaker is: a large backlog means
+    the reference the 3A sees is stale by that much.
+  - The new module `src/modules/audio_device/` holds the implementation:
+    the shared bounded `AudioRingBuffer`, the **PortAudio** backend
+    (MIT, cross-platform — WASAPI / MME / DirectSound on Windows, Core
+    Audio on macOS, ALSA / PulseAudio on Linux), the synthetic device
+    (so the module's tests run on a CI machine with no sound card), the
+    device-enumeration surface and the hot-unplug / device-loss path.
+    PortAudio is the module's **only** platform dependency (RD-10); the
+    rest of the module is portable.
+  - New public headers in the module: `nimrtc/audio_device/audio_device.hpp`
+    (`portaudio_available()`, `portaudio_version()`,
+    `portaudio_host_apis()`, `PortAudioSourceFactory`,
+    `PortAudioSinkFactory`, `SyntheticSourceFactory`,
+    `SyntheticSinkFactory`, and the `source_factory(id)` /
+    `sink_factory(id)` resolvers), `nimrtc/audio_device/ring_buffer.hpp`
+    (`AudioRingBuffer`), `nimrtc/audio_device/synthetic_device.hpp`,
+    `nimrtc/audio_device/resampler.hpp` (the explicit sample-rate
+    converter, plan F5), `nimrtc/audio_device/playback_progress.hpp`
+    (`PlaybackProgressTracker`, `PlaybackProgressStats`) and
+    `nimrtc/audio_device/aec_delay.hpp` (`AecDelayConfig`,
+    `AecDelayEstimator`, `AecDelayMonitor`, `IAecDelaySink`,
+    `IAecDelaySource`).
+  - The **resampler** (plan F5) is `libsamplerate` (BSD-2-Clause),
+    vendored under `src/third_party/libsamplerate/`; new switch
+    `NIMRTC_VENDORED_LIBSAMPLERATE` (default ON).  There is **no system
+    fallback** (AGENTS.md L5): with the vendored build off, the module
+    falls back to its own pure-C++ linear interpolation, which is *not*
+    band-limited — the fallback is visible through
+    `nimrtc::audio_device::resampler_backend()`, so a host can say so in
+    its own UI rather than the conversion being silent.
+  - The module is built by default (`NIMRTC_MODULE_AUDIO_DEVICE`, default
+    ON) and installs as `nimrtc_audio_device` /
+    `nimrtc::audio_device`.  The engine wiring — reporting the played-out
+    samples to the 3A — is plan F3 and is a separate, engine-level item.
+
+- **The platform capture backends (v1.4, remote-desktop plan A3 / A4 /
+  A5).**  The capture seam existed, but every platform said "unsupported":
+  a host could not actually share a screen on any operating system.
+  - **Windows**: two adapters over the portable capture layer.
+    **DXGI Desktop Duplication** (`"windows-dxgi"`) captures a display —
+    the cheapest path, no compositor round-trip, and it reports the
+    changed region natively through `GetFrameDirtyRects` /
+    `GetFrameMoveRects` (though it does **not** composite the pointer).
+    **Windows Graphics Capture** (`"windows-wgc"`) captures a display or
+    a *window*, composites the cursor into the frame, and reports **no**
+    dirty rectangles.  Both produce a `video_frame::GpuBuffer` whose
+    handle is an `ID3D11Texture2D` in `B8G8R8A8_UNORM` (BGRA), the
+    format every desktop compositor produces natively.
+  - **macOS**: **ScreenCaptureKit** (`"macos-screencapturekit"`),
+    capture of a display or a window, BGRA, cursor composited.  A
+    screen-recording permission denial is reported as a clean error, not
+    a crash — the Unix capture core has its own error vocabulary
+    (`UnixCaptureError::kPermissionDenied`, `kDeviceNotFound`,
+    `kUnsupportedFormat`, `kCaptureFailed`, `kDeviceLost`,
+    `kDisplayUnavailable`, `kPortalUnavailable`), because a host that
+    gets "permission denied" must ask the user, while a host that gets
+    "device lost" must re-open the device.
+  - **Linux**: the **Wayland** path through the XDG Desktop Portal +
+    **PipeWire** (`"linux-pipewire"`) and the **X11** fallback
+    (`"linux-x11"`, `XGetImage`).  Both are *optional* build
+    dependencies: when the development packages are missing, the
+    adapter is not compiled and a host that names it gets a clean
+    "unsupported" rather than a link error.  Global source enumeration is
+    a **portal limitation**, not an engine bug, and the module says so.
+  - The **portable** half — the bounded queue, the dirty-rect model, the
+    format negotiation, the portable pixel-diff and region crop — is
+    compiled and unit-tested on **every** platform, including the
+    Windows leg where the macOS and Linux adapters cannot be compiled at
+    all.  That is why the mechanism the adapters delegate to is tested
+    everywhere.
+  - New public header `nimrtc/video_capture/unix_capture_core.hpp`
+    (the platform-neutral capture core and the error vocabulary) and
+    `nimrtc/video_capture/unix_capture.hpp` (the portable device base
+    class and the three Unix factories).  Covered by
+    `src/modules/video_capture/tests/test_unix_capture_core.cpp`,
+    `test_windows_capture.cpp` and `test_video_capture.cpp`.
+
+- **The signalling guide and the reference signalling service (v1.4,
+  remote-desktop plan I1 / I2).**  The engine ships a signalling *seam*,
+  not a signalling server (RD-7), and nothing described the exchange a
+  host actually has to implement.
+  - The new guide
+    [`docs/guides/remote-desktop.md`](docs/guides/remote-desktop.md) is
+    the **canonical description** of the exchange: offer / answer, ICE
+    candidate trickle in both directions, ICE restart, TURN credential
+    refresh and the reconnect path, together with the exact engine
+    surface each step uses.  A reader can write a signalling service
+    from the guide alone.
+  - The new directory `examples/remote-desktop/` is the guide's
+    **executable form**: `signalling.py` (the asyncio WebSocket server),
+    `signalling_core.py` (the pairing store, the TURN credential issuer
+    and the message router — no I/O), `wsproto.py` (a hand-rolled
+    RFC 6455 WebSocket layer, **standard library only**), `client.py`
+    (the example device / viewer client) and `test_signalling.py` (the
+    self-running test).  It stays in `examples/`, not in `src/` (RD-7),
+    and it is a **reference implementation, not a production server**.
+
+- **The `remote-desktop` profile and the profile schema v1.2 (v1.4,
+  remote-desktop plan K3 / K4).**  The profile was the one place that
+  described a *scene*, and there was no scene for a remote desktop.
+  - The new profile `profiles/remote-desktop.json` describes it: the
+    screen-content codec preference, the resolution floor, the ladder
+    mode, the transport strategy, the timeline on, the DataChannel on
+    and the 3A choice.
+  - The new schema `profiles/schema/profile-v1.2.json` adds the four
+    optional top-level keys `video_codec_preference`,
+    `video_resolution_floor`, `video_ladder_mode` and
+    `video_content_type`.  It is **strictly additive** on v1.1: every
+    v1.1 profile loads unchanged, and a key that is absent leaves the
+    engine default in place (`"h264"`, `"720p"`, `"quality"`,
+    `"camera"`).
+  - The C++ loader reads them into four new `assembly::Profile` fields
+    with the same names, and `assembly::ProfileRegistry` gains the
+    `remote-desktop` scene constant.  Covered by
+    `src/modules/assembly/tests/test_profile_schema.cpp` and the
+    byte-for-byte profile round-trip in `test_assembly.cpp`.
+
+- **The encoder / decoder split seam (v1.4, remote-desktop plan B1).**
+  One `IVideoCodec` instance owned the encoder state *and* the decoder
+  state, so a host that only ever encoded still had to instantiate a
+  decoder (and the mirror image), and neither half could be swapped for
+  a different implementation.
+  - `src/plugins/include/nimrtc/plugins/video_codec.hpp` now declares
+    `IVideoEncoder` and `IVideoDecoder` as two separate seams, each with
+    its **capability query** (`capabilities()` — supported profiles,
+    resolutions, pixel formats, fps, maximum bitrate, zero-copy), plus
+    `IVideoEncoderFactory` and `IVideoDecoderFactory` for a plug-in
+    that implements only one direction.  The zero-copy contract
+    (`encode_zero_copy()` / `decode_zero_copy()`, the `GpuBuffer` pool)
+    and the incremental-encode request
+    (`set_incremental_request()`) live on the split seams.
+  - **`IVideoCodec` stays** as a deprecated compatibility shim for one
+    MINOR cycle (ADR-015 Decision 3): it now *derives* from
+    `IVideoEncoder` and `IVideoDecoder`, so existing code that consumes
+    it keeps compiling, and the engine still resolves the combined
+    factory — the split is an addition, not a migration.
+  - The engine now **rejects an unsupported geometry at `open()`** with
+    the distinct error code `core::kVideoCodecUnsupported` and a message
+    that names the requested and the maximum resolution, instead of
+    failing at the first frame.  Covered by
+    `tests/test_engine_video_codec_split.cpp`.
+
+- **The encoder-parameter authority, the resolution-change restart and the
+  content hint (v1.4, remote-desktop plan B12 / B13 / B7 / C5).**  The
+  encoder's parameters were scattered — some in `EngineConfig`, some in
+  the codec's own `open()` config, some implicit in whatever the capture
+  device happened to produce — so two of them could disagree, and the
+  disagreement only showed up as a picture that was subtly wrong.
+  - The new `plugins::VideoEncoderParams` struct (`NIMRTC_API_STABLE`)
+    is the **complete** description of what the encoder should be
+    producing right now: `width`, `height`, `fps`, `bitrate_bps`,
+    `keyframe_interval`, `qp`, `pixel_format`, the nested
+    `ContentHint` enum (`kUnspecified` / `kMotion` / `kDetail` /
+    `kText`) and the `VideoColorDescription` `color`.
+  - The **capability query** lives beside it in
+    `plugins::VideoCodecCapabilities` (`NIMRTC_API_STABLE`): the accepted
+    `pixel_formats`, the supported `profiles`, the `max_width` /
+    `max_height` / `min_width` / `min_height` bounds, `max_fps`,
+    `max_bitrate_bps`, the `zero_copy_encode` / `zero_copy_decode`
+    flags and the `accepts_size()` predicate.  A dimension of 0 means
+    "unconstrained" in the request and "no limit" in the capability, so
+    the two are not confused.
+  - The **resolution floor** and the **keyframe-cost budget** are
+    *controller* knobs, not encoder knobs: they live in
+    `plugins::VideoBitrateControllerConfig` (`min_height` and
+    `keyframe_cost_bps`), and they reach the encoder only through the
+    parameter set the controller's level implies.
+  - The engine computes the set in **one** place
+    (`src/engine/src/engine_video_params.hpp`) and pushes it through
+    `set_params()`.  The encoder is **passive**: it has no access to the
+    bandwidth estimator, to the rate controller or to the feedback
+    stream, and it never derives a parameter from a neighbouring field.
+  - A **resolution change is a parameter-set change** (plan B13): the
+    new SPS / PPS (or VPS, or the AV1 sequence header) must travel with
+    the new frame, so the peer decodes without a PLI round-trip.  The
+    encoder must restart and emit the parameter sets with the next frame.
+  - Covered by `src/modules/video_pipeline/tests/` and the engine tests.
+
+- **The `video_bitrate_controller` seam and the `video_capture` seam are
+  registered through the registry's typed slots.**  The registration
+  macros `NIMRTC_REGISTER_VIDEO_CAPTURE(id, factory_ptr)`,
+  `NIMRTC_REGISTER_VIDEO_SINK(id, factory_ptr)`,
+  `NIMRTC_REGISTER_VIDEO_CODEC(id, factory_ptr)` and
+  `NIMRTC_REGISTER_VIDEO_BITRATE_CONTROLLER(id, factory_ptr)` all take
+  exactly **one** spelling of the id (ADR-023 Decision 5), and a
+  malformed id is rejected at registration time rather than silently
+  accepted.
+
+- **The remote-desktop input module (v1.4, remote-desktop plan G3 / G4 /
+  G7).**  The control plane had no payload format and no input-side
+  policy, so there was nothing to put on the wire and nothing to stop a
+  viewer from sending a dangerous key combination.  The new self-contained
+  module `src/modules/rd_input/` carries all three pieces:
+
+  | Piece | What it does |
+  |-------|--------------|
+  | `nimrtc/rd_input/event_codec.hpp` | The compact, **versioned** binary codec for mouse move / button / wheel / key down-up / text.  A mouse-move delta is **5 bytes** (LEB128 + zigzag deltas); a batch carries a count and a per-event length prefix. |
+  | `nimrtc/rd_input/coalescer.hpp` | The pointer coalescer and the input-path rate limiter: pointer motion is accumulated and released at most once per display frame, while key / button / text events are queued **losslessly**. |
+  | `nimrtc/rd_input/safety_filter.hpp` | The configurable allow / deny filter: a denied key never reaches the remote side, and the denial is **logged** through the one `core::log::Logger`. |
+
+  The module is **a module, not a seam** (plan G3): it depends on
+  `nimrtc::core` only, registers no plugin, and adds nothing to
+  `src/plugins/`.  It is built by default (`NIMRTC_MODULE_RD_INPUT`,
+  default ON) and installs as `nimrtc_rd_input` / `nimrtc::rd_input`.
+
+  The engine wiring — the NimRTC-native control channel (G1) and the
+  control plane's own transport (G2) — is a separate, engine-level item
+  and is *not* part of this change.  `tools/check_dead_modules.py`
+  therefore carries `rd_input` in its new `PENDING_WIRING` list, which
+  names the work item that removes the waiver.
+
+- **The remote-desktop QoE module (v1.4, remote-desktop plan J3 / J6).**
+  The remote-desktop product is judged on *feel* — latency, sharpness,
+  responsiveness — but the project had no way to *measure* those: the
+  engine's `Stats` carries the per-stream counters and the per-stage
+  timings, not the experience metrics the plan's item J3 asks for, and
+  nothing measured the input-to-photon latency at all.
+
+  The new self-contained module `src/modules/rd_qoe/` carries the
+  measurement primitives:
+
+  | Piece | What it does |
+  |-------|--------------|
+  | `nimrtc/rd_qoe/qoe_metrics.hpp` — `QoeCollector` | The observer: the freeze count / total duration / longest freeze, the **viewer's** frame rate, the **end-to-end** latency percentiles (render timestamp − capture timestamp), the **input-to-photon** percentiles (J6: the operator's input event → the frame that reflects it being displayed), the sharpness proxy and the freeze ratio.  It is **fed** by the host — it never pulls from the engine — so it stays decoupled and unit-testable. |
+  | `PercentileEstimator` | A **bounded** percentile estimator: a fixed-capacity reservoir (default 1024 samples) plus a running max / min / mean.  A remote-desktop session runs for hours, so an unbounded sample list would be a leak; the bound and the accuracy trade-off (the percentiles describe the *recent* window) are documented on the class. |
+  | `SharpnessEstimator` | A **sharpness proxy** — the mean absolute Laplacian of the luma plane.  It is cheap, needs no reference picture, and is monotone in the right direction (higher = sharper); it is a proxy, not a reference-based metric, and it compares pictures of the same resolution against each other. |
+
+  The module is **a module, not a seam**: it depends on `nimrtc::core`
+  only, registers no plugin, and adds nothing to `src/plugins/`.  It is
+  built by default (`NIMRTC_MODULE_RD_QOE`, default ON) and installs as
+  `nimrtc_rd_qoe` / `nimrtc::rd_qoe`.  The engine wiring — pushing the
+  presented-frame events and the input-to-photon pairing into the
+  collector — landed later through the `plugins::IQoeCollector` seam
+  (see the entry above); the module registers under `"rd-qoe"` and the
+  engine resolves it through the registry's qoe-collector slot.
+
+- **The remote-desktop weak-network benchmark (v1.4, remote-desktop plan
+  J4 / J6).**  A throughput number says nothing about the feel, so the
+  new tool `tools/benchmark_remote_desktop.py` reports the **response
+  curve** instead: the ladder level vs. time, the delivered fps vs. time,
+  the cumulative freeze count vs. time, and the latency percentiles vs.
+  time, over a four-phase link profile (20 Mbps → 3 Mbps → 1 Mbps →
+  20 Mbps).  The run is **deterministic** (seeded RNG), so the committed
+  artifact
+  ([`docs/benchmarks/remote_desktop_weaknet_windows_x86_64.json`](docs/benchmarks/remote_desktop_weaknet_windows_x86_64.json))
+  doubles as a regression baseline.  The tool reuses the transport-floor
+  tiers of `tools/benchmark_weaknet.py` and the machine description of
+  `tools/benchmark_capture_encode.py`; it needs no network and has a
+  `--dry-run` mode.
+
+- **The real software codecs (v1.3, remote-desktop plan WP-B / B3).**  The
+  CPU bring-up baseline carried no codec: the H.264 and AV1 plug-ins
+  delegated to *stubs* that emitted synthetic bitstreams and painted
+  synthetic pictures, so the pipeline could be exercised end to end but
+  never carried real video.
+  - **OpenH264 v2.6.0** (Cisco, BSD-2-Clause) is vendored under
+    `src/third_party/openh264/` as a git submodule and built from source
+    through a hand-written CMake wrapper (upstream ships a Meson build).
+    The wrapper mirrors upstream's *three-library* split — the encoder
+    and the decoder ship different headers under the same names, with
+    the **same include guard**, so they must not share an include path —
+    and compiles the **portable C path only**: upstream's x86 fast paths
+    are NASM and its ARM ones are GAS, and neither assembler is
+    guaranteed on a build host.
+  - `src/modules/h264/src/openh264_encoder.cpp` now holds a **real**
+    H.264 encoder *and* decoder (`WelsCreateSVCEncoder` /
+    `WelsCreateDecoder`) instead of delegating to the stub: Annex-B
+    output, CABAC, single-slice AVC, and a decoder that completes the
+    access unit explicitly (`DecodeFrame2(NULL, 0)`) and drains the POC
+    reorder queue (`DECODER_OPTION_END_OF_STREAM` + `FlushFrame()`), so
+    the codec stays **delay-free**.
+  - The encoder **follows the picture**: a host whose capture
+    resolution differs from the engine's configured default (or changes
+    mid-session) makes the codec re-configure its encoder rather than
+    reject the frame.
+  - **dav1d v1.5.1** (VideoLAN, BSD-2-Clause) is vendored the same way
+    under `src/third_party/dav1d/` and backs
+    `src/modules/av1/src/dav1d_decoder.cpp`, a **real software AV1
+    decoder** (8-bit, portable C path, the generated `config.h` and
+    `vcs_version.h` reproduced by the wrapper, the templated DSP
+    sources instantiated once for `BITDEPTH=8`).
+  - The **stubs stay in the tree as the fallback**, and the telemetry
+    now tells them apart: `IVideoCodec::backend_id()` reports
+    `"software-stub"` for a stub and `"openh264"` / `"dav1d"` for the
+    real software codecs, so `Stats::video_codec_backend` is honest
+    about what produced the bitstream.
+  - The AV1 plug-in's **stub encoder is encode-only**, so the factory
+    pairs it with the best decoder the registry offers — the real
+    dav1d decoder when the vendored build is linked in, the stub
+    otherwise.  `HwCompositeCodec::backend_id()` forwards the
+    sub-codec's identity instead of the interface's "unknown".
+  - New switches: `NIMRTC_PLUGINS_OPENH264`, `NIMRTC_PLUGINS_DAV1D`,
+    `NIMRTC_VENDORED_OPENH264`, `NIMRTC_VENDORED_DAV1D`.  There is **no
+    system fallback** (AGENTS.md L5), so switching the vendored build
+    off simply leaves the stub in charge.  The Windows, Linux and macOS
+    CI legs now build both codecs and run the new round-trip tests.
+  - Covered by `src/modules/h264/tests/test_openh264_software.cpp` (8
+    cases: the real bitstream carries SPS + PPS + IDR, the decoded
+    pixels match the source within a lossy-codec tolerance, the decoded
+    picture is not blank, the factory selects the real codec) and
+    `src/modules/av1/tests/test_dav1d_software.cpp` (8 cases: a real
+    AV1 key frame decodes to **non-zero pixels**, Annex-B framing is
+    stripped, the codec-owned buffer yields the same picture, the
+    factory reaches dav1d).
+
+- **The M1 exit-criterion proof (v1.3, remote-desktop plan §B.2 / §B.6).**
+  The individual pieces of the video pipeline existed, but nothing proved
+  that a picture captured by one engine survives a *real* codec and
+  arrives at another engine as the *same* picture.  The new
+  `tests/test_engine_video_e2e_loopback.cpp` closes that gap: it drives
+  **two engines** through the complete chain at **1080p** —
+
+      capture (BGRA) → BT.601 staging → OpenH264 encode → STAP-A / FU-A
+      → RTP → transport → RTP → depacketize → Annex-B reassembly →
+      OpenH264 decode → render
+
+  — and compares the decoded luma against the reference luma computed
+  from the *same* source pattern with the *same* transform the staging
+  step uses (**mean absolute error < 12.0** grey levels, **Pearson
+  correlation > 0.95**).  The measured values on the reference machine
+  are **MAE 1.02** and **r 0.998**.
+    - The codec is pinned to the `openh264_h264` backend explicitly, so
+      the result does not depend on whether the host has an NVENC /
+      QSV / AMF card; the engine's telemetry has to report
+      `video_codec_backend == "openh264"`, which excludes the stub.
+    - The **negative control** is part of the test: a flat grey frame
+      must *fail* both thresholds, and the decoded frame must not be
+      byte-identical to the source (which would mean it never went
+      through the codec).
+    - The transport is a fake ICE transport (a seam, not a codec
+      shortcut) — the *network* part of the criterion is covered by the
+      transport-level work packages.
+
+- **The SIMD scaler (v1.3, remote-desktop plan C1 / C2).**  A capture
+  surface arrives at whatever resolution the display has; the encoder
+  wants the ladder's resolution.  The tree could only do that with the
+  hand-written scalar converters in `video_frame`, which are too slow for
+  a 4K desktop.
+  - **libyuv v0.0.0** (`lemenkov/libyuv`, BSD-3-Clause — the maintained
+    fork of Chromium's libyuv) is vendored under
+    `src/third_party/libyuv/` as a git submodule pinned at
+    `209763ad77fed3df2d57503d3ef40761e9473649` and built from source
+    through a hand-written CMake wrapper (upstream ships a GYP build).
+    The wrapper re-exports upstream's static `yuv` archive as
+    `nimrtc_vendor_libyuv` (alias `nimrtc::vendor::libyuv`), suppresses
+    upstream's `install()` rules so they cannot pollute NimRTC's
+    install set, and disables upstream's `cpuid` / `yuvconvert` tools.
+    New switch `NIMRTC_VENDORED_LIBYUV` (default ON).  There is **no
+    system fallback** (AGENTS.md L5), so switching the vendored build off
+    simply leaves the scaler reporting "unavailable".
+  - New public header `src/modules/video_frame/include/nimrtc/video_frame/scaler.hpp`
+    (`NIMRTC_API_STABLE`): `ScaleFilter` (`kPoint` / `kLinear` /
+    `kBilinear` / `kBox` — `kBox` is the *display* path, `kBilinear` the
+    *encode* path) and `VideoFrameScaler` with `scale_i420()`,
+    `scale_to_buffer()` (pool-aware), `bgra_to_i420()` and
+    `i420_to_bgra()`.  With libyuv absent the module still compiles and
+    every call returns `core::ErrorCode::NotImplemented`.
+  - **libyuv names its packed formats by *word* order, not memory
+    order.**  NimRTC's `PixelFormat::kBGRA` is memory order B,G,R,A,
+    which is libyuv's *`ARGB`* (word `0xAARRGGBB`); libyuv's own `BGRA`
+    is memory order A,R,G,B.  Calling `BGRAToI420` / `I420ToBGRA`
+    compiles and runs but silently produces the wrong colours — the
+    implementation calls `ARGBToI420` / `I420ToARGB`, and a saturated-red
+    test case pins the mapping so a swap cannot regress silently.
+  - The existing hand-written scalar converters stay in the tree as the
+    portable reference; the scaler is the SIMD path alongside them.
+  - Covered by `src/modules/video_frame/tests/test_video_frame_scaler.cpp`
+    (13 cases: down- and up-scaling, the pool path, invalid arguments,
+    a solid-colour source surviving both directions without banding,
+    chroma scaling, all four filter modes, a BGRA↔I420 round trip, and
+    an OpenH264 encode/decode round trip) plus a 1080p benchmark that
+    *records* ns/pixel (**1.2 – 4.2 ns/pixel** for 1920×1080 → 1280×720)
+    without asserting a threshold — a perf gate would be flaky on CI.
+    With `NIMRTC_VENDORED_LIBYUV=OFF` the module still compiles, the
+    scaler reports "unavailable" and every call returns a clean
+    `NotImplemented`.
+
+- **The Windows rendering and engine pump (v1.3, remote-desktop plan
+  WP-C / A10 / A11 / E2 / E8 / B10 / B15).**  The capture → encode →
+  present loop could not be closed on Windows: there was no native
+  renderer, the engine never drove the capture device on its own, and
+  the codec's identity and latency were invisible from the outside.
+  - **A D3D11 / DXGI swap-chain renderer** (`video_sink/d3d11_renderer.hpp`):
+    `Present(0)` plus a **presentation clock** — the presenter waits
+    for its deadline (`condition_variable::wait_until`), so it never
+    busy-waits and never blocks the tick thread.  Back-pressure is
+    **latest-wins** through a single-slot mailbox: a render that
+    arrives while the previous one is still pending *replaces* it
+    rather than queueing, and the replacement is counted in
+    `VideoSinkStats::frames_dropped_present`.  The presenter also runs
+    **offscreen** (no native window) so its pacing and drop accounting
+    are testable without a display.
+  - **The engine's internal capture pump** (plan A10).  `tick()` pops
+    one frame from the capture device's bounded queue and drives it
+    through the very same encode → packetize → enqueue path
+    `send_video()` uses, so a capture plug-in plus an encoder produce
+    an outbound RTP stream **without the host ever calling
+    `send_video()`**.  `send_video()` stays exactly as it was — the
+    pump is an *additional* source, not a replacement, and
+    `EngineConfig::video_capture_pump = false` turns it off.
+    RD-6 is preserved: the capture *device* owns its own thread and
+    fills its queue; the engine only ever touches the codec from
+    `tick()`.  `tests/test_engine_capture_pump.cpp` asserts this by
+    recording the thread id at `encode()` time and comparing it with
+    the id of the thread that called `tick()`.
+  - **The NVENC zero-copy encode path** takes a D3D11 surface: the
+    texture is registered with the driver
+    (`NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX`) and mapped as an encoder
+    input, so `bytes_copied` stays at **zero** on the hardware route.
+    A surface the driver cannot take (a BGRA texture, for instance —
+    the driver accepts NV12 for a registered DirectX input) is
+    *refused* rather than silently copied, and the engine falls back
+    to the CPU staging path.
+  - **The telemetry is now in the engine's stats snapshot.**  The
+    capture counters (`frames_captured`, `frames_dropped`,
+    `frames_zero_copy` vs `frames_cpu_staged`, `bytes_copied`), the
+    pump's own counters, the codec's identity and timing
+    (`backend_id`, hardware-accelerated or not, zero-copy vs staged,
+    keyframes, mean and max encode latency) and the sink's counters
+    (`frames_presented`, `frames_dropped_present`, `present_fps`) all
+    appear in `NimRTCEngine::Stats`.
+  - `video_frame::convert_bgra_to_i420()` bridges the packed BGRA a
+    desktop compositor produces to the planar I420 every encoder
+    wants, on the CPU path.
+  - The public-header baseline in `test_api_classification.cpp` moves
+    **140 → 141** in the same commit that adds
+    `video_sink/d3d11_renderer.hpp` (and, in the companion capture
+    commit, `video_capture/windows_capture.hpp`).
+
+- **The GPU delivery path for decoded video, and the frozen capture
+  semantics (v1.3, remote-desktop plan WP-A / A1 / E1).**  The video
+  plane had a CPU-only receive side: a decoded frame always reached the
+  sink as host pixels, even when the decoder could hand back a native
+  surface and the sink could present one.  That made the "zero-copy"
+  claim true for the *send* half of the pipeline and false for the
+  receive half.
+  - `plugins::IVideoSink` gains a **GPU-surface delivery path**:
+    `render(const GpuBuffer&)` and `render(const GpuBuffer&,
+    const VideoFrameInfo&)`, alongside the existing
+    `render(const VideoSourceFrame&)`.  The lifetime contract is the one
+    `IVideoCodec::decode_zero_copy()` already documents: the surface is
+    **borrowed** — the engine holds a reference across the `render()`
+    call and releases it afterwards, and a sink that keeps the surface
+    takes its own reference.
+  - Both `render()` overloads keep a **default implementation that
+    returns `kErrUnsupported`**, so a third-party sink that implements
+    only one side compiles unchanged.  The engine probes
+    `supports_gpu_render()` / `supports_cpu_render()` and routes to the
+    side that exists.
+  - The engine decides the route **once, at `open()` time**, from three
+    facts — the decoder's `supports_zero_copy_decode()`, the sink's
+    `supports_gpu_render()` and its `supports_cpu_render()`.  The rule
+    is a pure function (`src/engine/src/video_render_path.hpp`), so all
+    eight combinations are unit tested without an engine, a transport or
+    a clock.  A pair where **neither** path is possible is reported at
+    `open()` time as the new `kVideoSinkIncompatible` — a session that
+    opens cleanly and can never display anything is the failure mode
+    this replaces.
+  - `plugins::CaptureCapabilities` / `plugins::CaptureFormat` semantics
+    are **frozen**: `zero_copy`, `dirty_rects`, `region_selection`,
+    `max_pixels` and the new `max_fps` each have one meaning, and an
+    unsupported *combination* is refused at `open()` time with the new
+    `kVideoCaptureUnsupported` instead of on the first captured frame.
+    `want_cursor` stays a preference — it is honoured only when the
+    device can composite the pointer, never a reason to refuse a
+    session.
+  - New `EngineConfig::video_capture_config` carries the capture
+    request; `Stats::video_rx_gpu_frames` / `video_rx_cpu_frames` make
+    the delivery-path decision observable from the outside.
+  - Covered by `tests/test_video_render_path.cpp` (31 cases: the eight
+    path combinations, the single-sided-sink contract, and every
+    capture-capability violation class).
 
 - **The zero-copy capture → encode hand-off (v1.3.0, Remote Desktop plan
   B10).**  Until now the zero-copy *seam* existed but nothing on Windows
@@ -1436,11 +2360,332 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     builds up moves the estimate even though not a single packet was
     lost.
 
+- **The cross-platform presentation sinks (v1.4, remote-desktop plan E2 /
+  E3 / E4 / E5).**  The D3D11 renderer was a Windows-only path; a
+  macOS or a Linux host had no native presentation sink at all, so the
+  "render" half of the pipeline could not be exercised outside
+  Windows.
+  - The new module pieces are `nimrtc/video_sink/metal_renderer.hpp`
+    (macOS: a `CAMetalLayer` / `AVSampleBufferDisplayLayer` sink) and
+    `nimrtc/video_sink/egl_renderer.hpp` (Linux: EGL with a Wayland
+    (`wl_shm` / `zwp_linux_dmabuf`) or an X11 / XCB fallback).  Every
+    window-system dependency is **optional**: CMake probes for each one
+    and a missing dependency never breaks the build — the corresponding
+    path is simply not compiled, and `open()` reports `kErrUnsupported`
+    when no usable path is left.
+  - The shared behaviour lives in `nimrtc/video_sink/presenter_core.hpp`
+    (`PresenterCore`): the presentation clock, the **latest-wins**
+    single-slot mailbox and the drop accounting are *the same* on every
+    platform, so they are unit-tested on every platform and the
+    platform-specific file only supplies the `present()` callback.
+  - `nimrtc/video_sink/scale_to_fit.hpp` holds the letterbox /
+    pillarbox geometry the presentation path applies to a source whose
+    aspect ratio differs from the target.
+  - The `d3d11`, `metal` and `egl` factories are registered on
+    **every** platform, so a configuration naming one resolves on any
+    host; on a non-matching platform `open()` reports
+    `kErrUnsupported` rather than failing to resolve.  Covered by
+    `src/modules/video_sink/tests/test_presenter_core.cpp`,
+    `test_scale_to_fit.cpp`, `test_d3d11_renderer.cpp` and
+    `test_video_sink.cpp`.
+
+- **The dirty-rect incremental encode and the region-refresh message
+  (v1.4, remote-desktop plan B9).**  A screen that has not changed
+  should not cost a full frame every tick, and the peer needs to know
+  *which* region changed — the RFC 3550 §6.1 application-defined RTCP
+  packet is the sanctioned carrier.
+  - The new public header
+    `nimrtc/video_pipeline/incremental_encode.hpp`
+    (`NIMRTC_API_STABLE`): `VideoContentType`, `IncrementalDecision`,
+    `IncrementalEncodeStats`, `IncrementalEncodeController` and
+    `IncrementalEncodeDriver`.  The driver asks the controller what to
+    do with the frame's dirty rectangles, pushes the resulting request
+    to the **encoder** through the `plugins::IVideoEncoder` seam (it
+    does not know which codec it is talking to), and builds the
+    region-refresh bytes.
+  - The new public header
+    `nimrtc/video_rtcp_feedback/video_rtcp_feedback.hpp` gains
+    `RegionRect`, `RegionRefreshPacket` and the `kRegionRefreshName`
+    (`"NRGN"`) / `kRegionRefreshHeaderSize` /
+    `kRegionRefreshEntrySize` constants, alongside the existing
+    `FirCoalescer`.
+  - The **fallback is explicit**: where the codec cannot express the
+    region, the driver asks for a full key frame instead, and the
+    fallback is *counted* by the controller and reported through
+    `last_decision()` — a host can see that the mechanism did not
+    engage.
+  - The keyframe-cost budget is bounded too: the new public header
+    `nimrtc/video_pipeline/keyframe_limiter.hpp` adds `KeyframeReason`,
+    `KeyframeDecision`, `KeyframeDecisionReason`,
+    `KeyframeLimiterConfig`, `KeyframeLimiterStats` and
+    `KeyframeLimiter`, so a sawtooth bandwidth trace does not produce a
+    staircase that flips level every interval.
+  - Covered by `src/modules/video_pipeline/tests/test_video_pipeline_incremental.cpp`.
+
+- **The capture / encode benchmark and its committed artifact (v1.4,
+  remote-desktop plan J5).**  The plan's *hardware-first* claim (RD-1)
+  rested on a number nobody had measured.
+  - The new tool `tools/benchmark_capture_encode.py` measures the
+    capture rate (frames/s per megapixel) and the encode cost (ms per
+    frame, per backend class, per resolution), broken down stage by
+    stage, and checks the result against the §B.6 per-frame CPU budget.
+    It drives `tests/bench/bench_capture_encode.cpp`, which prints a
+    JSON document on stdout — the per-stage numbers are the **engine's
+    own** J1 instrumentation, so the measurement runs the real engine
+    with the real codecs rather than a synthetic loop.  It needs no
+    network and has a `--dry-run` mode.
+  - The committed artifact
+    ([`docs/benchmarks/capture_encode_windows_x86_64.json`](docs/benchmarks/capture_encode_windows_x86_64.json))
+    doubles as the regression baseline.
+
+- **The video-scene profile keys now reach the engine (v1.2 profile
+  bridge, remote-desktop plan M2).**  Profile v1.2 added four video-scene
+  keys — `video_codec_preference`, `video_resolution_floor`,
+  `video_ladder_mode` and `video_content_type` — but
+  `assembly::to_engine_config()` never mapped them onto `EngineConfig`,
+  so a scenario configured through a profile (e.g. the `remote-desktop`
+  profile) silently fell back to the default camera configuration and the
+  declared video scene was a no-op.
+  - `assembly::to_engine_config()` now maps
+    `video_codec_preference` → `EngineConfig::video_codec_name`,
+    `video_resolution_floor` → `EngineConfig::video_resolution_floor_height`,
+    `video_ladder_mode` → `EngineConfig::video_ladder_mode` and
+    `video_content_type` → `EngineConfig::video_content_hint`.
+  - The vocabulary is resolved by named helpers in
+    `src/modules/assembly/include/nimrtc/assembly/engine_bridge.hpp`
+    (`video_ladder_mode_of()`, `video_resolution_floor_height_of()` and
+    `video_content_hint_of()`), so the profile-to-engine mapping is
+    stated once and unknown values fall back to the engine default rather
+    than failing the load.
+  - Covered by `src/modules/assembly/tests/test_assembly_bridge.cpp`
+    (seven cases: the four keys survive the bridge, the vocabulary
+    resolvers agree with the engine enums, and the guards hold).
+
+- **The per-stream bandwidth shares are now declarable (remote-desktop
+  plan D5).**  D5 says "the remote-desktop profile declares the shares",
+  but the only way to give a stream a weight was the **runtime** call
+  `NimRTCEngine::set_video_stream_weight()` on an already-created
+  stream — so a profile-driven session had to be hand-tuned after the
+  fact and the scene's intent lived in code rather than in the profile.
+  - The new public field `EngineConfig::video_stream_weights`
+    (`std::map<std::string, std::uint32_t>`) states the split before the
+    session exists.  The key is the stream's stable id ("default",
+    "screen", "camera", ...) and the value is the stream's relative
+    weight; 0 means "this stream takes nothing from the pool", and the
+    default weight is 1 (an even split).
+  - The declaration is applied to the **default** stream at `open()` and
+    to an **extra** stream when that stream is created.  The runtime
+    override always wins over the declaration: the declaration is the
+    session's *starting* weight, not a lock.
+  - The map is **declarative, not constructive**: a declaration for a
+    stream the session never creates is inert, not an error.
+  - The Profile carries it too: `assembly::Profile::video_stream_weights`
+    is copied verbatim by `assembly::to_engine_config()`, the v1.2 schema
+    declares the optional `video_stream_weights` object (its values are
+    integers in 0..255, its keys are non-empty), and the JSON loader
+    reads it.  A malformed *entry* is skipped rather than failing the
+    whole load — the schema is the validator, the loader is the tolerant
+    reader.
+  - The shipped `profiles/remote-desktop.json` (and the matching C++
+    constant) now declares the scene's split: the screen gets weight 3
+    and a camera thumbnail weight 1.
+  - Covered by `tests/test_engine_video_stream_shares.cpp` (five new
+    cases), `src/modules/assembly/tests/test_assembly.cpp` (five new
+    cases), `src/modules/assembly/tests/test_assembly_bridge.cpp` (four
+    new cases) and `src/modules/assembly/tests/test_profile_schema.cpp`
+    (six new cases, plus the hand-rolled validator gained the
+    `additionalProperties`-as-schema, `propertyNames` and `minLength`
+    keywords the new block needs).
+
+
 ### Changed
+
+- **The engine's outbound RTP packing is now concentrated in one file
+  (v1.4, architecture-remediation plan §4.5.1, ADR-025 Decision 4).**
+  The engine is exempt from Layout Invariant 4 for the `rtp` module
+  (SDP and RTP are not pluggable — see ADR-025), but that exemption was
+  only honest if the concrete use had a *visible boundary*.  It did not:
+  four engine files each named `rtp::PacketBuilder` and each hand-rolled
+  the abs-send-time stamp, so a fix to the RTP header had to be made in
+  four places, and nothing would have noticed if one of them was missed.
+
+    - The new private collaborator `detail::RtpPacketizer`
+      (`src/engine/src/rtp_packetizer.hpp` + `rtp_packetizer.cpp`) owns
+      the packet building.  Its header contains **no** `rtp::` type — it
+      describes a packet in plain scalars and a byte span — so the
+      engine's internal headers can include it without dragging the
+      concrete RTP module in with it.  The concrete `rtp::PacketBuilder`
+      lives in that one `.cpp`.
+    - Four call sites now go through it: the audio path, the RFC 4733
+      DTMF path, the default video stream's packet callback, and the
+      extra video streams' packet callback.
+    - The abs-send-time encoding moved with it, and now uses the origin
+      the engine already keeps (`TimelineState::boot_epoch_offset_us`,
+      Unix microseconds) instead of converting the NTP64 origin on every
+      packet — a lossy round trip that could drift from the instants the
+      engine publishes elsewhere.
+    - `tools/check_engine_layering.py` grew a **second rule** to keep
+      it that way: `rtp::PacketBuilder` may be named in exactly one
+      engine file.  The rule is *symbol*-level rather than header-level
+      on purpose — the module-level exemption cannot express this at all
+      (`nimrtc/rtp/packet.hpp` is allowed everywhere), and a header-level
+      rule would also forbid the receive-side parser, which belongs to a
+      different collaborator.  The scan strips comments and string
+      literals first, so a mention in a doc comment is not a violation.
+    - Covered by the new `tests/test_rtp_packetizer.cpp` (12 tests),
+      whose reference is the **RTP module's own** builder: the
+      collaborator is asserted to produce byte-for-byte what
+      `rtp::PacketBuilder` produces, and its abs-send-time encoder what
+      `rtp::encode_abs_send_time_24` produces.  A refactor of this shape
+      fails silently otherwise.
+    - The engine's *receive* side (RTCP demultiplexing, SR/RR parsing,
+      the XR blocks) is deliberately **not** moved — that is the
+      `rtcp_processor` collaborator's separate work.
+
+- **The engine's internal state header has no loose members left, and
+  its line budget is now enforced (v1.4, architecture-remediation plan
+  §4.3, D1 wrap-up).**  The remediation plan split `engine_impl.hpp`
+  from 1076 lines into "the engine's own composition plus named
+  collaborators", with `< 400` lines as the acceptance criterion.  The
+  split held, but two things were left undone: a handful of members
+  were still loose in `Impl`, and the budget was only ever a sentence
+  in a plan document.
+
+    - The last five loose members moved.  `srtp_installed`,
+      `srtp_stats_drop` and `last_dtls_state` went into a new
+      collaborator, `detail::SecurityState`
+      (`src/engine/src/engine_security_state.hpp`), which holds one
+      thing — the engine's transport security: the DTLS handshake's
+      state-transition trace, whether the SRTP keying material is
+      installed (the **authority** on whether the outbound path is
+      encrypted), and how many packets SRTP refused to encrypt.  The
+      last two only make sense together, so a reader looking for "is
+      this session encrypted?" now finds the answer in one place.
+    - `sr_last_sent` went into `detail::TimelineState`, where the
+      ADR-017 timeline had been describing it all along — the field's
+      own file comment already claimed it.
+    - `dtls_active_inbound` was **deleted**: it had no readers left
+      since `engine.cpp` was split into five translation units.
+    - `Impl::dtls` and `Impl::srtp` — the DTLS handle and the SRTP
+      context — stay in `Impl` on purpose.  They are the objects the
+      engine *owns*, i.e. its composition, which is exactly what §4.3
+      says belongs there.  The collaborator holds the state about
+      them, not the objects.
+    - `tools/check_engine_layering.py` grew a **third rule**: the
+      internal state header must stay under 400 lines, counted the way
+      the plan's own history counted them.  The budget had already been
+      broken twice by features that had nothing to do with the engine's
+      structure (the remote-desktop multi-stream work took it to 423,
+      the QoE collector to 391), and both times the fix was the same —
+      the new state belonged in a collaborator.  The rule turns that
+      fix into something that happens at review time.  It runs on the
+      existing CI step and is also registered as the ctest case
+      `test_engine_layering`, so a local `ctest` sees it too.
+
+- **The dirty-rect incremental encode and the keyframe limiter are now
+  wired *into the engine* (v1.4, remote-desktop plan B9 / B14).**  Both
+  existed as module seams with their own test suites, but nothing in the
+  product called them — the dead-module state the architecture-remediation
+  plan D2 calls out.  A host could not reach the behaviour through the
+  engine at all.
+
+    - **B9 — the incremental encode.**  The engine now feeds the
+      capture device's dirty rectangles to the incremental encoder
+      through the `plugins::IVideoEncoder` seam and sends the RFC 3550
+      §6.1 application-defined RTCP **region-refresh** message
+      (`"NRGN"`) alongside the picture, so the peer knows *which* region
+      changed and not merely that something did.
+    - **B14 — the keyframe limiter.**  The limiter's counters are
+      exposed in `NimRTCEngine::Stats`, so a host can see how often the
+      keyframe budget actually bit, and a latency-triggered keyframe
+      request is **retried** rather than dropped when the limiter
+      declines it.
+    - Covered by the new `tests/test_engine_video_incremental.cpp`.
+
+- **`IVideoCodec` is deprecated in favour of the split `IVideoEncoder` /
+  `IVideoDecoder` seams (v1.4, remote-desktop plan B1, ADR-015
+  Decision 3).**  This is the **only** deprecated public symbol in the
+  tree, and it is a *marker*, not a removal.
+  - `plugins::IVideoCodec` now carries
+    `[[deprecated("IVideoCodec is the deprecated compatibility shim for
+    the split codec seam (remote-desktop plan B1, ADR-015 Decision 3).
+    Use IVideoEncoder and IVideoDecoder instead; this class will be
+    removed after one MINOR cycle.")]]`.
+  - It **derives** from `IVideoEncoder` and `IVideoDecoder`, so code
+    that consumes an `IVideoCodec` still compiles and still works; the
+    engine still resolves the combined `IVideoCodecFactory`.  A host
+    that wants to migrate has a MINOR cycle to do it.
+  - The replacement is `plugins::IVideoEncoder` (encode side:
+    `encode()`, `encode_zero_copy()`, `force_keyframe()`,
+    `set_params()`, `set_incremental_request()`, `input_pool()`) and
+    `plugins::IVideoDecoder` (decode side: `decode()`,
+    `decode_zero_copy()`, `output_pool()`), with
+    `plugins::IVideoEncoderFactory` /
+    `plugins::IVideoDecoderFactory` for a plug-in that implements only
+    one direction.
+
+- **The video path now reports what it actually did (v1.4, remote-desktop
+  plan C3 / J1 / B15).**  A host previously had to infer what the
+  pipeline was doing from its own logs; the engine now answers.
+  - **The format-normalisation counters** (plan C3): the capture path
+    may deliver BGRA / NV12 / I420 while the encoder path wants one
+    canonical format, and the engine does the conversion **once, on the
+    platform side**.  `Stats::video_format_conversions` counts the
+    frames that needed a *colour-space* conversion, `video_format_copies`
+    the frames that were copied without one, `video_format_zero_copy`
+    the frames that reached the encoder as a native GPU surface (so no
+    format work happened at all), and `video_format_canonical` /
+    `video_format_source` name the two formats.  The conversion counter
+    stays at **zero** on the zero-copy path.
+  - **The per-stage CPU-time instrumentation** (plan J1): the new public
+    struct `NimRTCEngine::Stats::StageTiming` (`NIMRTC_API_STABLE`)
+    carries the sample count, the total time and the mean / p95 in
+    **microseconds** for each stage, and the engine reports
+    `video_stage_capture`, `video_stage_convert`, `video_stage_encode`,
+    `video_stage_packetize`, `video_stage_decode` and
+    `video_stage_render`, plus the aggregate `video_stage_total_us` and
+    `video_stage_total_p95_us`.  A stage that never ran reports zero
+    samples rather than a fabricated mean.
+  - **The codec telemetry** names the backend that actually ran:
+    `Stats::video_codec_backend` (`"nvenc"`, `"openh264"`, `"dav1d"`,
+    `"software-stub"`, ...), `video_codec_hardware_accelerated`,
+    `video_codec_frames_zero_copy` vs `video_codec_frames_staged`,
+    `video_codec_bytes_copied`, `video_codec_keyframes` and the mean /
+    max encode latency.  A host that asked for `"hardware"` and got
+    `"openh264"` can now see the mismatch in the stats instead of
+    parsing a log.
+
+- **The `codec_backend` selector is now a real knob (v1.4, remote-desktop
+  plan B2).**  `EngineConfig::video_codec_backend` takes `"auto"`,
+  `"hardware"` or `"software"` (default `"auto"`), and the engine's
+  selection honours it: in the `"hardware"` and `"software"` modes the
+  ineligible backends are *not* eligible and the selection returns
+  nothing rather than silently handing back one of them — a host that
+  asked for hardware must not get software without being told.
+  `Stats::video_codec_backend_preference` echoes the request, so the
+  mismatch is visible from the outside.
+
+- **The video sink's GPU delivery path and the frozen capture
+  capabilities (v1.4, remote-desktop plan E1 / A1).**  `plugins::IVideoSink`
+  gains `render(const GpuBuffer&)` and
+  `render(const GpuBuffer&, const VideoFrameInfo&)` alongside the
+  existing `render(const VideoSourceFrame&)`; both keep a default
+  implementation returning `kErrUnsupported`, so a third-party sink that
+  implements only one side compiles unchanged.  The engine picks the
+  route **once, at `open()` time**, from the decoder's
+  `supports_zero_copy_decode()`, the sink's `supports_gpu_render()` and
+  its `supports_cpu_render()` — the rule is a pure function, so all
+  eight combinations are unit tested without an engine, a transport or a
+  clock.  A pair where neither path is possible is reported at `open()`
+  time as the new `core::kVideoSinkIncompatible`.
+  `plugins::CaptureCapabilities` / `plugins::CaptureFormat` semantics are
+  **frozen**: an unsupported *combination* is refused at `open()` time
+  with the new `core::kVideoCaptureUnsupported` instead of on the first
+  captured frame.
 
 - **`engine_impl.hpp` is no longer a 1000-line god header (v1.2.0,
   architecture remediation plan §4.3 / D1).**
-  The header fell from **1076 lines to 393** — the plan's target was
+  The header fell from **1076 lines to 394** — the plan's target was
   under 400.  What is left in it is the engine's *own* composition: the
   SDP parser / munger, the DTLS handle, the SRTP context, the transport
   session, and the handful of counters that do not belong to any one
@@ -1453,6 +2698,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | `detail::VideoState` | `engine_video_state.hpp` | video send/receive state, the negotiation result, the quality counters |
   | `detail::SessionState` | `engine_session_state.hpp` | the session model, the transceivers, the mids |
   | `detail::ScratchBuffers` | `engine_scratch.hpp` | every reusable scratch buffer |
+  | `detail::FeedbackState` | `engine_feedback_state.hpp` | the network-feedback counters, the RTCP XR routing counter, the pacing split |
 
   The rule the split follows is simple: *a member that only one feature
   reads or writes belongs to that feature's collaborator, not to
@@ -1468,7 +2714,37 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   separately reviewable.
 
   Verified with a full build (zero errors, zero warnings) and the whole
-  `ctest` suite: **1434 / 1434 passing**.
+  `ctest` suite: **1454 / 1454 passing**.
+
+  The header grew again as the remote-desktop multi-stream / QoE planes
+  landed (394 → 423 lines, back over the 400-line target).  The
+  members that work added — the network-feedback counters, the RTCP XR
+  routing counter and the pacing split — are all "what the engine
+  observed on the RTCP path", so they moved into
+  `detail::FeedbackState` (`engine_feedback_state.hpp`): **423 → 381
+  lines**, back under the target.  Re-verified: full build clean,
+  `ctest` **1943 / 1943 passing** (the 1966 / 1966 figure recorded
+  earlier was taken in the `NIMRTC_BUILD_EXAMPLES=ON` tree, which
+  compiles 24 more AV1 / dav1d cases and drops one `test_nvenc_probe`
+  — 1943 + 24 − 1 = 1966).
+
+- **A multi-stream test asserted the wrong thing, and only failed on
+  the machines that matter most (v1.4, remote-desktop plan H2).**
+  `EngineMultiStream.EachStreamOwnsItsOwnCodecInstance` used to prove
+  "the two streams own separate encoder instances" by requiring the two
+  streams' `backend_id`s to differ.  But `IVideoCodec::backend_id()`
+  names the backend *implementation* ("nvenc", "openh264",
+  "software-stub"), not the instance — so on a host with an NVIDIA GPU
+  the H.264 and the H.265 encoders both legitimately report `"nvenc"`,
+  and on a software-only host they both report `"software-stub"`.  The
+  assertion therefore failed on exactly the hardware hosts where the
+  hardware path is worth having, and passed on the hosts where it was
+  least meaningful.  The test now proves instance separation
+  *structurally* — the camera stream's encoder was swapped to H.265 and
+  the screen stream still reports H.264, which could not happen if one
+  encoder were shared — and separately asserts that each stream's entry
+  still names the backend it actually ran on.  **No engine behaviour
+  changed.**
 
 - **The plugin ID naming contract is now written down, and the docs
   that describe the config surface now match the code (v1.2.0,
@@ -1870,175 +3146,333 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `a=ssrc` line, which is what makes Chrome count our inbound RTP at
     all. The demo no longer appends a stale constant SSRC of its own.
 
-### Performance
-
-- **The media hot paths no longer allocate per frame or per packet
-  (v1.2.0, architecture remediation plan §3 -- the C class).**  Six of
-  the seven C items landed here; C7 (the video path's RTP-packet
-  concatenation) was already removed in Phase 1.3.
-  - **C1 / C2 -- the staged video frames are pooled.**
-    `stage_source_frame()` allocated a fresh `VideoFrameBuffer` per
-    frame (`make_shared` plus a full-frame `memset` at 1080p30 -- about
-    3 MB allocated *and* zeroed every 33 ms) and then did an NV12 ->
-    I420 de-interleave on top.  `VideoFrameBufferPool` now owns the
-    whole buffer -- its pixel storage *and* its control block.  The pool
-    parks the buffer and hands out an **aliasing** `shared_ptr` that
-    shares the parked buffer's control block, so recycling a frame
-    allocates neither a new control block nor new pixel memory; the
-    steady state performs no allocation and no full-frame memset.
-  - **C3 -- the GPU zero-copy video send path is open.**
-    `send_video()` always staged the frame into a CPU I420 buffer before
-    handing it to the codec -- a ~3 MB copy per frame at 1080p30, plus a
-    de-interleave for an NV12 source.  `plugins::VideoSourceFrame`
-    gained three **additive** fields (`gpu_backend`, `gpu_handle`,
-    `gpu_pitch_bytes`), and `EngineConfig::video_zero_copy` (default:
-    off) opts the host in.  The zero-copy path is taken only when the
-    flag is on **and** the frame carries a live GPU handle **and** the
-    codec reports `supports_zero_copy_encode()`; otherwise the CPU
-    staging path runs exactly as before, so turning the flag on is
-    always safe.  When the codec supports the handle but the encode
-    fails, the engine falls back to the CPU path rather than dropping
-    the frame.  `Stats::video_zero_copy_frames` and
-    `Stats::video_zero_copy_fallbacks` make the decision observable.
-  - **C4 -- `PacketBuilder::build_into()`.**  `build()` allocated a new
-    `core::ByteBuffer` on every packet (50 Hz audio, 30 Hz video).  The
-    new overload serialises directly into caller-provided memory, and
-    the engine keeps **per-path** scratch buffers (audio, video and DTMF
-    separately) so the three threads never share one buffer.
-  - **C5 -- the SRTP scratch high-water mark.**  The libsrtp backend
-    called `resize(out_len)` before encrypt / decrypt and `resize(actual)`
-    after, so the vector was repeatedly shrunk and grown -- and each
-    `resize` value-initialises (zeroes) the memory.  The scratch is now
-    sized to the **high-water mark** and never shrinks during the
-    session's lifetime, which removes the memset churn entirely.
-  - **C6 -- the RTCP compound demux.**  `demux_rtcp()` returned a
-    `std::vector<RtcpBlock>` **by value** -- one heap allocation per
-    RTCP datagram.  The new overload clears and refills a caller-owned
-    scratch vector, keeping its capacity across calls.
-  - **The Phase 0.3 hot-path benchmark harness ships with the fix**
-    (remediation plan §0.3), so the numbers are reproducible rather than
-    asserted: `tests/bench_engine_hotpath.cpp` (an allocation probe --
-    overridden `operator new` / `operator delete` backed by CRT
-    `malloc` / `free` with an atomic arming flag, plus latency
-    percentiles for `send_video()`, `tick()` and the scheduler under
-    contention) and `tools/benchmark_hotpath.py` (the capture/compare
-    wrapper).
-    Measured on one machine at 1080p30 over 300 frames, `main` versus
-    this branch:
-
-    | metric | `main` | this branch | delta |
-    | --- | --- | --- | --- |
-    | `send_video` bytes/frame | 3 112 483 | 2 023 | **-99.9 %** |
-    | `send_video` mean latency | 902.97 us | 134.34 us | **-85.1 %** |
-    | `send_video` p50 latency | 861.55 us | 129.75 us | **-84.9 %** |
-    | `send_video` p99 latency | 1 387.36 us | 169.32 us | **-87.8 %** |
-    | `send_video` allocations/frame | 23.18 | 22.18 | -4.3 % |
-    | `tick` p99 | 0.3 us | 0.2 us | -33 % |
-
-    The allocation *count* barely moves because `main` staged each frame
-    with one 3 MB allocation; what C1 / C2 removed is the **volume**
-    (3.1 MB of allocator traffic per frame, plus the full-frame memset
-    that came with it), not the number of `new` calls.  The remaining
-    ~22 allocations per frame are in the encode / packetise path (the
-    codec's own output buffer and the RTP packet vector), not in the
-    frame staging.
-
-- **`send_video()` is now allocation-free end to end (v1.2.0,
-  remediation Phase 3 §3.5).**  The C class above removed the *volume*
-  of allocator traffic, but the allocation *count* was still 22 per
-  frame.  This change drives it to **zero** — the number the plan's
-  §3.5 acceptance criterion asks for.
-  - **The video frame pool recycles the buffer object, not just its
-    storage.**  The pool used to hand out a fresh `shared_ptr` per
-    frame, and a `shared_ptr` that owns its object carries a
-    heap-allocated control block.  The pool now parks the buffer and
-    hands out an **aliasing** `shared_ptr` that shares the parked
-    buffer's control block (`shared_ptr<T>(owner, owner.get())`), so
-    recycling a frame allocates neither a control block nor pixel
-    memory.  A buffer is reusable once the caller has released its
-    alias, which is visible as the owner's `use_count()` dropping back
-    to one.
-  - **The packetizer works on spans, not copies.**  `parse_annex_b()`
-    and `parse_length_prefixed()` returned a
-    `std::vector<std::vector<std::uint8_t>>` -- one heap allocation
-    per NAL unit, per frame, plus a copy of every NAL's bytes.  The
-    caller owns the bitstream for the whole `push_frame()` call, so
-    the NAL units are now **spans into the source**, parsed into a
-    reusable vector.  The FU-A fragment buffer, the STAP-A output
-    buffer, the aggregation group and the FU-A flags are reusable
-    members as well, pre-reserved so a frame with an unusual number of
-    NAL units does not grow them.
-  - **The retransmission ring is pre-sized.**  Each cached slot is
-    reserved to the MTU when the ring is built, so caching a packet is
-    a memcpy into an existing buffer instead of a fresh allocation per
-    outgoing packet.
-  - **The ref-frame registry is a fixed-size table.**  It was a
-    `std::map` plus a `std::deque` -- two heap allocations per sent
-    frame (a map node and a deque block), forever.  It is now an
-    open-addressed table with backward-shift deletion plus a
-    fixed-size insertion ring, both allocated once at construction.
-    The timestamp→id lookup selects the lowest matching id explicitly,
-    so the observable behaviour is identical to the `std::map`'s.
-  - **The outbound packet buffer is reused on the no-scheduler path.**
-    With a scheduler the packet comes from the scheduler's pool; on
-    the "transport" profile the engine wrote straight to ICE and
-    allocated a fresh vector per packet.  It now uses the engine's own
-    scratch buffer.  This relies on `ITransport::send()` treating its
-    `BufferView` as **borrowed** -- the transport must copy the bytes
-    it needs before returning -- which is now written down explicitly
-    in the seam's documentation.
-  - **The measurement is a gate, not a claim.**  The benchmark gained
-    an `--assert-zero-allocs` flag, and the ctest case
-    `hotpath_zero_allocs` runs it at 1080p.  The count is exact rather
-    than a threshold: the engine runs no background threads in the
-    benchmark's profile, so every allocation counted during the
-    measured region belongs to the `send_video()` call itself.  A
-    regression that reintroduces a per-frame allocation fails the
-    build.
-
-    Measured after this change, over 300 frames per resolution:
-
-    | resolution | allocations/frame | bytes/frame |
-    | --- | --- | --- |
-    | 1920x1080 | **0.000000** | **0.000000** |
-    | 1280x720 | **0.000000** | **0.000000** |
-    | 854x480 | **0.000000** | **0.000000** |
-
-    The §3.5 criterion "`send_video()` 1080p30 的 per-call 堆分配次数 =
-    0" is met.
-
-- **The audio send path has a zero per-packet allocation budget too
-  (remediation Phase 3 §3.5).**  The plan's second allocation
-  criterion -- "音频路径 per-packet 堆分配次数 = 0" -- now has a gate of
-  its own, in `tests/test_engine_audio_alloc.cpp`.
-  - The metric is **per packet**, not per call: the host may hand the
-    engine an arbitrary block size, and the engine accumulates samples
-    until it has a whole 20 ms frame.
-  - The audio path is unreachable without a completed DTLS handshake
-    (otherwise the engine would put plaintext RTP on the wire), so the
-    test drives the engine through a fake ICE transport and a fake DTLS
-    session, the same pair `tests/test_engine_audio_send.cpp` uses.
-  - The fake transport only *counts* the bytes it is handed.  A fake
-    that copied them would allocate once per packet and land right in
-    the measured region, so the test would have been measuring the fake
-    rather than the engine.
-  - The criterion is asserted as "the allocation count does not grow
-    with the packet count" (a 50-packet run and a 250-packet run must
-    cost the same), not as "every single call allocates nothing".  The
-    engine's periodic work -- the RTCP sender report, the SRTP context
-    rollover -- may allocate on *some* calls; what must not happen is
-    one allocation per packet, forever.
-  - The probe lives in its own binary on purpose: replacing the global
-    `operator new` collides with a sanitizer runtime's own definition,
-    so the video side of the same criterion stays in the benchmark
-    binary (`hotpath_zero_allocs`) and the audio side is here.
-
-    The remaining §3.5 items -- the `tick()` p99 reduction and the
-    scheduler's drain / enqueue non-blocking property -- are covered by
-    the Phase 0.3 benchmark's other two sections and are tracked
-    separately.
 
 ### Fixed
+
+- **Every shipped example compiled and then refused to start.**  The
+  remote-desktop clients (`rd_device`, `rd_viewer`) and the other
+  examples (`demo-p2p`, `loopback-p2p`, `demo-wtserver`,
+  `demo-agent-gateway`) all link `nimrtc::web_transport`, which pulls in
+  the msquic **shared** library.  On Windows that library is a DLL, and
+  the loader looks for it *next to the executable* — so an example
+  without `msquic.dll` beside it dies with `STATUS_DLL_NOT_FOUND`
+  (0xc0000135) **before `main()` is entered**, with no message and no
+  log line.  The exit code was the only symptom, and it read like a
+  crash in the program rather than a missing file.
+
+  The test tree had always handled this — `gtest_discover_tests` *runs*
+  the executable to enumerate its cases, so the missing DLL showed up as
+  a build failure — and `cmake/NimRTCTest.cmake` grew a
+  `nimrtc_copy_msquic_dll()` helper for it.  The **examples** had no
+  such handler, so the whole example tree was in the worst shape a
+  shipped artefact can be in: the build was green and every binary was
+  unusable.
+
+    - **New module `cmake/NimRTCRuntime.cmake`** — the runtime staging
+      helpers, shared by the test tree and the example tree so there is
+      one implementation:
+      - `nimrtc_stage_msquic_dll(<target>)` copies the per-config
+        `msquic.dll` out of the vendored build tree
+        (`src/third_party/msquic/bin/$<CONFIG>/`) next to the
+        executable.  A no-op off Windows and when the vendored msquic
+        target is absent.
+      - `nimrtc_stage_dtls_certs(<target>)` copies the **Chrome-friendly**
+        DTLS certificate into `<target-dir>/certs/`.  This matters
+        because the absolute fallback compiled into `nimrtc::dtls` points
+        at the *upstream* wolfSSL certificate, which carries no
+        `subjectAltName` — and Chrome (BoringSSL) rejects it with fatal
+        alert 46 ("certificate_unknown").  A NimRTC-to-NimRTC session
+        works with either; a browser session only works with the staged
+        one.
+      - `nimrtc_stage_runtime(<target>)` — the one call a shipped
+        executable needs; it does both.
+    - `cmake/NimRTCTest.cmake`'s `nimrtc_copy_msquic_dll()` now delegates
+      to the shared helper, so the historical name keeps working.
+    - `examples/CMakeLists.txt` and
+      `examples/demo-agent-gateway/CMakeLists.txt` call
+      `nimrtc_stage_runtime()` on every example, which also replaces the
+      three hand-rolled certificate-copy blocks that had grown up
+      independently in `demo-p2p`, `loopback-p2p` and
+      `demo-agent-gateway`.
+    - **Verified**: all six examples now start and exit 0 on `--help`,
+      and a local `rd_device` ↔ `rd_viewer` session over the
+      stdin/stdout signalling dialect completes the full handshake — one
+      offer (51 SDP lines, with both a video and an audio m-line), one
+      answer, and eleven relayed ICE candidates.
+
+- **A software encoder no longer loses every captured frame (v1.4,
+  remote-desktop plan RD-4 / B10).**  The engine attached the capture
+  device's GPU callback whenever the *device* could deliver surfaces,
+  without asking the *codec* whether it could consume one.  But the
+  plug-in contract says that *with* a GPU callback attached the device
+  delivers the surface inside the callback and does **not** push the
+  frame through the CPU copy queue — the pixels are not available
+  anywhere else.  So a session whose codec was a software encoder
+  (OpenH264, or any machine without a matching hardware pair) ended up
+  with **no picture at all**: every frame delivered, every frame
+  dropped, and no CPU mirror to fall back to.  RD-4 says "zero-copy is
+  the default path; CPU staging is the fallback" — and the fallback was
+  unreachable.
+
+    - The two halves of the seam are now established at two different
+      moments, because the codec's capability is only known once the
+      codec is open: the `GpuContext` is published into
+      `VideoCodecConfig::gpu_context` **before** the codec is created
+      (the encode session has to live on the capture's device), and the
+      GPU callback is attached **after** the codec exists, by the new
+      `NimRTCEngine::wire_capture_gpu_callback()`, and **only** when
+      `IVideoCodec::supports_zero_copy_encode()` is true.
+    - When the codec cannot take a surface, the callback stays
+      unattached, so the capture device stages to the host and fills
+      its ordinary queue, the pump takes the CPU route, and the picture
+      still arrives.  The engine says so in the log and reports
+      `Stats::video_capture_gpu_wired == false`, so the fallback is
+      visible rather than silent.
+    - `tests/test_engine_capture_zero_copy.cpp` gained the regression
+      test (`ACodecThatCannotTakeASurfaceKeepsTheCpuPath`) with a
+      stand-in software codec: the seam must **not** be wired, nothing
+      may go down the zero-copy path, and the codec must still be given
+      the capture's device.
+    - **Verified** on a real Windows host with the OpenH264 software
+      encoder: `rd_device` ↔ `rd_viewer` delivers the picture
+      (`capture=496`, `pumped=118`, `decoded=114`, `rendered=114`) and
+      the log reports the fallback instead of the dropped-frame
+      warning.
+
+- **The composite codec forwarded the zero-copy *capability* but not
+  the zero-copy *call*.**  `HwCompositeCodec::supports_zero_copy_encode()`
+  answered `true` -- it forwards that to the encoder -- but the
+  composite did not override `encode_zero_copy()`, so it inherited the
+  interface's default `kErrUnsupported`.  That is the worst of both
+  worlds: the engine believed the seam was live, wired the capture
+  device's GPU callback, handed the surface to the codec, and was told
+  "unsupported" for every single frame.  Because the capture device
+  keeps no CPU mirror once the callback is attached, every frame was
+  lost and the session showed a picture that never moved.  The
+  composite now forwards `encode_zero_copy()` to the encoder and
+  `decode_zero_copy()` to the decoder, exactly the way it already
+  forwards `encode()` and `decode()`.
+  `src/modules/nvcodec/tests/test_hw_composite_codec.cpp` gained the
+  three regression tests that pin the capability and the call
+  together: the encode is forwarded, the decode is forwarded, and a
+  composite whose encoder cannot take a surface refuses the call
+  rather than silently succeeding.
+
+- **The device-local texture copy was *recorded*, not *executed*.**  The
+  `CopySubresourceRegion` sits in the context's command buffer until the
+  GPU runs it, and two consumers need the copy to have *happened*: DXGI,
+  which is not allowed to recycle a texture whose copy is still in
+  flight, and the hardware encoder, which registers the destination
+  texture as its input surface and waits for the writes to it.  Neither
+  can see the other's work on its own, so the encode could block
+  forever waiting for a copy the GPU was never told to perform.
+  `wcap::copy_texture_on_device()` now **flushes** the immediate context
+  after recording the copy, so the command is submitted to the GPU queue
+  before the destination texture is handed to the encoder.  A flush is a
+  GPU-side submit -- the pixels never enter host memory, so
+  `bytes_copied` stays at zero.
+
+- **The shared D3D11 device was used from two threads without protection.**
+  The capture device copies the desktop into the device on **its own
+  thread**, and a hardware encoder that registers the copied surface as
+  its input uses the **same** device on the encoder's thread (the driver
+  inserts its own GPU work on the device's immediate context to read the
+  registered surface).  A D3D11 *immediate* context is not thread-safe:
+  two threads using it concurrently is undefined behaviour, and on the
+  reference host it showed up as a hard deadlock inside
+  `nvEncEncodePicture` -- the driver waited for its own work while the
+  capture thread was in the middle of the device copy.
+  `D3D11State::create_on()` now queries `ID3D11Multithread` and enables
+  `SetMultithreadProtected(TRUE)`, which is the documented answer for
+  exactly this situation (a device used from more than one thread).
+  With that in place the capture thread no longer needs an artificial
+  wait before handing the surface over -- the device's own command queue
+  orders the copy before the encoder's work.
+
+- **The capture frames that predate the zero-copy seam are discarded.**
+  The capture device is opened *before* the codec exists -- the codec
+  has to adopt the capture's D3D11 device, and that device only exists
+  once the capture device is open -- so the frames produced in that
+  window went through the CPU staging path, because the GPU callback
+  did not exist yet.  They are stale (the mailbox delivers the current
+  picture within one capture interval), so
+  `NimRTCEngine::drain_stale_cpu_frames()` drops them once the seam is
+  wired.  It does not rewrite the device's own `bytes_copied`
+  accounting -- those bytes really were copied -- which is why the
+  verification program reports the startup transient separately from
+  the steady state.
+
+- **The Windows capture device's GPU context released the D3D11 device
+  one time too many.**  `WindowsCapture::gpu_context()` hands the caller
+  a `GpuContext` whose `keepalive` is a `shared_ptr` that owns *one*
+  reference to the `ID3D11Device` — so a consumer that outlives the
+  capture device never sees a dangling device pointer.  The keepalive
+  was built from a `ComPtr` **copy** of the device, and the deleter
+  called `Release()` on it: the copy's own destructor released the
+  reference *again*, so the device's refcount went to zero while the
+  context was still alive, and the next use faulted with an access
+  violation (`0xC0000005`).  The keepalive now takes its **own**
+  reference (`AddRef`) before the copy goes out of scope, so the
+  reference count is exactly balanced.
+
+- **The Windows cursor source crashed the process on every poll.**  The
+  cursor layer (remote-desktop plan A6) read the icon's monochrome
+  mask with `GetDIBits`, and the call was wrong in three separate ways:
+
+    - The `BITMAPINFO` was **null**.  `GetDIBits` reads the
+      destination's layout through it unconditionally, so the call
+      faulted with an access violation (`0xC0000005`) inside
+      `gdi32full.dll` — reproducible on every host, on the first poll.
+    - The destination had **no room for the colour table**.  A
+      1-bit-per-pixel `BI_RGB` destination carries a 2-entry palette
+      and `GetDIBits` writes it after the header, but a plain
+      `BITMAPINFO` has room for only one entry: the call wrote 4 bytes
+      past the end of the structure, a stack buffer overflow that the
+      debug runtime's stack check turned into a hard failure.
+    - The mask was read **one scan line at a time** (`biHeight = 1`,
+      `cLines = 1`).  Such a request reports success but leaves the
+      destination buffer untouched for every line past the first, so
+      the loop silently re-read the *same* row — and applied it to
+      every row of the cursor.
+
+  The mask is now read in a **single top-down** `GetDIBits` call into a
+  destination with an explicit 2-entry palette, so the mask rows line
+  up with the (top-down) drawn DIB and the bitmap is the cursor's real
+  shape.
+
+- **`WindowsCapture.DxgiReportsDirtyRects` failed on an idle desktop.**
+  The test waited for 3 Desktop Duplication frames, but DXGI only
+  delivers a frame when the screen *changes* — so on a static desktop
+  the wait timed out and the test failed roughly half the time.  The
+  test now nudges the desktop while it waits, exactly as its sibling
+  `DxgiReportsANonEmptyDirtyRectWhenTheDesktopChanges` already did.
+
+- **A fresh clone now configures and builds.**  `cmake -S . -B build` on
+  a clean checkout failed outright: the WebRTC APM vendor wrapper raised
+  a `FATAL_ERROR` whenever the prebuilt static library was missing, but
+  the APM source tree is cloned at build time by
+  `tools/fetch_webrtc_apm.py` -- so on a clean clone the prebuilt can
+  never be built and the configure was impossible.  The fatal error now
+  fires only when the source **is** present (so the build script was
+  started and did not finish); otherwise the wrapper defines the stub
+  target and says so.  The `audio3a` module's `NIMRTC_USE_WEBRTC_APM`
+  define now follows the **source** rather than the option, so the
+  module builds its stub implementation and reports `DEGRADED` at
+  runtime -- the honest state -- instead of failing to compile.
+- **The stage-timing test was flaky** (it failed on roughly a third of
+  its runs).  It asserted that the capture stage cost more than zero
+  *microseconds*, but popping a frame from a queue costs tens of
+  nanoseconds, so the microsecond view rounded to zero.  Two changes:
+  the public `Stats::StageTiming` gained the nanosecond view
+  (`mean_ns` / `max_ns` / `total_ns`), so a sub-microsecond stage is no
+  longer reported as "free" (the microsecond fields stay, because the
+  plan's §B.6 budget is written in them); and the test's capture device
+  now copies its picture the way a real device does, so the measurement
+  is unambiguous.  The negative control confirms the test still catches
+  a broken measurement.
+
+> Work that lands after `v1.1.0`.
+>
+> The audio pipeline's development body lands here. Its work packages are
+> specified in `docs/plan/audio-pipeline-spec.md` and scheduled in
+> `docs/plan/audio-pipeline-dev-plan.md`; the ladder the owner fixed on
+> 2026-11-06 puts the whole audio body (WP-0 .. WP-11) into `v1.2.0`, so
+> nothing here is a feature release of the `v1.1` line.
+
+
+- **The per-stream bandwidth share was assigned to the wrong stream
+  (remote-desktop plan D5).**  `bandwidth_allocation.hpp`'s
+  `allocate_bandwidth()` reserves index 0 for audio, index 1 for the
+  default video stream, and gives the extra video streams the indices
+  `[2 + i]`.  The engine's write-back loop iterated the extra-stream
+  vector starting at index 1, so the **default** stream's share was
+  written to the first extra stream and the **last** extra stream was
+  never written at all.  The split now uses the `[2 + i]` indexing, and
+  the write-back is covered by
+  `tests/test_engine_video_stream_shares.cpp`.
+  - The share computation was also coupled to the pacing path: it only
+    ran inside `update_pacing_rates()`, which early-exits when the
+    scheduler or the media pacer is disabled.  The split is now computed
+    by its own function (`compute_video_stream_shares()` in
+    `src/engine/src/engine_transport.cpp`), called once per tick
+    whenever the BWE has an estimate, so each stream's
+    `IVideoBitrateController` receives its share regardless of whether
+    pacing is enabled.
+  - The per-stream weights are configurable
+    (`NimRTCEngine::set_video_stream_weight()` /
+    `NimRTCEngine::video_stream_weight()`), and the resulting share is
+    observable (`NimRTCEngine::video_stream_share_bps()` and the new
+    `VideoStreamStats::bandwidth_share_bps` /
+    `VideoStreamStats::bandwidth_weight` fields).
+  - Covered by `tests/test_engine_video_stream_shares.cpp` (nine cases:
+    the default weight, custom weights, the split's proportionality, the
+    stats reporting, and the zero-weight / stream-removal dynamics).
+
+- **The vendored libopus registered its own test suite in NimRTC's ctest
+  run, and all five of those tests failed.**  Upstream libopus decides
+  whether to build *its* tests from the **global** `BUILD_TESTING` cache
+  entry, not from its own `OPUS_BUILD_TESTING` option:
+
+  ```cmake
+  if(OPUS_BUILD_TESTING OR BUILD_TESTING)
+    set(OPUS_BUILD_TESTING ON)
+    set(BUILD_TESTING ON)
+  endif()
+  ...
+  if(BUILD_TESTING AND NOT BUILD_SHARED_LIBS)
+    add_test(NAME test_opus_decode ...)
+    add_test(NAME test_opus_padding ...)
+    add_test(NAME test_opus_api ...)
+    add_test(NAME test_opus_encode ...)
+    add_test(NAME test_opus_extensions ...)
+  endif()
+  ```
+
+  NimRTC sets `OPUS_BUILD_TESTING=OFF` explicitly, but the upstream
+  `add_subdirectory()` call inherits NimRTC's own `BUILD_TESTING=ON`, so
+  the `add_test()` calls landed in NimRTC's ctest run.  The test
+  *executables* live in an `EXCLUDE_FROM_ALL` subdirectory and are never
+  built, so `test_opus_decode`, `test_opus_padding`, `test_opus_api`,
+  `test_opus_encode` and `test_opus_extensions` all failed with "the
+  test executable does not exist".  `src/third_party/libopus/CMakeLists.txt`
+  now shadows the cache entry with a directory-scope `BUILD_TESTING OFF`
+  for the duration of the `add_subdirectory()` call (a normal variable
+  takes precedence over the cache in that scope), and restores the
+  original value afterwards so the rest of the NimRTC tree still builds
+  its own tests.  Upstream's tests are not part of NimRTC's quality gate;
+  the NimRTC-owned Opus tests in `src/modules/opus/tests/` are.
+
+- **The BWE plugin seam test asserted against an empty registry.**
+  `BwePluginSeam.ListBwesContainsAimd` called
+  `core::PluginRegistry::instance().list_bwes()` and expected to find
+  `"aimd"` — but the test never registered the factory first.  That
+  worked when the whole binary ran as one gtest process, because an
+  earlier test in the same binary had called
+  `nimrtc::bwe::register_default_plugins()`.  NimRTC registers every
+  gtest case as its **own** ctest entry (`gtest_discover_tests`), so
+  each case runs in a fresh process and the registry starts empty; the
+  case therefore failed in isolation.  The test now calls
+  `register_default_plugins()` itself (it is idempotent), matching the
+  four sibling cases in the same file.
+
+- **`tools/check_prerequisites.py` could not read the MSVC version on a
+  localized toolchain.**  The check ran `cl` and matched the version with
+  `Version\s+(\d+)\.(\d+)` — but MSVC's banner is **localized**, and a
+  Chinese-locale toolchain prints
+
+  ```
+  用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.43.34809
+  ```
+
+  with no English word in front of the number at all.  The regex therefore
+  found nothing and the check reported `unknown version (could not parse cl
+  output)` on a perfectly good VS 2022 install — 8/9 instead of 9/9, with
+  the advice "Install Visual Studio 2022 Build Tools", which the machine
+  already had.  The check now reads the version from `cl /Bv` with a
+  locale-independent `19.xx` pattern, and falls back to the toolset
+  directory name under `VC\Tools\MSVC\` if the banner does not parse.
+  Both the English and the Chinese banner now resolve to `19.43`.
+
 
 - **The engine closed the capture device twice (remote-desktop plan
   A1 / A10).**  `NimRTCEngine::shutdown_video_capture()` closed the
@@ -2906,7 +4340,246 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `alloc_probe_enabled: false` in that build — a sanitizer build is
   about races and memory errors, not about allocation counts.
 
+
+### Performance
+
+
+- **The media hot paths no longer allocate per frame or per packet
+  (v1.2.0, architecture remediation plan §3 -- the C class).**  Six of
+  the seven C items landed here; C7 (the video path's RTP-packet
+  concatenation) was already removed in Phase 1.3.
+  - **C1 / C2 -- the staged video frames are pooled.**
+    `stage_source_frame()` allocated a fresh `VideoFrameBuffer` per
+    frame (`make_shared` plus a full-frame `memset` at 1080p30 -- about
+    3 MB allocated *and* zeroed every 33 ms) and then did an NV12 ->
+    I420 de-interleave on top.  `VideoFrameBufferPool` now owns the
+    whole buffer -- its pixel storage *and* its control block.  The pool
+    parks the buffer and hands out an **aliasing** `shared_ptr` that
+    shares the parked buffer's control block, so recycling a frame
+    allocates neither a new control block nor new pixel memory; the
+    steady state performs no allocation and no full-frame memset.
+  - **C3 -- the GPU zero-copy video send path is open.**
+    `send_video()` always staged the frame into a CPU I420 buffer before
+    handing it to the codec -- a ~3 MB copy per frame at 1080p30, plus a
+    de-interleave for an NV12 source.  `plugins::VideoSourceFrame`
+    gained three **additive** fields (`gpu_backend`, `gpu_handle`,
+    `gpu_pitch_bytes`), and `EngineConfig::video_zero_copy` (default:
+    off) opts the host in.  The zero-copy path is taken only when the
+    flag is on **and** the frame carries a live GPU handle **and** the
+    codec reports `supports_zero_copy_encode()`; otherwise the CPU
+    staging path runs exactly as before, so turning the flag on is
+    always safe.  When the codec supports the handle but the encode
+    fails, the engine falls back to the CPU path rather than dropping
+    the frame.  `Stats::video_zero_copy_frames` and
+    `Stats::video_zero_copy_fallbacks` make the decision observable.
+  - **C4 -- `PacketBuilder::build_into()`.**  `build()` allocated a new
+    `core::ByteBuffer` on every packet (50 Hz audio, 30 Hz video).  The
+    new overload serialises directly into caller-provided memory, and
+    the engine keeps **per-path** scratch buffers (audio, video and DTMF
+    separately) so the three threads never share one buffer.
+  - **C5 -- the SRTP scratch high-water mark.**  The libsrtp backend
+    called `resize(out_len)` before encrypt / decrypt and `resize(actual)`
+    after, so the vector was repeatedly shrunk and grown -- and each
+    `resize` value-initialises (zeroes) the memory.  The scratch is now
+    sized to the **high-water mark** and never shrinks during the
+    session's lifetime, which removes the memset churn entirely.
+  - **C6 -- the RTCP compound demux.**  `demux_rtcp()` returned a
+    `std::vector<RtcpBlock>` **by value** -- one heap allocation per
+    RTCP datagram.  The new overload clears and refills a caller-owned
+    scratch vector, keeping its capacity across calls.
+  - **The Phase 0.3 hot-path benchmark harness ships with the fix**
+    (remediation plan §0.3), so the numbers are reproducible rather than
+    asserted: `tests/bench_engine_hotpath.cpp` (an allocation probe --
+    overridden `operator new` / `operator delete` backed by CRT
+    `malloc` / `free` with an atomic arming flag, plus latency
+    percentiles for `send_video()`, `tick()` and the scheduler under
+    contention) and `tools/benchmark_hotpath.py` (the capture/compare
+    wrapper).
+    Measured on one machine at 1080p30 over 300 frames, `main` versus
+    this branch:
+
+    | metric | `main` | this branch | delta |
+    | --- | --- | --- | --- |
+    | `send_video` bytes/frame | 3 112 483 | 2 023 | **-99.9 %** |
+    | `send_video` mean latency | 902.97 us | 134.34 us | **-85.1 %** |
+    | `send_video` p50 latency | 861.55 us | 129.75 us | **-84.9 %** |
+    | `send_video` p99 latency | 1 387.36 us | 169.32 us | **-87.8 %** |
+    | `send_video` allocations/frame | 23.18 | 22.18 | -4.3 % |
+    | `tick` p99 | 0.3 us | 0.2 us | -33 % |
+
+    The allocation *count* barely moves because `main` staged each frame
+    with one 3 MB allocation; what C1 / C2 removed is the **volume**
+    (3.1 MB of allocator traffic per frame, plus the full-frame memset
+    that came with it), not the number of `new` calls.  The remaining
+    ~22 allocations per frame are in the encode / packetise path (the
+    codec's own output buffer and the RTP packet vector), not in the
+    frame staging.
+
+- **`send_video()` is now allocation-free end to end (v1.2.0,
+  remediation Phase 3 §3.5).**  The C class above removed the *volume*
+  of allocator traffic, but the allocation *count* was still 22 per
+  frame.  This change drives it to **zero** — the number the plan's
+  §3.5 acceptance criterion asks for.
+  - **The video frame pool recycles the buffer object, not just its
+    storage.**  The pool used to hand out a fresh `shared_ptr` per
+    frame, and a `shared_ptr` that owns its object carries a
+    heap-allocated control block.  The pool now parks the buffer and
+    hands out an **aliasing** `shared_ptr` that shares the parked
+    buffer's control block (`shared_ptr<T>(owner, owner.get())`), so
+    recycling a frame allocates neither a control block nor pixel
+    memory.  A buffer is reusable once the caller has released its
+    alias, which is visible as the owner's `use_count()` dropping back
+    to one.
+  - **The packetizer works on spans, not copies.**  `parse_annex_b()`
+    and `parse_length_prefixed()` returned a
+    `std::vector<std::vector<std::uint8_t>>` -- one heap allocation
+    per NAL unit, per frame, plus a copy of every NAL's bytes.  The
+    caller owns the bitstream for the whole `push_frame()` call, so
+    the NAL units are now **spans into the source**, parsed into a
+    reusable vector.  The FU-A fragment buffer, the STAP-A output
+    buffer, the aggregation group and the FU-A flags are reusable
+    members as well, pre-reserved so a frame with an unusual number of
+    NAL units does not grow them.
+  - **The retransmission ring is pre-sized.**  Each cached slot is
+    reserved to the MTU when the ring is built, so caching a packet is
+    a memcpy into an existing buffer instead of a fresh allocation per
+    outgoing packet.
+  - **The ref-frame registry is a fixed-size table.**  It was a
+    `std::map` plus a `std::deque` -- two heap allocations per sent
+    frame (a map node and a deque block), forever.  It is now an
+    open-addressed table with backward-shift deletion plus a
+    fixed-size insertion ring, both allocated once at construction.
+    The timestamp→id lookup selects the lowest matching id explicitly,
+    so the observable behaviour is identical to the `std::map`'s.
+  - **The outbound packet buffer is reused on the no-scheduler path.**
+    With a scheduler the packet comes from the scheduler's pool; on
+    the "transport" profile the engine wrote straight to ICE and
+    allocated a fresh vector per packet.  It now uses the engine's own
+    scratch buffer.  This relies on `ITransport::send()` treating its
+    `BufferView` as **borrowed** -- the transport must copy the bytes
+    it needs before returning -- which is now written down explicitly
+    in the seam's documentation.
+  - **The measurement is a gate, not a claim.**  The benchmark gained
+    an `--assert-zero-allocs` flag, and the ctest case
+    `hotpath_zero_allocs` runs it at 1080p.  The count is exact rather
+    than a threshold: the engine runs no background threads in the
+    benchmark's profile, so every allocation counted during the
+    measured region belongs to the `send_video()` call itself.  A
+    regression that reintroduces a per-frame allocation fails the
+    build.
+
+    Measured after this change, over 300 frames per resolution:
+
+    | resolution | allocations/frame | bytes/frame |
+    | --- | --- | --- |
+    | 1920x1080 | **0.000000** | **0.000000** |
+    | 1280x720 | **0.000000** | **0.000000** |
+    | 854x480 | **0.000000** | **0.000000** |
+
+    The §3.5 criterion "`send_video()` 1080p30 的 per-call 堆分配次数 =
+    0" is met.
+
+- **The audio send path has a zero per-packet allocation budget too
+  (remediation Phase 3 §3.5).**  The plan's second allocation
+  criterion -- "音频路径 per-packet 堆分配次数 = 0" -- now has a gate of
+  its own, in `tests/test_engine_audio_alloc.cpp`.
+  - The metric is **per packet**, not per call: the host may hand the
+    engine an arbitrary block size, and the engine accumulates samples
+    until it has a whole 20 ms frame.
+  - The audio path is unreachable without a completed DTLS handshake
+    (otherwise the engine would put plaintext RTP on the wire), so the
+    test drives the engine through a fake ICE transport and a fake DTLS
+    session, the same pair `tests/test_engine_audio_send.cpp` uses.
+  - The fake transport only *counts* the bytes it is handed.  A fake
+    that copied them would allocate once per packet and land right in
+    the measured region, so the test would have been measuring the fake
+    rather than the engine.
+  - The criterion is asserted as "the allocation count does not grow
+    with the packet count" (a 50-packet run and a 250-packet run must
+    cost the same), not as "every single call allocates nothing".  The
+    engine's periodic work -- the RTCP sender report, the SRTP context
+    rollover -- may allocate on *some* calls; what must not happen is
+    one allocation per packet, forever.
+  - The probe lives in its own binary on purpose: replacing the global
+    `operator new` collides with a sanitizer runtime's own definition,
+    so the video side of the same criterion stays in the benchmark
+    binary (`hotpath_zero_allocs`) and the audio side is here.
+
+    The remaining §3.5 items -- the `tick()` p99 reduction and the
+    scheduler's drain / enqueue non-blocking property -- are covered by
+    the Phase 0.3 benchmark's other two sections and are tracked
+    separately.
+
+
 ### Tooling
+
+
+- **The plugin author guide for the capture / codec / sink / audio-device
+  seams (v1.4, remote-desktop plan K5).**  The existing
+  `docs/plugin_author_guide.md` described the *transport* and *DTLS*
+  seams; the new capture, codec, sink and audio-device seams had no
+  guide at all, so a plug-in author had to read the headers and guess.
+  - The new guide
+    [`docs/guides/plugin-author-guide.md`](docs/guides/plugin-author-guide.md)
+    is a complete, hands-on document: where each seam lives (header,
+    factory id, registry slot), the five-step recipe for any plug-in
+    (implement the interface → implement the factory → register it →
+    make the engine resolve it → test it) with the exact registration
+    macro and the exact CMake target, and then one worked skeleton per
+    kind: a **capture plug-in** (`IVideoCapture`, the bounded-queue
+    discipline, the drop policy, the format negotiation, the dirty-rect
+    contract, the zero-copy `GpuBuffer` contract, the error-code
+    discipline), a **hardware-encoder plug-in** (the
+    `available()`-probe-then-create shape, the priority ordering,
+    `zero_copy_supported`, the `VideoEncoderParams` authority and the
+    parameter-set-on-resolution-change rule), the **GPU / zero-copy
+    contract** (`GpuBuffer`'s acquire / release-ref lifetime rule, the
+    `GpuBackend` values, and how to *prove* a zero-copy path), the
+    **screen-content contract** (content type, dirty rects, the ROI, the
+    content hint — and why a screen capture is not a camera, ADR-022),
+    the **audio device seams** and their ring-buffer discipline, and the
+    **testing pattern** (a synthetic device so the test runs on every CI
+    leg, the "no network, no codec" rule, and the negative control).
+  - It closes with the **house rules**: the stability markers
+    (`NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE` /
+    `NIMRTC_API_DEPRECATED`, ADR-015), the plugin-id grammar
+    (ADR-023), the layering rules L1–L7 and what a plug-in author must
+    *not* do (no engine changes, no concrete-module includes in the
+    engine, no global mutable state), and the licence rules for a
+    bundled codec (ADR-021 / the RD-2 allowlist).
+
+- **The README feature tables now describe what actually ships (v1.4,
+  remote-desktop plan K9).**  The plan's honesty rule (RD-9) is that
+  *a row must never imply a bundled codec or a device backend that is
+  not shipped*.  The tables did not hold to it.
+  - The codec rows no longer imply more than the tree carries: the
+    **H.264 hardware backends (NVENC, QSV, AMF, VA-API, DXVA) are
+    opt-in and default to `OFF`**, the **H.265 software path is a stub
+    decoder only**, the **AV1 software path is decode-only** (dav1d),
+    **VP8 / VP9 are packetizers only**, and **G.711 is a routing-only**
+    payload.  Only OpenH264 (H.264, software) and dav1d (AV1, software
+    decode) are genuinely bundled codecs.
+  - The device rows now name the backends that exist and say which
+    platform each one belongs to: the capture devices are `synthetic`
+    (everywhere) plus `windows-dxgi` / `windows-wgc` (Windows),
+    `macos-screencapturekit` (macOS) and `linux-pipewire` / `linux-x11`
+    (Linux); the renderers are `headless`, `pinned`, `d3d11` (Windows),
+    `metal` (macOS) and `egl` (Linux) — the `d3d11` / `metal` / `egl`
+    factories are registered on **every** platform so a configuration
+    naming one resolves, and on a non-matching platform `open()` reports
+    `kErrUnsupported`.  The audio device layer is **PortAudio** (with
+    the synthetic device always available).
+  - The `remote-desktop` profile, the signalling guide and the reference
+    example are listed as the tenth profile, and the **repository layout**
+    and the **vendored third-party versions** tables now list the
+    remote-desktop modules (40 modules in total) and the newly vendored
+    dependencies (openh264, dav1d, libyuv, PortAudio, libsamplerate,
+    nv-codec-headers).
+  - `README.zh.md` carries the same corrections, written as a Chinese
+    technical writer would rather than a literal translation, and
+    `docs/zh/architecture.md` §6 gained the matching honest inventory
+    ("视频侧实际交付的编解码器与设备").
+
 
 - **The gtest discovery timeout was too short for a loaded host.**
   `gtest_discover_tests` re-runs each test binary to enumerate its

@@ -30,11 +30,13 @@ on:
   # `main` itself and the release branches, plus every PR that targets
   # `main`.  A push to a working branch gets the fast leg
   # (`ci-fast.yml`) instead -- see the comment there for the throughput
-  # argument.  The five checks the repository ruleset gates on
-  # (`windows / msvc`, `windows / build`, `linux-gcc / x86_64`,
-  # `macos-clang / arm64`, `docs / markdown links`) are all produced
-  # here or in `interop.yml`, and both still run on `main` and on every
-  # PR into `main`.
+  # argument.  The eleven checks the repository ruleset gates on are
+  # exactly the ones produced here or in `interop.yml`, and both still
+  # run on `main` and on every PR into `main`.
+  #
+  # `tools/check_ci_ruleset.py` is what keeps that sentence true: it
+  # compares `.github/rulesets/protect-main.json` against the
+  # workflows and fails when the two disagree.
   push:
     branches: [main, release/**]
   pull_request:
@@ -133,8 +135,12 @@ jobs:
             -File ./scripts/generate_wtserver_cert.ps1 `
             -BuildDir "${{ github.workspace }}/build"
 
+      # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
+      # codecs (remote-desktop plan WP-B).  They are vendored source
+      # builds, so the leg proves that the wrappers compile and that the
+      # software round-trip tests pass on this platform too.
       - name: Configure
-        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON
+        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
       - name: Build
         run: cmake --build --preset debug.msvc -j 2
@@ -282,6 +288,15 @@ jobs:
         with:
           submodules: recursive
 
+      # PyYAML is not part of the standard library, and the merge-gate
+      # guard below parses the workflow files with it.  The runner image
+      # usually has it, but "usually" is not a dependency contract --
+      # and the guard is worthless if it silently skips.  Installing it
+      # explicitly turns "the runner happened to have it" into "the
+      # guard runs".
+      - name: Install PyYAML
+        run: python -m pip install --upgrade pyyaml
+
       - name: Check Markdown links and anchors
         run: python tools/check_md_links.py
 
@@ -316,11 +331,32 @@ jobs:
       # invariant enforceable rather than aspirational -- a new
       # concrete `#include` in src/engine/ is one line, and the coupling
       # it creates is not.
+      #
+      # The same script also enforces the remediation plan §4.3 line
+      # budget for the engine's internal state header, which two
+      # unrelated features have already pushed back over once each.
       - name: Check the engine's layering against ADR-025
         run: python tools/check_engine_layering.py
 
       - name: Self-test the engine-layering guard
         run: python tools/check_engine_layering.py --self-test
+
+      # The merge gate is a GitHub Ruleset that demands a list of
+      # required status checks, and that list has to agree with the set
+      # of checks the workflows actually produce.  The two drift apart
+      # silently: a required check no workflow produces blocks every
+      # merge, forever, with nothing to fix from the PR page, and a
+      # check the matrix produces but the gate does not require costs
+      # runner time and catches nothing.
+      #
+      # `windows / fast` is the trap this guard exists for: it comes
+      # from `ci-fast.yml`, which does not run on `main`, so requiring
+      # it would deadlock the repository.
+      - name: Check the merge gate against the CI matrix
+        run: python tools/check_ci_ruleset.py --verbose
+
+      - name: Self-test the merge-gate guard
+        run: python tools/check_ci_ruleset.py --self-test
 
       # ADR-026: a `.h` under `src/**/include/` is a promise that a C
       # host can include it.  `sched_c.h` is the first public header
@@ -346,6 +382,22 @@ jobs:
       # signatures, so the RFC 8032 §7.1 vectors run on every push.
       - name: Self-test the offline release signature verifier
         run: python tools/verify_release_signature.py --self-test
+
+      # The release body reports per-platform 3A content by asking
+      # whether a bundle ships the WebRTC APM archives.  That question
+      # used to be answered by `tar -tJf ... | grep -q`, which under
+      # `set -o pipefail` reports *every* bundle as APM-free: `grep -q`
+      # exits on its first match, `tar` dies of SIGPIPE (141), and the
+      # pipeline's status is 141.  The published v1.1.0 body carries
+      # that false "lib/webrtc_apm/ is absent" claim for the two Linux
+      # platforms whose bundles do carry 14 APM members each.
+      #
+      # `tools/check_bundle_apm.py` replaces the pipeline, and its
+      # self-test pins the three verdicts it must keep apart (present /
+      # absent / unreadable) *and* fails if the pipeline ever comes back
+      # into the workflow.
+      - name: Self-test the release-bundle APM guard
+        run: python tools/check_bundle_apm.py --self-test
 
       # The soak collector's whole value is in its evidence, so its
       # streak semantics are pinned by a self-test: seven calendar-
@@ -490,8 +542,12 @@ jobs:
             -out build/wtserver_cert.pem \
             -config build/wtserver_openssl.cnf
 
+      # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
+      # codecs (remote-desktop plan WP-B).  They are vendored source
+      # builds, so the leg proves that the wrappers compile and that the
+      # software round-trip tests pass on this platform too.
       - name: Configure
-        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON
+        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
       - name: Build
         run: cmake --build --preset debug -j 2
@@ -1027,8 +1083,12 @@ jobs:
             -out build/wtserver_cert.pem \
             -config build/wtserver_openssl.cnf
 
+      # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
+      # codecs (remote-desktop plan WP-B).  They are vendored source
+      # builds, so the leg proves that the wrappers compile and that the
+      # software round-trip tests pass on this platform too.
       - name: Configure
-        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
+        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
       - name: Build
         run: cmake --build --preset debug.macos -j 2

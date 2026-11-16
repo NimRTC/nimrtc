@@ -197,6 +197,35 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
      *  implicit layout, or when the frame is CPU-side). */
     std::uint32_t gpu_pitch_bytes = 0;
 
+    /** The GPU *device* that owns `gpu_handle`.
+     *
+     *  The producer and the consumer must agree on the device: an
+     *  encoder session is opened against one device, and a surface
+     *  registered with it has to come from that same device. */
+    void*        gpu_device = nullptr;
+
+    /** True iff this frame is a **capture-contract** surface.
+     *
+     *  A capture device that negotiated a zero-copy surface promises
+     *  two things: the picture lives in GPU memory, and there is no
+     *  CPU copy of it to fall back to.  The engine honours that promise
+     *  *unconditionally* -- it hands the surface to the encoder even
+     *  when `EngineConfig::video_zero_copy` is off -- because a host
+     *  that cannot use the surface has no other picture to send, and
+     *  quietly staging it through the CPU would defeat the path the
+     *  device negotiated.
+     *
+     *  A frame that merely *carries* a handle (the flat
+     *  `gpu_backend` / `gpu_handle` fields) is **not** a capture
+     *  contract: it is an *opt-in* optimisation, and the host turns it
+     *  on with `EngineConfig::video_zero_copy`.  The difference is
+     *  deliberate -- the host owns the choice for a frame it produced
+     *  itself, while the capture device owns it for a frame it
+     *  negotiated.
+     *
+     *  @see `EngineConfig::video_zero_copy` */
+    bool        capture_surface_contract = false;
+
     /** True iff this frame carries a live GPU handle. */
     [[nodiscard]] bool has_gpu_handle() const noexcept {
         return gpu_backend != GpuBackend::kNone && gpu_handle != nullptr;
@@ -213,21 +242,23 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
     /** RTP timestamp (32-bit, media clock). */
     std::uint32_t rtp_timestamp = 0;
 
-    // -- Colour description (remote-desktop plan C5) ------------------------
-    //
-    // How the picture's luma and chroma are scaled and interpreted.
-    // A desktop compositor produces full-range BT.709; a camera produces
-    // limited-range BT.601.  The source states what it produces, the
-    // conversion uses it, and the encoder and the renderer both honour
-    // it — so a full-range screen does not come out washed out.
-    //
-    // `kUnspecified` on both fields means "nobody said"; the portable
-    // layer resolves that to the desktop default (full range, BT.709).
-    video_frame::ColorDescription color{};
+    /** The colour description of the picture (remote-desktop plan C5).
+     *
+     *  A desktop compositor delivers **full-range** pixels; a camera in
+     *  the default studio setup delivers **limited-range** ones.  The
+     *  two must not be conflated: the difference is a visible shift in
+     *  contrast, and it looks exactly like a broken codec.
+     *
+     *  The description travels with the frame so the encoder can code it
+     *  correctly and the renderer can interpret it the same way.  The
+     *  default (`known() == false`) means "the source does not say".
+     *
+     *  @see `plugins::VideoColorDescription` */
+    VideoColorDescription color;
 
     // -- Zero-copy surface (remote-desktop plan B10) -------------------------
     //
-    // The GPU half of the frame.  When `gpu_surface.backend` is not
+    // The GPU half of the frame.  When the surface's backend is not
     // `kNone` the picture lives in GPU memory: `plane_y/u/v` may be
     // null, and the *encoder* is expected to consume the surface
     // directly (`IVideoCodec::encode_zero_copy`) rather than through a
@@ -240,7 +271,33 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
     // `GpuHandle::device` identifies the GPU device the surface belongs
     // to — the encoder session is opened against one device, so the
     // producer and the consumer must agree on it.
-    GpuHandle gpu_surface{};
+    //
+    // It is a *view* of the three flat fields above, not a second copy:
+    // the flat form is what the whole `video_frame` module uses, so it
+    // is the one the seam keeps.
+    [[nodiscard]] GpuHandle gpu_surface() const noexcept {
+        GpuHandle h;
+        h.backend             = gpu_backend;
+        h.handle              = gpu_handle;
+        h.native_pitch_bytes  = gpu_pitch_bytes;
+        h.device              = gpu_device;
+        return h;
+    }
+
+    /** Set the GPU half from one handle (the inverse of `gpu_surface()`).
+     *
+     *  This is the *capture seam's* setter: handing the engine a
+     *  `GpuHandle` is a promise that the picture lives in GPU memory,
+     *  so the frame is marked as a capture contract.  A host that
+     *  produces its own surfaces and wants the zero-copy path to be
+     *  *opt-in* fills the flat fields instead. */
+    void set_gpu_surface(const GpuHandle& h) noexcept {
+        gpu_backend     = h.backend;
+        gpu_handle      = h.handle;
+        gpu_pitch_bytes = h.native_pitch_bytes;
+        gpu_device      = h.device;
+        capture_surface_contract = true;
+    }
 };
 
 // ---------------------------------------------------------------------------

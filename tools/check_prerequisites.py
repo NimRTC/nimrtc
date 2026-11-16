@@ -173,15 +173,52 @@ def _msvc_version_from_vswhere() -> str:
 
 
 def _msvc_clang_cl_version() -> tuple:
-    """Try to read MSVC version from 'cl' compiler output."""
+    """Try to read MSVC version from 'cl' compiler output.
+
+    MSVC prints the version on its first line, e.g.
+
+        Microsoft (R) C/C++ Optimizing Compiler Version 19.43.34809 for x64
+
+    The banner is **localized**, so the literal word "Version" is not
+    guaranteed to appear: a Chinese-locale toolchain prints
+
+        用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.43.34809
+
+    with no English word in front of the number at all.  Matching the
+    English "Version" keyword therefore made this check report
+    "unknown version (could not parse cl output)" on a perfectly good
+    VS 2022 install.  The version number itself is locale-independent,
+    so the robust approach is to read it from `cl /Bv` (which prints the
+    same banner plus the compiler's internal version) and, failing
+    that, to fall back to a bare `19.xx` pattern.
+
+    A secondary, more reliable source is the toolset directory name
+    under the VC toolchain, which carries the same `19.43` number.
+    """
     cl = shutil.which("cl")
     if not cl:
         return (0,)
-    out, _ = run_cmd(["cl"], timeout=10)
-    # MSVC prints version in first line like "Microsoft (R) C/C++ ... Version 19.43.34433"
-    m = re.search(r"Version\s+(\d+)\.(\d+)", out)
+
+    # `cl /Bv` prints the banner with the full compiler version.
+    out, _ = run_cmd([cl, "/Bv"], timeout=20)
+
+    # Preferred: the localized banner's bare "19.43" number, which sits
+    # right before the build number (19.43.34809 -> 19.43).
+    m = re.search(r"\b(19|20)\.(\d{2})\b", out)
     if m:
         return (int(m.group(1)), int(m.group(2)))
+
+    # Fallback: the toolset directory name, e.g.
+    # ...\VC\Tools\MSVC\14.43.34808\bin\Hostx64\x64\cl.exe
+    # The *toolset* is 14.43 while the compiler version is 19.43, so
+    # this is only a last resort -- but it is locale-independent.
+    m = re.search(r"\\MSVC\\(\d+)\.(\d+)", cl)
+    if m:
+        toolset = (int(m.group(1)), int(m.group(2)))
+        # MSVC 14.x toolset <=> compiler 19.x; the minor tracks the
+        # compiler minor for the VS2022 generation (14.4x -> 19.4x).
+        return (19, toolset[1])
+
     return (0,)
 
 

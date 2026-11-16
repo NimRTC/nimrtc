@@ -20,29 +20,52 @@ bool by_priority_desc(const B* a, const B* b) noexcept {
 }
 
 // Null-check helper.
+//
+// The `preference` filter is the plan's B2 knob:
+//   - `kAuto`     — every backend is eligible (hardware first, because the
+//                   priority order puts hardware above software).
+//   - `kHardware` — only `is_hw` backends are eligible.  When none is
+//                   available the selection *fails* (returns nullptr),
+//                   because silently handing back a software backend
+//                   would defeat the point of asking for hardware.
+//   - `kSoftware` — only the non-hardware backends are eligible.
+//
+// The filter is applied to the *explicit* preferred id as well: naming
+// a software backend while asking for hardware is a contradiction, and
+// the honest answer to that is "no match", not a silent override.
+template <typename B>
+bool eligible_for_preference(const B& b,
+                             VideoCodecBackendPreference preference) noexcept {
+    switch (preference) {
+        case VideoCodecBackendPreference::kHardware:
+            return b.is_hw;
+        case VideoCodecBackendPreference::kSoftware:
+            return !b.is_hw;
+        case VideoCodecBackendPreference::kAuto:
+            break;
+    }
+    return true;
+}
+
 template <typename B>
 const B* first_match(const std::vector<B>& all,
                      VideoCodecKind kind,
                      std::string_view preferred_id,
-                     CodecBackend policy) noexcept {
-    // The policy filters the *eligible* set.  `kAuto` keeps everything,
-    // `kHardware` keeps only the hardware backends, `kSoftware` only
-    // the software ones.
-    const auto eligible = [&](const B& b) noexcept {
-        switch (policy) {
-            case CodecBackend::kHardware: return b.is_hw;
-            case CodecBackend::kSoftware: return !b.is_hw;
-            case CodecBackend::kAuto:
-            default:                      return true;
-        }
-    };
-
+                     VideoCodecBackendPreference preference) noexcept {
+    // The preference filters the *eligible* set.  `kAuto` keeps
+    // everything, `kHardware` keeps only the hardware backends,
+    // `kSoftware` only the software ones.
+    //
+    // (`CodecBackend` and `VideoCodecBackendPreference` are the same
+    // question with two spellings; the seam keeps the longer one and
+    // the engine fills it from `EngineConfig::video_codec_backend`.)
+    //
     // 1. Explicit preferred id (must be available AND eligible)
     if (!preferred_id.empty()) {
         for (const auto& b : all) {
             if (b.id != preferred_id) continue;
             if (b.codec_kind != kind) continue;
-            if (!eligible(b)) continue;
+            if (!eligible_for_preference(b, preference)) continue;
             if (b.available && !b.available(VideoCodecConfig{})) continue;
             return &b;
         }
@@ -52,8 +75,10 @@ const B* first_match(const std::vector<B>& all,
     sorted.reserve(all.size());
     for (const auto& b : all) {
         if (b.codec_kind != kind) continue;
-        if (!eligible(b)) continue;
-        if (b.available && !b.available(VideoCodecConfig{})) continue;
+        if (!eligible_for_preference(b, preference)) continue;
+        if (b.available && !b.available(VideoCodecConfig{})) {
+            continue;
+        }
         sorted.push_back(&b);
     }
     std::sort(sorted.begin(), sorted.end(), by_priority_desc<B>);
@@ -62,10 +87,12 @@ const B* first_match(const std::vector<B>& all,
     //    sees why selection failed (returns a backend whose `create` will
     //    fail loudly rather than returning nullptr).
     //
-    //    An *explicit* policy does NOT get this last-resort: asking for
-    //    hardware and getting an unavailable software backend would be
-    //    exactly the silent fallback the override exists to prevent.
-    if (policy != CodecBackend::kAuto) return nullptr;
+    //    This fallback is only reached in `kAuto` mode: in `kHardware` /
+    //    `kSoftware` mode an ineligible backend must NOT be handed back,
+    //    because that is exactly the silent fallback the mode forbids.
+    if (preference != VideoCodecBackendPreference::kAuto) {
+        return nullptr;
+    }
     for (const auto& b : all) {
         if (b.codec_kind == kind) return &b;
     }
@@ -97,11 +124,34 @@ void HwVideoBackendRegistry::install_stub_backends() noexcept {
 
 void HwVideoBackendRegistry::register_encoder(VideoEncoderBackend backend) noexcept {
     std::lock_guard<std::mutex> lk(mutex_);
+    // Upsert by (id, codec_kind): re-registering the same backend
+    // *replaces* the row rather than appending a duplicate.
+    //
+    // A module's `register_default_video_backends()` is normally called
+    // exactly once (from the plugin registrar's one-shot initialiser),
+    // but it is a public entry point and a host or a test may call it
+    // again.  Appending a second row with the same id would (a) make
+    // the "every row has a unique id" invariant false and (b) give the
+    // selector two indistinguishable candidates.
+    for (auto& row : encoders_) {
+        if (row.id == backend.id && row.codec_kind == backend.codec_kind) {
+            row = std::move(backend);
+            return;
+        }
+    }
     encoders_.push_back(std::move(backend));
 }
 
 void HwVideoBackendRegistry::register_decoder(VideoDecoderBackend backend) noexcept {
     std::lock_guard<std::mutex> lk(mutex_);
+    // The decoder side is the mirror of the encoder side — see the
+    // comment in register_encoder() for why this is an upsert.
+    for (auto& row : decoders_) {
+        if (row.id == backend.id && row.codec_kind == backend.codec_kind) {
+            row = std::move(backend);
+            return;
+        }
+    }
     decoders_.push_back(std::move(backend));
 }
 
@@ -117,32 +167,54 @@ void HwVideoBackendRegistry::register_pair(VideoEncoderBackend enc,
 
 const VideoEncoderBackend*
 HwVideoBackendRegistry::select_encoder(VideoCodecKind kind,
-                                       std::string_view preferred_id) const noexcept {
+                                       std::string_view preferred_id,
+                                       VideoCodecBackendPreference preference) const noexcept {
     std::lock_guard<std::mutex> lk(mutex_);
-    return first_match(encoders_, kind, preferred_id, CodecBackend::kAuto);
+    return first_match(encoders_, kind, preferred_id, preference);
 }
 
 const VideoDecoderBackend*
 HwVideoBackendRegistry::select_decoder(VideoCodecKind kind,
-                                       std::string_view preferred_id) const noexcept {
+                                       std::string_view preferred_id,
+                                       VideoCodecBackendPreference preference) const noexcept {
     std::lock_guard<std::mutex> lk(mutex_);
-    return first_match(decoders_, kind, preferred_id, CodecBackend::kAuto);
+    return first_match(decoders_, kind, preferred_id, preference);
 }
+
+// ---- The `CodecBackend` spelling (remote-desktop plan B2) -----------------
+//
+// `CodecBackend` and `VideoCodecBackendPreference` are the same question
+// with two spellings: the codec module's vocabulary and the seam's.  The
+// seam keeps the longer one and the engine fills it from
+// `EngineConfig::video_codec_backend`; the overloads below are the
+// adapter, so a caller that holds the shorter spelling gets exactly the
+// same answer.
+
+namespace {
+
+VideoCodecBackendPreference to_preference(CodecBackend policy) noexcept {
+    switch (policy) {
+        case CodecBackend::kHardware: return VideoCodecBackendPreference::kHardware;
+        case CodecBackend::kSoftware: return VideoCodecBackendPreference::kSoftware;
+        case CodecBackend::kAuto:     break;
+    }
+    return VideoCodecBackendPreference::kAuto;
+}
+
+}  // anonymous namespace
 
 const VideoEncoderBackend*
 HwVideoBackendRegistry::select_encoder(VideoCodecKind kind,
                                        std::string_view preferred_id,
                                        CodecBackend policy) const noexcept {
-    std::lock_guard<std::mutex> lk(mutex_);
-    return first_match(encoders_, kind, preferred_id, policy);
+    return select_encoder(kind, preferred_id, to_preference(policy));
 }
 
 const VideoDecoderBackend*
 HwVideoBackendRegistry::select_decoder(VideoCodecKind kind,
                                        std::string_view preferred_id,
                                        CodecBackend policy) const noexcept {
-    std::lock_guard<std::mutex> lk(mutex_);
-    return first_match(decoders_, kind, preferred_id, policy);
+    return select_decoder(kind, preferred_id, to_preference(policy));
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +258,20 @@ void HwVideoBackendRegistry::clear_for_tests() noexcept {
     encoders_.clear();
     decoders_.clear();
     install_stub_backends();
+}
+
+void HwVideoBackendRegistry::clear_for_kind_for_tests(VideoCodecKind kind) noexcept {
+    std::lock_guard<std::mutex> lk(mutex_);
+    encoders_.erase(std::remove_if(encoders_.begin(), encoders_.end(),
+                                   [kind](const VideoEncoderBackend& b) {
+                                       return b.codec_kind == kind;
+                                   }),
+                    encoders_.end());
+    decoders_.erase(std::remove_if(decoders_.begin(), decoders_.end(),
+                                   [kind](const VideoDecoderBackend& b) {
+                                       return b.codec_kind == kind;
+                                   }),
+                    decoders_.end());
 }
 
 } // namespace nimrtc::plugins

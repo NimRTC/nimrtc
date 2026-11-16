@@ -243,6 +243,14 @@ TEST_F(EngineVideoCodec, codec_encode_decode_roundtrip) {
     codec_cfg.codec = np::VideoCodecKind::kH264;
     codec_cfg.payload_type = 102;
     codec_cfg.name = "h264";
+    // The round-trip must be self-contained: the *same* backend must both
+    // encode and decode, otherwise a hardware encoder's bitstream is fed to
+    // a software decoder (or vice versa) and the mismatch shows up as a
+    // decode error rather than as a codec bug.  On macOS the default
+    // `kAuto` selection pairs the VideoToolbox encoder with the OpenH264
+    // decoder, so the software preference is what makes this deterministic.
+    codec_cfg.backend_preference = np::VideoCodecBackendPreference::kSoftware;
+    codec_cfg.backend_policy = np::CodecBackend::kSoftware;
 
     std::unique_ptr<np::IVideoCodec> codec(factory->create(codec_cfg));
     ASSERT_NE(codec, nullptr);

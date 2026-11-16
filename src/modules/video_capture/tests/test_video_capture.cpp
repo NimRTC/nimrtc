@@ -252,10 +252,10 @@ TEST(CaptureQueue, CarriesTheGpuSurfaceThroughTheQueue) {
     CaptureFrame f{};
     ASSERT_TRUE(q.pop(f));
     EXPECT_TRUE(f.has_gpu_handle);
-    EXPECT_EQ(f.gpu_surface.backend,
+    EXPECT_EQ(f.gpu_surface().backend,
               nimrtc::video_frame::GpuBackend::kWindowsD3D11Texture);
-    EXPECT_EQ(f.gpu_surface.handle, surface.handle);
-    EXPECT_EQ(f.gpu_surface.device, surface.device);
+    EXPECT_EQ(f.gpu_surface().handle, surface.handle);
+    EXPECT_EQ(f.gpu_surface().device, surface.device);
     // A GPU frame has no CPU pixels.
     EXPECT_EQ(f.pixels, nullptr);
     EXPECT_EQ(f.size, 0u);
@@ -274,7 +274,7 @@ TEST(CaptureQueue, PeekCarriesTheGpuSurfaceToo) {
     CaptureFrame peeked{};
     ASSERT_TRUE(q.peek(peeked));
     EXPECT_TRUE(peeked.has_gpu_handle);
-    EXPECT_EQ(peeked.gpu_surface.handle, surface.handle);
+    EXPECT_EQ(peeked.gpu_surface().handle, surface.handle);
 }
 
 TEST(CaptureQueue, RetiresTheSurfaceWhenTheNextFrameIsPopped) {
@@ -366,8 +366,8 @@ TEST(CaptureQueue, ACpuFrameCarriesNoSurface) {
     CaptureFrame f{};
     ASSERT_TRUE(q.pop(f));
     EXPECT_FALSE(f.has_gpu_handle);
-    EXPECT_EQ(f.gpu_surface.backend, nimrtc::video_frame::GpuBackend::kNone);
-    EXPECT_EQ(f.gpu_surface.handle, nullptr);
+    EXPECT_EQ(f.gpu_surface().backend, nimrtc::video_frame::GpuBackend::kNone);
+    EXPECT_EQ(f.gpu_surface().handle, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +441,29 @@ TEST(SyntheticCapture, ProducesAndPopsAFrame) {
     EXPECT_EQ(f.size, static_cast<std::size_t>(320u * 240u * 4u));
     ASSERT_NE(f.pixels, nullptr);
     EXPECT_EQ(cap.stats().frames_captured, 1u);
+}
+
+TEST(SyntheticCapture, TheFrameDeclaresItsPixelFormat) {
+    // The device produces BGRA (see `render_frame`: the bytes are
+    // written in B, G, R, A order).  It has to *say* so: the engine
+    // reads `CaptureFrame::format` to decide whether it has to convert
+    // the picture to the codec's canonical layout, and an undeclared
+    // format is read as planar I420 — which would stage a packed BGRA
+    // picture as three planes and produce garbage.
+    CaptureConfig cfg{};
+    cfg.format.width  = 320;
+    cfg.format.height = 240;
+    SyntheticCapture cap{cfg};
+    ASSERT_EQ(cap.open(), nimrtc::plugins::kOk);
+    ASSERT_EQ(cap.produce_one(), nimrtc::plugins::kOk);
+
+    CaptureFrame f{};
+    ASSERT_EQ(cap.pop_frame(f), nimrtc::plugins::kOk);
+    EXPECT_EQ(f.format, nimrtc::plugins::VideoPixelFormat::kBGRA);
+    // A CPU frame: no GPU surface, no handle.
+    EXPECT_FALSE(f.has_gpu_handle);
+    EXPECT_EQ(f.gpu_backend, nimrtc::plugins::GpuBackend::kNone);
+    EXPECT_EQ(f.gpu_handle, nullptr);
 }
 
 TEST(SyntheticCapture, AStaticDesktopHasNoDirtyRect) {

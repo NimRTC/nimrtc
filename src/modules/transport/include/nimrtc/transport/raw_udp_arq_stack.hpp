@@ -57,7 +57,9 @@
 // a v0.13.x follow-up.
 #include <nimrtc/core/api_version.hpp>
 #include <memory>
+#include <span>
 #include <string_view>
+#include <utility>
 
 #include <nimrtc/transport/transport_stack.hpp>
 
@@ -98,6 +100,32 @@ public:
     // The control-plane payload: the ARQ session.
     raw_udp::IRawUdpDatagram* raw_control() noexcept override {
         return raw_control_.get();
+    }
+
+    // ---- The control-plane seam (remote-desktop plan G2) ----------------
+    //
+    // The engine may not include the `raw_udp` module's header (the
+    // module is not on the ADR-025 exemption list), so it reaches the
+    // ARQ session through these virtuals.  This class *does* own the
+    // concrete `IRawUdpDatagram`, so it is the right place to forward.
+    bool has_control_path() const noexcept override {
+        return raw_control_ != nullptr;
+    }
+
+    plugins::Status send_control(
+        std::span<const std::uint8_t> data) noexcept override {
+        if (!raw_control_) return plugins::kErrNotReady;
+        // The peer endpoint is learned from the first inbound datagram
+        // (or set by the host through `raw_control()->send(dst, ...)`).
+        // An unknown peer is "not ready", not an error — the control
+        // path simply has not heard from the peer yet.
+        const plugins::Endpoint peer = raw_control_->remote_endpoint();
+        return raw_control_->send(peer, data);
+    }
+
+    void on_control(plugins::OnDatagramCb cb) noexcept override {
+        if (!raw_control_) return;
+        raw_control_->on_recv(std::move(cb));
     }
 
     // ---- ITransportStack: lifecycle ----------------------------------------

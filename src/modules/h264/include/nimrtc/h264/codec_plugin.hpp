@@ -97,6 +97,20 @@ public:
     plugins::VideoCodecStats stats() const noexcept override;
     std::uint8_t payload_type() const noexcept override;
 
+    // ---- Telemetry ---------------------------------------------------------
+
+    /** The backend identity a host sees in `Stats::video_codec_backend`.
+     *
+     *  "software-stub" is the honest label for this adapter: it emits a
+     *  *synthetic* bitstream shaped like H.264, but no real macroblocks
+     *  are coded and no real picture is reconstructed.  A host that
+     *  needs a real codec must be able to tell the two apart, so this
+     *  id is deliberately distinct from the real software backends
+     *  ("openh264", "dav1d") and from the hardware ones.
+     *
+     *  @see plugins::IVideoCodec::backend_id() */
+    std::string_view backend_id() const noexcept override { return "software-stub"; }
+
 private:
     plugins::VideoCodecConfig cfg_{};
     std::unique_ptr<Decoder>  decoder_;

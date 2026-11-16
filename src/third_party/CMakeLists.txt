@@ -64,6 +64,128 @@ _nimrtc_vendor_add_if_populated(webrtc_audio_processing)
 # https://codeload.github.com/sctplab/usrsctp/tar.gz/refs/tags/0.9.5.0).
 _nimrtc_vendor_add_if_populated(usrsctp)
 
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track C — libyuv (YUV / RGB scale + convert).
+#
+# libyuv ships its OWN CMakeLists.txt, so the wrapper next to `src/` is
+# added EXPLICITLY rather than through the helper above (the helper looks
+# for `src/CMakeLists.txt`, which libyuv does not have — its root is the
+# submodule root).  The wrapper creates the target unconditionally — as an
+# empty INTERFACE stub when the submodule is absent or the vendored switch
+# is off — so the option can be flipped without a CMake error; the scaler
+# then reports "not available" and the capture → encode path falls back to
+# the module's hand-written scalar converters.
+#
+# libyuv is DEFAULT ON: it is the cross-platform scale / colour library the
+# remote-desktop plan names as the default (RD-10), and it builds on every
+# platform NimRTC ships (Windows / macOS / Linux / Android / iOS).
+# -----------------------------------------------------------------------------
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libyuv/CMakeLists.txt")
+    add_subdirectory(libyuv)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track F (F2) — PortAudio (cross-platform audio I/O).
+#
+# PortAudio ships its OWN CMakeLists.txt at the submodule root, so the
+# wrapper next to `src/` is added EXPLICITLY rather than through the
+# helper above (the helper looks for `src/CMakeLists.txt`, which
+# PortAudio does not have — its root is the submodule root).
+#
+# The wrapper creates the target unconditionally — as an empty INTERFACE
+# stub when the submodule is absent or the vendored switch is off — so
+# the option can be flipped without a CMake error; the audio-device
+# module then reports the PortAudio backend as unavailable and the
+# synthetic backend stays in charge.
+# -----------------------------------------------------------------------------
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/portaudio/CMakeLists.txt")
+    add_subdirectory(portaudio)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track F (F5) — libsamplerate (sample-rate conversion).
+#
+# libsamplerate ships its OWN CMakeLists.txt at the submodule root, so
+# the wrapper next to `src/` is added EXPLICITLY rather than through the
+# helper above (the helper looks for `src/CMakeLists.txt`, which
+# libsamplerate does not have — its root is the submodule root).
+#
+# The wrapper creates the target unconditionally — as an empty INTERFACE
+# stub when the submodule is absent or the vendored switch is off — so
+# the option can be flipped without a CMake error; the audio-device
+# module then reports the resampler backend as "linear" instead of
+# pretending it has a band-limited converter.
+# -----------------------------------------------------------------------------
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libsamplerate/CMakeLists.txt")
+    add_subdirectory(libsamplerate)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan WP-B — real software codecs.
+#
+#   openh264 : Cisco's BSD-2-Clause H.264 encoder + decoder.  Built from
+#               source (portable C path, no NASM / GAS) so no assembler
+#               toolchain is needed on the CI hosts.
+#   dav1d    : VideoLAN's BSD-2-Clause AV1 decoder.  Built from source
+#               (portable C path, no NASM / GAS), 8-bit only.
+#
+# NOTE: upstream ships a Meson build, not a CMakeLists.txt, so these two
+# are added EXPLICITLY (their wrapper lives next to `src/`, not inside
+# it, so the helper above would not find them).
+#
+# The wrappers are added only when the matching *plugin* is enabled:
+# with the plugin off nothing links the codec, and compiling ~800
+# upstream translation units on every CI push would be pure waste.  The
+# wrapper itself creates the target unconditionally — as an empty
+# INTERFACE stub when the submodule is absent or the vendored switch is
+# off — so the options can be flipped without a CMake error; the codec
+# then simply reports "not available" and the registry falls through to
+# the software stub.
+# -----------------------------------------------------------------------------
+if(NIMRTC_PLUGINS_OPENH264 AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/openh264/CMakeLists.txt")
+    add_subdirectory(openh264)
+endif()
+if(NIMRTC_PLUGINS_DAV1D AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dav1d/CMakeLists.txt")
+    add_subdirectory(dav1d)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan B11 — the OPTIONAL software AV1 / VP9 encoders.
+#
+#   svt-av1 : AOMediaCodec's BSD-2-Clause-Clear AV1 *encoder*, with the
+#              screen-content mode (intra block copy) a remote control
+#              needs.  Upstream ships its own CMake build, so the wrapper
+#              at src/third_party/svt-av1/CMakeLists.txt adds it with the
+#              NASM requirement relaxed (the build degrades to the
+#              portable C path when NASM is absent — R-11).
+#   libvpx  : the BSD-3-Clause VP8 / VP9 codec.  Upstream ships a
+#              hand-rolled `configure` script rather than a CMake
+#              project, so the wrapper at src/third_party/libvpx/CMakeLists.txt
+#              compiles the upstream sources directly.
+#
+# BOTH default OFF (NIMRTC_VENDORED_SVT_AV1 / NIMRTC_VENDORED_LIBVPX).
+# They are heavy builds and they are not on the default path — the
+# hardware encoders (Track B5 / B5a / B6) are.
+#
+# The wrappers are added unconditionally — they create the target as an
+# empty INTERFACE stub when the option is off or the submodule is absent
+# — so the options can be flipped without a CMake error; the codec then
+# simply reports "not available" and the registry falls through to the
+# software stub.
+#
+# NOTE: neither is added behind a NIMRTC_PLUGINS_<NAME> switch: the
+# vendor switch IS the switch (there is no system fallback — L5 forbids
+# linking a system codec).
+# -----------------------------------------------------------------------------
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/svt-av1/CMakeLists.txt")
+    add_subdirectory(svt-av1)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libvpx/CMakeLists.txt")
+    add_subdirectory(libvpx)
+endif()
+
 # v0.14.0-beta.1 (ADR-014): msquic QUIC library.
 # WebTransport / QUIC backend for the IWebTransportSession seam.
 # Populated by: git submodule add https://github.com/microsoft/msquic src/third_party/msquic

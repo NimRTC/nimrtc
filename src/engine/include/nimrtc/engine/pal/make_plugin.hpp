@@ -56,6 +56,7 @@
 #define NIMRTC_ENGINE_PAL_MAKE_PLUGIN_HPP
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -125,6 +126,31 @@ struct NIMRTC_API_STABLE MakePluginOpts {
     /** Engine error callback. May be empty; only consulted when a
      *  failure mode == Error. */
     EngineErrorCallback on_error = nullptr;
+
+    /**
+     * @brief Called when `open()` failed, while the plugin object is
+     *        still alive.
+     *
+     * A plugin often knows *why* it refused to open -- a screen recorder
+     * that already holds the desktop-duplication slot, a declined
+     * consent prompt, a display that does not support the backend.  That
+     * reason is what the operator can act on, and the generic "the
+     * plugin could not be opened" is not.  The hook returns the reason
+     * (empty when the plugin has nothing to add), and it is appended to
+     * the reported message.
+     *
+     * The hook is called *before* the slot is reset, so the plugin is
+     * still readable.
+     *
+     * @note The explicit `= {}` is load-bearing: it gives the member a
+     *       default member initializer, so that a designated
+     *       initialiser that omits it (every call site that does not
+     *       want the detail) is *not* a missing-field-initialiser under
+     *       GCC's `-Wmissing-field-initializers`, which the build
+     *       promotes to an error.  The same reason is spelled out in
+     *       `assembly.hpp`'s `VideoSection video = {}`.
+     */
+    std::function<std::string(const void*)> open_failure_detail = {};
 };
 
 /**
@@ -197,9 +223,20 @@ template <typename IPlugin, typename Config, typename Factory,
     };
 
     auto report_open_failed = [&]() noexcept {
-        const std::string msg = std::string{"engine: '"}
+        std::string msg = std::string{"engine: '"}
             + std::string{plugin_id}
             + "' plugin open failed";
+        // The plugin's own reason, when it has one.  It is what the
+        // operator can act on, so it is part of the message rather
+        // than a separate line they have to connect.
+        if (opts.open_failure_detail && slot) {
+            const std::string detail =
+                opts.open_failure_detail(static_cast<const void*>(slot.get()));
+            if (!detail.empty()) {
+                msg += ": ";
+                msg += detail;
+            }
+        }
         switch (opts.open_fail_mode) {
             case PluginFailureMode::Error:
                 if (opts.on_error) opts.on_error(opts.err_open_failed, msg);

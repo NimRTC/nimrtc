@@ -17,19 +17,10 @@ nimrtc_apply_options(demo-agent-gateway)
 # module a *live* part of the product rather than a schema nobody reads.
 target_link_libraries(demo-agent-gateway PRIVATE
     nimrtc::assembly_engine
+    nimrtc::audio_device
     nimrtc::engine
     nimrtc::datachannel)
 
-# Stage Chrome-friendly DTLS cert (same as loopback-p2p)
-add_custom_command(
-    TARGET demo-agent-gateway POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "$<TARGET_FILE_DIR:demo-agent-gateway>/certs"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/src/third_party/wolfssl/src/certs/server-ecc.pem"
-        "$<TARGET_FILE_DIR:demo-agent-gateway>/certs/server-ecc.pem"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/src/third_party/wolfssl/src/certs/ecc-key.pem"
-        "$<TARGET_FILE_DIR:demo-agent-gateway>/certs/ecc-key.pem"
-    COMMENT "Staging Chrome-friendly DTLS cert for demo-agent-gateway"
-)
+# Stage the msquic runtime DLL and the Chrome-friendly DTLS cert (same
+# as loopback-p2p).
+nimrtc_stage_runtime(demo-agent-gateway)

@@ -591,7 +591,8 @@ std::string NimRTCEngine::create_offer() noexcept {
         // advertising a synthetic pair would describe a stream nothing
         // produces.
         video.fmtp[vpt] = detail::default_fmtp_of(
-            family, /*with_sprop=*/video_codec_ != nullptr);
+            family, /*with_sprop=*/video_codec_ != nullptr,
+            detail::sdp_content_hint_of(config_.video_content_hint));
 
         // a=rtcp-fb:<vpt> nack pli  (RFC 4585 §6.2.1 + WebRTC §5.2)
         // NACK + Picture Loss Indication are the two feedbacks Chrome's
@@ -619,6 +620,38 @@ std::string NimRTCEngine::create_offer() noexcept {
                       "%u cname:nimrtc-video",
                       static_cast<unsigned>(config_.video_sender_tuning.ssrc));
         video.extra_attrs.emplace_back("ssrc", ssrc_line);
+
+        // a=content-hint:<motion|detail|text>  (RFC 8692 §3)
+        //
+        // The content hint tells the peer what kind of picture it is
+        // about to receive, so it can size its decoder's buffers and its
+        // own rendering path accordingly.  It is emitted only when the
+        // host stated an opinion — `kUnspecified` means "no opinion",
+        // and an `a=content-hint` line with no value is not a thing
+        // RFC 8692 defines.
+        //
+        // RFC 8692 §3 defines exactly three values:
+        //   "motion" — the stream contains moving video (a camera);
+        //   "detail" — the stream contains detail that would be hard to
+        //              tolerate if it were lost (a screen's text);
+        //   "text"   — the stream contains text (a screen, mostly text).
+        //
+        // A screen stream therefore advertises "text" or "detail", and a
+        // camera stream advertises "motion".  The mapping is one place
+        // so the SDP and the encoder's parameter set cannot disagree.
+        switch (config_.video_content_hint) {
+            case plugins::VideoEncoderParams::ContentHint::kMotion:
+                video.extra_attrs.emplace_back("content-hint", "motion");
+                break;
+            case plugins::VideoEncoderParams::ContentHint::kDetail:
+                video.extra_attrs.emplace_back("content-hint", "detail");
+                break;
+            case plugins::VideoEncoderParams::ContentHint::kText:
+                video.extra_attrs.emplace_back("content-hint", "text");
+                break;
+            case plugins::VideoEncoderParams::ContentHint::kUnspecified:
+                break;   // no opinion — emit nothing
+        }
 
         push_candidates_into(video);
         return video;

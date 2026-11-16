@@ -49,6 +49,7 @@
 #include <nimrtc/assembly/engine_bridge.hpp>
 #include <nimrtc/assembly/profiles.hpp>
 #include <nimrtc/assembly/transport_bridge.hpp>
+#include <nimrtc/audio_device/audio_device.hpp>
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>
 
@@ -207,6 +208,28 @@ int run_demo(double seconds) {
         std::fprintf(stderr, "[ERROR] audio3a plugin unavailable\n");
         engine.close();
         return 1;
+    }
+
+    // ---- Audio device enumeration ----------------------------------------
+    //
+    // The audio-device module (remote-desktop plan F2) is the PortAudio
+    // seam.  The demo enumerates the capture devices the backend can
+    // see and reports which backend won — it does not *open* a device,
+    // because the demo drives the 3A path with synthetic PCM below.
+    {
+        const auto backends = audio_device::available_source_backends();
+        std::fprintf(stderr, "[AudioDevice] capture backends:");
+        for (const auto& b : backends) std::fprintf(stderr, " %s", b.c_str());
+        std::fprintf(stderr, "\n");
+        std::fprintf(stderr, "[AudioDevice] portaudio available: %s\n",
+                     audio_device::portaudio_available() ? "yes" : "no");
+        const auto devices = audio_device::enumerate_capture_devices();
+        std::fprintf(stderr, "[AudioDevice] %zu capture device(s)\n", devices.size());
+        for (const auto& d : devices) {
+            std::fprintf(stderr, "  - id=%s name=%s rate=%u ch=%u\n",
+                         d.id.c_str(), d.name.c_str(), d.default_sample_rate_hz,
+                         d.max_input_channels);
+        }
     }
 
     // ---- Install PCM taps ----------------------------------------------

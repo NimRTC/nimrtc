@@ -111,6 +111,10 @@ enum class NIMRTC_API_STABLE ColorRange : std::uint8_t {
     /** Full range (Y 0..255, C 0..255) — what a desktop compositor
      *  produces. */
     kFull        = 2,
+
+    // The spelling the plugin seam used before it settled on the
+    // module's.  Same value, so either spelling compiles.
+    kUnknown = kUnspecified,
 };
 
 /**
@@ -132,6 +136,13 @@ enum class NIMRTC_API_STABLE ColorMatrix : std::uint8_t {
     kBT709       = 2,
     /** BT.2020 — very wide gamut; HDR and UHD production. */
     kBT2020      = 3,
+
+    // The spellings the plugin seam used before it settled on the
+    // module's.  Same values, so either spelling compiles.
+    kUnknown = kUnspecified,
+    kBt601   = kBT601,
+    kBt709   = kBT709,
+    kBt2020  = kBT2020,
 };
 
 /** Human-readable colour-range name (for logs and SDP). */
@@ -168,6 +179,11 @@ struct NIMRTC_API_STABLE ColorDescription {
         return range != ColorRange::kUnspecified ||
                matrix != ColorMatrix::kUnspecified;
     }
+
+    /** The same question as `is_known()`, under the spelling the plugin
+     *  seam uses.  Both names are the same predicate, so a call written
+     *  with one can be read with the other. */
+    [[nodiscard]] bool known() const noexcept { return is_known(); }
 
     /** True iff the two descriptions agree on everything they state. */
     [[nodiscard]] bool agrees_with(const ColorDescription& other) const noexcept {
@@ -667,6 +683,122 @@ NIMRTC_API_STABLE inline std::string_view gpu_backend_name(GpuBackend b) noexcep
 }
 
 // ---------------------------------------------------------------------------
+// GpuContext — the *shared* GPU device between producer and consumer
+// ---------------------------------------------------------------------------
+//
+// ## Why this exists
+//
+// A `GpuBuffer` carries a *surface* (a texture, a pixel buffer).  It does
+// **not** carry the *device* that surface was created on — and on Windows
+// that omission is fatal for the zero-copy path.
+//
+// NVENC's DirectX input path registers the texture with the encode
+// session, and the driver accepts the registration **only if the texture
+// was created on the very same `ID3D11Device` the session was opened
+// with**.  A texture from a *different* device — even on the *same*
+// physical adapter — is refused with
+// `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9).  This is not a
+// policy choice by the driver; it is how the resource is handed to the
+// encoder's engine.
+//
+// So a capture device and an encoder that want to share a surface must
+// also share the *device*.  That is what `GpuContext` is: the
+// device handle, carried alongside the frames, so the two can agree on
+// it before the first frame flows.
+//
+// ## The contract
+//
+//   - The context is **created once**, by whoever owns the device (in
+//     practice: the capture device, or the host that owns the GPU).
+//   - It is **copied** by value into every consumer that needs it.  The
+//     copy is cheap; the *device* is shared, not duplicated.
+//   - A consumer that receives a context **must** create its own
+//     resources on that device, never on a private one.  A resource
+//     created elsewhere cannot be registered with the encoder.
+//
+// ## What it is NOT
+//
+// It is deliberately **not** a platform header.  It carries an opaque
+// `void*` plus a `GpuBackend` tag — exactly the same shape as
+// `GpuHandle`, so no module has to include `d3d11.h` to talk about it.
+// The concrete module casts it (and only the concrete module knows what
+// the pointer actually is).
+
+/**
+ * @brief The shared GPU device / context between a producer and a consumer.
+ *
+ * @see GpuContext for the contract and the reason it exists.
+ */
+struct NIMRTC_API_STABLE GpuContext {
+    /** The device family this context belongs to.  `kNone` means "no
+     *  context" — the default, and the honest answer for a CPU path. */
+    GpuBackend backend = GpuBackend::kNone;
+
+    /** The native device handle.
+     *
+     *  For `GpuBackend::kWindowsD3D11Texture` this is an
+     *  `ID3D11Device*`.  Null when there is no context. */
+    void* device = nullptr;
+
+    /** The native device context / command queue, when the backend has
+     *  a separate one (`ID3D11DeviceContext*` on Windows).  May be
+     *  null — a consumer that only *registers* a surface does not need
+     *  the immediate context. */
+    void* immediate = nullptr;
+
+    /** Keeps the native device alive.
+     *
+     *  The producer owns the device and hands out a *borrowed* pointer
+     *  to it.  Without a keepalive, a consumer that outlives the
+     *  producer would hold a dangling `ID3D11Device*` — and a dangling
+     *  device pointer is not a crash you can debug, it is a crash
+     *  somewhere else entirely.
+     *
+     *  The producer installs a `shared_ptr` that owns the device here;
+     *  the consumer keeps a copy.  The device is released when the last
+     *  holder lets go.
+     *
+     *  Null when there is no context, or when the producer does not
+     *  want to transfer ownership (in which case the producer must
+     *  guarantee the device outlives every consumer). */
+    std::shared_ptr<void> keepalive;
+
+    /** True iff a device is actually present. */
+    [[nodiscard]] bool valid() const noexcept {
+        return backend != GpuBackend::kNone && device != nullptr;
+    }
+
+    /** True iff this context and @p other refer to the same device.
+     *
+     *  The comparison is by pointer identity: two contexts are the same
+     *  only when they name the same device object.  (Two *different*
+     *  `ID3D11Device` objects on the same adapter are still two
+     *  devices, and the driver treats them as such — see the header
+     *  comment.) */
+    [[nodiscard]] bool same_device(const GpuContext& other) const noexcept {
+        return backend == other.backend && device == other.device;
+    }
+};
+
+/** Human-readable GpuContext device name (for logging). */
+NIMRTC_API_STABLE inline std::string_view gpu_context_device_name(
+        GpuContext c) noexcept {
+    if (!c.valid()) return "none";
+    switch (c.backend) {
+        case GpuBackend::kWindowsD3D11Texture: return "win-d3d11-device";
+        case GpuBackend::kNvidiaCudaArray:
+        case GpuBackend::kNvidiaCudaDevicePtr: return "cuda-device";
+        case GpuBackend::kLinuxVaapiSurface:
+        case GpuBackend::kLinuxVaapiDRM:       return "vaapi-device";
+        case GpuBackend::kAppleMTLTexture:
+        case GpuBackend::kMetalIOSurface:      return "metal-device";
+        case GpuBackend::kVulkanImage:         return "vulkan-device";
+        case GpuBackend::kOpenGLTexture:       return "gl-context";
+        default:                               return "custom-device";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GpuBuffer — refcounted GPU surface / texture with optional CPU mirror
 // ---------------------------------------------------------------------------
 //
@@ -1089,6 +1221,46 @@ NIMRTC_API_STABLE void convert_i420_to_nv12(std::uint32_t width,
                           const std::uint8_t* v_plane, std::int32_t v_stride,
                           std::uint8_t* y_out, std::int32_t y_out_stride,
                           std::uint8_t* uv_out, std::int32_t uv_out_stride) noexcept;
+
+/**
+ * @brief Convert packed BGRA to I420 (BT.601 limited range).
+ *
+ * The desktop compositors produce BGRA natively (that is what the
+ * synthetic capture device produces too), and every video encoder wants
+ * planar 4:2:0 — so this is the conversion the capture → encode path
+ * needs on the CPU side.
+ *
+ * The chroma is *subsampled by point sampling*: the U and V of a 2×2
+ * block are taken from its top-left pixel.  That is the cheap and
+ * conventional choice for a screen-content path (the chroma of a
+ * desktop image is mostly flat), and it keeps the conversion
+ * branch-free.
+ *
+ * The luma is the standard BT.601 limited-range transform:
+ *
+ * ```
+ * Y  =  0.257 R + 0.504 G + 0.098 B + 16
+ * U  = -0.148 R - 0.291 G + 0.439 B + 128
+ * V  =  0.439 R - 0.368 G - 0.071 B + 128
+ * ```
+ *
+ * @param width       Picture width in pixels.
+ * @param height      Picture height in pixels.
+ * @param bgra_in     The packed BGRA source (4 bytes per pixel).
+ * @param bgra_stride Source row stride in bytes.
+ * @param y_out       Destination luma plane.
+ * @param y_out_stride Destination luma row stride in bytes.
+ * @param u_out       Destination U plane (width/2 x height/2).
+ * @param u_out_stride Destination U row stride in bytes.
+ * @param v_out       Destination V plane (width/2 x height/2).
+ * @param v_out_stride Destination V row stride in bytes.
+ */
+NIMRTC_API_STABLE void convert_bgra_to_i420(std::uint32_t width,
+                          std::uint32_t height,
+                          const std::uint8_t* bgra_in, std::int32_t bgra_stride,
+                          std::uint8_t* y_out, std::int32_t y_out_stride,
+                          std::uint8_t* u_out, std::int32_t u_out_stride,
+                          std::uint8_t* v_out, std::int32_t v_out_stride) noexcept;
 
 // ---------------------------------------------------------------------------
 // Colour-aware conversions (remote-desktop plan C3 / C5)

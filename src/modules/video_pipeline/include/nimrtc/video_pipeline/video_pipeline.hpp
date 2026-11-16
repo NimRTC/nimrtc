@@ -74,8 +74,11 @@
 
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/core/error.hpp>
+#include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 #include <nimrtc/video_jb/video_jitter_buffer.hpp>
+#include <nimrtc/video_pipeline/incremental_encode.hpp>
+#include <nimrtc/video_pipeline/keyframe_limiter.hpp>
 #include <nimrtc/video_rtcp_feedback/video_rtcp_feedback.hpp>
 #include <nimrtc/rtp/packet.hpp>
 
@@ -279,6 +282,19 @@ struct NIMRTC_API_STABLE SenderStats {
     /** NACKs that could not be answered because the packet had already
      *  left the retransmission cache (v1.1 Q3). */
     std::uint64_t packets_retransmit_missed    = 0;
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    /** Key-frame requests the limiter was offered. */
+    std::uint64_t keyframe_requests             = 0;
+    /** Key-frame requests the limiter granted (a key frame was produced). */
+    std::uint64_t keyframes_granted             = 0;
+    /** Key-frame requests the limiter deferred (held back, not dropped). */
+    std::uint64_t keyframes_deferred            = 0;
+    /** Key-frame requests the limiter rejected (the budget was spent). */
+    std::uint64_t keyframes_rejected            = 0;
+    /** Grants that bypassed the limiter because the request carried the
+     *  codec's parameter sets (a resolution change / a codec switch).
+     *  Those are never deferred: deferring them breaks the decode. */
+    std::uint64_t keyframes_forced              = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -370,6 +386,96 @@ public:
     /** Number of packets currently held in the retransmission cache. */
     std::size_t cached_packet_count() const noexcept;
 
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    //
+    // The pipeline is where a key-frame request becomes an actual IDR:
+    // `apply_feedback_rtcp()` sees the PLI / FIR, and the *encoder* is
+    // the one that has to produce the IDR.  The limiter sits between
+    // the two, so a burst of PLIs produces ONE key frame, not N.
+    //
+    // The limiter's default policy is the same interval the FIR
+    // coalescer uses (250 ms — RFC 5104 §4.3.1.1's "about 4 Hz"), so
+    // the two ends of the loop agree on the rate.
+
+    /** The limiter's configuration. */
+    void set_keyframe_limiter_config(KeyframeLimiterConfig cfg) noexcept;
+
+    /** The limiter's current configuration. */
+    KeyframeLimiterConfig keyframe_limiter_config() const noexcept;
+
+    /**
+     * @brief Offer a key-frame request to the limiter.
+     *
+     *  @param reason Why the key frame was asked for.
+     *  @param now_us Monotonic timestamp in microseconds.
+     *  @param carries_parameter_sets True iff the key frame must also
+     *        carry the codec's parameter sets (a resolution change).
+     *        Such a request is **never** deferred.
+     *  @return The limiter's verdict. */
+    KeyframeDecision request_keyframe(KeyframeReason reason,
+                                       std::int64_t now_us,
+                                       bool carries_parameter_sets = false) noexcept;
+
+    /** The limiter's counters. */
+    KeyframeLimiterStats keyframe_limiter_stats() const noexcept;
+
+    /** True iff a key-frame request is still waiting to be re-offered.
+     *
+     *  A deferred request is **held**, not dropped: the limiter says
+     *  "not yet", and the caller re-offers it once the minimum interval
+     *  has elapsed, so the picture still recovers even when the peer
+     *  only asked once. */
+    bool keyframe_request_pending() const noexcept;
+
+    /** Re-offer the held key-frame request.
+     *
+     *  @param now_us Monotonic timestamp in microseconds.
+     *  @return The number of key frames granted (0 or 1). */
+    std::uint32_t retry_pending_keyframe(std::int64_t now_us) noexcept;
+
+    // ---- The incremental (dirty-rect) encode mechanism (plan B9) --------
+    //
+    // The sender hosts the arbiter because the arbiter needs the
+    // *codec's* capability (`IVideoEncoder::supports_incremental_encode()`),
+    // and the sender is the one that sits next to the encoder.
+    //
+    // The content type is carried explicitly (ADR-022 Decision 5): the
+    // mechanism only engages for screen content, because a camera
+    // stream has no unchanged area worth skipping.
+
+    /** The stream's content type. */
+    void set_content_type(VideoContentType type) noexcept;
+    VideoContentType content_type() const noexcept;
+
+    /** Enable / disable the incremental-encode mechanism. */
+    void set_incremental_encode_enabled(bool enabled) noexcept;
+    bool incremental_encode_enabled() const noexcept;
+
+    /** Offer one frame's changed region to the arbiter.
+     *
+     *  @param dirty     The changed rectangles, in source pixels.
+     *  @param full_frame True iff the whole frame changed.
+     *  @return The decision. */
+    IncrementalDecision offer_dirty_region(
+            const std::vector<plugins::VideoRegion>& dirty,
+            bool full_frame) noexcept;
+
+    /** The region-refresh message for the peer, or empty. */
+    core::ByteSpan take_region_refresh() noexcept;
+
+    /** The incremental mechanism's counters. */
+    IncrementalEncodeStats incremental_stats() const noexcept;
+
+    /** Attach the encoder the incremental requests are pushed to.
+     *
+     *  The sender does not own the encoder (the engine does), so the
+     *  pointer is borrowed and must outlive the sender's use of it. */
+    void set_incremental_encoder(plugins::IVideoEncoder* encoder) noexcept;
+
+    /** Set the SSRCs the region-refresh message names. */
+    void set_region_refresh_ssrcs(std::uint32_t media_ssrc,
+                                   std::uint32_t feedback_ssrc) noexcept;
+
     /** Snapshot of sender counters. */
     SenderStats stats() const noexcept;
 
@@ -428,6 +534,10 @@ NIMRTC_API_STABLE std::size_t build_feedback_rtcp(
  *  The input may be a single feedback packet or a compound RTCP packet;
  *  every packet in the compound is processed.
  *
+ *  The key-frame requests are arbitrated by the sender's key-frame storm
+ *  limiter (remote-desktop plan B14): a burst of PLIs produces ONE key
+ *  frame, not N.
+ *
  *  @param sender The sender that answers the feedback.
  *  @param rtcp   The received RTCP bytes.
  *  @return The number of actions performed (packets retransmitted plus
@@ -436,5 +546,26 @@ NIMRTC_API_STABLE std::size_t build_feedback_rtcp(
 NIMRTC_API_STABLE core::Result<int> apply_feedback_rtcp(
     VideoSender& sender,
     core::ByteSpan rtcp) noexcept;
+
+/** Apply an incoming RTCP feedback packet to a sender, with an explicit
+ *  monotonic timestamp.
+ *
+ *  The timestamp is what the key-frame storm limiter compares against
+ *  its minimum interval (plan B14).  A caller that has its own clock
+ *  (the engine's tick thread) passes it in; a caller that does not uses
+ *  the overload above, which reads the steady clock.
+ *
+ *  @param sender The sender that answers the feedback.
+ *  @param rtcp   The received RTCP bytes.
+ *  @param now_us Monotonic timestamp in microseconds.
+ *  @return The number of actions performed. */
+NIMRTC_API_STABLE core::Result<int> apply_feedback_rtcp(
+    VideoSender& sender,
+    core::ByteSpan rtcp,
+    std::int64_t now_us) noexcept;
+
+/** The monotonic clock, in microseconds.  The same epoch as
+ *  `core::SteadyClock`. */
+NIMRTC_API_STABLE std::int64_t monotonic_now_us() noexcept;
 
 } // namespace nimrtc::video_pipeline

@@ -206,7 +206,8 @@ bool H264Fmtp::has_any() const noexcept {
         || max_smbps.has_value()
         || max_br.has_value()
         || max_dpb.has_value()
-        || level_asymmetry_allowed.has_value();
+        || level_asymmetry_allowed.has_value()
+        || x_google_content_hint.has_value();
 }
 
 bool H265Fmtp::has_any() const noexcept {
@@ -410,6 +411,14 @@ core::Result<H264Fmtp> parse_h264(std::string_view fmtp_raw) noexcept {
                 return core::Result<H264Fmtp>::fail(
                     core::ErrorCode::InvalidArgument,
                     "h264 level-asymmetry-allowed: bad value");
+            }
+        } else if (iequals(k, "x-google-content-hint")) {
+            // The content hint (remote-desktop plan B7).  The three
+            // values RFC 8692 §3 defines are the only ones that mean
+            // anything; anything else is dropped rather than carried
+            // around as a string nobody can act on.
+            if (iequals(v, "motion") || iequals(v, "detail") || iequals(v, "text")) {
+                out.x_google_content_hint = std::string(v);
             }
         }
         // Unknown keys are silently ignored — SDP has a 'permissive parse' culture.
@@ -793,6 +802,9 @@ std::string build_h264_fmtp(const H264Fmtp& cfg) noexcept {
     if (cfg.max_dpb)   append_kv(out, "max-dpb",   std::to_string(*cfg.max_dpb));
     if (cfg.level_asymmetry_allowed) {
         append_kv(out, "level-asymmetry-allowed", "1");
+    }
+    if (cfg.x_google_content_hint && !cfg.x_google_content_hint->empty()) {
+        append_kv(out, "x-google-content-hint", *cfg.x_google_content_hint);
     }
     return out;
 }

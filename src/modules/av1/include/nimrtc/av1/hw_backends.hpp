@@ -5,17 +5,29 @@
  * Mirrors the H.264 module's backend table (Sunshine's `video.cpp`
  * backend table), restricted to the AV1 codec family:
  *
- *   priority  backend        platforms                impl
- *   --------- ------------- ------------------------- --------------------------
- *      450    nvenc_av1      Win+Linux NVIDIA         src/modules/nvcodec/
- *      430    nvdec_av1      Win+Linux NVIDIA         src/modules/nvcodec/
- *      360    vaapi_av1      Linux Intel/AMD          (not wired yet)
- *        0    stub_av1       all                      this module
+ *   priority  backend            platforms                impl
+ *   --------- ------------------ ------------------------ ---------------------------
+ *      450    nvenc_av1          Win+Linux NVIDIA         src/modules/nvcodec/
+ *      430    nvdec_av1          Win+Linux NVIDIA         src/modules/nvcodec/
+ *      420    mediacodec_av1     Android                  src/modules/av1/
+ *      400    videotoolbox_av1   macOS 14+                src/modules/nvcodec/
+ *      380    amf_av1            Windows AMD (VCN 3/4)    src/modules/av1/
+ *      360    vaapi_av1          Linux Intel/AMD          src/modules/av1/
+ *       50    dav1d_av1          all (decode only)        src/modules/nvcodec/ (vendored)
+ *        0    stub_av1           all                      this module
  *
  * The NVIDIA entries are *always* registered: their `available()` probe
  * initialises a real NVENC / NVDEC session for the AV1 codec, so a GPU
  * without an AV1 encoder reports "not available" rather than "yes,
  * because NVENC exists".
+ *
+ * The non-NVIDIA rows are registered on *every* platform too — the seam
+ * id and the `HwBackend` kind stay stable across the tree, and the
+ * availability probe is what decides whether a row is usable.  A row
+ * that exists in the table but not in the silicon reports
+ * `available() == false` **with a reason** (`unavailable_reason()`),
+ * so an unsupported combination is explicitly reported rather than
+ * silently ignored (remote-desktop plan B6).
  *
  * ## Selection semantics
  *

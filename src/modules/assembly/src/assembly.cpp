@@ -37,10 +37,9 @@ ProfileRegistry::ProfileRegistry() {
     profiles_.emplace(std::string{kProfileAgentGateway.name},     kProfileAgentGateway);
     profiles_.emplace(std::string{kProfileRelayAgent.name},       kProfileRelayAgent);
     profiles_.emplace(std::string{kProfileAgentLowLatency.name},  kProfileAgentLowLatency);
-    // Remote-desktop plan K3: the remote-desktop profile (v1.2 `video`
-    // block).  It is the first profile that declares *screen* content
-    // rather than camera content.
-    profiles_.emplace(std::string{kProfileRemoteDesktop.name}, kProfileRemoteDesktop);
+    // v1.2 (v1.4.0) — the remote-desktop scene profile.  See
+    // docs/plan/remote-desktop-plan.md K3.
+    profiles_.emplace(std::string{kProfileRemoteDesktop.name},    kProfileRemoteDesktop);
 }
 
 ProfileRegistry& ProfileRegistry::instance() {
@@ -231,6 +230,11 @@ static TransportSection transport_from_json(const json& root) {
 // unvalidated on purpose — the codec seam's `codec_backend_from_string`
 // is the authoritative parser, and the assembly layer does not depend
 // on the codec seam.
+//
+// This block is **additive** on top of the flat v1.2 keys
+// (`video_codec_preference` and friends) that the same profile may also
+// carry: the flat keys are the v1.2 spelling, the block is the
+// v1.3 spelling, and a profile that declares both is legal.
 // ---------------------------------------------------------------------------
 static VideoSection video_from_json(const json& root) {
     VideoSection out;
@@ -291,6 +295,10 @@ static VideoSection video_from_json(const json& root) {
 
     return out;
 }
+
+// ---------------------------------------------------------------------------
+// profile_from_json_file
+// ---------------------------------------------------------------------------
 Profile profile_from_json_file(const std::string& file_path) {
     std::ifstream file{file_path};
     if (!file) {
@@ -402,8 +410,57 @@ Profile profile_from_json_file(const std::string& file_path) {
     // -- v1.1 transport section (additive) ------------------------------------
     p.transport = transport_from_json(root);
 
-    // -- v1.2 video section (additive) ----------------------------------------
+    // -- v1.2 video scene configuration (additive) ---------------------------
+    //
+    // All four keys are OPTIONAL in the schema: a v1.1 profile that does
+    // not declare them loads with the engine defaults below, which is the
+    // same "optional block, absent → defaults" contract the v1.1
+    // `transport` block follows.  `root.value()` returns the supplied
+    // default when the key is missing or null.
+    p.video_codec_preference =
+        json_to_string(root.value("video_codec_preference", "h264"));
+    p.video_resolution_floor =
+        json_to_string(root.value("video_resolution_floor", "720p"));
+    p.video_ladder_mode =
+        json_to_string(root.value("video_ladder_mode", "quality"));
+    p.video_content_type =
+        json_to_string(root.value("video_content_type", "camera"));
+
+    // -- v1.3 additive: the nested `video` block ---------------------------
+    //
+    // The block is OPTIONAL: a profile that does not declare it loads
+    // with the `VideoSection` defaults (a camera-like picture with no
+    // resolution floor).  The block is the richer spelling of the same
+    // scene: it can name the codec *order* (a list), the backend policy
+    // and the exact floor in pixels — things the flat keys cannot say.
     p.video = video_from_json(root);
+
+    // -- v1.2 additive: the declared per-stream bandwidth shares ------------
+    //
+    // The block is OPTIONAL: a profile that does not declare it loads with
+    // an empty map, which means "every stream splits the pool evenly"
+    // (the engine's default weight is 1).
+    //
+    // The shape is `{ "<stream_id>": <weight>, ... }` — an object whose
+    // values are non-negative integers.  A malformed entry (a non-integer
+    // value, a negative one) is **skipped** rather than failing the whole
+    // load: a weight is a hint about the split, and a bad hint must not
+    // make an otherwise-valid profile unusable.  The schema is the
+    // validator (it rejects the profile outright); the loader is the
+    // tolerant reader.
+    p.video_stream_weights.clear();
+    if (root.contains("video_stream_weights") &&
+        root["video_stream_weights"].is_object()) {
+        for (const auto& entry : root["video_stream_weights"].items()) {
+            if (!entry.key().empty() && entry.value().is_number_integer()) {
+                const auto weight = entry.value().get<std::int64_t>();
+                if (weight >= 0) {
+                    p.video_stream_weights[entry.key()] =
+                        static_cast<std::uint32_t>(weight);
+                }
+            }
+        }
+    }
 
     return p;
 }
@@ -513,10 +570,33 @@ std::string profile_to_json_string(const Profile& p) {
         root["transport"] = std::move(t);
     }
 
-    // v1.2 additive `video` block.  Emitted when it carries something
-    // beyond the defaults, so a v1.1 profile round-trips byte-identically
-    // (no `video` field) while a remote-desktop profile carries the
-    // whole block.
+    // v1.2 additive video-scene keys.  Always emitted so the key set is
+    // self-documenting and the round-trip is symmetric with the parser
+    // (which fills the same defaults for a v1.1 profile that omits
+    // them).  A v1.1 profile therefore parses to the same values the
+    // serialiser writes — the schema change stays strictly additive.
+    root["video_codec_preference"] = std::string{p.video_codec_preference};
+    root["video_resolution_floor"] = std::string{p.video_resolution_floor};
+    root["video_ladder_mode"]      = std::string{p.video_ladder_mode};
+    root["video_content_type"]     = std::string{p.video_content_type};
+
+    // v1.2 additive: the declared per-stream bandwidth shares.  Emitted
+    // only when the profile actually declares one, so a v1.1 profile
+    // still round-trips byte-identically (the block is absent, not
+    // empty).  The key order is the map's own order (std::map is
+    // ordered), so the output is deterministic.
+    if (!p.video_stream_weights.empty()) {
+        json w = json::object();
+        for (const auto& [id, weight] : p.video_stream_weights) {
+            w[id] = weight;
+        }
+        root["video_stream_weights"] = std::move(w);
+    }
+
+    // v1.3 additive: the nested `video` block.  Emitted when it carries
+    // something (no `video` field) while a remote-desktop profile
+    // carries the full picture.  A profile that leaves the block at its
+    // defaults round-trips byte-identically.
     if (!p.video.codec_name.empty() ||
         !p.video.codec_preference.empty() ||
         p.video.content_type != VideoContentType::kUnspecified ||
@@ -532,17 +612,17 @@ std::string profile_to_json_string(const Profile& p) {
         }
         v["codec_backend"] = p.video.codec_backend;
         switch (p.video.content_type) {
-            case VideoContentType::kMotion:  v["content_type"] = "motion";  break;
-            case VideoContentType::kScreen:  v["content_type"] = "screen";  break;
-            case VideoContentType::kText:    v["content_type"] = "text";    break;
-            case VideoContentType::kUnspecified:
-            default:                        v["content_type"] = "unspecified"; break;
+        case VideoContentType::kMotion:  v["content_type"] = "motion";  break;
+        case VideoContentType::kScreen:  v["content_type"] = "screen";  break;
+        case VideoContentType::kText:    v["content_type"] = "text";    break;
+        case VideoContentType::kUnspecified:
+        default:                        v["content_type"] = "unspecified"; break;
         }
         switch (p.video.ladder_mode) {
-            case VideoLadderMode::kSmoothness: v["ladder_mode"] = "smoothness"; break;
-            case VideoLadderMode::kQuality:    v["ladder_mode"] = "quality";    break;
-            case VideoLadderMode::kFixed:
-            default:                           v["ladder_mode"] = "fixed";      break;
+        case VideoLadderMode::kSmoothness: v["ladder_mode"] = "smoothness"; break;
+        case VideoLadderMode::kQuality:    v["ladder_mode"] = "quality";    break;
+        case VideoLadderMode::kFixed:
+        default:                           v["ladder_mode"] = "fixed";      break;
         }
         if (p.video.resolution_floor_width != 0 ||
             p.video.resolution_floor_height != 0) {

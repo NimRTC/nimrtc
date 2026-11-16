@@ -622,11 +622,19 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   polls `IVideoCapture::pop_frame()` directly), so the net move
     //   is +1.
     //
+    // Session-guard bump: +1 public header (190 -> 191) for the
+    //   remote-desktop session-guard module
+    //   (`src/modules/rd_session/`, the plan's "is this interactive
+    //   desktop session still capturable?" module -- the locked
+    //   workstation detection and the console-session recovery):
+    //     - rd_session/session_guard.hpp (the module's public API --
+    //       the guard state vocabulary, the query and the recovery)
+    //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 190;
+    constexpr std::size_t kBaselineHeaderCount = 191;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -74,6 +74,7 @@
 #include <nimrtc/rd_input/input_event.hpp>
 #include <nimrtc/rd_input/safety_filter.hpp>
 #include <nimrtc/rd_input_inject/input_injector.hpp>
+#include <nimrtc/rd_session/session_guard.hpp>
 
 #include "rd_signalling.hpp"
 
@@ -84,6 +85,7 @@ using nimrtc::engine::NimRTCEngine;
 namespace np = nimrtc::plugins;
 namespace rdi = nimrtc::rd_input;
 namespace inj = nimrtc::rd_input_inject;
+namespace rds = nimrtc::rd_session;
 
 // ---------------------------------------------------------------------------
 // The configuration
@@ -100,6 +102,8 @@ struct Options {
     std::string control_channel_name = "control-channel";
     /** Whether the input is injected into the local OS. */
     bool inject = true;
+    /** Whether to try to recover a locked console session and exit. */
+    bool recover_session = false;
     /** How long the session runs, in seconds (0 = forever). */
     int duration_sec = 0;
     /** The capture width / height (0 = the device's best). */
@@ -145,7 +149,8 @@ void print_usage(const char* prog) {
         "  --turn-user <u>       TURN username\n"
         "  --turn-pass <p>       TURN password\n"
         "  --no-inject           Do not inject input (a read-only session)\n"
-        "  --no-control          Do not open a control channel\n",
+        "  --no-control          Do not open a control channel\n"
+        "  --recover-session     Recover a locked console session, then exit\n",
         prog, default_capture_name().c_str());
 }
 
@@ -643,6 +648,8 @@ int main(int argc, char** argv) {
             opts.inject = false;
         } else if (arg == "--no-control") {
             opts.control_channel_name.clear();
+        } else if (arg == "--recover-session") {
+            opts.recover_session = true;
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -652,6 +659,44 @@ int main(int argc, char** argv) {
             print_usage(argv[0]);
             return 64;
         }
+    }
+
+    // ---- The session guard (the locked-workstation trap) ------------------
+    //
+    // A locked workstation breaks the capture in two different, both
+    // expensive ways: DXGI refuses outright, and WGC freezes after one
+    // frame without an error anywhere.  Neither failure says why, so
+    // the device says it here -- *before* the capture starts, where the
+    // diagnosis is still cheap.
+    {
+        const rds::SessionGuardState state = rds::query_session_guard_state();
+        std::fprintf(stderr, "[rd_device] session guard: %s (%s)\n",
+                     std::string(rds::session_guard_state_name(state)).c_str(),
+                     rds::session_guard_state_hint(state).c_str());
+
+        if (state == rds::SessionGuardState::kLocked && !opts.recover_session) {
+            std::fprintf(stderr,
+                         "[rd_device] the workstation is locked, so the "
+                         "capture cannot work.  Unlock it (Win+L, then "
+                         "sign in) or run 'rd_device --recover-session' "
+                         "from an elevated prompt.\n");
+            return 1;
+        }
+    }
+
+    // ---- The explicit recovery -------------------------------------------
+    //
+    // The recovery is opt-in and privileged, so it is a *flag*, never
+    // something that happens behind the operator's back.
+    if (opts.recover_session) {
+        std::string error;
+        if (!rds::recover_console_session(&error)) {
+            std::fprintf(stderr, "[rd_device] the session was not recovered: %s\n",
+                         error.empty() ? "the reason was not reported" : error.c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "[rd_device] the session was recovered.\n");
+        return 0;
     }
 
     DeviceSession session(opts);

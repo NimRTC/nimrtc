@@ -195,6 +195,14 @@ option(NIMRTC_MODULE_RD_INPUT
 # is driven by the example application, not by the engine.
 option(NIMRTC_MODULE_RD_INPUT_INJECT
        "Build remote-desktop input-injection module (SendInput / CGEvent / XTest)" ON)
+# The remote-desktop session-guard module — "is the interactive desktop
+# session currently capturable?".  A module, not a seam: it is driven by
+# the device example, not by the engine.  It exists because a *locked*
+# Windows workstation breaks the capture in two different, both
+# expensive ways (DXGI refuses outright, WGC freezes after one frame),
+# and neither failure says why.
+option(NIMRTC_MODULE_RD_SESSION
+       "Build remote-desktop session-guard module (locked-workstation detection / recovery)" ON)
 # Remote-desktop plan Track F (F2): the audio-device module — the
 # PortAudio-backed capture + playback devices, the shared ring buffer
 # and the synthetic device the module's tests run on.

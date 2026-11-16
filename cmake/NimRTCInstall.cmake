@@ -76,6 +76,7 @@ set(_nimrtc_install_headers
   "${CMAKE_SOURCE_DIR}/src/modules/audio_device/include"
   "${CMAKE_SOURCE_DIR}/src/modules/rd_input/include"
   "${CMAKE_SOURCE_DIR}/src/modules/rd_qoe/include"
+  "${CMAKE_SOURCE_DIR}/src/modules/rd_session/include"
 )
 
 foreach(_inc IN LISTS _nimrtc_install_headers)
@@ -125,6 +126,7 @@ set(_nimrtc_install_shorts
   audio_device
   rd_input
   rd_qoe
+  rd_session
   sctp
   dtls_seam
   raw_udp

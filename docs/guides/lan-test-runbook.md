@@ -410,6 +410,19 @@ Turn off the screen saver and the automatic lock, or keep the session
 active. `tsdiscon 1` followed by `tscon 1 /dest:console` clears a
 locked session without killing the running processes.
 
+The device **checks the session guard before it starts the capture** and
+says so on one line, so a locked workstation is named rather than
+inferred from a frozen picture:
+
+```
+[rd_device] session guard: locked (the workstation is LOCKED - ...)
+[rd_device] the workstation is locked, so the capture cannot work. ...
+```
+
+`rd_device --recover-session` performs the `tsdiscon` / `tscon` pair for
+you (it needs an elevated prompt, and it exits afterwards rather than
+starting a session).
+
 The device now names the reason in its log, so the message tells you
 which case you are in:
 

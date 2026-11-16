@@ -7,6 +7,53 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The remote-desktop session guard** (`src/modules/rd_session/`).  A
+  locked Windows workstation breaks the screen capture in two different,
+  both expensive ways: DXGI Desktop Duplication is refused outright
+  (`E_ACCESSDENIED`), and Windows Graphics Capture opens happily and
+  then delivers **exactly one frame** and no more.  The second case is
+  the expensive one — a frozen picture looks like a broken encoder, a
+  broken network or a broken peer, and the operator burns an hour
+  bisecting the wrong layer.
+
+  The module answers one question, portably: *is the interactive
+  desktop session currently capturable?*  The answer is a **three-state**
+  value, not a boolean, because the third state needs a different
+  operator response:
+
+  | state | meaning |
+  |---|---|
+  | `kUsable` | the desktop is available; a capture will produce frames |
+  | `kLocked` | the session is locked; a capture will fail or freeze |
+  | `kUnknown` | the platform cannot tell (headless, a service session, …) |
+
+  `kUnknown` is a first-class answer, not a failure: a machine with no
+  interactive session at all is not a *locked* session.
+
+  On Windows the detection is a single Win32 call — `OpenInputDesktop()`,
+  which opens the **input desktop** the user actually interacts with.
+  When the session is unlocked it succeeds and the name reads back as
+  `"Default"`; when it is locked, Winlogon owns the input desktop and
+  the call fails with `ERROR_ACCESS_DENIED`.  That failure alone is not
+  proof of a lock (a service session in session 0 fails the same way),
+  so it is attributed to a lock only when the Winlogon UI is running in
+  *our own* session; otherwise the answer is the honest `kUnknown`.
+
+  The **recovery** disconnects and reconnects the console session
+  (`tsdiscon` / `tscon`), which leaves it logged in but unlocked.  It
+  has to run in a *helper process*: `WTSDisconnectSession()` on the
+  caller's own session terminates the caller before the call returns,
+  so the module spawns the terminal-services tools with
+  `CREATE_NO_WINDOW` instead.
+
+  The module is **wired into `rd_device`**: the device reports the
+  guard's state on one line before the capture starts and refuses to
+  start on a locked workstation instead of freezing silently, and
+  `rd_device --recover-session` performs the recovery on demand (it
+  needs an elevated prompt).
+
 ### Fixed
 
 - **The VideoToolbox encoder emits its parameter sets in band.**  A

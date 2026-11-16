@@ -299,6 +299,16 @@ if(NIMRTC_MODULE_RD_INPUT_INJECT)
 endif()
 
 # -----------------------------------------------------------------------------
+# Remote-desktop session guard — the "is this workstation capturable?" probe.
+#
+# Self-contained: it depends on nimrtc::core only, and it registers no
+# plugin (the engine never resolves it — the device-side example does).
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_RD_SESSION)
+    add_subdirectory(rd_session)
+endif()
+
+# -----------------------------------------------------------------------------
 # Remote-desktop plan Track D — the video rate controller (D1 / D2 / D3 / D4).
 #
 # Self-contained: it depends on nimrtc::core + nimrtc::plugins (the seam it

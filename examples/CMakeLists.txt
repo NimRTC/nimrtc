@@ -134,6 +134,12 @@ if(NIMRTC_MODULE_RD_INPUT_INJECT)
         target_link_libraries(rd_device PRIVATE nimrtc::video_sink)
     endif()
 
+    # The session guard ("is this workstation locked?").  Optional: a
+    # build without it simply loses the locked-workstation diagnostics.
+    if(NIMRTC_MODULE_RD_SESSION)
+        target_link_libraries(rd_device PRIVATE nimrtc::rd_session)
+    endif()
+
     # The msquic runtime DLL and the Chrome-friendly DTLS cert: without
     # them the device dies with STATUS_DLL_NOT_FOUND before `main()`.
     nimrtc_stage_runtime(rd_device)

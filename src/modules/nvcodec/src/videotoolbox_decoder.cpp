@@ -716,7 +716,7 @@ private:
                 }
             }
         } else if (format == kCVPixelFormatType_420YpCbCr8PlanarFullRange ||
-                   format == kCVPixelFormatType_420YpCbCr8PlanarVideoRange) {
+                   format == kCVPixelFormatType_420YpCbCr8Planar) {
             // ---- The planar (I420) layout ---------------------------------
             //
             // The plane pointers come from the buffer itself: computing

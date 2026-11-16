@@ -757,7 +757,7 @@ public:
                     }
                 }
             } else if (format == kCVPixelFormatType_420YpCbCr8PlanarFullRange ||
-                       format == kCVPixelFormatType_420YpCbCr8PlanarVideoRange) {
+                       format == kCVPixelFormatType_420YpCbCr8Planar) {
                 // ---- The planar (I420) layout ------------------------------
                 //
                 // Three separate planes, each with its own pitch.  The

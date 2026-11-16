@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wsproto  # noqa: E402  (path shim above)
 from signalling_core import (  # noqa: E402
     DEFAULT_MAX_CONCURRENT_SESSIONS,
+    DEFAULT_PAIRING_TTL_S,
     DEFAULT_TURN_TTL_S,
     PairingStore,
     SessionLimits,
@@ -214,6 +215,14 @@ async def main() -> int:
         help="TURN credential TTL in seconds (default: 3600)",
     )
     parser.add_argument(
+        "--pairing-ttl",
+        type=float,
+        default=DEFAULT_PAIRING_TTL_S,
+        help="Pairing code TTL in seconds (default: 300). Raise it for a "
+             "manual test where the code has to be typed by hand on "
+             "another machine.",
+    )
+    parser.add_argument(
         "--max-sessions",
         type=int,
         default=DEFAULT_MAX_CONCURRENT_SESSIONS,
@@ -241,7 +250,7 @@ async def main() -> int:
 
     secret = args.turn_secret.encode("utf-8") if args.turn_secret else os.urandom(32)
     service = SignallingService(
-        pairing_store=PairingStore(),
+        pairing_store=PairingStore(ttl_s=args.pairing_ttl),
         turn_issuer=TurnCredentialIssuer(secret, ttl_s=args.turn_ttl, url=args.turn_url),
         limits=SessionLimits(
             max_concurrent_sessions=args.max_sessions,

@@ -14,7 +14,7 @@
 
 #if defined(__APPLE__)
 
-#    include "macos/screencapturekit_capture.hpp"
+#    include "screencapturekit_capture.hpp"
 
 namespace nimrtc::video_capture::detail {
 

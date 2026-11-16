@@ -483,16 +483,20 @@ bool MetalRenderer::Impl::present_via_avsamplebuffer(const PresentedFrame& frame
     // these values").  `kCVPixelBufferIOSurfacePropertiesKey` wants a
     // dictionary of its own (an empty one asks CoreVideo for an
     // IOSurface-backed buffer, which is what the display layer wants).
+    //
+    // `kCVPixelBufferOpenGLESCompatibilityKey` is *not* among them: the
+    // SDK marks it `API_UNAVAILABLE(macosx)` -- it exists for the iOS
+    // OpenGL-ES path, and naming it on macOS is a hard compile error.
+    // The macOS display layer wants a CoreGraphics-compatible buffer,
+    // which is what the third key asks for.
     CVPixelBufferRef pixel_buffer = nullptr;
     CFTypeRef keys[] = {
         kCVPixelBufferIOSurfacePropertiesKey,
-        kCVPixelBufferOpenGLESCompatibilityKey,
         kCVPixelBufferCGBitmapContextCompatibilityKey,
     };
     CFTypeRef values[] = {
         CFDictionaryCreate(kCFAllocatorDefault, nullptr, nullptr, 0,
                            nullptr, nullptr),
-        kCFBooleanTrue,
         kCFBooleanTrue,
     };
     CFDictionaryRef attrs = CFDictionaryCreate(
@@ -871,9 +875,15 @@ plugins::Status MetalRenderer::render(
     if (impl_->sampler_ != nil) {
         [encoder setFragmentSamplerState:impl_->sampler_ atIndex:0];
     }
-    [encoder setFragmentTexture:
-                 (__bridge id<MTLTexture>)surface.handle().handle)
-                            atIndex:0];
+    // The handle carries an `id<MTLTexture>`.  In Objective-C++ a
+    // protocol-qualified `id` cannot appear in a *cast expression*
+    // (`(__bridge id<MTLTexture>)x` does not even parse), so the bridge
+    // cast is spelled on the plain `id` and the protocol-qualified
+    // variable is then assigned from it -- an `id` converts to any
+    // qualified `id` without a cast.
+    __bridge id bridged = (__bridge id)surface.handle().handle;
+    id<MTLTexture> texture = bridged;
+    [encoder setFragmentTexture:texture atIndex:0];
     const float dest_rect[4] = {0.0f, 0.0f, 1.0f, 1.0f};
     [encoder setVertexBytes:dest_rect length:sizeof(dest_rect) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];

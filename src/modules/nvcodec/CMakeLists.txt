@@ -72,6 +72,32 @@ include(NimRTHwPlugins)
 nimrtc_link_nvenc(nimrtc_nvcodec)
 nimrtc_link_nvdec(nimrtc_nvcodec)
 
+# ---------------------------------------------------------------------------
+# The VideoToolbox backend (macOS).
+#
+# The VideoToolbox sources are compiled on every platform -- they carry a
+# portable stub that reports "not available" -- but the *implementation*
+# calls into Apple's frameworks, so the frameworks must be linked on
+# Apple.  Without them the compile succeeds and the link fails with
+# undefined symbols ("_VTCompressionSessionCreate", "_CFArrayGetCount",
+# "_kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder").
+#
+# The framework flags use the *single-string* spelling
+# ("-framework VideoToolbox"), not the two-item list form
+# ("-framework" "VideoToolbox"): CMake de-duplicates link items by name,
+# so the repeated bare "-framework" entry survives only once and every
+# framework after it loses its prefix -- the linker then looks for a
+# *library* named "VideoToolbox" instead of the framework.
+# ---------------------------------------------------------------------------
+if(APPLE)
+    target_link_libraries(nimrtc_nvcodec PRIVATE
+        "-framework VideoToolbox"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework CoreFoundation"
+        "-framework Foundation")
+endif()
+
 add_library(nimrtc::nvcodec ALIAS nimrtc_nvcodec)
 
 # Tests

@@ -40,6 +40,16 @@
    > **屏幕不能锁！** Windows 一旦锁屏（或屏保启动），WGC 采集会停在
    > 1 帧不动，DXGI 会直接报 `E_ACCESSDENIED`。保持会话处于已登录且
    > 桌面可见的状态（把屏保和自动锁定都关掉）。
+   >
+   > 设备端启动时会**自己检测**锁屏并直接拒绝启动，日志里会写：
+   >
+   > ```
+   > [rd_device] session guard: locked (the workstation is LOCKED - ...)
+   > [rd_device] the workstation is locked, so the capture cannot work. ...
+   > ```
+   >
+   > 也就是说，锁屏不会再变成"画面卡住但看不出为什么"，而是直接告诉你
+   > 原因和补救办法。
 
    > **想用键盘鼠标控制设备端，必须加 `--inject`。** 默认不开，是为了
    > 不让测试脚本意外操纵你本机的桌面。开了之后操作端发的鼠标/键盘
@@ -70,6 +80,25 @@ rd_viewer.bat --url ws://172.16.33.44:8765 --code 186534 ^
 | `--capture windows-wgc` | 显式指定 WGC 采集 |
 | `--backend software` | 软件编解码（没有 GPU / 硬件编解码器时用） |
 | `--codec h264` / `av1` / `h265` | 指定视频编码 |
+
+### 锁屏了怎么办
+
+设备端自己会检测。如果它拒绝启动并打印 `session guard: locked`，说明
+这台机器的会话被锁了 —— 采集一定不工作（不是网络问题，也不是编码器
+问题）。
+
+两种解法：
+
+1. **手动解锁** —— 在设备机上按 `Win+L`，然后输入密码登录。
+2. **让程序自己恢复** —— 在**管理员**的命令行里跑：
+
+   ```bat
+   rd_device.bat --recover-session
+   ```
+
+   它做的是 `tsdiscon 1` + `tscon 1 /dest:console`：把控制台会话断开
+   再接回来。会话仍然是登录状态（跑着的程序不会死），但**不再锁屏**。
+   跑完就退出，不会开新会话。
 
 ### 已在本机验证过的组合
 
@@ -120,7 +149,8 @@ isolation"，那个开关会让两台机器互相看不见。
 | `0xc000007b` 闪退 | 缺 `msquic.dll` 或缺 MSVC 运行时。用 `rd_viewer.bat` 而不是 exe |
 | `unknown argument '--url'` | 直接跑了 exe。必须用 `.bat`（`--url/--code` 是 Python 层的参数） |
 | `pairing_invalid` | 配对码被用过了。**看设备端窗口里的最新那个码** |
-| 设备端 `capture` 不涨 / 卡在 1 | **屏幕被锁了**。关掉屏保和自动锁定，保持会话已登录 |
+| 设备端直接退出，日志写 `session guard: locked` | **屏幕被锁了**。解锁，或用 `rd_device.bat --recover-session`（管理员） |
+| 设备端 `capture` 不涨 / 卡在 1 | 同上，锁屏。只是这条路径发生在会话中途 |
 | 设备端报 `plugin open failed` | 看后面附带的 DXGI 原因：`E_ACCESSDENIED` = 锁屏，`NOT_CURRENTLY_AVAILABLE` = 别的程序占着桌面复制 |
 | 设备端 `injected=0` | 没加 `--inject`，输入事件被安全地丢掉了 |
 | 连上了但黑屏/无画面 | 设备端还没出 IDR。看设备端日志有没有 `armed the video encoder for an IDR` |

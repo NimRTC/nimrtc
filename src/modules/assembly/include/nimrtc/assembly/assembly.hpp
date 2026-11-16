@@ -496,7 +496,15 @@ struct NIMRTC_API_STABLE Profile {
     // The runtime override (`NimRTCEngine::set_video_stream_weight()`)
     // always wins over the declaration: the declaration is the *default*
     // the session starts from, not a lock.
-    std::map<std::string, std::uint32_t> video_stream_weights;
+    //
+    // The default member initializer is load-bearing: the profile
+    // constants below are *designated initializers*, and GCC's
+    // `-Wmissing-field-initializers` (which the project builds with
+    // `-Werror`) rejects a designated initializer that mentions a
+    // non-aggregate member with `= {}` unless the member carries a
+    // default member initializer.  Without it, every profile that says
+    // ".video_stream_weights = {}" fails to compile on GCC.
+    std::map<std::string, std::uint32_t> video_stream_weights{};
 
     // ---- v1.2 additive: video shaping --------------------------------------
     ///

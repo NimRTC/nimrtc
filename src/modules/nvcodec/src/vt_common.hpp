@@ -400,8 +400,6 @@ inline bool av1_annex_b_to_low_overhead(const std::uint8_t* data,
     if (!data || size < 4) return false;
     if (!(data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)) return false;
 
-    constexpr std::uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
-
     std::size_t pos = 0;
     while (pos < size) {
         // Locate the start code.
@@ -659,8 +657,6 @@ inline bool annex_b_to_avcc(const std::uint8_t* data,
     out.clear();
     if (!data || size < 4) return false;
     if (!(data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)) return false;
-
-    constexpr std::uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
 
     std::size_t pos = 0;
     while (pos < size) {

@@ -311,9 +311,14 @@ public:
 
         // The "force a key frame" request is a *frame property*, not a
         // flag on the encode call.
-        CFDictionaryRef frame_props = nullptr;
+        //
+        // The dictionary has to be *mutable*: `CFDictionarySetValue`
+        // takes a `CFMutableDictionaryRef`, and `CFDictionaryCreate`
+        // (the immutable factory) takes six arguments and hands back
+        // an immutable dictionary, so it cannot be used here at all.
+        CFMutableDictionaryRef frame_props = nullptr;
         if (force_keyframe) {
-            frame_props = CFDictionaryCreate(
+            frame_props = CFDictionaryCreateMutable(
                 kCFAllocatorDefault, 1, &kCFTypeDictionaryKeyCallBacks,
                 &kCFTypeDictionaryValueCallBacks);
             if (frame_props) {
@@ -395,21 +400,28 @@ private:
         CFRelease(num);
     }
 
-    /** The output callback VideoToolbox delivers the compressed sample to. */
-    static OSStatus output_callback(void* refcon,
-                                    void* /*sourceFrameRefCon*/,
-                                    OSStatus status,
-                                    VTEncodeInfoFlags flags,
-                                    CMSampleBufferRef sample_buffer) {
+    /** The output callback VideoToolbox delivers the compressed sample to.
+     *
+     *  The signature is fixed by VideoToolbox:
+     *  `VTCompressionOutputCallback` returns **void**, not `OSStatus`.
+     *  The encoder's own status arrives as the `status` *argument*, so
+     *  there is nothing to return — returning an `OSStatus` here does
+     *  not compile ("no known conversion from 'OSStatus (*)(...)' to
+     *  'VTCompressionOutputCallback'"). */
+    static void output_callback(void* refcon,
+                                void* /*sourceFrameRefCon*/,
+                                OSStatus status,
+                                VTEncodeInfoFlags flags,
+                                CMSampleBufferRef sample_buffer) {
         auto* self = static_cast<VtSession*>(refcon);
-        if (!self) return noErr;
-        if (status != noErr) return status;
+        if (!self) return;
+        if (status != noErr) return;
 
         if (flags & kVTEncodeInfo_FrameDropped) {
             self->dropped_ = true;
-            return noErr;
+            return;
         }
-        if (!sample_buffer) return noErr;
+        if (!sample_buffer) return;
 
         // The key-frame flag: `kCMSampleBufferFlag_...` does not carry
         // it, but the sample's attachments do — VideoToolbox marks an
@@ -417,25 +429,50 @@ private:
         // reaches us through the sample buffer's format-description
         // attachments.  The reliable, public way to ask is the sample
         // buffer's *sync* sample flag, which is set for an IDR.
-        if (CMSampleBufferIsNotSync(sample_buffer)) {
-            self->keyframe_seen_ = false;
-        } else {
-            self->keyframe_seen_ = true;
+        //
+        // The flag lives in the sample's *attachments* array, under
+        // `kCMSampleAttachmentKey_NotSync`: the entry is absent (or
+        // `false`) for a sync sample, and `true` for a non-sync one.
+        // There is no `CMSampleBufferIsNotSync()` function — the
+        // attachment is the only public spelling.
+        //
+        // A sample with no attachments array at all is treated as a
+        // sync sample: the absence of the "not sync" marker means
+        // "not marked as non-sync", and a *key frame* is the safe
+        // answer (a spurious key frame costs one extra IDR; a missed
+        // one costs a broken decode).
+        bool not_sync = false;
+        CFArrayRef attachments =
+            CMSampleBufferGetSampleAttachmentsArray(sample_buffer, true);
+        if (attachments) {
+            CFIndex count = CFArrayGetCount(attachments);
+            for (CFIndex i = 0; i < count; ++i) {
+                CFMutableDictionaryRef att =
+                    static_cast<CFMutableDictionaryRef>(
+                        CFArrayGetValueAtIndex(attachments, i));
+                if (!att) continue;
+                CFTypeRef value =
+                    CFDictionaryGetValue(att, kCMSampleAttachmentKey_NotSync);
+                if (value && CFBooleanGetValue(static_cast<CFBooleanRef>(value))) {
+                    not_sync = true;
+                    break;
+                }
+            }
         }
+        self->keyframe_seen_ = !not_sync;
 
         // ---- Extract the compressed bytes ------------------------------
         CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample_buffer);
-        if (!block) return noErr;
+        if (!block) return;
         const std::size_t total = CMBlockBufferGetDataLength(block);
-        if (total == 0) return noErr;
+        if (total == 0) return;
 
         self->output_.resize(total);
         if (CMBlockBufferCopyDataBytes(block, 0, total, self->output_.data())
             != kCMBlockBufferNoErr) {
             self->output_.clear();
-            return noErr;
+            return;
         }
-        return noErr;
     }
 
     VTCompressionSessionRef session_ = nullptr;
@@ -779,7 +816,13 @@ private:
     plugins::VideoCodecConfig      cfg_;
     vt_detail::Codec               codec_ = vt_detail::Codec::kH264;
     VtSession                      session_;
-    std::mutex                     mtx_;
+    // `mutable`: the two `supports_zero_copy_*` accessors are `const`
+    // members, but they still have to take the lock to read the
+    // session's state.  A plain `std::mutex` member would make the
+    // lock impossible to take from a const member function, which
+    // Clang rejects outright ("1st argument ('const std::mutex')
+    // would lose const qualifier").
+    mutable std::mutex              mtx_;
     bool                           opened_ = false;
     bool                           force_keyframe_next_ = false;
     plugins::VideoCodecStats       stats_{};
@@ -841,7 +884,7 @@ bool vt_encoder_available(VtCodec codec) noexcept {
 std::unique_ptr<plugins::IVideoCodec>
 make_vt_encoder(VtCodec codec, plugins::VideoCodecConfig cfg) {
 #if defined(__APPLE__)
-    const vt_detail::Codec c = to_detail(codec);
+    const vt_detail::Codec c = vt_detail::to_detail(codec);
     if (!vt_detail::os_at_least(vt_detail::min_macos_version(c))) {
         NIMRTC_LOG_WARN("vt: encoder open() failed — "
                         << vt_detail::encoder_unavailable_reason(c));

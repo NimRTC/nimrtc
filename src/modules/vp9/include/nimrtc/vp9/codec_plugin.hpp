@@ -128,7 +128,7 @@ private:
 class NIMRTC_API_STABLE Vp9PluginFactory : public plugins::IVideoCodecFactory {
 public:
     std::string_view id() const noexcept override { return NIMRTC_PLUGIN_ID("vp9"); }
-    std::string_view display_name() const noexcept {
+    std::string_view display_name() const noexcept override {
         return "VP9 (RFC 9559) — libvpx software encoder when vendored, stub fallback";
     }
     plugins::IVideoCodec* create(plugins::VideoCodecConfig cfg) const override;

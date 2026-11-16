@@ -271,7 +271,21 @@ inline bool take_line(std::string* line) {
     return true;
 }
 
+/// Set once the signalling channel has been seen at EOF.
+inline bool& channel_eof() {
+    static bool eof = false;
+    return eof;
+}
+
 } // namespace detail
+
+/// Has the signalling channel been closed by its writer?
+///
+/// "Closed" is not the same as "empty": a pipe whose writer is gone
+/// reads as EOF forever, and a binary that keeps ticking in that state
+/// captures and encodes into the void.  The reader records the EOF and
+/// this accessor lets the owner of the loop react to it.
+inline bool channel_closed() noexcept { return detail::channel_eof(); }
 
 inline bool read_line(std::string* line, int timeout_ms) {
     line->clear();
@@ -289,16 +303,26 @@ inline bool read_line(std::string* line, int timeout_ms) {
         char chunk[4096];
         while (true) {
             DWORD avail = 0;
-            if (PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr) &&
-                avail > 0) {
-                DWORD read = 0;
-                if (!ReadFile(h, chunk, sizeof(chunk), &read, nullptr)) {
-                    return false;
+            if (PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) {
+                if (avail > 0) {
+                    DWORD read = 0;
+                    if (!ReadFile(h, chunk, sizeof(chunk), &read, nullptr)) {
+                        return false;
+                    }
+                    if (read == 0) return false;
+                    detail::pending_bytes().append(chunk, read);
+                    if (detail::take_line(line)) return true;
+                    continue;
                 }
-                if (read == 0) return false;
-                detail::pending_bytes().append(chunk, read);
-                if (detail::take_line(line)) return true;
-                continue;
+                // avail == 0 with a *live* pipe means "no data right
+                // now"; a *broken* pipe means the writer is gone.  The
+                // two are told apart by the PeekNamedPipe result: it
+                // fails with ERROR_BROKEN_PIPE once the other end is
+                // closed.  Without this check the binary would keep
+                // ticking until its deadline while nobody is listening.
+            } else if (GetLastError() == ERROR_BROKEN_PIPE) {
+                detail::channel_eof() = true;
+                return false;
             }
             if (std::chrono::steady_clock::now() >= deadline) return false;
             Sleep(10);
@@ -306,7 +330,13 @@ inline bool read_line(std::string* line, int timeout_ms) {
     }
     while (true) {
         const int c = fgetc(stdin);
-        if (c == EOF) return false;
+        if (c == EOF) {
+            // A console stdin that hits EOF means the input was
+            // redirected and the writer is gone.
+            if (!std::feof(stdin)) return false;
+            detail::channel_eof() = true;
+            return false;
+        }
         if (c == '\n') {
             while (!line->empty() &&
                    (line->back() == '\r' || line->back() == '\n')) {
@@ -317,11 +347,14 @@ inline bool read_line(std::string* line, int timeout_ms) {
         line->push_back(static_cast<char>(c));
     }
 #else
-    struct pollfd pfd = { fileno(stdin), POLLIN, 0 };
+    struct pollfd pfd = { fileno(stdin), POLLIN, 0};
     const int r = ::poll(&pfd, 1, timeout_ms);
     if (r <= 0) return false;
     int c = fgetc(stdin);
-    if (c == EOF) return false;
+    if (c == EOF) {
+        detail::channel_eof() = true;
+        return false;
+    }
     while (c != EOF && c != '\n') {
         line->push_back(static_cast<char>(c));
         c = fgetc(stdin);

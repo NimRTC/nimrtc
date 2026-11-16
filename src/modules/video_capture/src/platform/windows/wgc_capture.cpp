@@ -180,6 +180,18 @@ bool WgcCapture::open(WgcTargetKind target,
 }
 
 void WgcCapture::close() noexcept {
+    // The pending frame has to be closed *before* the pool is dropped,
+    // otherwise its buffer is never handed back and the pool's resources
+    // are torn down with a frame still checked out.
+    if (pending_frame_) {
+        try {
+            pending_frame_.Close();
+        } catch (const winrt::hresult_error&) {
+            // Nothing to do: the frame is being destroyed anyway.
+        }
+        pending_frame_ = nullptr;
+    }
+
     // There is no `StopCapture` in this SDK's projection (it arrived
     // with a later Windows 11 release), and none is needed: dropping the
     // session stops the capture.  The pool and the item are released
@@ -197,6 +209,31 @@ bool WgcCapture::try_get_next(ComPtr<ID3D11Texture2D>& out_texture,
     if (!pool_) {
         out_error = WindowsCaptureError::kDeviceLost;
         return false;
+    }
+
+    // ---- Release the previous frame -------------------------------------
+    //
+    // A `Direct3D11CaptureFrame` holds one of the pool's buffers, and the
+    // buffer comes back to the pool only when the frame is **closed**.
+    // The pool has a fixed number of buffers (two, in `open()`), so a
+    // frame that is never closed starves the pool: the compositor keeps
+    // producing frames, but there is nowhere to put them, and the capture
+    // silently stops after a handful of frames.
+    //
+    // The previous frame is closed *here*, at the start of the next call,
+    // rather than right after the texture was handed out: the texture
+    // points into the frame's buffer, so the frame has to outlive the
+    // caller's use of it.  The class contract already says the texture
+    // stays valid "until the next call", and the consumer copies the
+    // pixels (or the GPU surface) before it returns.
+    if (pending_frame_) {
+        try {
+            pending_frame_.Close();
+        } catch (const winrt::hresult_error&) {
+            // A frame that refuses to close is a broken frame; the pool
+            // will drop it anyway.  There is nothing to recover here.
+        }
+        pending_frame_ = nullptr;
     }
 
     Direct3D11CaptureFrame frame = nullptr;
@@ -235,11 +272,14 @@ bool WgcCapture::try_get_next(ComPtr<ID3D11Texture2D>& out_texture,
         return false;
     }
 
+    // The frame stays open until the next call (see the note above): the
+    // texture the caller is about to use lives in the frame's buffer.
+    pending_frame_ = frame;
+
     out_texture = texture;
     out_error = WindowsCaptureError::kNone;
     return true;
 }
-
 } // namespace nimrtc::video_capture::wcap
 
 #endif // _WIN32

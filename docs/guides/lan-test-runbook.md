@@ -229,6 +229,49 @@ On the viewer:
 count and the DataChannel message counters in each direction. `beats`
 growing means the dead-man watchdog on the device is being kept quiet.
 
+### 4.5 The packaged bundle (no build toolchain on the operator's machine)
+
+§4.1 and §4.2 need a Python 3 and, on the device machine, a source
+tree. When the operator's machine must not carry a toolchain, ship the
+**deployment bundle** instead: `build/rd-deploy.zip` (built by
+`scripts/package_rd_deploy.ps1`, refreshed whenever the binaries
+change).
+
+The zip contains `rd_device.exe`, `rd_viewer.exe`, `msquic.dll`, the
+MSVC runtime under `crt/`, the four Python files (`client.py`,
+`wsproto.py`, `signalling.py`, `signalling_core.py`), the two `.bat`
+entry points and a `README.md`.
+
+**Device machine** (unzip anywhere, then two terminals):
+
+```bat
+python signalling.py --host 0.0.0.0 --port 8765
+
+rd_device.bat --url ws://127.0.0.1:8765 --duration 3600 --backend hardware --no-stun
+```
+
+**Operator's machine** (unzip anywhere, then one terminal):
+
+```bat
+rd_viewer.bat --url ws://<device-lan-ip>:8765 --code <pairing code> ^
+               --duration 3600 --backend hardware --no-stun --sink d3d11
+```
+
+The `.bat` wrappers put `crt/` on the DLL search path, so **no
+"VC++ redistributable" install is needed**. `msquic.dll` sits next to
+the executables; without it the viewer dies with `0xc000007b`.
+
+Two rules the operator must respect:
+
+- **The `--url` on the operator's machine is the device's LAN address**,
+  never `127.0.0.1`.
+- **The pairing code is one-shot.** After the operator disconnects, the
+  device prints a *fresh* code — use the newest one. Reusing a spent
+  code yields `pairing_invalid`.
+
+The operator's machine needs **Python 3** (the `.bat` invokes
+`python`); everything else is self-contained.
+
 ---
 
 ## 5. The self-running harness

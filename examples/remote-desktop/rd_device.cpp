@@ -547,6 +547,20 @@ int DeviceSession::run() {
         //
         // The read is non-blocking (a zero timeout), so the tick loop
         // keeps running at its own rate.
+        //
+        // A *closed* channel is different from an empty one: when the
+        // client that drives this binary goes away, there is nobody left
+        // to send the offer, so the session cannot start and there is no
+        // point in capturing and encoding into the void.  `read_line`
+        // reports the closed channel by returning false with the reader
+        // at EOF — but "no line yet" also returns false, so the EOF is
+        // told apart by the dedicated flag below.
+        if (rd_sig::channel_closed()) {
+            std::fprintf(stderr,
+                         "[rd_device] the signalling channel closed - stopping\n");
+            running_ = false;
+            break;
+        }
         if (rd_sig::read_line(&line, 0)) {
             if (!line.empty()) {
                 handle_signal(line);

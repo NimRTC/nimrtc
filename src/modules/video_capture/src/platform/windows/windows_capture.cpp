@@ -35,6 +35,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -360,6 +361,33 @@ public:
             // burning a core.  The tick thread is never involved.
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
             return false;
+        }
+
+        // A periodic frame-rate report.  WGC delivers frames only when
+        // the compositor produced them, so this line is the quickest way
+        // to tell "the desktop is idle" from "the capture is broken".
+        //
+        // The counters are plain statics on purpose: `pump_wgc()` runs on
+        // the capture thread only, so there is nothing to synchronise.
+        {
+            static std::int64_t frames = 0;
+            static std::int64_t frames_at_report = 0;
+            static std::int64_t report_us = 0;
+
+            ++frames;
+            const std::int64_t now = now_us();
+            if (report_us == 0) {
+                report_us = now;
+                frames_at_report = frames;
+            } else if (now - report_us >= 5'000'000) {
+                const double seconds = static_cast<double>(now - report_us) / 1e6;
+                const double fps =
+                    static_cast<double>(frames - frames_at_report) / seconds;
+                std::fprintf(stderr, "[wgc] frames=%lld fps=%.1f\n",
+                             static_cast<long long>(frames), fps);
+                report_us = now;
+                frames_at_report = frames;
+            }
         }
 
         // WGC reports no dirty rectangles 锟?the honest answer is "the

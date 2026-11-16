@@ -136,6 +136,16 @@ private:
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool pool_{nullptr};
     winrt::Windows::Graphics::Capture::GraphicsCaptureSession session_{nullptr};
     winrt::Windows::Graphics::Capture::GraphicsCaptureItem item_{nullptr};
+    /**
+     * @brief The frame handed out by the last `try_get_next()`.
+     *
+     * A WGC frame owns one of the pool's buffers, and the buffer returns
+     * to the pool only when the frame is closed.  The frame is kept alive
+     * here because the texture the caller uses lives inside the frame's
+     * buffer; it is closed at the beginning of the next `try_get_next()`
+     * call (or by the destructor / `stop()`).
+     */
+    winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame pending_frame_{nullptr};
     std::uint32_t width_ = 0;
     std::uint32_t height_ = 0;
 };

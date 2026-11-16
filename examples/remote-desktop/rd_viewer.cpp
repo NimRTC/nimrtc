@@ -529,6 +529,17 @@ int ViewerSession::run() {
         //
         // The read is non-blocking (a zero timeout), so the tick loop
         // keeps running at its own rate.
+        //
+        // A *closed* channel is different from an empty one: once the
+        // client that drives this binary is gone there is nobody left to
+        // send the offer, so the session can never come up and there is
+        // no point in decoding into the void.
+        if (rd_sig::channel_closed()) {
+            std::fprintf(stderr,
+                         "[rd_viewer] the signalling channel closed - stopping\n");
+            running_ = false;
+            break;
+        }
         if (rd_sig::read_line(&line, 0)) {
             if (!line.empty()) {
                 handle_signal(line);

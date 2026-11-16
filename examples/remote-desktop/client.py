@@ -207,6 +207,9 @@ class MediaBridge:
         self.process: Optional[subprocess.Popen] = None
         self._to_ws: "asyncio.Queue[str]" = asyncio.Queue()
         self._exit_reported = False
+        #: True once `stop()` was called — the process was torn down on
+        #: purpose, so its exit does not end the session.
+        self.expected_exit = False
 
     def _turn_flags(self) -> List[str]:
         """The TURN flags, or an empty list when TURN is not in use.
@@ -251,19 +254,47 @@ class MediaBridge:
             bufsize=1,
         )
 
+    async def wait_done(self) -> int:
+        """Wait until the media binary exits, and return its exit code.
+
+        The media binary's lifetime is the *session's* lifetime: when it
+        exits — because `--duration` ran out, or because it crashed — the
+        whole client is done, signalling channel included.  Waiting on
+        the process here is what lets the caller tear the session down
+        instead of leaving a live socket behind (see `run_client`).
+        """
+        if self.process is None:
+            return 0
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.process.wait)
+
     def stop(self) -> None:
         if self.process is None:
             return
+        self.expected_exit = True
         try:
             if self.process.stdin:
                 self.process.stdin.close()
-            self.process.terminate()
-            self.process.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, ValueError):
+            pass
+        # Give the binary a moment to shut down on its own.  Closing its
+        # stdin is the signal it uses to notice that the signalling
+        # channel is gone, and a graceful exit lets it print its
+        # "state: closed" marker — which is what the harness (and the
+        # operator reading the log) looks for.
+        try:
+            self.process.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
             try:
-                self.process.kill()
-            except OSError:
-                pass
+                self.process.terminate()
+                self.process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    self.process.kill()
+                except OSError:
+                    pass
+        except OSError:
+            pass
         self.process = None
 
     def write(self, message: Dict) -> None:
@@ -347,19 +378,35 @@ async def run_client(args: argparse.Namespace) -> int:
 
     bridge: Optional[MediaBridge] = None
     stdout_task: Optional[asyncio.Future] = None
+    watcher: Optional[asyncio.Future] = None
     pending: List[Dict] = []
     peer_present = False
     state: Dict[str, object] = {}
 
+    # ---- The media binary's exit ends the session -------------------------
+    #
+    # `--duration` is the *media* session's lifetime: when it runs out,
+    # the media binary exits but the signalling socket would stay open,
+    # and the client would sit there forever.  That is not a harmless
+    # leak:
+    #
+    #   - the operator sees a console that looks alive but shows nothing,
+    #     so the natural reaction is to press Ctrl+C and start over;
+    #   - the device never sees a `peer_left`, so it never asks for a
+    #     fresh pairing code;
+    #   - the pairing code the operator used stays *spent*, and the next
+    #     run with that code is refused with `pairing_invalid`.
+    #
+    # So the media binary's exit tears the whole client down: the socket
+    # closes, the device is told the operator left, and it hands out a
+    # new code.  The operator's next run then works.
+    media_exited = asyncio.Event()
+
     async def send(message: Dict) -> None:
         await conn.send_text(json.dumps(message))
 
-    def maybe_start_media() -> None:
-        """Start the media binary once both peers are in the room."""
-        nonlocal bridge, stdout_task
-        if bridge is not None or not peer_present:
-            return
-
+    def build_media() -> Optional[MediaBridge]:
+        """Build the media bridge for this role (without starting it)."""
         if args.media == "rd":
             # The remote-desktop pair: the binary *is* the role, so the
             # role's binary is picked and no offerer/answerer flag is
@@ -369,7 +416,7 @@ async def run_client(args: argparse.Namespace) -> int:
             if binary is None:
                 print(f"[media] rd_{args.role} binary not found - media plane "
                       f"skipped (build it, or pass --binary)")
-                return
+                return None
             extra: List[str] = []
             if args.media == "rd" and args.role == "viewer":
                 if args.sink:
@@ -404,35 +451,93 @@ async def run_client(args: argparse.Namespace) -> int:
                 # candidate that can win the pair selection and then
                 # break the session the moment the NAT mapping moves.
                 extra.append("--no-stun")
-            bridge = MediaBridge("rd", binary, answerer=(args.role == "device"),
-                                 turn=state.get("turn"), use_turn=args.use_turn,
-                                 duration=args.duration, extra=extra)
-        else:
-            binary = find_demo_p2p(args.binary)
-            if binary is None:
-                print("[media] demo-p2p binary not found - media plane skipped "
-                      "(build it, or pass --binary)")
-                return
-            bridge = MediaBridge("demo-p2p", binary, answerer=(args.role == "device"),
-                                 turn=state.get("turn"), use_turn=args.use_turn,
-                                 duration=args.duration)
+            return MediaBridge("rd", binary, answerer=(args.role == "device"),
+                               turn=state.get("turn"), use_turn=args.use_turn,
+                               duration=args.duration, extra=extra)
+        binary = find_demo_p2p(args.binary)
+        if binary is None:
+            print("[media] demo-p2p binary not found - media plane skipped "
+                  "(build it, or pass --binary)")
+            return None
+        return MediaBridge("demo-p2p", binary, answerer=(args.role == "device"),
+                           turn=state.get("turn"), use_turn=args.use_turn,
+                           duration=args.duration)
 
-        bridge.start()
+    async def watch_media(b: MediaBridge) -> None:
+        """Wait for the media binary to exit on its own."""
+        await b.wait_done()
+        if b.expected_exit:
+            # We stopped it deliberately (the peer changed) — that is not
+            # the end of the client.
+            return
+        media_exited.set()
+
+    def start_media() -> None:
+        """Start the media binary and pump its stdout to the signalling channel.
+
+        A *fresh* media binary is built for every session.  That matters
+        for the device: the media plane carries a DTLS-SRTP session, and
+        a DTLS session belongs to **one** peer.  When the operator leaves
+        and comes back, the device must not keep the old session around
+        — the new operator's DTLS handshake has to run against a fresh
+        one, or the two sides derive different SRTP keys and the operator
+        sees a session that connects but never decodes a frame.
+        """
+        nonlocal bridge, stdout_task, watcher
+        new_bridge = build_media()
+        if new_bridge is None:
+            return
+
+        new_bridge.start()
         # The stdout pump has to start *with* the binary: the answer and
         # the local candidates are written to stdout as soon as the
         # binary has them, and a pump that starts later would lose them.
-        stdout_task = asyncio.ensure_future(
-            bridge.pump_stdout(lambda m: asyncio.ensure_future(send(m)))
+        new_stdout_task = asyncio.ensure_future(
+            new_bridge.pump_stdout(lambda m: asyncio.ensure_future(send(m)))
         )
+        new_watcher = asyncio.ensure_future(watch_media(new_bridge))
         # A message that arrived before the media plane existed is
         # forwarded now that it does.  The queue holds *every* message,
         # not just the last one: the candidates arrive in a burst right
         # after the SDP, and a single slot would drop all but the last.
         nonlocal pending
         for message in pending:
-            bridge.write(message)
+            new_bridge.write(message)
         pending = []
-        print(f"[media] started {binary} (answerer={args.role == 'device'})")
+        bridge = new_bridge
+        stdout_task = new_stdout_task
+        watcher = new_watcher
+        media_exited.clear()
+        print(f"[media] started {new_bridge.binary} "
+              f"(answerer={args.role == 'device'})")
+
+    def stop_media() -> None:
+        """Tear the media plane down (the peer left, or a new one arrived)."""
+        nonlocal bridge, stdout_task, watcher
+        if watcher is not None:
+            watcher.cancel()
+            watcher = None
+        if stdout_task is not None:
+            stdout_task.cancel()
+            stdout_task = None
+        if bridge is not None:
+            bridge.stop()
+            bridge = None
+
+    def maybe_start_media() -> None:
+        """Start (or restart) the media binary once both peers are in the room.
+
+        The restart is the point: a device that already served one
+        operator has to serve the next one with a *fresh* media session,
+        because the DTLS-SRTP session is per-peer.
+        """
+        nonlocal peer_present
+        if not peer_present:
+            return
+        if bridge is not None:
+            print(f"[media] the peer changed - restarting the media plane")
+            stop_media()
+        start_media()
 
     async def handle(message: Dict) -> None:
         nonlocal pending, peer_present
@@ -464,6 +569,10 @@ async def run_client(args: argparse.Namespace) -> int:
         elif mtype == "peer_left":
             peer_present = False
             print(f"[{args.role}] the {message.get('role')} left")
+            # The media session belonged to the peer that just left: its
+            # DTLS-SRTP session, its SRTP keys, its decoder state.  Tear
+            # the media plane down so the next peer gets a fresh one.
+            stop_media()
             # The operator is gone, so the pairing code that let them
             # in has been consumed.  The device has to ask for a fresh
             # one now: the next operator cannot use the old code, and a
@@ -524,15 +633,22 @@ async def run_client(args: argparse.Namespace) -> int:
     await send({"type": "turn_request"})
 
     ws_task = asyncio.ensure_future(pump_ws())
+    media_waiter = asyncio.ensure_future(media_exited.wait())
 
     try:
-        await ws_task
+        await asyncio.wait(
+            {ws_task, media_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     except wsproto.ConnectionClosed:
         print(f"[{args.role}] the signalling channel closed")
     finally:
         ws_task.cancel()
+        media_waiter.cancel()
+        if watcher is not None:
+            watcher.cancel()
         if stdout_task is not None:
             stdout_task.cancel()
         if bridge is not None:

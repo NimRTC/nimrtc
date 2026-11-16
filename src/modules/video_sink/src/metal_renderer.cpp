@@ -445,21 +445,30 @@ bool MetalRenderer::Impl::upload_bgra(const PresentedFrame& frame) {
 
     const std::size_t row_bytes = static_cast<std::size_t>(frame.width) * 4u;
 
+    // The source rows may be *padded*: the presenter carries the
+    // frame's own stride, which is `width * 4` for a packed picture
+    // but can be wider when the producer padded its lines.  The copy
+    // has to honour that stride, otherwise the rows would be read at
+    // the wrong offset.
+    const std::size_t src_stride = frame.stride > 0
+        ? static_cast<std::size_t>(frame.stride)
+        : row_bytes;
+
     // `MTLTexture` has no `getBytes` accessor and no writable pointer:
     // the pixels are moved with `replaceRegion:...withBytes:...`, which
     // copies a *region* of the caller's buffer into the texture.  The
     // staging texture lives in shared storage, so the copy is a plain
     // memory copy -- but it has to go through the texture's own API.
     //
-    // The region covers the whole texture, and the source rows are
-    // packed (`row_bytes` apart), so the copy is one call.
+    // The region covers the whole texture, and `bytesPerRow` is the
+    // source row pitch, so the copy is one call.
     const MTLRegion region = MTLRegionMake2D(0, 0, upload_w_, upload_h_);
     [upload_ replaceRegion:region
                mipmapLevel:0
                      slice:0
                 withBytes:frame.pixels.data()
-              bytesPerRow:row_bytes
-            bytesPerImage:row_bytes * upload_h_];
+              bytesPerRow:src_stride
+            bytesPerImage:src_stride * upload_h_];
     return true;
 }
 
@@ -507,12 +516,19 @@ bool MetalRenderer::Impl::present_via_avsamplebuffer(const PresentedFrame& frame
         return false;
     }
     const std::size_t row_bytes = static_cast<std::size_t>(frame.width) * 4u;
+    // The source rows may be padded: the presenter carries the frame's
+    // own stride, which is `width * 4` for a packed picture but can be
+    // wider when the producer padded its lines.
+    const std::size_t src_stride = frame.stride > 0
+        ? static_cast<std::size_t>(frame.stride)
+        : row_bytes;
     auto* base = static_cast<std::uint8_t*>(CVPixelBufferGetBaseAddress(pixel_buffer));
     const std::size_t base_stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
     for (std::uint32_t row = 0; row < frame.height; ++row) {
         std::memcpy(base + static_cast<std::size_t>(row) * base_stride,
                     frame.pixels.data() +
-                        static_cast<std::ptrdiff_t>(row) * row_bytes,
+                        static_cast<std::ptrdiff_t>(row) *
+                            static_cast<std::ptrdiff_t>(src_stride),
                     row_bytes);
     }
     CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);

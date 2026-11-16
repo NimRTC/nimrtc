@@ -81,6 +81,25 @@ struct DirtyCaptureState {
     std::atomic<std::int64_t> next_ts_us{0};
     std::uint32_t width  = 64;
     std::uint32_t height = 48;
+
+    /** Return the state to its initial condition.
+     *
+     *  The state is shared by every test in this file (see the note on
+     *  `shared_capture_state()`), so each test resets it before it
+     *  starts. */
+    void reset() {
+        next_dirty = np::CaptureDirtyRects{};
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            frames.clear();
+        }
+        stop.store(false);
+        produced.store(0);
+        next_seq.store(0);
+        next_ts_us.store(0);
+        width  = 64;
+        height = 48;
+    }
 };
 
 class DirtyCaptureDevice : public np::IVideoCapture {
@@ -217,6 +236,23 @@ struct RecordingCodecState {
     /** The last region the codec was asked to code. */
     std::mutex mutex;
     np::VideoRegion last_region{};
+
+    /** Return the state to its initial condition.
+     *
+     *  The state is shared by every test in this file (see the note on
+     *  `shared_codec_state()`), so each test resets it before it
+     *  starts. */
+    void reset() {
+        encode_calls.store(0);
+        incremental_requests.store(0);
+        full_frame_requests.store(0);
+        force_keyframe_calls.store(0);
+        supports_incremental.store(false);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            last_region = np::VideoRegion{};
+        }
+    }
 };
 
 class RecordingCodec : public np::IVideoCodec {
@@ -313,6 +349,45 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// The shared state and the factories that point at it.
+//
+// ## Why the state is shared instead of per-test
+//
+// The plugin registry is a *process-wide* singleton: a factory that is
+// registered under an id stays registered until it is unregistered.  The
+// factories therefore have to be **process-lifetime** objects, and a
+// process-lifetime factory cannot point at a *stack* object — it would
+// dangle as soon as the test that created it returned.
+//
+// The old spelling was
+//
+//     DirtyCaptureState state;                        // on the stack
+//     static const RecordingCodecFactory f(&state);  // forever
+//
+// The `static` initialises the factory on the *first* test that runs,
+// with that test's stack address.  Every later test that registers a
+// factory under the same id keeps the *first* address — a pointer to a
+// frame that is long gone.  The engine then writes through it, and the
+// sanitizer reports a stack-buffer-overflow inside the codec's
+// `supports_incremental_encode()`.
+//
+// So the state lives here, for the life of the process, and each test
+// resets it before it starts.
+// ---------------------------------------------------------------------------
+
+/** The capture state every test in this file shares. */
+DirtyCaptureState& shared_capture_state() {
+    static DirtyCaptureState state;
+    return state;
+}
+
+/** The codec state every test in this file shares. */
+RecordingCodecState& shared_codec_state() {
+    static RecordingCodecState state;
+    return state;
+}
+
+// ---------------------------------------------------------------------------
 // The engine configuration used by every test here.
 // ---------------------------------------------------------------------------
 
@@ -363,10 +438,12 @@ std::vector<std::uint8_t> make_pli(std::uint32_t sender_ssrc,
 // 1. The mechanism is off: the codec is never asked for an incremental
 //    encode, whatever the device reports.
 TEST(EngineVideoIncremental, DisabledMechanismNeverEngages) {
-    DirtyCaptureState state;
+    DirtyCaptureState& state = shared_capture_state();
+    state.reset();
     static const DirtyCaptureFactory capture_factory(&state);
 
-    RecordingCodecState codec_state;
+    RecordingCodecState& codec_state = shared_codec_state();
+    codec_state.reset();
     codec_state.supports_incremental.store(true);
     static const RecordingCodecFactory codec_factory(&codec_state);
 
@@ -406,10 +483,12 @@ TEST(EngineVideoIncremental, DisabledMechanismNeverEngages) {
 // 2. The content is not screen content: the mechanism does not engage,
 //    even when the host enabled it (ADR-022 Decision 5).
 TEST(EngineVideoIncremental, CameraContentNeverEngages) {
-    DirtyCaptureState state;
+    DirtyCaptureState& state = shared_capture_state();
+    state.reset();
     static const DirtyCaptureFactory capture_factory(&state);
 
-    RecordingCodecState codec_state;
+    RecordingCodecState& codec_state = shared_codec_state();
+    codec_state.reset();
     codec_state.supports_incremental.store(true);
     static const RecordingCodecFactory codec_factory(&codec_state);
 
@@ -445,10 +524,12 @@ TEST(EngineVideoIncremental, CameraContentNeverEngages) {
 // 3. Screen content + a codec that supports it: the encoder is asked
 //    for an incremental encode.
 TEST(EngineVideoIncremental, ScreenContentEngagesTheMechanism) {
-    DirtyCaptureState state;
+    DirtyCaptureState& state = shared_capture_state();
+    state.reset();
     static const DirtyCaptureFactory capture_factory(&state);
 
-    RecordingCodecState codec_state;
+    RecordingCodecState& codec_state = shared_codec_state();
+    codec_state.reset();
     codec_state.supports_incremental.store(true);
     static const RecordingCodecFactory codec_factory(&codec_state);
 
@@ -494,10 +575,12 @@ TEST(EngineVideoIncremental, ScreenContentEngagesTheMechanism) {
 
 // 4. A codec that cannot express a region: the fallback is reported.
 TEST(EngineVideoIncremental, TheFallbackIsReported) {
-    DirtyCaptureState state;
+    DirtyCaptureState& state = shared_capture_state();
+    state.reset();
     static const DirtyCaptureFactory capture_factory(&state);
 
-    RecordingCodecState codec_state;
+    RecordingCodecState& codec_state = shared_codec_state();
+    codec_state.reset();
     codec_state.supports_incremental.store(false);   // <- cannot
     static const RecordingCodecFactory codec_factory(&codec_state);
 
@@ -540,6 +623,16 @@ TEST(EngineVideoIncremental, TheFallbackIsReported) {
 // 5. A burst of PLIs produces a bounded number of IDRs, and the
 //    counters say so.
 TEST(EngineVideoKeyframeLimiter, AStormProducesABoundedIdrRate) {
+    // The key-frame limiter tests do not register a codec of their own,
+    // so the engine resolves whatever factory is in the registry -- and
+    // that factory must not point at another test's dead stack frame.
+    // See the note on `shared_codec_state()`.
+    RecordingCodecState& codec_state = shared_codec_state();
+    codec_state.reset();
+    static const RecordingCodecFactory codec_factory(&codec_state);
+    PluginRegistry::instance().register_video_codec(codec_factory.id(),
+                                                    &codec_factory);
+
     EngineConfig cfg = make_config();
     // No capture device: this test is about the feedback path only.
     cfg.video_capture_name = "";
@@ -584,6 +677,15 @@ TEST(EngineVideoKeyframeLimiter, AStormProducesABoundedIdrRate) {
 // 6. A held request is re-offered: the picture still recovers even when
 //    the peer only asked once.
 TEST(EngineVideoKeyframeLimiter, ADeferredRequestIsHeldNotDropped) {
+    // See the note on `shared_codec_state()`: this test needs a codec
+    // of its own so it never resolves a factory that points at another
+    // test's dead stack frame.
+    RecordingCodecState& codec_state = shared_codec_state();
+    codec_state.reset();
+    static const RecordingCodecFactory codec_factory(&codec_state);
+    PluginRegistry::instance().register_video_codec(codec_factory.id(),
+                                                    &codec_factory);
+
     EngineConfig cfg = make_config();
     cfg.video_capture_name = "";
     cfg.video_capture_pump = false;

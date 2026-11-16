@@ -708,10 +708,20 @@ int main(int argc, char** argv) {
     // measured region belongs to the `send_video()` call itself.
     if (opt.assert_zero_allocs) {
         if (!NIMRTC_BENCH_ALLOC_PROBE) {
+            // The probe replaces the global `operator new`, and a
+            // sanitizer runtime ships its own strong definition of it
+            // -- so the probe cannot be installed in a sanitizer build.
+            //
+            // The exit code 77 is ctest's "skipped" code (the test case
+            // declares it with SKIP_RETURN_CODE): the gate reports
+            // itself as *not run* rather than as failed.  A failure
+            // would be a lie -- nothing was measured, so nothing can be
+            // wrong.
             std::fprintf(stderr,
                          "bench: the allocation probe is unavailable in this "
-                         "build (sanitizer runtime) - cannot assert\n");
-            return 2;
+                         "build (sanitizer runtime) - the zero-allocation "
+                         "gate is skipped\n");
+            return 77;
         }
         if (sv.alloc_per_frame != 0.0) {
             std::fprintf(stderr,

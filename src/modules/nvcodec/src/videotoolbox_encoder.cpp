@@ -158,8 +158,13 @@ public:
         // would be a lie on a Mac whose silicon cannot do the codec —
         // and the availability probe would report "available" for a
         // software encode.
+        //
+        // The two keys are complementary, not contradictory: "Enable"
+        // says "hardware acceleration is allowed", "Require" says "and
+        // fail if it is not available".  Setting only "Require" would
+        // be read by some OS versions as "hardware is disabled".
         CFMutableDictionaryRef encoder_spec =
-            CFDictionaryCreateMutable(kCFAllocatorDefault, 1,
+            CFDictionaryCreateMutable(kCFAllocatorDefault, 2,
                                       &kCFTypeDictionaryKeyCallBacks,
                                       &kCFTypeDictionaryValueCallBacks);
         if (!encoder_spec) return false;
@@ -167,12 +172,10 @@ public:
             encoder_spec,
             kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
             kCFBooleanTrue);
-
-        // `RealTime = true` is the right choice for screen and camera
-        // content: latency matters more than compression efficiency.
-        CFDictionarySetValue(encoder_spec,
-                             kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
-                             kCFBooleanTrue);
+        CFDictionarySetValue(
+            encoder_spec,
+            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
+            kCFBooleanTrue);
 
         // ---- The session -----------------------------------------------
         //
@@ -180,6 +183,14 @@ public:
         // "synchronous mode" without one.  The callback appends the
         // compressed sample to this session's own buffer, and `encode()`
         // hands that buffer out.
+        //
+        // The source's pixel format is left to the session: the session
+        // picks the format its encoder actually accepts, and the CPU
+        // staging path reads the buffer's *actual* format before it
+        // fills it.  Forcing a format here would make the session
+        // creation fail outright on an encoder that does not accept it,
+        // and "the encoder refused" is a worse answer than "the staging
+        // path adapts to the format the encoder wants".
         OSStatus st = VTCompressionSessionCreate(
             kCFAllocatorDefault,
             static_cast<std::int32_t>(width_),
@@ -555,13 +566,56 @@ public:
     // half answers "unsupported" rather than being left abstract --
     // an abstract class cannot be marked `final`.  (The `decode()`
     // override lives further down, next to the zero-copy path.)
+    // ---- The parameter set (remote-desktop plan B12 / B13) --------------
+    //
+    // A VideoToolbox session is bound to a fixed geometry, so a
+    // geometry change means a *fresh session* -- which is exactly what
+    // `update_config()` already does.  This override therefore
+    // translates the parameter set into a configuration and hands it
+    // over, instead of answering "unsupported".
+    //
+    // Answering "unsupported" was a real bug: the engine pushes the
+    // parameter set before the first frame, so the encoder kept the
+    // geometry it was opened with (640x480) and then refused every
+    // 320x240 frame ("the encoder keeps its previous parameters"),
+    // which made the whole send path fail on macOS.
     plugins::Status set_params(const plugins::VideoEncoderParams& params) noexcept override {
-        (void)params;
-        return plugins::kErrUnsupported;
+        // A parameter set may leave the geometry out entirely (the
+        // caller only wants to change, say, the bitrate).  But it may
+        // not state *half* a geometry: "480 rows, no width" is a
+        // contradiction, and quietly ignoring it would leave the
+        // encoder coding at a size the caller did not ask for.
+        if ((params.width == 0) != (params.height == 0)) {
+            return plugins::kErrInvalidParam;
+        }
+
+        plugins::VideoCodecConfig cfg = cfg_;
+        if (params.width != 0 && params.height != 0) {
+            // 4:2:0 chroma needs even dimensions.
+            cfg.width  = params.width  & ~1u;
+            cfg.height = params.height & ~1u;
+            if (cfg.width == 0 || cfg.height == 0) {
+                return plugins::kErrInvalidParam;
+            }
+        }
+        if (params.fps != 0)            cfg.fps = params.fps;
+        if (params.bitrate_bps != 0)    cfg.bitrate_bps = params.bitrate_bps;
+        if (params.keyframe_interval != 0) {
+            cfg.keyframe_interval = params.keyframe_interval;
+        }
+        cfg.pixel_format = params.pixel_format;
+        return update_config(cfg);
     }
 
     plugins::VideoEncoderParams params() const noexcept override {
-        return {};
+        plugins::VideoEncoderParams p;
+        p.width             = cfg_.width;
+        p.height            = cfg_.height;
+        p.fps               = cfg_.fps;
+        p.bitrate_bps       = cfg_.bitrate_bps;
+        p.keyframe_interval = cfg_.keyframe_interval;
+        p.pixel_format      = cfg_.pixel_format;
+        return p;
     }
 
     plugins::VideoCodecKind kind() const noexcept override {
@@ -619,9 +673,20 @@ public:
             return plugins::kErrInternal;
         }
 
-        // Lock the pixel buffer and fill the NV12 planes.  The lock has
-        // to happen *after* the acquisition, and it reports the real
-        // row pitch — which is not the frame width in general.
+        // Lock the pixel buffer and fill it.  The lock has to happen
+        // *after* the acquisition, and it reports the real row pitch —
+        // which is not the frame width in general.
+        //
+        // The buffer's *pixel format* is read first, because the
+        // staging code has to match it.  The pool is taken from the
+        // encoder's own session, so the format is the one the encoder
+        // negotiated — which is NOT necessarily bi-planar NV12.
+        //
+        // Writing NV12 into a buffer that is, say, 32BGRA does not
+        // merely produce a wrong picture: the chroma plane lands
+        // outside the luma plane's allocation and the encoder then
+        // reads past the end of the surface.  That is a heap overrun,
+        // and it is what used to crash the macOS CI leg.
         const CVReturn lock_st = CVPixelBufferLockBaseAddress(pixel_buffer, 0);
         void* base = (lock_st == kCVReturnSuccess)
                          ? CVPixelBufferGetBaseAddress(pixel_buffer) : nullptr;
@@ -646,28 +711,105 @@ public:
             const std::uint32_t stride_v =
                 static_cast<std::uint32_t>(layout.strides[2]);
 
-            // The luma plane: one row at a time, at the buffer's pitch.
-            for (std::uint32_t row = 0; row < h; ++row) {
-                std::memcpy(dst + static_cast<std::size_t>(row) * pitch,
-                            y_in + static_cast<std::size_t>(row) * stride_y, w);
-            }
-            // The chroma plane: U and V interleaved, at the buffer's
-            // own chroma pitch.
-            const std::size_t uv_pitch =
-                CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
-            const std::uint32_t cw = (w + 1u) / 2u;
-            const std::uint32_t ch = (h + 1u) / 2u;
-            auto* uv_dst = dst + static_cast<std::size_t>(pitch) * h;
-            for (std::uint32_t row = 0; row < ch; ++row) {
-                const std::uint8_t* u_row =
-                    u_in + static_cast<std::size_t>(row) * stride_u;
-                const std::uint8_t* v_row =
-                    v_in + static_cast<std::size_t>(row) * stride_v;
-                std::uint8_t* out = uv_dst + static_cast<std::size_t>(row) * uv_pitch;
-                for (std::uint32_t col = 0; col < cw; ++col) {
-                    out[col * 2 + 0] = u_row[col];
-                    out[col * 2 + 1] = v_row[col];
+            const OSType format = CVPixelBufferGetPixelFormatType(pixel_buffer);
+
+            if (format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+                format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
+                // ---- The bi-planar (NV12) layout -------------------------
+                //
+                // The luma plane: one row at a time, at the buffer's pitch.
+                for (std::uint32_t row = 0; row < h; ++row) {
+                    std::memcpy(dst + static_cast<std::size_t>(row) * pitch,
+                                y_in + static_cast<std::size_t>(row) * stride_y, w);
                 }
+                // The chroma plane: U and V interleaved, at the buffer's
+                // own chroma pitch.
+                //
+                // The chroma plane's *address* comes from the buffer, not
+                // from `luma_base + pitch * height`.  On an
+                // IOSurface-backed buffer the planes are separate
+                // allocations, so the luma pointer plus a height-sized
+                // offset lands in the *middle of the luma allocation* —
+                // and writing the chroma there overruns it.  That is
+                // what used to crash the macOS CI leg.
+                const std::size_t uv_pitch =
+                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+                void* uv_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1);
+                const std::uint32_t cw = (w + 1u) / 2u;
+                const std::uint32_t ch = (h + 1u) / 2u;
+                if (uv_pitch == 0 || !uv_plane) {
+                    CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+                    CVPixelBufferRelease(pixel_buffer);
+                    stats_.encode_errors++;
+                    return plugins::kErrInternal;
+                }
+                auto* uv_dst = static_cast<std::uint8_t*>(uv_plane);
+                for (std::uint32_t row = 0; row < ch; ++row) {
+                    const std::uint8_t* u_row =
+                        u_in + static_cast<std::size_t>(row) * stride_u;
+                    const std::uint8_t* v_row =
+                        v_in + static_cast<std::size_t>(row) * stride_v;
+                    std::uint8_t* out =
+                        uv_dst + static_cast<std::size_t>(row) * uv_pitch;
+                    for (std::uint32_t col = 0; col < cw; ++col) {
+                        out[col * 2 + 0] = u_row[col];
+                        out[col * 2 + 1] = v_row[col];
+                    }
+                }
+            } else if (format == kCVPixelFormatType_420YpCbCr8PlanarFullRange ||
+                       format == kCVPixelFormatType_420YpCbCr8PlanarVideoRange) {
+                // ---- The planar (I420) layout ------------------------------
+                //
+                // Three separate planes, each with its own pitch.  The
+                // plane pointers come from `CVPixelBufferGetBaseAddressOfPlane`
+                // — computing them by hand from the luma pointer would
+                // be wrong as soon as the buffer's rows are padded.
+                const std::size_t y_pitch =
+                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+                const std::size_t u_pitch =
+                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+                const std::size_t v_pitch =
+                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 2);
+                void* y_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0);
+                void* u_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1);
+                void* v_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 2);
+                if (!y_plane || !u_plane || !v_plane ||
+                    y_pitch == 0 || u_pitch == 0 || v_pitch == 0) {
+                    CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+                    CVPixelBufferRelease(pixel_buffer);
+                    stats_.encode_errors++;
+                    return plugins::kErrInternal;
+                }
+                auto* y_dst = static_cast<std::uint8_t*>(y_plane);
+                auto* u_dst = static_cast<std::uint8_t*>(u_plane);
+                auto* v_dst = static_cast<std::uint8_t*>(v_plane);
+                const std::uint32_t cw = (w + 1u) / 2u;
+                const std::uint32_t ch = (h + 1u) / 2u;
+                for (std::uint32_t row = 0; row < h; ++row) {
+                    std::memcpy(y_dst + static_cast<std::size_t>(row) * y_pitch,
+                                y_in + static_cast<std::size_t>(row) * stride_y, w);
+                }
+                for (std::uint32_t row = 0; row < ch; ++row) {
+                    std::memcpy(u_dst + static_cast<std::size_t>(row) * u_pitch,
+                                u_in + static_cast<std::size_t>(row) * stride_u, cw);
+                    std::memcpy(v_dst + static_cast<std::size_t>(row) * v_pitch,
+                                v_in + static_cast<std::size_t>(row) * stride_v, cw);
+                }
+            } else {
+                // ---- An unexpected format ---------------------------------
+                //
+                // The pool's format is whatever the encoder negotiated,
+                // and this backend does not know every format
+                // VideoToolbox can pick.  Writing NV12 into it would
+                // overrun it, so the frame is refused instead — the
+                // caller falls back to the software encoder.
+                NIMRTC_LOG_WARN("vt: the encoder's pixel buffer has an "
+                                "unsupported format (" << format
+                                << ") — the frame is refused");
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+                CVPixelBufferRelease(pixel_buffer);
+                stats_.encode_errors++;
+                return plugins::kErrUnsupported;
             }
         }
         CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);

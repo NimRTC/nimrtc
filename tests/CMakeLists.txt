@@ -2923,7 +2923,12 @@ if(NIMRTC_BUILD_TESTS)
                      --assert-zero-allocs)
     set_tests_properties(hotpath_zero_allocs PROPERTIES
         TIMEOUT 300
-        LABELS "performance;hotpath")
+        LABELS "performance;hotpath"
+        # Exit code 77 means "skipped" (ctest's convention).  A
+        # sanitizer build cannot install the benchmark's allocation
+        # probe -- the sanitizer runtime owns the global `operator new`
+        # -- so the gate reports itself as not run instead of failed.
+        SKIP_RETURN_CODE 77)
 endif()
 
 # ---------------------------------------------------------------------------

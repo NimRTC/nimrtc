@@ -170,6 +170,11 @@ public:
         // decoder for the codec, instead of silently falling back to the
         // software decoder — which would make the "hardware backend"
         // claim false.
+        //
+        // The two keys are complementary, not contradictory: "Enable"
+        // says "hardware acceleration is allowed", "Require" says "and
+        // fail if it is not available".  Setting only "Require" would
+        // be read by some OS versions as "hardware is disabled".
         CFMutableDictionaryRef decoder_spec =
             CFDictionaryCreateMutable(kCFAllocatorDefault, 2,
                                       &kCFTypeDictionaryKeyCallBacks,
@@ -554,7 +559,7 @@ public:
             v_plane = cpu_buf->plane(2);
         }
 
-        if (!copy_nv12_to_i420(pixel_buffer, y_plane, u_plane, v_plane, w, h)) {
+        if (!copy_surface_to_i420(pixel_buffer, y_plane, u_plane, v_plane, w, h)) {
             stats_.decode_errors++;
             return plugins::kErrInternal;
         }
@@ -639,61 +644,116 @@ public:
     }
 
 private:
-    /** Copy a bi-planar NV12 surface into three I420 planes.
+    /** Copy a decoded surface into three I420 planes.
+     *
+     *  The surface's *format* is read first: VideoToolbox's decoder
+     *  produces whatever the session negotiated, which may be bi-planar
+     *  (NV12) or planar (I420).  Copying an NV12 surface as if it were
+     *  planar reads the chroma planes out of the wrong place, and
+     *  copying a planar surface as if it were NV12 reads *past* the
+     *  luma plane's allocation — a heap overrun, not a wrong picture.
      *
      *  @param stride_y  The destination luma stride (bytes).
      *  @param stride_u  The destination U stride (bytes).
      *  @param stride_v  The destination V stride (bytes). */
-    static bool copy_nv12_to_i420(CVPixelBufferRef pixel_buffer,
-                                  std::uint8_t* y_plane,
-                                  std::uint8_t* u_plane,
-                                  std::uint8_t* v_plane,
-                                  std::uint32_t w,
-                                  std::uint32_t h,
-                                  std::int32_t stride_y = 0,
-                                  std::int32_t stride_u = 0,
-                                  std::int32_t stride_v = 0) noexcept {
+    static bool copy_surface_to_i420(CVPixelBufferRef pixel_buffer,
+                                     std::uint8_t* y_plane,
+                                     std::uint8_t* u_plane,
+                                     std::uint8_t* v_plane,
+                                     std::uint32_t w,
+                                     std::uint32_t h,
+                                     std::int32_t stride_y = 0,
+                                     std::int32_t stride_u = 0,
+                                     std::int32_t stride_v = 0) noexcept {
         if (!pixel_buffer || !y_plane || !u_plane || !v_plane) return false;
 
         const CVReturn lock_st = CVPixelBufferLockBaseAddress(pixel_buffer, 0);
         if (lock_st != kCVReturnSuccess) return false;
 
-        const auto* base = static_cast<const std::uint8_t*>(
-            CVPixelBufferGetBaseAddress(pixel_buffer));
-        const std::size_t pitch = CVPixelBufferGetBytesPerRow(pixel_buffer);
-        if (!base || pitch == 0) {
-            CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
-            return false;
-        }
-
-        const std::size_t uv_pitch = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
-        if (uv_pitch == 0) {
-            CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
-            return false;
-        }
-
         const std::size_t sy = stride_y > 0 ? static_cast<std::size_t>(stride_y) : w;
         const std::size_t su = stride_u > 0 ? static_cast<std::size_t>(stride_u) : (w + 1u) / 2u;
         const std::size_t sv = stride_v > 0 ? static_cast<std::size_t>(stride_v) : (w + 1u) / 2u;
-
-        // Luma.
-        for (std::uint32_t row = 0; row < h; ++row) {
-            std::memcpy(y_plane + static_cast<std::size_t>(row) * sy,
-                        base + static_cast<std::size_t>(row) * pitch, w);
-        }
-
-        // Chroma: the NV12 surface interleaves U and V.
         const std::uint32_t cw = (w + 1u) / 2u;
         const std::uint32_t ch = (h + 1u) / 2u;
-        const std::uint8_t* uv_src = base + static_cast<std::size_t>(pitch) * h;
-        for (std::uint32_t row = 0; row < ch; ++row) {
-            const std::uint8_t* src = uv_src + static_cast<std::size_t>(row) * uv_pitch;
-            std::uint8_t* u_row = u_plane + static_cast<std::size_t>(row) * su;
-            std::uint8_t* v_row = v_plane + static_cast<std::size_t>(row) * sv;
-            for (std::uint32_t col = 0; col < cw; ++col) {
-                u_row[col] = src[col * 2 + 0];
-                v_row[col] = src[col * 2 + 1];
+        const OSType format = CVPixelBufferGetPixelFormatType(pixel_buffer);
+
+        if (format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+            format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
+            // ---- The bi-planar (NV12) layout ------------------------------
+            const auto* base = static_cast<const std::uint8_t*>(
+                CVPixelBufferGetBaseAddress(pixel_buffer));
+            const std::size_t pitch = CVPixelBufferGetBytesPerRow(pixel_buffer);
+            const std::size_t uv_pitch =
+                CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+            // The chroma plane's *address* comes from the buffer, not
+            // from `luma_base + pitch * height`.  On an
+            // IOSurface-backed buffer the planes are separate
+            // allocations, so the luma pointer plus a height-sized
+            // offset lands in the *middle of the luma allocation* — and
+            // reading the chroma from there is a wild read.
+            const auto* uv_plane = static_cast<const std::uint8_t*>(
+                CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1));
+            if (!base || pitch == 0 || uv_pitch == 0 || !uv_plane) {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+                return false;
             }
+
+            // Luma.
+            for (std::uint32_t row = 0; row < h; ++row) {
+                std::memcpy(y_plane + static_cast<std::size_t>(row) * sy,
+                            base + static_cast<std::size_t>(row) * pitch, w);
+            }
+
+            // Chroma: the NV12 surface interleaves U and V.
+            for (std::uint32_t row = 0; row < ch; ++row) {
+                const std::uint8_t* src =
+                    uv_plane + static_cast<std::size_t>(row) * uv_pitch;
+                std::uint8_t* u_row = u_plane + static_cast<std::size_t>(row) * su;
+                std::uint8_t* v_row = v_plane + static_cast<std::size_t>(row) * sv;
+                for (std::uint32_t col = 0; col < cw; ++col) {
+                    u_row[col] = src[col * 2 + 0];
+                    v_row[col] = src[col * 2 + 1];
+                }
+            }
+        } else if (format == kCVPixelFormatType_420YpCbCr8PlanarFullRange ||
+                   format == kCVPixelFormatType_420YpCbCr8PlanarVideoRange) {
+            // ---- The planar (I420) layout ---------------------------------
+            //
+            // The plane pointers come from the buffer itself: computing
+            // them by hand from the luma pointer would be wrong as soon
+            // as the buffer's rows are padded.
+            const std::size_t y_pitch =
+                CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+            const std::size_t u_pitch =
+                CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+            const std::size_t v_pitch =
+                CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 2);
+            const auto* y_src = static_cast<const std::uint8_t*>(
+                CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0));
+            const auto* u_src = static_cast<const std::uint8_t*>(
+                CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1));
+            const auto* v_src = static_cast<const std::uint8_t*>(
+                CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 2));
+            if (!y_src || !u_src || !v_src ||
+                y_pitch == 0 || u_pitch == 0 || v_pitch == 0) {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+                return false;
+            }
+            for (std::uint32_t row = 0; row < h; ++row) {
+                std::memcpy(y_plane + static_cast<std::size_t>(row) * sy,
+                            y_src + static_cast<std::size_t>(row) * y_pitch, w);
+            }
+            for (std::uint32_t row = 0; row < ch; ++row) {
+                std::memcpy(u_plane + static_cast<std::size_t>(row) * su,
+                            u_src + static_cast<std::size_t>(row) * u_pitch, cw);
+                std::memcpy(v_plane + static_cast<std::size_t>(row) * sv,
+                            v_src + static_cast<std::size_t>(row) * v_pitch, cw);
+            }
+        } else {
+            // An unexpected format: refuse rather than guess.  A wrong
+            // guess reads outside the surface's allocation.
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+            return false;
         }
 
         CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);

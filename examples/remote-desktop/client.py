@@ -464,6 +464,14 @@ async def run_client(args: argparse.Namespace) -> int:
         elif mtype == "peer_left":
             peer_present = False
             print(f"[{args.role}] the {message.get('role')} left")
+            # The operator is gone, so the pairing code that let them
+            # in has been consumed.  The device has to ask for a fresh
+            # one now: the next operator cannot use the old code, and a
+            # device that has no live code cannot admit anybody at all.
+            if args.role == "device":
+                print(f"[{args.role}] the operator left - requesting a new "
+                      f"pairing code")
+                await send({"type": "pairing_request"})
         elif mtype == "turn_credentials":
             state["turn"] = {
                 "url": message["url"],
@@ -474,6 +482,14 @@ async def run_client(args: argparse.Namespace) -> int:
                   f"(ttl {int(message['ttl'])} s)")
         elif mtype == "error":
             print(f"[{args.role}] ERROR {message.get('code')}: {message.get('message')}")
+            # A device whose code was consumed (or has expired) is
+            # stranded: it cannot admit an operator any more.  Ask for a
+            # fresh code instead of sitting there useless.
+            if (args.role == "device" and
+                    message.get("code") == "pairing_invalid"):
+                print(f"[{args.role}] the pairing code is spent - "
+                      f"requesting a new one")
+                await send({"type": "pairing_request"})
         elif mtype in MEDIA_TYPES:
             # A media-plane message: the SDP / candidate / restart is
             # handed to the media binary.  The bridge is transparent —

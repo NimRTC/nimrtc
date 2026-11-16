@@ -230,6 +230,27 @@ def test_routing() -> None:
     out = service.handle(device, {"type": "answer", "sdp": "v=0\r\nanswer\r\n"})
     check(out[0][0] == viewer, "the answer is relayed to the viewer")
 
+    # ---- The device asks for a second code ---------------------------------
+    #
+    # The first code was consumed by the pairing above, so the device is
+    # stranded: it cannot admit an operator any more.  A device that asks
+    # for a new code has to keep its identity *and* its room, or the
+    # operator ends up in a room the device is not in.
+    out = service.handle(device, {"type": "pairing_request"})
+    check(out[0][1]["type"] == "pairing_code", "the device can ask for a second code")
+    code2 = out[0][1]["code"]
+    check(code2 != code, "the second code differs from the first")
+
+    out = service.handle(device, {"type": "device_register", "code": code2})
+    check(out[0][1]["type"] == "device_registered", "the device registers with the second code")
+    check(out[0][1]["room_id"] == room_id, "the device keeps its room across the re-register")
+    device_cred2 = out[0][1]["credential"]
+
+    # A fresh operator pairs with the new code and lands in the same room.
+    out = service.handle("peer-viewer-2", {"type": "pair", "code": code2})
+    check(out[0][1]["type"] == "paired", "a second viewer pairs with the second code")
+    check(out[0][1]["room_id"] == room_id, "the second viewer lands in the device's room")
+
     # ICE restart and reconnect relay.
     out = service.handle(device, {"type": "ice_restart", "sdp": "v=0\r\nnew-ice\r\n"})
     check(out[0][0] == viewer and out[0][1]["type"] == "ice_restart",

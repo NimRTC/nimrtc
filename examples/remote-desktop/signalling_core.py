@@ -181,19 +181,24 @@ class PairingStore:
         return record
 
     def register_device(
-        self, code: str, now: Optional[float] = None
+        self, code: str, now: Optional[float] = None, room_id: Optional[str] = None
     ) -> Tuple[Optional[PairingRecord], Optional[SessionCredential]]:
         """Bind a device to a pairing code.
 
         Returns ``(record, credential)``; the credential is None when
         the code is unknown, expired, or already registered.
+
+        ``room_id`` pins the room the device joins.  A device that asks
+        for a *second* code (the first one expired, or a new operator
+        wants in) passes the room it already owns, so re-registering
+        does not orphan the room and split the pair in two.
         """
         now = _now() if now is None else now
         record = self.validate(code, now)
         if record is None or record.registered:
             return None, None
         record.registered = True
-        room_id = record.room_id or f"room-{secrets.token_hex(8)}"
+        room_id = room_id or record.room_id or f"room-{secrets.token_hex(8)}"
         record.room_id = room_id
         credential = SessionCredential(
             token=f"cred-{secrets.token_urlsafe(24)}",
@@ -722,7 +727,15 @@ class SignallingService:
     # ---- pairing / registration -----------------------------------------
 
     def _on_pairing_request(self, peer_id: str, message: Dict) -> List[Tuple[str, Dict]]:
-        record = self.pairing.issue(now=self._now())
+        # A device that has already registered may ask for a *new* code:
+        # the operator may have walked away, the code may have expired,
+        # or a second operator may want in.  The device identity is
+        # carried over so the room it already owns is not orphaned.
+        device_id = None
+        session = self.session_of_peer(peer_id)
+        if session is not None:
+            device_id = session.get("device_id")
+        record = self.pairing.issue(now=self._now(), device_id=device_id)
         logger.info(
             "pairing code %s issued for device %s (expires in %.0f s)",
             record.code, record.device_id, self.pairing.ttl_s,
@@ -741,7 +754,16 @@ class SignallingService:
 
     def _on_device_register(self, peer_id: str, message: Dict) -> List[Tuple[str, Dict]]:
         code = str(message.get("code", ""))
-        record, credential = self.pairing.register_device(code, now=self._now())
+        # A device that already owns a room keeps it: re-registering
+        # with a fresh code must not strand the room (and the peer
+        # that is already in it).
+        room_id = None
+        session = self.session_of_peer(peer_id)
+        if session is not None:
+            room_id = session.get("room_id")
+        record, credential = self.pairing.register_device(
+            code, now=self._now(), room_id=room_id
+        )
         if record is None or credential is None:
             return [
                 (

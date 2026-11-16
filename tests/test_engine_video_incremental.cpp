@@ -125,8 +125,16 @@ public:
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (state_->frames.empty()) return np::kErrNotReady;
 
-        out.pixels   = state_->frames.front().data();
-        out.size     = state_->frames.front().size();
+        // The seam's contract says the pixel pointer stays valid "until
+        // the next call to `pop_frame()`".  So the frame that was handed
+        // out last time is kept alive here and only released when this
+        // call replaces it -- popping the deque's front and destroying
+        // the vector would pull the bytes out from under the consumer.
+        current_ = std::move(state_->frames.front());
+        state_->frames.pop_front();
+
+        out.pixels   = current_.data();
+        out.size     = current_.size();
         out.stride   = static_cast<std::int32_t>(state_->width * 4u);
         out.width    = state_->width;
         out.height   = state_->height;
@@ -138,7 +146,6 @@ public:
         // frame.  The engine has to carry them across unchanged.
         out.dirty = state_->next_dirty;
 
-        state_->frames.pop_front();
         return np::kOk;
     }
 
@@ -170,6 +177,15 @@ private:
     DirtyCaptureState* state_ = nullptr;
     std::thread producer_;
     bool open_ = false;
+
+    /**
+     * @brief The frame handed out by the last `pop_frame()`.
+     *
+     * The seam's contract says the pixel pointer stays valid until the
+     * next `pop_frame()` call, so the bytes have to outlive the call
+     * that produced them.
+     */
+    std::vector<std::uint8_t> current_;
 };
 
 class DirtyCaptureFactory : public np::IVideoCaptureFactory {

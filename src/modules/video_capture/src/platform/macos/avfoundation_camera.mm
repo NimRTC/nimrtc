@@ -84,8 +84,8 @@ using NimAvfSampleDeliverer = void (*)(void* ctx, CMSampleBufferRef sample);
 - (void)captureOutput:(AVCaptureOutput*)output
     didOutputSampleBuffer:(CMSampleBufferRef)sample
            fromConnection:(AVCaptureConnection*)connection {
-    (void)static_cast<void*>(output);
-    (void)static_cast<void*>(connection);
+    (void)output;
+    (void)connection;
     if (deliverer_ == nullptr) return;
     deliverer_(context_, sample);
 }

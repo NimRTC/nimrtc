@@ -200,6 +200,7 @@ public:
 
     // ---- The zero-copy seam ------------------------------------------------
     void set_gpu_frame_callback(np::GpuCaptureFrameCallback cb) noexcept override {
+        std::lock_guard<std::mutex> lock(gpu_cb_mutex_);
         gpu_cb_ = std::move(cb);
     }
 
@@ -209,7 +210,12 @@ public:
 
     bool supports_gpu_frames() const noexcept override { return true; }
 
-    np::CaptureStats stats() const noexcept override { return stats_; }
+    np::CaptureStats stats() const noexcept override {
+        np::CaptureStats s;
+        s.frames_captured = frames_captured_.load(std::memory_order_relaxed);
+        s.frames_zero_copy = frames_zero_copy_.load(std::memory_order_relaxed);
+        return s;
+    }
 
 private:
     void produce_loop() {
@@ -218,7 +224,12 @@ private:
             // The device's own cadence.
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
 
-            if (!gpu_cb_) continue;
+            np::GpuCaptureFrameCallback cb;
+            {
+                std::lock_guard<std::mutex> lock(gpu_cb_mutex_);
+                cb = gpu_cb_;
+            }
+            if (!cb) continue;
 
             np::GpuCaptureFrame frame;
             auto buffer = std::make_shared<np::GpuBuffer>(
@@ -234,11 +245,11 @@ private:
             frame.color.range = np::VideoColorRange::kFull;
             frame.color.matrix = np::VideoColorMatrix::kBt709;
 
-            ++stats_.frames_captured;
-            ++stats_.frames_zero_copy;
+            ++frames_captured_;
+            ++frames_zero_copy_;
             if (state_) ++state_->produced;
 
-            gpu_cb_(std::move(frame));
+            cb(std::move(frame));
         }
     }
 
@@ -246,8 +257,23 @@ private:
     std::shared_ptr<GpuCaptureState> state_;
     bool open_ = false;
     np::CaptureFrameCallback cpu_cb_;
+    /**
+     * @brief The GPU-frame callback the producer thread invokes.
+     *
+     * It is written by `set_gpu_frame_callback()` (the consumer's
+     * thread) and read by the producer thread, so it is a mutex-
+     * protected value rather than a plain member.
+     */
+    mutable std::mutex gpu_cb_mutex_;
     np::GpuCaptureFrameCallback gpu_cb_;
-    np::CaptureStats stats_{};
+    /**
+     * @brief The capture counters.
+     *
+     * The producer thread writes them and the consumer reads them, so
+     * they are atomics.
+     */
+    std::atomic<std::uint64_t> frames_captured_{0};
+    std::atomic<std::uint64_t> frames_zero_copy_{0};
     std::thread producer_;
 
     /** The device the surfaces live on.  The stand-in has no real

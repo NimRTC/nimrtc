@@ -466,7 +466,18 @@ void ViewerSession::flush_input(std::uint64_t now_us_value) {
 int ViewerSession::run() {
     auto* ice = engine_->get_ice_transport();
     if (ice != nullptr) {
-        ice->wait_for_gathering(2000);
+        // How long to wait for the candidate gathering to settle before
+        // the offer goes out.
+        //
+        // With a STUN server the gathering has to survive the server's
+        // retransmit schedule (libjuice does three attempts eight
+        // seconds apart), so two seconds is not enough: the offer would
+        // carry a candidate set that is still changing, and the peer
+        // would answer against a stale one.  A LAN run has no STUN at
+        // all, so the host candidates are ready almost immediately and
+        // a long wait would only delay the session.
+        const int gather_ms = opts_.stun_host.empty() ? 500 : 30'000;
+        ice->wait_for_gathering(gather_ms);
     }
 
     // ---- The offer ---------------------------------------------------------

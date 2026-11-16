@@ -509,7 +509,11 @@ int DeviceSession::run() {
     // waiting for the offer.
     auto* ice = engine_->get_ice_transport();
     if (ice != nullptr) {
-        ice->wait_for_gathering(2000);
+        // The same rule as the viewer: with a STUN server the gathering
+        // has to survive its retransmit schedule before the candidate
+        // set is stable, and a LAN run has nothing to wait for.
+        const int gather_ms = opts_.stun_host.empty() ? 500 : 30'000;
+        ice->wait_for_gathering(gather_ms);
     }
     emit_candidates();
 

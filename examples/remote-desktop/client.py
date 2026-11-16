@@ -206,6 +206,7 @@ class MediaBridge:
         self.extra = list(extra or [])
         self.process: Optional[subprocess.Popen] = None
         self._to_ws: "asyncio.Queue[str]" = asyncio.Queue()
+        self._exit_reported = False
 
     def _turn_flags(self) -> List[str]:
         """The TURN flags, or an empty list when TURN is not in use.
@@ -283,6 +284,12 @@ class MediaBridge:
         while True:
             line = await loop.run_in_executor(None, self.process.stdout.readline)
             if not line:
+                # EOF: the binary closed its stdout.  Report *why* it
+                # stopped — a media binary that dies on a signal (a
+                # crash, an access violation) would otherwise look
+                # exactly like a clean exit, and the operator would be
+                # left staring at a silent disconnect.
+                self.report_exit()
                 return
             line = line.strip()
             if not line:
@@ -292,6 +299,36 @@ class MediaBridge:
             except json.JSONDecodeError:
                 continue
             on_message(message)
+
+    def report_exit(self) -> None:
+        """Print the media binary's exit status, once."""
+        if self._exit_reported:
+            return
+        self._exit_reported = True
+        proc = self.process
+        if proc is None:
+            return
+        try:
+            code = proc.poll()
+        except OSError:
+            return
+        if code is None:
+            return
+        if code == 0:
+            print(f"[media] {os.path.basename(self.binary)} exited cleanly (code 0)")
+            return
+        # A negative code on POSIX is a signal; on Windows the raw
+        # NTSTATUS comes through (0xC0000005 = access violation,
+        # 0xC000007B = DLL not found).  Name the two that actually
+        # bite in practice.
+        hint = ""
+        if code == -1073741515 or code == 0xC000007B:
+            hint = " — STATUS_DLL_NOT_FOUND: a required DLL is missing " \
+                   "(check that msquic.dll sits next to the exe)"
+        elif code == -1073741819 or code == 0xC0000005:
+            hint = " — STATUS_ACCESS_VIOLATION: the binary crashed"
+        print(f"[media] {os.path.basename(self.binary)} exited with code "
+              f"{code} (0x{code & 0xFFFFFFFF:08X}){hint}", file=sys.stderr)
 
 
 async def run_client(args: argparse.Namespace) -> int:

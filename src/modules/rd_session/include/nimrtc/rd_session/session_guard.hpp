@@ -154,10 +154,10 @@ NIMRTC_API_STABLE inline std::string_view session_guard_state_name(
  * ## Cost
  *
  * One syscall on Windows (a desktop handle open plus a name read-back).
- * It is cheap enough to call on a timer — the device-side example calls
- * it once at start-up and then periodically, because a session can be
- * locked *while* a session is running (the idle timeout, or a human
- * pressing `Win+L`).
+ * It is cheap enough to call on a timer — and a session *can* be
+ * locked while a session is running (the idle timeout, or a human
+ * pressing `Win+L`), so a caller that keeps a session open may want to
+ * re-check it periodically.
  */
 NIMRTC_API_STABLE SessionGuardState query_session_guard_state() noexcept;
 
@@ -186,10 +186,20 @@ NIMRTC_API_STABLE std::string session_guard_state_hint(
  * reconnected, which leaves it **logged in but not locked** — the
  * running programs survive, and the input desktop becomes the user's
  * own again.  This is the same operation the `tsdiscon` / `tscon` pair
- * performs, done in-process.
+ * performs, done by a **helper process**: the disconnect must not run
+ * in the caller, because disconnecting the caller's *own* session
+ * terminates the caller before the call returns.
  *
  * @param[out] error  the reason the recovery failed (empty on success).
  * @return `true` when the session is usable again.
+ *
+ * ## Idempotence
+ *
+ * A session that is **not** locked is left alone and reported as a
+ * failure with an explanatory `error` ("the session is not locked, so
+ * it was left alone"): the recovery is an action on a *locked* session,
+ * and silently disconnecting a healthy session would drop the
+ * operator's own desktop for nothing.
  *
  * ## Privileges
  *

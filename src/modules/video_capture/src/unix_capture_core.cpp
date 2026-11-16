@@ -15,19 +15,12 @@
 // ----------------------------------------------------------------------------
 
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 #include <nimrtc/video_capture/unix_capture_core.hpp>
 
 namespace nimrtc::video_capture {
 
 namespace {
-
-std::int64_t now_us() noexcept {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
 
 /** A half-open horizontal interval [x0, x1) of changed pixels. */
 struct Interval {
@@ -303,8 +296,10 @@ bool crop_frame_bgra(const std::uint8_t* src, std::size_t src_size, std::uint32_
     out.resize(static_cast<std::size_t>(dst_stride) * clamped.height);
 
     for (std::uint32_t y = 0; y < clamped.height; ++y) {
-        const std::uint8_t* src_row = src + static_cast<std::size_t>(clamped.y + y) * stride +
-                                      static_cast<std::size_t>(clamped.x) * 4u;
+        const std::uint8_t* src_row =
+            src + static_cast<std::size_t>(clamped.y + y) *
+                      static_cast<std::size_t>(stride) +
+                  static_cast<std::size_t>(clamped.x) * 4u;
         std::uint8_t* dst_row = out.data() + static_cast<std::size_t>(y) * dst_stride;
         std::memcpy(dst_row, src_row, dst_stride);
     }

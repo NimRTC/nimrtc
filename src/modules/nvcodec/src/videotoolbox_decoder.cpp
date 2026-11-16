@@ -66,9 +66,6 @@ namespace {
 
 namespace vt_detail = ::nimrtc::nvcodec::vt_detail;
 
-constexpr std::uint32_t kDefaultWidth  = 1280;
-constexpr std::uint32_t kDefaultHeight = 720;
-
 /** The probe's geometry.
  *
  *  A decompression session is created from a *format description*, not

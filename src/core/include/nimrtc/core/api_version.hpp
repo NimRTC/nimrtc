@@ -202,6 +202,69 @@
 #endif
 
 // -----------------------------------------------------------------------------
+// Scoped suppression of a deprecation warning
+//
+// A deprecated symbol that the *library itself* still has to name trips
+// `-Wdeprecated-declarations` (GCC/Clang) and `C4996` (MSVC) at every
+// mention.  NimRTC compiles its own targets with `-Werror` / `/WX`, so a
+// bare mention inside the tree is a build failure rather than a warning.
+//
+// The deprecation must therefore be *scoped*, not removed: the public
+// spelling still warns for a host that uses the deprecated symbol, and
+// the library's own plumbing silences exactly the mention it cannot
+// avoid.
+//
+// These two macros are that scoped form.  They are deliberately NOT the
+// same as deleting the attribute: the attribute stays, so a downstream
+// host that names the symbol still gets told to migrate.
+//
+// Usage:
+//
+//     NIMRTC_SUPPRESS_DEPRECATION_BEGIN
+//     std::function<std::unique_ptr<plugins::IVideoCodec>(C)> create;
+//     NIMRTC_SUPPRESS_DEPRECATION_END
+//
+// The pair must be balanced, and the scope must be as narrow as the
+// mention it covers -- a whole-file suppression would hide a *user's*
+// accidental use of the same symbol in the same translation unit.
+//
+// Why a pragma pair rather than a per-target compiler flag: the
+// deprecated name lives in a *public header*.  A host that compiles
+// against the installed headers with `-Werror` would hit the warning
+// on the header's own lines, with no way for the host to fix it.  The
+// suppression has to travel with the header.
+//
+// (The library's own targets ALSO carry `-Wno-error=deprecated-declarations`
+// in `cmake/NimRTCOptions.cmake`, because the deprecated name is spelled
+// in the *implementation* files too -- the codec modules derive from the
+// compatibility shim, and the plugin registry hands it out.  That flag
+// covers the tree; these macros cover the installed header.)
+// -----------------------------------------------------------------------------
+
+#if defined(_MSC_VER)
+    // MSVC: C4996 is the deprecation warning.
+    #define NIMRTC_SUPPRESS_DEPRECATION_BEGIN \
+        __pragma(warning(push)) __pragma(warning(disable : 4996))
+    #define NIMRTC_SUPPRESS_DEPRECATION_END __pragma(warning(pop))
+#elif defined(__GNUC__) || defined(__clang__)
+    // GCC / Clang: -Wdeprecated-declarations.
+    //
+    // `_Pragma` rather than `#pragma`: the macro has to be usable from
+    // inside another macro expansion, and `_Pragma` is the only spelling
+    // that survives that.
+    #define NIMRTC_SUPPRESS_DEPRECATION_BEGIN \
+        _Pragma("GCC diagnostic push") \
+        _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+    #define NIMRTC_SUPPRESS_DEPRECATION_END _Pragma("GCC diagnostic pop")
+#else
+    // Fallback: no-op.  A compiler that cannot suppress the warning
+    // cannot have the warning promoted to an error either, so the build
+    // still works -- it just prints the notice.
+    #define NIMRTC_SUPPRESS_DEPRECATION_BEGIN
+    #define NIMRTC_SUPPRESS_DEPRECATION_END
+#endif
+
+// -----------------------------------------------------------------------------
 // Runtime-accessible version constants (mirrors the macros above)
 // -----------------------------------------------------------------------------
 

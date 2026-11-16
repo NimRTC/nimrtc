@@ -1382,6 +1382,13 @@ public:
 // Factory
 // ---------------------------------------------------------------------------
 
+// The combined factory is the seam the engine resolves (the engine drives
+// one codec instance in both directions), so the library has to name the
+// deprecated shim in the factory's return type.  The suppression is
+// scoped to the two declarations below -- the deprecation itself is
+// untouched, and a host that spells `IVideoCodec` still gets the warning.
+NIMRTC_SUPPRESS_DEPRECATION_BEGIN
+
 class NIMRTC_API_STABLE IVideoCodecFactory {
 public:
     virtual ~IVideoCodecFactory() = default;
@@ -1413,6 +1420,8 @@ public:
         return new T(std::move(cfg));
     }
 };
+
+NIMRTC_SUPPRESS_DEPRECATION_END
 
 // ---------------------------------------------------------------------------
 // The split factories (plan B1)

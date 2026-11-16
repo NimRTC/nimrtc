@@ -57,7 +57,12 @@ namespace nimrtc::video_capture {
 
 namespace {
 
-/** The plugin ids the two backends register under. */
+/**
+ * The plugin ids the two backends register under.
+ *
+ * `WindowsCaptureFactory::id()` returns these, so they are the
+ * single place the spelling lives.
+ */
 constexpr const char* kDxgiBackendId = "windows-dxgi";
 constexpr const char* kWgcBackendId  = "windows-wgc";
 
@@ -1054,9 +1059,9 @@ plugins::Status WindowsCapture::reopen() noexcept { return open(); }
 std::string_view WindowsCaptureFactory::id() const noexcept {
     switch (backend_) {
         case WindowsCaptureBackend::kDxgiDesktopDuplication:
-            return "windows-dxgi";
+            return kDxgiBackendId;
         case WindowsCaptureBackend::kWgc:
-            return "windows-wgc";
+            return kWgcBackendId;
     }
     return "windows-unknown";
 }

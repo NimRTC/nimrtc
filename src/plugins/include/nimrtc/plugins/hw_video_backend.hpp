@@ -54,6 +54,24 @@
 namespace nimrtc::plugins {
 
 // ---------------------------------------------------------------------------
+// The compatibility shim, named from inside the library
+//
+// `IVideoCodec` is the deprecated compatibility shim (remote-desktop plan
+// B1, ADR-015 Decision 3), and this header is the registry seam that
+// hands it out -- the engine resolves the *combined* factory and drives
+// one codec instance in both directions.  So the library has to name
+// the shim here, and naming it trips `-Wdeprecated-declarations`
+// (GCC/Clang) / `C4996` (MSVC).
+//
+// The suppression is scoped to the two backend descriptors and nothing
+// else, so a host that spells the symbol still gets the warning.  The
+// deprecation itself is untouched: it is still scheduled for removal
+// after one MINOR cycle.
+// ---------------------------------------------------------------------------
+
+NIMRTC_SUPPRESS_DEPRECATION_BEGIN
+
+// ---------------------------------------------------------------------------
 // Backend descriptor — a single (id, available, priority, create, kind) entry
 // ---------------------------------------------------------------------------
 
@@ -173,6 +191,8 @@ struct NIMRTC_API_STABLE VideoDecoderBackend {
 
     std::function<std::unique_ptr<IVideoCodec>(VideoCodecConfig)> create;
 };
+
+NIMRTC_SUPPRESS_DEPRECATION_END
 
 // ---------------------------------------------------------------------------
 // Selector — ordered list of backends + selection policy

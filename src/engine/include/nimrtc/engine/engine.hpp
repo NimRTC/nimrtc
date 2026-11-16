@@ -3011,7 +3011,8 @@ public:
         std::uint64_t suppressed_stale = 0;
         /** The candidates dropped because the rate limit was reached. */
         std::uint64_t suppressed_rate = 0;
-    } input_echo_stats() const noexcept;
+    };
+    NIMRTC_API_STABLE InputEchoStats input_echo_stats() const noexcept;
 
     /**
      * @brief Configure the presentation geometry (plan E7).
@@ -3166,7 +3167,8 @@ public:
         std::uint64_t heartbeats_received = 0;
         /** The heartbeats the engine sent. */
         std::uint64_t heartbeats_sent = 0;
-    } control_channel_stats() const noexcept;
+    };
+    NIMRTC_API_STABLE ControlChannelStats control_channel_stats() const noexcept;
 
     /**
      * @brief The instant the last heartbeat arrived, in microseconds on
@@ -3331,8 +3333,18 @@ public:
      *  sent (one per report, whatever the block count). */
     NIMRTC_API_UNSTABLE std::uint64_t xr_reports_sent_count() const noexcept;
 
+    // The deprecated compatibility shim, named from inside the library.
+    // `plugins::IVideoCodec` is the deprecated shim of the split codec seam
+    // (remote-desktop plan B1 / ADR-015 Decision 3); the engine resolves
+    // the *combined* factory and drives one instance in both directions, so
+    // it has to name the type.  The suppression is scoped to these two
+    // accessors; the deprecation itself is untouched, so a host that
+    // names the shim still gets the warning.
+    NIMRTC_SUPPRESS_DEPRECATION_BEGIN
     NIMRTC_API_UNSTABLE plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
     NIMRTC_API_UNSTABLE const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
+    NIMRTC_SUPPRESS_DEPRECATION_END
+
 
     /** The video rate controller (remote-desktop plan D1).
      *
@@ -3997,7 +4009,11 @@ private:
     std::chrono::steady_clock::time_point audio_bitrate_last_step_{};
 
     // ---- Video codec plugin (ADR-001: resolved via PluginRegistry) ----
+    // The deprecated compatibility shim -- see the note on the
+    // `video_codec()` accessors above.
+    NIMRTC_SUPPRESS_DEPRECATION_BEGIN
     std::unique_ptr<plugins::IVideoCodec> video_codec_;
+    NIMRTC_SUPPRESS_DEPRECATION_END
 
     // ---- Public callbacks (no concrete deps) ----
     AudioFrameCallback  on_audio_frame_;
@@ -4316,7 +4332,11 @@ private:
         std::string mid;
         std::string codec_name;
         std::string backend_id;
+        // The deprecated compatibility shim -- see the note on the
+        // `video_codec()` accessors above.
+        NIMRTC_SUPPRESS_DEPRECATION_BEGIN
         plugins::IVideoCodec* codec = nullptr;
+        NIMRTC_SUPPRESS_DEPRECATION_END
         plugins::IVideoSender* sender = nullptr;
         plugins::IVideoReceiver* receiver = nullptr;
         plugins::IVideoSink* sink = nullptr;

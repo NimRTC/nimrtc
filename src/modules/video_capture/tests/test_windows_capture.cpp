@@ -552,7 +552,26 @@ TEST(WindowsCapture, TheZeroCopyPathDoesNotCopyToTheHost) {
         }
         FAIL() << "the DXGI capture could not be opened";
     }
-    ASSERT_TRUE(collector.wait_for(2));
+
+    // Desktop Duplication is *change-driven*: it delivers a frame only
+    // when the screen actually changes.  On an idle CI runner the
+    // desktop never changes, so a bare wait is a race against the
+    // desktop's idleness rather than a test of the zero-copy contract.
+    //
+    // The desktop is nudged while waiting -- exactly as the sibling
+    // `DxgiReportsDirtyRects` test does.  Without that, this test
+    // fails on a machine that is merely idle and passes on a machine
+    // that happens to be busy, which is the worst kind of flake.
+    {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(8000);
+        while (collector.count() < 2 && std::chrono::steady_clock::now() < deadline) {
+            nudge_the_desktop();
+            collector.wait_for(1, std::chrono::milliseconds(100));
+        }
+    }
+    ASSERT_GE(collector.count(), 1u)
+        << "the DXGI capture produced no frame while the desktop changed";
 
     const auto stats = cap->stats();
     EXPECT_GT(stats.frames_captured, 0u);

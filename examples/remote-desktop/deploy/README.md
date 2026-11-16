@@ -37,6 +37,14 @@
 
    > 设备端默认就是 `--media rd`，不用手写这个参数。
 
+   > **屏幕不能锁！** Windows 一旦锁屏（或屏保启动），WGC 采集会停在
+   > 1 帧不动，DXGI 会直接报 `E_ACCESSDENIED`。保持会话处于已登录且
+   > 桌面可见的状态（把屏保和自动锁定都关掉）。
+
+   > **想用键盘鼠标控制设备端，必须加 `--inject`。** 默认不开，是为了
+   > 不让测试脚本意外操纵你本机的桌面。开了之后操作端发的鼠标/键盘
+   > 事件会被真实注入到设备机的系统里。
+
 ### 操作机
 
 ```bat
@@ -52,6 +60,26 @@ rd_viewer.bat --url ws://172.16.33.44:8765 --code 186534 ^
 | `--sink d3d11` | 开窗口显示画面。不加就是 headless（只跑不显示） |
 | `--backend hardware` | 硬件解码。机器没有硬件解码器就改成 `software` |
 | `--no-stun` | 纯局域网模式，不要去连公网 STUN |
+
+### 设备端可选项
+
+| 参数 | 作用 |
+|---|---|
+| `--inject` | **允许把操作端发来的鼠标/键盘事件真实注入设备机系统**。默认关闭 |
+| `--capture windows-dxgi` | 换成 DXGI 桌面复制采集（默认是 WGC） |
+| `--capture windows-wgc` | 显式指定 WGC 采集 |
+| `--backend software` | 软件编解码（没有 GPU / 硬件编解码器时用） |
+| `--codec h264` / `av1` / `h265` | 指定视频编码 |
+
+### 已在本机验证过的组合
+
+下面每一条都在本机跑通了完整链路（信令 → 配对 → ICE → 采集 → 编码 → 传输 → 解码 → 渲染）：
+
+| 设备端 | 操作端 |
+|---|---|
+| `--backend hardware`（WGC） | `--backend hardware --sink d3d11` |
+| `--backend software`（WGC） | `--backend software` |
+| `--backend hardware --capture windows-dxgi` | `--backend hardware --sink d3d11` |
 
 ## 配对码怎么用
 
@@ -92,6 +120,9 @@ isolation"，那个开关会让两台机器互相看不见。
 | `0xc000007b` 闪退 | 缺 `msquic.dll` 或缺 MSVC 运行时。用 `rd_viewer.bat` 而不是 exe |
 | `unknown argument '--url'` | 直接跑了 exe。必须用 `.bat`（`--url/--code` 是 Python 层的参数） |
 | `pairing_invalid` | 配对码被用过了。**看设备端窗口里的最新那个码** |
+| 设备端 `capture` 不涨 / 卡在 1 | **屏幕被锁了**。关掉屏保和自动锁定，保持会话已登录 |
+| 设备端报 `plugin open failed` | 看后面附带的 DXGI 原因：`E_ACCESSDENIED` = 锁屏，`NOT_CURRENTLY_AVAILABLE` = 别的程序占着桌面复制 |
+| 设备端 `injected=0` | 没加 `--inject`，输入事件被安全地丢掉了 |
 | 连上了但黑屏/无画面 | 设备端还没出 IDR。看设备端日志有没有 `armed the video encoder for an IDR` |
 | 一直 `connecting` | UDP 不通，或 AP 开了 client isolation |
 | `frames=0` | 媒体面没通，检查 UDP 端口 |

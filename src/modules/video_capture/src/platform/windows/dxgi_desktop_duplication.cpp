@@ -127,18 +127,69 @@ DxgiDesktopDuplication::~DxgiDesktopDuplication() { close(); }
 bool DxgiDesktopDuplication::open(const DxgiOutput& output) noexcept {
     close();
 
-    if (!output.adapter || !output.output) return false;
+    if (!output.adapter || !output.output) {
+        last_open_error_ = "the output is not usable";
+        return false;
+    }
 
     HRESULT hr = d3d_.create_on(output.adapter);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        last_open_error_ = "the D3D11 device could not be created (0x" +
+                           std::to_string(static_cast<unsigned>(hr)) + ")";
+        return false;
+    }
 
     ComPtr<IDXGIOutputDuplication> duplication;
     hr = output.output->DuplicateOutput(d3d_.device.Get(), &duplication);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        // The reason matters: Windows allows exactly *one* Desktop
+        // Duplication session per output, and another program that
+        // captures the screen (a remote-desktop tool, a screen recorder)
+        // holds that slot.  The operator needs to know which of the two
+        // happened, because only one of them is fixable by closing the
+        // other program.
+        switch (hr) {
+            case DXGI_ERROR_NOT_CURRENTLY_AVAILABLE:
+                last_open_error_ =
+                    "another program already holds the desktop-duplication "
+                    "slot for this display (Windows allows only one "
+                    "duplication session per output) - close the screen "
+                    "recorder / remote-desktop app and try again";
+                break;
+            case DXGI_ERROR_UNSUPPORTED:
+                last_open_error_ =
+                    "this display does not support desktop duplication "
+                    "(a remote or virtual display often does not)";
+                break;
+            case DXGI_ERROR_DEVICE_REMOVED:
+                last_open_error_ = "the graphics adapter was removed";
+                break;
+            case E_ACCESSDENIED:
+                // The most common cause by far: the workstation is
+                // *locked*.  A locked session's output is not attached
+                // to the calling process's desktop, and the duplication
+                // is refused with ACCESS_DENIED.  The symptom is
+                // indistinguishable from "the capture is broken" --
+                // exactly one frame and then nothing -- so the reason
+                // has to be named.
+                last_open_error_ =
+                    "the display could not be duplicated (access denied) - "
+                    "the usual cause is a LOCKED workstation: unlock the "
+                    "screen and the capture works";
+                break;
+            default:
+                last_open_error_ =
+                    "DuplicateOutput failed (0x" +
+                    std::to_string(static_cast<unsigned>(hr)) + ")";
+                break;
+        }
+        return false;
+    }
 
     duplication_ = duplication;
     width_ = output.width;
     height_ = output.height;
+    last_open_error_.clear();
     return true;
 }
 

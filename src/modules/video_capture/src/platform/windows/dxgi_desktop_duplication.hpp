@@ -91,6 +91,17 @@ public:
     /** Release everything. Idempotent. */
     void close() noexcept;
 
+    /**
+     * @brief Why the last `open()` failed.
+     *
+     * Empty when the last open succeeded.  The string is written for
+     * the *operator* -- it names the thing they have to change, not the
+     * HRESULT they cannot act on.
+     */
+    [[nodiscard]] const std::string& last_open_error() const noexcept {
+        return last_open_error_;
+    }
+
     [[nodiscard]] bool is_open() const noexcept { return duplication_ != nullptr; }
 
     /** The output's width in pixels. */
@@ -136,6 +147,8 @@ private:
      *  frame.  Every later frame is described by the compositor's own
      *  diff. */
     bool seen_frame_ = false;
+    /** Why the last `open()` failed (empty when it succeeded). */
+    std::string last_open_error_;
 };
 
 } // namespace nimrtc::video_capture::wcap

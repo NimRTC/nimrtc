@@ -809,6 +809,21 @@ public:
         return false;
     }
 
+    /**
+     * @brief Why the last `open()` failed.
+     *
+     * The message is written for the *operator*: it names the thing
+     * they have to change (a screen recorder that holds the desktop
+     * duplication slot, a missing consent prompt, a display that does
+     * not support duplication), not the HRESULT they cannot act on.
+     *
+     * Empty when the device is open, or when it has nothing to add to
+     * the generic "the capture device could not be opened".
+     */
+    [[nodiscard]] virtual std::string last_error_message() const noexcept {
+        return {};
+    }
+
     /** Counters. */
     [[nodiscard]] virtual CaptureStats stats() const noexcept = 0;
 };

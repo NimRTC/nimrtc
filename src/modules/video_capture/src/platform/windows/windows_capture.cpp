@@ -203,13 +203,14 @@ public:
 
         dxgi_ = std::make_unique<wcap::DxgiDesktopDuplication>();
         if (!dxgi_->open(*chosen)) {
+            const std::string& why = dxgi_->last_open_error();
             report_error(WindowsCaptureError::kD3dDeviceFailed,
                          "windows capture: DXGI duplication could not be "
-                         "opened");
+                         "opened" +
+                             (why.empty() ? std::string{} : " - " + why));
             dxgi_.reset();
             return false;
         }
-
         // The negotiated size: the device's native size, unless the
         // caller asked for something smaller (the region path crops).
         negotiated_width_ = dxgi_->width();
@@ -683,8 +684,14 @@ public:
 
     void report_error(WindowsCaptureError error, std::string message) noexcept {
         last_error_ = error;
+        // The message is kept so the *generic* seam (`IVideoCapture::
+        // last_error_message()`) can hand it to a host that has no
+        // Windows-specific error callback.  Without it the operator
+        // only sees "the capture device could not be opened", which is
+        // not something they can act on.
+        last_error_message_ = std::move(message);
         auto cb = error_cb_;
-        if (cb) cb(error, message);
+        if (cb) cb(error, last_error_message_);
     }
 
     // ---- State ------------------------------------------------------------
@@ -702,6 +709,9 @@ public:
     std::thread thread_;
     std::mutex stop_mutex_;
     std::condition_variable stop_cv_;
+
+    /** The last failure's message (empty when nothing failed). */
+    std::string last_error_message_;
 
     std::vector<wcap::DxgiOutput> outputs_;
     std::unique_ptr<wcap::DxgiDesktopDuplication> dxgi_;
@@ -921,6 +931,10 @@ plugins::CaptureStats WindowsCapture::stats() const noexcept {
     return impl_->stats_;
 }
 
+std::string WindowsCapture::last_error_message() const noexcept {
+    return impl_->last_error_message_;
+}
+
 void WindowsCapture::set_gpu_frame_callback(GpuCaptureFrameCallback cb) noexcept {
     impl_->gpu_cb_ = std::move(cb);
 }
@@ -1046,6 +1060,10 @@ void WindowsCapture::set_frame_callback(plugins::CaptureFrameCallback cb) noexce
 
 plugins::CaptureStats WindowsCapture::stats() const noexcept {
     return impl_->stats_;
+}
+
+std::string WindowsCapture::last_error_message() const noexcept {
+    return impl_->last_error_message_;
 }
 
 void WindowsCapture::set_gpu_frame_callback(GpuCaptureFrameCallback cb) noexcept {

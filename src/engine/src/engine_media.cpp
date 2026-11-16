@@ -505,7 +505,18 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
              .err_missing = core::kVideoCapturePluginMissing,
              .open_fail_mode = pal::PluginFailureMode::Error,
              .missing_mode = pal::PluginFailureMode::Error,
-             .on_error = on_error_});
+             .on_error = on_error_,
+             // The capture device knows *why* it refused -- another
+             // program holds the desktop-duplication slot, the display
+             // does not support duplication, the consent prompt was
+             // declined -- and that reason is what the operator can act
+             // on.  It is read while the device is still alive.
+             .open_failure_detail =
+                 [](const void* plugin) -> std::string {
+                     if (plugin == nullptr) return {};
+                     return static_cast<const plugins::IVideoCapture*>(plugin)
+                         ->last_error_message();
+                 }});
     }
 
 

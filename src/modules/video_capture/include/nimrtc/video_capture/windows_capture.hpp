@@ -325,6 +325,15 @@ public:
     /** True iff this device can deliver surfaces without a host round-trip. */
     [[nodiscard]] bool supports_gpu_frames() const noexcept override;
 
+    /**
+     * @brief Why the last `open()` failed.
+     *
+     * The generic seam's message, with the *reason* appended: which
+     * display, which limitation, and what the operator can do about
+     * it.
+     */
+    [[nodiscard]] std::string last_error_message() const noexcept override;
+
     // ---- Windows-specific -------------------------------------------------
 
     /** Attach a failure callback (consent refused, device lost, ...). */

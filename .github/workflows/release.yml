@@ -1041,17 +1041,37 @@ jobs:
                 bundle="$candidate"
                 break
               done
-              shipped="unknown"
+              shipped="no-bundle"
               if [[ -n "$bundle" ]]; then
-                if tar -tJf "$bundle" 2>/dev/null | grep -q "webrtc_apm/"; then
-                  shipped="yes"
-                else
-                  shipped="no"
-                fi
+                # `tools/check_bundle_apm.py` decides this, NOT
+                # `tar -tJf ... | grep -q`.  The pipeline spelling is
+                # wrong under `set -o pipefail`: `grep -q` exits on its
+                # first match, `tar` then gets SIGPIPE and exits 141,
+                # and the pipeline reports failure -- so every bundle
+                # looks APM-free.  That is exactly how the published
+                # v1.1.0 body came to claim `lib/webrtc_apm/ is absent`
+                # for the two Linux platforms whose bundles do carry
+                # the APM archives.  The script uses `tarfile` and has
+                # no pipeline at all.
+                #
+                # Its exit code separates the facts that must not be
+                # conflated: 0 = APM archives present, 1 = read fine but
+                # no archives, 2 = the bundle could not be read at all.
+                set +e
+                python3 tools/check_bundle_apm.py "$bundle" >/dev/null 2>&1
+                apm_rc=$?
+                set -e
+                case "$apm_rc" in
+                  0) shipped="yes" ;;
+                  1) shipped="no" ;;
+                  *) shipped="unreadable" ;;
+                esac
               fi
               if [[ "$shipped" == "yes" ]]; then
                 echo "> - \`${platform}\` — WebRTC APM (real 3A) bundled"
-              elif [[ "$shipped" == "unknown" ]]; then
+              elif [[ "$shipped" == "unreadable" ]]; then
+                echo "> - \`${platform}\` — a bundle exists for this platform but could not be read, so its 3A content cannot be checked"
+              elif [[ "$shipped" == "no-bundle" ]]; then
                 echo "> - \`${platform}\` — no bundle for this platform in the release run (the build job produced no artefact), so its 3A content cannot be checked"
               elif [[ "$value" == "ON" ]]; then
                 echo "> - \`${platform}\` — the build used the real WebRTC APM, but this bundle ships no APM archives (\`lib/webrtc_apm/\` is absent), so it provides no usable 3A"
@@ -1160,14 +1180,25 @@ jobs:
               # Report the shipped content next to the build-time mode:
               # the two are not the same fact (see the release-body
               # generator for the v1.0.2 "real 3A bundled" mis-claim).
-              shipped="no APM archives in the bundle"
+              #
+              # `tools/check_bundle_apm.py` replaces the
+              # `tar -tJf ... | grep -q` pipeline, which under
+              # `pipefail` reported every bundle as APM-free because
+              # `grep -q` exits early and `tar` dies of SIGPIPE.  Its
+              # exit code keeps "no archives" and "could not be read"
+              # apart.
+              shipped="no bundle for this platform"
               for candidate in dist/nimrtc-*-"${platform}"-*.tar.xz; do
                 [[ -f "$candidate" ]] || continue
-                if tar -tJf "$candidate" 2>/dev/null | grep -q "webrtc_apm/"; then
-                  shipped="APM archives present in the bundle"
-                else
-                  shipped="no APM archives in the bundle"
-                fi
+                set +e
+                python3 tools/check_bundle_apm.py "$candidate" >/dev/null 2>&1
+                apm_rc=$?
+                set -e
+                case "$apm_rc" in
+                  0) shipped="APM archives present in the bundle" ;;
+                  1) shipped="no APM archives in the bundle" ;;
+                  *) shipped="the bundle could not be read, so its 3A content cannot be checked" ;;
+                esac
                 break
               done
               echo "- \`${platform}\` — 3A build mode: ${value}; ${shipped}"

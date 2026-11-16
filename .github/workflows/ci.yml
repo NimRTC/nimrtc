@@ -383,6 +383,22 @@ jobs:
       - name: Self-test the offline release signature verifier
         run: python tools/verify_release_signature.py --self-test
 
+      # The release body reports per-platform 3A content by asking
+      # whether a bundle ships the WebRTC APM archives.  That question
+      # used to be answered by `tar -tJf ... | grep -q`, which under
+      # `set -o pipefail` reports *every* bundle as APM-free: `grep -q`
+      # exits on its first match, `tar` dies of SIGPIPE (141), and the
+      # pipeline's status is 141.  The published v1.1.0 body carries
+      # that false "lib/webrtc_apm/ is absent" claim for the two Linux
+      # platforms whose bundles do carry 14 APM members each.
+      #
+      # `tools/check_bundle_apm.py` replaces the pipeline, and its
+      # self-test pins the three verdicts it must keep apart (present /
+      # absent / unreadable) *and* fails if the pipeline ever comes back
+      # into the workflow.
+      - name: Self-test the release-bundle APM guard
+        run: python tools/check_bundle_apm.py --self-test
+
       # The soak collector's whole value is in its evidence, so its
       # streak semantics are pinned by a self-test: seven calendar-
       # consecutive green days are a streak of seven, a gap or a failing

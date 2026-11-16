@@ -394,6 +394,14 @@ TEST(Openh264Software, TheFactorySelectsTheRealSoftwareCodec) {
     // encode and decode.  With the vendored OpenH264 linked in, that is
     // the real software codec — not the synthetic stub — and the host
     // must be able to see the difference in the telemetry.
+    //
+    // The backend policy is pinned to *software* on purpose.  In the
+    // default (`auto`) mode the factory picks the highest-priority
+    // *available* backend, which on a machine with an NVIDIA GPU is the
+    // hardware encoder — and then this test, which is about the
+    // *software* path, would fail on a GPU host and pass on a headless
+    // one.  A test whose result depends on the host's hardware is not a
+    // test; pinning the class makes the assertion mean what it says.
     nimrtc::h264::register_default_video_backends();
 
     plugins::VideoCodecConfig cfg;
@@ -402,6 +410,8 @@ TEST(Openh264Software, TheFactorySelectsTheRealSoftwareCodec) {
     cfg.height       = kHeight;
     cfg.bitrate_bps  = 2000000;
     cfg.pixel_format = plugins::VideoPixelFormat::kI420;
+    cfg.backend_preference = plugins::VideoCodecBackendPreference::kSoftware;
+    cfg.backend_policy    = plugins::CodecBackend::kSoftware;
 
     nimrtc::h264::H264PluginFactory factory;
     std::unique_ptr<plugins::IVideoCodec> codec(factory.create(cfg));

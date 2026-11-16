@@ -173,6 +173,19 @@ struct VideoState {
     plugins::VideoFeedbackReport pending_video_feedback_{};
     bool                        has_pending_video_feedback_ = false;
 
+    /** The last moment a *decoder-driven* key-frame request went out.
+     *
+     *  A frame the decoder refused (a P-frame whose reference never
+     *  arrived, or a picture whose parameter sets the decoder never
+     *  saw) is the receiver's signal that it needs a new IDR — but the
+     *  failure repeats on *every* subsequent P-frame, so an
+     *  unthrottled request would be a PLI storm.
+     *
+     *  This is the engine's own throttle: at most one decoder-driven
+     *  key-frame request per interval.  The *peer's* key-frame storm
+     *  limiter (plan B14) bounds the other side; this bounds ours. */
+    std::int64_t video_last_decode_keyframe_us = 0;
+
     // ---- Negotiated payload-type routing (B-4) -------------------------
     //
     // The payload types the peer declared on the video m-line of its

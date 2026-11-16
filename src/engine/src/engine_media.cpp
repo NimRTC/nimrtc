@@ -1324,6 +1324,14 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                     // arrives but never decodes.
                     impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kDecoderError);
+                    // A frame the decoder refuses is the receiver's
+                    // signal that it needs a new IDR: the picture's
+                    // reference frame never arrived, or the decoder
+                    // never saw the parameter sets at all.  The
+                    // jitter buffer cannot see this (the frame
+                    // assembled perfectly), so the request has to be
+                    // raised here.
+                    request_keyframe_on_decode_failure();
                     return;
                 }
 
@@ -1473,6 +1481,9 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
     if (decode_rc != plugins::kOk) {
         surface->release_ref();   // the engine's reference
         surface->release_ref();   // the pool's reference
+        // Same signal as on the CPU path: the decoder refused the
+        // picture, so the peer has to send a new IDR.
+        request_keyframe_on_decode_failure();
         return decode_rc;
     }
 
@@ -2592,6 +2603,67 @@ void NimRTCEngine::retry_pending_keyframe() noexcept {
         impl_->video_state.video_keyframes_applied += keyframe_requests;
         (void)video_codec_->force_keyframe();
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// The decoder-driven key-frame request
+// ---------------------------------------------------------------------------
+//
+// A frame the decoder refuses is the receiver's own statement that it
+// needs a new IDR: the picture's reference frame never arrived, or — the
+// case that bites hardest — the decoder never saw the codec's parameter
+// sets (SPS / PPS) and therefore has no decoder context to work with.
+//
+// The jitter buffer cannot raise this request: the frame assembled
+// *perfectly* as far as the RTP layer is concerned (every packet
+// arrived, the access unit is complete), and only the codec knows that
+// the bitstream is undecodable.  Without this path a stream that
+// arrives but never decodes stays undecoded until the sender's periodic
+// IDR comes around — GOP frames later, which on a static desktop is
+// tens of seconds.
+//
+// The request is throttled by the engine: the failure repeats on
+// *every* subsequent P-frame, so an unthrottled request would be a PLI
+// storm.  The peer's own key-frame storm limiter (remote-desktop plan
+// B14) bounds the other side of the loop; this bounds ours.
+void NimRTCEngine::request_keyframe_on_decode_failure() noexcept {
+    if (!video_receiver_) return;
+
+    auto& vstate = impl_->video_state;
+
+    // ---- The throttle ------------------------------------------------------
+    //
+    // The interval matches the key-frame limiter's own default (250 ms —
+    // RFC 5104 §4.3.1.1's "about 4 Hz"), so the two ends of the loop agree
+    // on the rate: the request is sent at most four times a second, and
+    // the peer produces at most four IDRs a second in answer.
+    constexpr std::int64_t kMinRequestIntervalUs = 250'000;
+
+    const std::int64_t now_us = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    if (vstate.video_last_decode_keyframe_us != 0 &&
+        now_us - vstate.video_last_decode_keyframe_us < kMinRequestIntervalUs) {
+        return;
+    }
+    vstate.video_last_decode_keyframe_us = now_us;
+
+    // ---- The report --------------------------------------------------------
+    //
+    // The report goes through the *same* door the jitter buffer's own
+    // loss report uses (`queue_video_feedback()`), so the RTCP bytes
+    // are produced by the receiver plugin and the engine only carries
+    // them.  The engine never builds an RTCP packet itself.
+    plugins::VideoFeedbackReport report{};
+    report.want_keyframe = true;
+
+    core::log::Logger::instance().info(
+        "engine[video]: the decoder refused a frame — requesting a key "
+        "frame from the peer");
+
+    queue_video_feedback(report);
 }
 
 

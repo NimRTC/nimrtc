@@ -5,17 +5,31 @@ Two clients connect through ``signalling.py`` and establish a media
 session.  The **viewer** is the offerer; the **device** answers (see
 ``docs/guides/remote-desktop.md`` §2 for why).
 
-The client is the *signalling* half of the peer.  The media half is the
-existing ``demo-p2p`` example binary, which speaks newline-delimited
-JSON on stdin/stdout using exactly the message shapes this signalling
-service relays (``offer`` / ``answer`` / ``candidate``).  The client
-bridges the two: a message that arrives over the WebSocket is written
-to the binary's stdin, and a line the binary writes to stdout is sent
-over the WebSocket.
+The client is the *signalling* half of the peer.  The media half is a
+media binary that speaks newline-delimited JSON on stdin/stdout using
+exactly the message shapes this signalling service relays (``offer`` /
+``answer`` / ``candidate``).  The client bridges the two: a message that
+arrives over the WebSocket is written to the binary's stdin, and a line
+the binary writes to stdout is sent over the WebSocket.
 
-If the ``demo-p2p`` binary cannot be found, the client still runs the
-whole signalling flow (pairing, join, TURN issuance, candidate relay)
-and reports that the media plane was skipped.
+Two media binaries are supported, selected with ``--media``:
+
+``demo-p2p``
+    The generic WebRTC example (audio + optional video).  This is the
+    default and is what the signalling guide demonstrates.
+
+``rd``
+    The remote-desktop pair — ``rd_device`` (the machine whose screen is
+    shared) and ``rd_viewer`` (the operator's client).  The pair speaks
+    the *same* JSON dialect but adds the screen-capture media plane
+    (DXGI / WGC → NVENC H.264 → SRTP → NVDEC → sink) and the input
+    control plane (the ``rd_input`` wire format over the DTLS
+    application-data seam).  ``rd_device`` is always the answerer and
+    ``rd_viewer`` always the offerer, so no flag is needed for the role.
+
+If the media binary cannot be found, the client still runs the whole
+signalling flow (pairing, join, TURN issuance, candidate relay) and
+reports that the media plane was skipped.
 
 ## Usage
 
@@ -27,6 +41,18 @@ Terminal 2 (the operator — it types the pairing code):
 
     python examples/remote-desktop/client.py --role viewer --code 123456 \\
         --url ws://127.0.0.1:8765
+
+## Usage — the remote-desktop pair
+
+    python examples/remote-desktop/client.py --role device --media rd \\
+        --url ws://192.168.1.10:8765
+
+    python examples/remote-desktop/client.py --role viewer --media rd \\
+        --code 123456 --url ws://192.168.1.10:8765 --sink d3d11
+
+> The device does **not** inject input unless ``--inject`` is given:
+> injecting real mouse and keyboard events into the developer's own
+> desktop is not something a test harness should do by surprise.
 """
 
 from __future__ import annotations
@@ -39,7 +65,8 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -49,23 +76,92 @@ import wsproto  # noqa: E402  (path shim above)
 #: the two peers.
 MEDIA_TYPES = ("offer", "answer", "candidate", "ice_restart", "reconnect")
 
+#: The media binaries the client knows how to drive.
+MEDIA_KINDS = ("demo-p2p", "rd")
+
+
+def _locate(name: str, explicit: Optional[str]) -> Optional[str]:
+    """Locate a media binary by name, searching the usual build trees.
+
+    The explicit path wins.  Otherwise every candidate found under
+    ``build/`` is collected and the **most recently modified** one is
+    returned.
+
+    Picking the newest rather than the first hit matters: this repository
+    keeps several build trees alive at once (``build/msvc-full``,
+    ``build/ci-msvc``, ``build/zcs``, …) and a stale binary in one of
+    them will happily connect, negotiate and then fail in confusing ways
+    — e.g. a media plane that never decodes a frame because the fix for
+    it landed in a *different* tree.  "Newest wins" makes the harness
+    always exercise the code that was actually just compiled.
+
+    Both the flat layout (``<build>/examples/rd_device.exe``) and the
+    per-target layout (``<build>/examples/rd_device/rd_device.exe``) are
+    supported, because the two exist side by side depending on which
+    CMake generator produced the tree.
+    """
+    if explicit:
+        if os.path.isfile(explicit):
+            # An explicit *file* only satisfies the request when it is the
+            # binary that was asked for.  The harness passes one path to
+            # both roles, so a path pointing at ``rd_device.exe`` must not
+            # be handed to the viewer — that would run the device binary
+            # twice and produce a session with two devices in it.  In that
+            # case the explicit path is treated as a *directory* hint and
+            # the right binary is picked out of it.
+            if os.path.splitext(os.path.basename(explicit))[0].lower() == name.lower():
+                return explicit
+            sibling = os.path.join(os.path.dirname(explicit), name + (
+                ".exe" if os.name == "nt" else ""))
+            return sibling if os.path.isfile(sibling) else None
+        if os.path.isdir(explicit):
+            sibling = os.path.join(explicit, name + (
+                ".exe" if os.name == "nt" else ""))
+            return sibling if os.path.isfile(sibling) else None
+        return None
+
+    exe = ".exe" if os.name == "nt" else ""
+    target = name + exe
+
+    found: List[str] = []
+
+    def _add(path: str) -> None:
+        if os.path.isfile(path) and path not in found:
+            found.append(path)
+
+    # The documented build trees, in both layouts.
+    build_root = Path(__file__).resolve().parent.parent.parent / "build"
+    for tree in sorted(build_root.glob("*")) if build_root.is_dir() else []:
+        if not tree.is_dir():
+            continue
+        _add(str(tree / "examples" / target))
+        _add(str(tree / "examples" / name / target))
+        _add(str(tree / "examples" / "Release" / target))
+        _add(str(tree / "examples" / "Debug" / target))
+
+    # A recursive sweep catches any other layout (custom build dirs,
+    # multi-config generators, …).
+    if build_root.is_dir():
+        for found_path in build_root.rglob(target):
+            _add(str(found_path))
+
+    if found:
+        # Newest first: the tree that was compiled most recently holds
+        # the code under test.
+        found.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return found[0]
+
+    return shutil.which(target) or None
+
 
 def find_demo_p2p(explicit: Optional[str]) -> Optional[str]:
     """Locate the ``demo-p2p`` binary, if it has been built."""
-    if explicit:
-        return explicit if os.path.exists(explicit) else None
-    exe = ".exe" if os.name == "nt" else ""
-    candidates = [
-        os.path.join("build", "msvc-full", "examples", "demo-p2p", "demo-p2p" + exe),
-        os.path.join("build", "examples", "Release", "demo-p2p" + exe),
-        os.path.join("build", "examples", "Debug", "demo-p2p" + exe),
-        os.path.join("build", "examples", "demo-p2p", "demo-p2p" + exe),
-        shutil.which("demo-p2p" + exe) or "",
-    ]
-    for candidate in candidates:
-        if candidate and os.path.exists(candidate):
-            return candidate
-    return None
+    return _locate("demo-p2p", explicit)
+
+
+def find_rd_binary(role: str, explicit: Optional[str]) -> Optional[str]:
+    """Locate the remote-desktop binary for `role` ("device" / "viewer")."""
+    return _locate("rd_device" if role == "device" else "rd_viewer", explicit)
 
 
 def parse_turn_url(url: str) -> Tuple[str, int]:
@@ -79,39 +175,77 @@ def parse_turn_url(url: str) -> Tuple[str, int]:
         return host, 3478
 
 
-class DemoP2PBridge:
-    """Runs ``demo-p2p`` and bridges its JSON lines to the WebSocket."""
+class MediaBridge:
+    """Runs a media binary and bridges its JSON lines to the WebSocket.
 
-    def __init__(self, binary: str, answerer: bool, turn: Optional[Dict],
-                 use_turn: bool = False) -> None:
+    Two binaries are supported, and they speak the *same* JSON dialect
+    (newline-delimited ``{"type": ..., ...}`` on stdin/stdout):
+
+    ``demo-p2p``
+        ``--signaling-proxy [--answerer]``.  The generic WebRTC example.
+
+    ``rd_device`` / ``rd_viewer``
+        ``--duration <sec>`` and the role-specific flags.  The roles are
+        fixed by the binaries themselves — ``rd_device`` is the answerer
+        and ``rd_viewer`` is the offerer — so the bridge only has to pick
+        the right binary.
+
+    The bridge is *transparent*: the signalling message **is** the media
+    message.  Nothing is interpreted here beyond the framing.
+    """
+
+    def __init__(self, kind: str, binary: str, answerer: bool,
+                 turn: Optional[Dict], use_turn: bool = False,
+                 duration: int = 120, extra: Optional[List[str]] = None) -> None:
+        self.kind = kind
         self.binary = binary
         self.answerer = answerer
         self.turn = turn
         self.use_turn = use_turn
+        self.duration = duration
+        self.extra = list(extra or [])
         self.process: Optional[subprocess.Popen] = None
         self._to_ws: "asyncio.Queue[str]" = asyncio.Queue()
 
-    def start(self) -> None:
-        cmd = [self.binary, "--signaling-proxy", "--duration", "120"]
-        if self.answerer:
-            cmd.append("--answerer")
-        if self.turn and self.use_turn:
-            # Only pass the TURN configuration when the operator asked for
-            # it.  The signalling service issues the credential
-            # unconditionally, but pointing the ICE agent at a TURN server
-            # that is not running only makes the gathering round slower.
-            host, port = parse_turn_url(self.turn.get("url", ""))
-            cmd += [
+    def _turn_flags(self) -> List[str]:
+        """The TURN flags, or an empty list when TURN is not in use.
+
+        The credential is only passed on when the operator asked for it:
+        the signalling service issues one unconditionally, but pointing
+        the ICE agent at a TURN server that is not running only makes
+        the gathering round slower.
+        """
+        if not (self.turn and self.use_turn):
+            return []
+        host, port = parse_turn_url(self.turn.get("url", ""))
+        if self.kind == "demo-p2p":
+            return [
                 "--turn-host", host,
                 "--turn-port", str(port),
                 "--turn-user", self.turn.get("username", ""),
                 "--turn-pass", self.turn.get("password", ""),
             ]
+        # rd_device / rd_viewer use the shorter spelling.
+        return [
+            "--turn", f"{host}:{port}",
+            "--turn-user", self.turn.get("username", ""),
+            "--turn-pass", self.turn.get("password", ""),
+        ]
+
+    def start(self) -> None:
+        if self.kind == "demo-p2p":
+            cmd = [self.binary, "--signaling-proxy", "--duration", str(self.duration)]
+            if self.answerer:
+                cmd.append("--answerer")
+        else:
+            cmd = [self.binary, "--duration", str(self.duration)]
+        cmd += self._turn_flags()
+        cmd += self.extra
         self.process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=None,  # let the demo write to the console
+            stderr=None,  # let the binary write to the console
             text=True,
             bufsize=1,
         )
@@ -174,9 +308,9 @@ async def run_client(args: argparse.Namespace) -> int:
     conn = await wsproto.client_connect(host, port, path)
     print(f"[{args.role}] connected to {url}")
 
-    bridge: Optional[DemoP2PBridge] = None
+    bridge: Optional[MediaBridge] = None
     stdout_task: Optional[asyncio.Future] = None
-    pending_offer: Optional[Dict] = None
+    pending: List[Dict] = []
     peer_present = False
     state: Dict[str, object] = {}
 
@@ -184,17 +318,68 @@ async def run_client(args: argparse.Namespace) -> int:
         await conn.send_text(json.dumps(message))
 
     def maybe_start_media() -> None:
-        """Start ``demo-p2p`` once both peers are in the room."""
+        """Start the media binary once both peers are in the room."""
         nonlocal bridge, stdout_task
         if bridge is not None or not peer_present:
             return
-        binary = find_demo_p2p(args.binary)
-        if binary is None:
-            print("[media] demo-p2p binary not found - media plane skipped "
-                  "(build it, or pass --binary)")
-            return
-        bridge = DemoP2PBridge(binary, answerer=(args.role == "device"),
-                               turn=state.get("turn"), use_turn=args.use_turn)
+
+        if args.media == "rd":
+            # The remote-desktop pair: the binary *is* the role, so the
+            # role's binary is picked and no offerer/answerer flag is
+            # needed — rd_viewer is always the offerer and rd_device is
+            # always the answerer.
+            binary = find_rd_binary(args.role, args.binary)
+            if binary is None:
+                print(f"[media] rd_{args.role} binary not found - media plane "
+                      f"skipped (build it, or pass --binary)")
+                return
+            extra: List[str] = []
+            if args.media == "rd" and args.role == "viewer":
+                if args.sink:
+                    extra += ["--sink", args.sink]
+                if args.codec:
+                    extra += ["--codec", args.codec]
+                if args.backend:
+                    extra += ["--backend", args.backend]
+                if args.no_input:
+                    extra.append("--no-input")
+                if args.no_qoe:
+                    extra.append("--no-qoe")
+            if args.media == "rd" and args.role == "device":
+                if args.codec:
+                    extra += ["--codec", args.codec]
+                if args.backend:
+                    extra += ["--backend", args.backend]
+                if args.capture:
+                    extra += ["--capture", args.capture]
+                if not args.inject:
+                    # Injecting real mouse and keyboard events into the
+                    # developer's own desktop is not something a test
+                    # harness should do by surprise.
+                    extra.append("--no-inject")
+            if args.no_control:
+                extra.append("--no-control")
+            if args.no_stun:
+                # A LAN-only run: no STUN gathering at all, so the ICE
+                # agent gathers host candidates only.  This is what a
+                # two-machine test on a private network wants — reaching
+                # out to a public STUN server adds a server-reflexive
+                # candidate that can win the pair selection and then
+                # break the session the moment the NAT mapping moves.
+                extra.append("--no-stun")
+            bridge = MediaBridge("rd", binary, answerer=(args.role == "device"),
+                                 turn=state.get("turn"), use_turn=args.use_turn,
+                                 duration=args.duration, extra=extra)
+        else:
+            binary = find_demo_p2p(args.binary)
+            if binary is None:
+                print("[media] demo-p2p binary not found - media plane skipped "
+                      "(build it, or pass --binary)")
+                return
+            bridge = MediaBridge("demo-p2p", binary, answerer=(args.role == "device"),
+                                 turn=state.get("turn"), use_turn=args.use_turn,
+                                 duration=args.duration)
+
         bridge.start()
         # The stdout pump has to start *with* the binary: the answer and
         # the local candidates are written to stdout as soon as the
@@ -203,15 +388,17 @@ async def run_client(args: argparse.Namespace) -> int:
             bridge.pump_stdout(lambda m: asyncio.ensure_future(send(m)))
         )
         # A message that arrived before the media plane existed is
-        # forwarded now that it does.
-        nonlocal pending_offer
-        if pending_offer is not None:
-            bridge.write(pending_offer)
-            pending_offer = None
+        # forwarded now that it does.  The queue holds *every* message,
+        # not just the last one: the candidates arrive in a burst right
+        # after the SDP, and a single slot would drop all but the last.
+        nonlocal pending
+        for message in pending:
+            bridge.write(message)
+        pending = []
         print(f"[media] started {binary} (answerer={args.role == 'device'})")
 
     async def handle(message: Dict) -> None:
-        nonlocal pending_offer, peer_present
+        nonlocal pending, peer_present
         mtype = message.get("type")
         if mtype == "pairing_code":
             remaining = int(message["expires_at"] - time.time())
@@ -258,7 +445,7 @@ async def run_client(args: argparse.Namespace) -> int:
             if bridge is not None:
                 bridge.write(message)
             else:
-                pending_offer = message
+                pending.append(message)
         else:
             print(f"[{args.role}] <- {mtype}")
 
@@ -302,6 +489,15 @@ async def run_client(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    # The client prints the pairing code, and the operator has to be able
+    # to read it off the console.  Python block-buffers stdout when it is
+    # not a terminal (a pipe, a CI log), so without this the code would
+    # not appear until the process exited.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+
     parser = argparse.ArgumentParser(description="NimRTC remote-desktop example client")
     parser.add_argument("--role", choices=("device", "viewer"), required=True,
                         help="which side of the session this client is")
@@ -310,12 +506,37 @@ def main() -> int:
     parser.add_argument("--code", default="",
                         help="the pairing code (viewer role)")
     parser.add_argument("--binary", default=None,
-                        help="path to the demo-p2p binary (default: search build/)")
+                        help="path to the media binary (default: search build/)")
+    parser.add_argument("--media", choices=MEDIA_KINDS, default="demo-p2p",
+                        help="which media binary to drive: demo-p2p (the "
+                             "generic WebRTC example) or rd (the "
+                             "remote-desktop pair)")
     parser.add_argument("--duration", type=int, default=120,
                         help="how long the media session may run, in seconds")
     parser.add_argument("--use-turn", action="store_true",
                         help="pass the issued TURN credential to the media binary "
                              "(only useful when a TURN server is actually running)")
+    # ---- The remote-desktop pair's own flags (--media rd) ----------------
+    parser.add_argument("--sink", default=None,
+                        help="rd_viewer: the video sink (headless | d3d11)")
+    parser.add_argument("--codec", default=None,
+                        help="rd_*: the video codec (h264 | av1 | h265)")
+    parser.add_argument("--backend", default=None,
+                        help="rd_*: the codec backend (auto | hardware | software)")
+    parser.add_argument("--capture", default=None,
+                        help="rd_device: the capture backend "
+                             "(windows-wgc | windows-dxgi)")
+    parser.add_argument("--inject", action="store_true",
+                        help="rd_device: let the device inject the received "
+                             "input into its own desktop (off by default)")
+    parser.add_argument("--no-input", action="store_true",
+                        help="rd_viewer: watch only; do not send any input")
+    parser.add_argument("--no-qoe", action="store_true",
+                        help="rd_viewer: do not collect the QoE metrics")
+    parser.add_argument("--no-control", action="store_true",
+                        help="rd_*: do not open a control channel (media only)")
+    parser.add_argument("--no-stun", action="store_true",
+                        help="rd_*: do not gather STUN candidates (LAN only)")
     args = parser.parse_args()
     try:
         return asyncio.run(run_client(args))

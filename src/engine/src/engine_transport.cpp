@@ -1985,6 +1985,31 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     log.info("engine[dtls→srtp]: SRTP keys INSTALLED ✓ "
              "(state=" + std::string(state_ == State::kOpen ? "Open" : "Other") +
              ") — RTP from peer will now be unprotectable");
+
+    // ---- Arm the encoder for an IDR (the first frame on the wire) --------
+    //
+    // Everything the encoder produced *before* this moment went nowhere:
+    // the outbound path could not protect it (no key), so it was dropped.
+    // The first IDR — the one that carries the SPS / PPS — was almost
+    // certainly one of those dropped frames.
+    //
+    // The peer therefore never received a parameter set, and a decoder
+    // that has no SPS cannot create its decoder context at all: it
+    // drops every P-frame it is handed, and the picture only appears
+    // when the *next* IDR comes around (GOP frames later — on a static
+    // desktop that is tens of seconds).
+    //
+    // So the transport-ready moment is exactly the moment the encoder
+    // has to produce a *fresh* IDR: the first frame that actually
+    // reaches the peer must carry the parameter sets.
+    //
+    // `force_keyframe()` is the same door an inbound PLI uses, so the
+    // encoder's own policy (the key-frame storm limiter) still applies.
+    if (video_codec_) {
+        (void)video_codec_->force_keyframe();
+        log.info("engine[dtls→srtp]: armed the video encoder for an IDR — "
+                 "the first frame on the wire will carry the parameter sets");
+    }
 }
 
 

@@ -4174,6 +4174,21 @@ private:
      *  `tick()` — the receiver raises them from inside the ICE receive
      *  path, and sending from there would re-enter the transport. */
     void queue_video_feedback(const plugins::VideoFeedbackReport& report) noexcept;
+    /** Ask the peer for a new key frame because the decoder refused a
+     *  picture.
+     *
+     *  A frame the decoder refuses means the picture's reference never
+     *  arrived, or the decoder never saw the codec's parameter sets
+     *  (SPS / PPS) and has no decoder context at all.  The jitter
+     *  buffer cannot see this — the access unit assembled perfectly as
+     *  far as the RTP layer is concerned — so the request is raised
+     *  here, on the decode path.
+     *
+     *  The request is throttled (the failure repeats on every
+     *  subsequent P-frame, so an unthrottled request would be a PLI
+     *  storm) and goes out through the same door the jitter buffer's
+     *  own loss report uses. */
+    void request_keyframe_on_decode_failure() noexcept;
     /** Encode the pending receiver feedback as RTCP and put it on the wire
      *  (v1.1 Q3).  The bytes are produced by the receiver plugin — the
      *  engine only protects them (SRTCP) and sends them. */

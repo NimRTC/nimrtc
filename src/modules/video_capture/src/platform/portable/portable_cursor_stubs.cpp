@@ -29,12 +29,12 @@ std::shared_ptr<ICursorSource> make_windows_cursor_source() noexcept {
 }
 #endif // !defined(_WIN32)
 
-#if !defined(NIMRTC_HAS_X11_CAPTURE)
-// The X11 cursor source is compiled only when the X11 development
+#if !defined(NIMRTC_HAS_X11_CURSOR)
+// The X11 cursor source is compiled only when the XFixes development
 // headers were found at configure time (and, of course, only on Linux).
 std::shared_ptr<ICursorSource> make_x11_cursor_source() noexcept {
     return nullptr;
 }
-#endif // !defined(NIMRTC_HAS_X11_CAPTURE)
+#endif // !defined(NIMRTC_HAS_X11_CURSOR)
 
 } // namespace nimrtc::video_capture

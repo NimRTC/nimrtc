@@ -78,11 +78,11 @@ std::shared_ptr<ICursorSource> make_platform_cursor_source() noexcept {
     return make_windows_cursor_source();
 #elif defined(__APPLE__)
     return make_macos_cursor_source();
-#elif defined(NIMRTC_HAS_X11_CAPTURE)
-    // The X11 source is only compiled when the X11 development headers
-    // were found at configure time (the CMake guard), so the dispatch
-    // must use the same condition -- otherwise a Linux box without the
-    // X11 package would fail to link.
+#elif defined(NIMRTC_HAS_X11_CURSOR)
+    // The X11 source is only compiled when the XFixes development
+    // headers were found at configure time (the CMake guard), so the
+    // dispatch must use the same condition -- otherwise a Linux box
+    // without the XFixes package would fail to link.
     return make_x11_cursor_source();
 #else
     return nullptr;
@@ -94,7 +94,7 @@ bool platform_cursor_source_available() noexcept {
     return true;
 #elif defined(__APPLE__)
     return true;
-#elif defined(NIMRTC_HAS_X11_CAPTURE)
+#elif defined(NIMRTC_HAS_X11_CURSOR)
     // The X11 source needs the XFixes extension, which is present on
     // every X11 server since forever; the build guard in CMake decides
     // whether the implementation was compiled at all.

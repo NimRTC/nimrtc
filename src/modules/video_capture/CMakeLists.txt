@@ -134,21 +134,61 @@ if(UNIX AND NOT APPLE)
     set(_nimrtc_linux_factory_glue FALSE)
 
     # ---- X11 --------------------------------------------------------------
+    #
+    # The X11 path has *two* dependencies, not one:
+    #
+    #   - `libx11`    -- `XGetImage`, for the screen capture itself.
+    #   - `libxfixes` -- `XFixesGetCursorImage`, for the cursor source.
+    #
+    # They ship in two different Debian/Ubuntu packages (`libx11-dev` and
+    # `libxfixes-dev`), and a build host may well have only the first.
+    # `find_package(X11)` finds `libx11` alone, so it cannot answer the
+    # second question -- `pkg-config` can, because the XFixes headers
+    # are only installed together with its `.pc` file.
+    #
+    # The two are therefore detected separately, and each source file is
+    # compiled only when its own dependency is present.  The cursor
+    # source in particular *includes* `X11/extensions/Xfixes.h`, so
+    # compiling it without `libxfixes-dev` is a hard build failure --
+    # not a runtime "unavailable" that the stub could paper over.
     find_package(X11 QUIET)
+    find_package(PkgConfig QUIET)
+
+    set(_nimrtc_have_x11 FALSE)
     if(X11_FOUND)
+        set(_nimrtc_have_x11 TRUE)
         list(APPEND NIMRTC_VIDEO_CAPTURE_SOURCES
             src/platform/linux/x11_capture.cpp
-            # The X11 cursor source (remote-desktop plan A6):
-            # XFixesGetCursorImage.  It needs the XFixes extension, which
-            # is part of the X11 development package.
-            src/platform/linux/x11_cursor.cpp
             )
-        set(_nimrtc_linux_factory_glue TRUE)
         message(STATUS "video_capture: the X11 capture backend is enabled")
     else()
         message(STATUS
             "video_capture: the X11 capture backend is disabled "
             "(the X11 development headers were not found)")
+    endif()
+
+    set(_nimrtc_have_xfixes FALSE)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(NIMRTC_XFIXES QUIET xfixes)
+        if(NIMRTC_XFIXES_FOUND)
+            set(_nimrtc_have_xfixes TRUE)
+        endif()
+    endif()
+    if(_nimrtc_have_xfixes)
+        list(APPEND NIMRTC_VIDEO_CAPTURE_SOURCES
+            # The X11 cursor source (remote-desktop plan A6):
+            # XFixesGetCursorImage.  It needs the XFixes extension.
+            src/platform/linux/x11_cursor.cpp
+            )
+        message(STATUS "video_capture: the X11 cursor source is enabled")
+    elseif(_nimrtc_have_x11)
+        message(STATUS
+            "video_capture: the X11 cursor source is disabled "
+            "(the XFixes development headers were not found)")
+    endif()
+
+    if(_nimrtc_have_x11 OR _nimrtc_have_xfixes)
+        set(_nimrtc_linux_factory_glue TRUE)
     endif()
 
     # ---- V4L2 camera (remote-desktop plan A9) ----------------------------
@@ -409,6 +449,19 @@ if(UNIX AND NOT APPLE AND X11_FOUND)
     target_include_directories(nimrtc_video_capture PRIVATE ${X11_INCLUDE_DIR})
     target_compile_definitions(nimrtc_video_capture
         PRIVATE NIMRTC_HAS_X11_CAPTURE=1)
+endif()
+
+# The X11 *cursor* source is a separate capability from the X11 capture:
+# it needs the XFixes extension, which ships in its own package.  The
+# source is compiled only when XFixes is present, and the portable stub
+# provides the entry point otherwise.
+if(UNIX AND NOT APPLE AND _nimrtc_have_xfixes)
+    target_include_directories(nimrtc_video_capture SYSTEM PRIVATE
+        ${NIMRTC_XFIXES_INCLUDE_DIRS})
+    target_link_libraries(nimrtc_video_capture PRIVATE
+        ${NIMRTC_XFIXES_LIBRARIES})
+    target_compile_definitions(nimrtc_video_capture
+        PRIVATE NIMRTC_HAS_X11_CURSOR=1)
 endif()
 
 if(UNIX AND NOT APPLE AND PIPEWIRE_FOUND AND SPA_FOUND)

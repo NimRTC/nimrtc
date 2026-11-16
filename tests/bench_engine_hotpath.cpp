@@ -339,6 +339,14 @@ SendVideoResult bench_send_video(int width, int height, int frames, int warmup) 
     cfg.video_source_name      = "memory";
     cfg.video_width            = static_cast<std::uint32_t>(width);
     cfg.video_height           = static_cast<std::uint32_t>(height);
+    // The zero-allocation gate measures the *engine's* hot path, not the
+    // codec backend's staging.  The default `auto` selection picks the
+    // hardware encoder where one exists (VideoToolbox on macOS, NVENC on
+    // Linux), and that path allocates CVPixelBuffers and temporary vectors
+    // per frame — which the budget would then charge to the engine.  The
+    // software backend is the documented intent of this benchmark and
+    // keeps the gate deterministic on every CI runner.
+    cfg.video_codec_backend    = "software";
 
     NimRTCEngine engine(cfg);
     if (engine.open() != 0u) {

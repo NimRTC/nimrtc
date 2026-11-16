@@ -41,6 +41,8 @@
 
 #include "screencapturekit_capture.hpp"
 
+#include <nimrtc/core/log.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -253,12 +255,12 @@ public:
                         std::to_string(display.displayID);
             device.name = "Display " + std::to_string(display.displayID);
             device.kind = plugins::CaptureDeviceKind::kScreen;
-            device.max_width = display.width;
-            device.max_height = display.height;
-            device.max_fps = display.refreshRate > 0
-                                 ? static_cast<std::uint32_t>(
-                                       display.refreshRate)
-                                 : 60u;
+            device.max_width = static_cast<std::uint32_t>(display.width);
+            device.max_height = static_cast<std::uint32_t>(display.height);
+            // `SCDisplay` has no refresh-rate property (it only carries
+            // the identifier and the geometry), so the rate is the
+            // 60 Hz the stream is configured for.
+            device.max_fps = 60u;
             devices.push_back(std::move(device));
         }
 
@@ -345,8 +347,11 @@ public:
         if (wants_window) {
             for (SCWindow* window in content.windows) {
                 if (window.windowID != wanted_id) continue;
-                filter = [SCContentFilter
-                    contentFilterForIncludingWindow:window];
+                // The filter is built with the *initialiser*, not a
+                // factory method: `SCContentFilter` has no
+                // `+contentFilterFor...` class methods.
+                filter = [[SCContentFilter alloc]
+                    initWithDesktopIndependentWindow:window];
                 break;
             }
         } else {
@@ -360,9 +365,9 @@ public:
                 chosen = content.displays.firstObject;
             }
             if (chosen != nil) {
-                filter = [SCContentFilter
-                    contentFilterForDisplay:chosen
-                          excludingWindows:@[]];
+                filter = [[SCContentFilter alloc]
+                    initWithDisplay:chosen
+                     excludingWindows:@[]];
             }
         }
 
@@ -415,12 +420,45 @@ public:
             return plugins::kErrHardwareError;
         }
 
-        [stream addStreamOutput:sink_
-                           type:SCStreamOutputTypeScreen
-             sampleContextQueue:dispatch_get_global_queue(
-                 DISPATCH_QUEUE_PRIORITY_USER_INITIATED, 0)];
+        // The stream output is attached with the *error-returning*
+        // variant: `addStreamOutput:...error:` reports why the output
+        // could not be attached, where the older `...sampleContextQueue:`
+        // spelling (which the modern SDK no longer declares) only
+        // returned a void.
+        //
+        // The frames are delivered on a dedicated serial queue, so the
+        // sink's own lock is never contended by two deliveries at once.
+        dispatch_queue_t frame_queue =
+            dispatch_queue_create("com.nimrtc.screencapturekit.frames",
+                                  DISPATCH_QUEUE_SERIAL);
+        if (![stream addStreamOutput:sink_
+                                type:SCStreamOutputTypeScreen
+                   sampleHandlerQueue:frame_queue
+                                error:&error_ns]) {
+            NIMRTC_LOG_ERROR("sck: addStreamOutput failed ("
+                             << (error_ns != nil
+                                     ? error_ns.localizedDescription.UTF8String
+                                     : "unknown")
+                             << ")");
+            error = UnixCaptureError::kCaptureFailed;
+            return plugins::kErrHardwareError;
+        }
 
-        if (![stream startCaptureWithError:&error_ns]) {
+        // `startCaptureWithCompletionHandler:` is asynchronous, so the
+        // caller waits for the completion.  The timeout keeps a wedged
+        // compositor from parking the open call forever.
+        dispatch_semaphore_t started = dispatch_semaphore_create(0);
+        __block NSError* start_error = nil;
+        [stream startCaptureWithCompletionHandler:^(NSError* ns_error) {
+            start_error = ns_error;
+            dispatch_semaphore_signal(started);
+        }];
+        dispatch_semaphore_wait(
+            started, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        if (start_error != nil) {
+            NIMRTC_LOG_ERROR("sck: startCapture failed ("
+                             << start_error.localizedDescription.UTF8String
+                             << ")");
             error = UnixCaptureError::kCaptureFailed;
             return plugins::kErrHardwareError;
         }
@@ -441,7 +479,12 @@ public:
 
     void close_device() noexcept {
         if (stream_ != nil) {
-            [stream_ stopCapture];
+            // The modern spelling takes a completion handler; the
+            // handler is a no-op because the caller only wants the
+            // stream to stop.
+            [stream_ stopCaptureWithCompletionHandler:^(NSError* ns_error) {
+                (void)ns_error;
+            }];
             stream_ = nil;
         }
         if (sink_ != nil) {

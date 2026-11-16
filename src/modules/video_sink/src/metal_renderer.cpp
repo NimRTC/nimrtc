@@ -294,7 +294,11 @@ bool MetalRenderer::Impl::create_metal_objects() {
     const bool want_surface = !cfg_.offscreen && cfg_.native_window != nullptr;
 
     if (want_surface) {
-        NSView* view = static_cast<NSView*>(cfg_.native_window);
+        // `native_window` is an opaque `void*` that carries the `NSView*`.
+        // Under ARC a `void*` cannot be cast to an Objective-C pointer
+        // directly -- the cast has to be spelled `__bridge`, which says
+        // "this is the same object, but ARC does not manage it".
+        NSView* view = (__bridge NSView*)cfg_.native_window;
         CALayer* layer = [view layer];
 
         if ([layer isKindOfClass:[CAMetalLayer class]]) {
@@ -440,13 +444,22 @@ bool MetalRenderer::Impl::upload_bgra(const PresentedFrame& frame) {
     }
 
     const std::size_t row_bytes = static_cast<std::size_t>(frame.width) * 4u;
-    for (std::uint32_t row = 0; row < frame.height; ++row) {
-        std::memcpy(static_cast<std::uint8_t*>([upload_ getBytes]) +
-                        static_cast<std::ptrdiff_t>(row) * upload_w_ * 4u,
-                    frame.pixels.data() +
-                        static_cast<std::ptrdiff_t>(row) * row_bytes,
-                    row_bytes);
-    }
+
+    // `MTLTexture` has no `getBytes` accessor and no writable pointer:
+    // the pixels are moved with `replaceRegion:...withBytes:...`, which
+    // copies a *region* of the caller's buffer into the texture.  The
+    // staging texture lives in shared storage, so the copy is a plain
+    // memory copy -- but it has to go through the texture's own API.
+    //
+    // The region covers the whole texture, and the source rows are
+    // packed (`row_bytes` apart), so the copy is one call.
+    const MTLRegion region = MTLRegionMake2D(0, 0, upload_w_, upload_h_);
+    [upload_ replaceRegion:region
+               mipmapLevel:0
+                     slice:0
+                withBytes:frame.pixels.data()
+              bytesPerRow:row_bytes
+            bytesPerImage:row_bytes * upload_h_];
     return true;
 }
 
@@ -454,15 +467,35 @@ bool MetalRenderer::Impl::present_via_avsamplebuffer(const PresentedFrame& frame
     if (display_layer_ == nil) return false;
 
     // ---- The pixel buffer -------------------------------------------------
+    //
+    // `CVPixelBufferCreate` takes a *dictionary* of attributes, and the
+    // dictionary literal has to be built at runtime (`CFDictionaryCreate`
+    // with a NULL value list is the only way to spell "these keys with
+    // these values").  `kCVPixelBufferIOSurfacePropertiesKey` wants a
+    // dictionary of its own (an empty one asks CoreVideo for an
+    // IOSurface-backed buffer, which is what the display layer wants).
     CVPixelBufferRef pixel_buffer = nullptr;
-    const CVPixelBufferAttributes attrs[] = {
-        {kCVPixelBufferIOSurfacePropertiesKey, nullptr},
-        {kCVPixelBufferOpenGLESCompatibilityKey, kCFBooleanTrue},
-        {kCVPixelBufferCGBitmapContextCompatibilityKey, kCFBooleanTrue},
+    CFTypeRef keys[] = {
+        kCVPixelBufferIOSurfacePropertiesKey,
+        kCVPixelBufferOpenGLESCompatibilityKey,
+        kCVPixelBufferCGBitmapContextCompatibilityKey,
     };
+    CFTypeRef values[] = {
+        CFDictionaryCreate(kCFAllocatorDefault, nullptr, nullptr, 0,
+                           nullptr, nullptr),
+        kCFBooleanTrue,
+        kCFBooleanTrue,
+    };
+    CFDictionaryRef attrs = CFDictionaryCreate(
+        kCFAllocatorDefault, keys, values,
+        static_cast<CFIndex>(sizeof(keys) / sizeof(keys[0])), nullptr, nullptr);
+    CFRelease(values[0]);
+    if (attrs == nullptr) return false;
+
     const CVReturn cv_rc = CVPixelBufferCreate(
         kCFAllocatorDefault, frame.width, frame.height, kBgraPixelFormat,
         attrs, &pixel_buffer);
+    CFRelease(attrs);
     if (cv_rc != kCVReturnSuccess || pixel_buffer == nullptr) {
         NIMRTC_LOG_ERROR("metal renderer: CVPixelBufferCreate failed ("
                          << cv_rc << ")");
@@ -495,7 +528,9 @@ bool MetalRenderer::Impl::present_via_avsamplebuffer(const PresentedFrame& frame
     }
 
     CMSampleBufferRef sample_buffer = nullptr;
-    const CMSampleTiming timing = {
+    // The timing struct is `CMSampleTimingInfo` -- there is no
+    // `CMSampleTiming`.
+    const CMSampleTimingInfo timing = {
         .duration = CMTimeMake(1, 30),
         .presentationTimeStamp = CMTimeMake(
             static_cast<std::int64_t>(frame.capture_ts_us), 1000000),
@@ -513,9 +548,12 @@ bool MetalRenderer::Impl::present_via_avsamplebuffer(const PresentedFrame& frame
     }
 
     // The layer enqueues the sample; it is released by the layer.
-    if ([display_layer_ status] == AVQueuedBufferStatusFull) {
-        // The layer is full: drop the *oldest* sample so the picture
-        // stays live (the same latest-wins policy as the mailbox).
+    //
+    // There is no "the layer is full" status: the honest question is
+    // whether the layer is *ready for more data*.  When it is not, the
+    // queued samples are flushed so the picture stays live (the same
+    // latest-wins policy as the mailbox).
+    if (![display_layer_ isReadyForMoreMediaData]) {
         [display_layer_ flush];
     }
     [display_layer_ enqueueSampleBuffer:sample_buffer];
@@ -751,8 +789,11 @@ plugins::Status MetalRenderer::render(
     // `AVSampleBufferDisplayLayer` (which accepts one directly); a Metal
     // texture is drawn into the layer's drawable.
     if (backend == plugins::GpuBackend::kAppleCFPixelBuffer) {
-        auto* pixel_buffer =
-            static_cast<CVPixelBuffer*>(surface.handle().handle);
+        // The handle carries a `CVPixelBufferRef`, which is a
+        // `CVImageBufferRef` -- a CoreFoundation type, not a
+        // `CVPixelBuffer` class.
+        auto pixel_buffer =
+            static_cast<CVPixelBufferRef>(surface.handle().handle);
         if (pixel_buffer == nullptr) return plugins::kErrInvalidParam;
         if (impl_->display_layer_ == nil) return plugins::kErrUnsupported;
         CMSampleBufferRef sample_buffer = nullptr;
@@ -761,7 +802,7 @@ plugins::Status MetalRenderer::render(
                 kCFAllocatorDefault, pixel_buffer, &format_desc) != noErr) {
             return plugins::kErrHardwareError;
         }
-        const CMSampleTiming timing = {
+        const CMSampleTimingInfo timing = {
             .duration = CMTimeMake(1, 30),
             .presentationTimeStamp = CMTimeMake(
                 static_cast<std::int64_t>(surface.handle().native_pitch_bytes),
@@ -815,7 +856,7 @@ plugins::Status MetalRenderer::render(
         [encoder setFragmentSamplerState:impl_->sampler_ atIndex:0];
     }
     [encoder setFragmentTexture:
-                 static_cast<id<MTLTexture>>(surface.handle().handle)
+                 (__bridge id<MTLTexture>)surface.handle().handle)
                             atIndex:0];
     const float dest_rect[4] = {0.0f, 0.0f, 1.0f, 1.0f};
     [encoder setVertexBytes:dest_rect length:sizeof(dest_rect) atIndex:0];

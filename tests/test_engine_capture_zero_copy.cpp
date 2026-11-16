@@ -200,6 +200,13 @@ public:
 
     // ---- The zero-copy seam ------------------------------------------------
     void set_gpu_frame_callback(np::GpuCaptureFrameCallback cb) noexcept override {
+        // The producer thread *reads* the callback on every iteration, so
+        // it is copied under the lock into a local and the local is
+        // invoked outside the lock.  Assigning the member under the lock
+        // and then copying it out under the same lock is what keeps the
+        // two threads from touching the same `std::function` at once --
+        // a `std::function` copy reads the callable's storage, and a
+        // concurrent assignment would overwrite it.
         std::lock_guard<std::mutex> lock(gpu_cb_mutex_);
         gpu_cb_ = std::move(cb);
     }

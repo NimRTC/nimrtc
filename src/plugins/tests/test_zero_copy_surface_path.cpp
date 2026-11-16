@@ -177,6 +177,10 @@ TEST(GpuBufferZeroCopy, FrameClassificationGpu) {
     auto* pool = new FakeGpuBufferPool(GpuBackend::kAppleCFPixelBuffer);
     GpuBuffer* buf = pool->acquire(1920, 1080, PixelFormat::kBGRA);
     ASSERT_NE(buf, nullptr);
+    // The deleter drops both references: the caller's (ref=2→1) and the
+    // pool's (ref=1→0, which fires the recycle callback and hands the
+    // buffer back to the pool's idle list).  The pool's destructor then
+    // deletes it, so nothing is leaked.
     auto gb = std::shared_ptr<GpuBuffer>(buf,
         [](GpuBuffer* p) {
             if (p) {
@@ -196,6 +200,9 @@ TEST(GpuBufferZeroCopy, FrameClassificationGpu) {
     EXPECT_EQ(f.height(), 1080u);
     EXPECT_EQ(f.format(), PixelFormat::kBGRA);
 
+    // The buffer goes back to the pool's idle list before the pool is
+    // destroyed, so the pool's destructor owns it and frees it.
+    f.buffer.reset();
     delete pool;
 }
 

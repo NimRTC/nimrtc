@@ -167,6 +167,10 @@ TEST(D3D11Renderer, PresentationClockPacesThePresenter) {
         std::chrono::steady_clock::now() - start).count();
     const std::uint64_t budget = static_cast<std::uint64_t>(elapsed_ms) * 20u / 1000u + 4u;
     EXPECT_LE(st.frames_presented, budget);
+    // ... and it must have presented *fewer* than were pushed: the
+    // clock dropped the surplus, which is what the mailbox's
+    // back-pressure is for.
+    EXPECT_LT(st.frames_presented, pushed);
 }
 
 // ---------------------------------------------------------------------------

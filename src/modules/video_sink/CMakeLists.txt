@@ -72,14 +72,25 @@ endif()
 if(APPLE)
     set_source_files_properties(src/metal_renderer.cpp PROPERTIES
         COMPILE_OPTIONS "-x;objective-c++;-fobjc-arc")
+    # The frameworks are named with the *single-string* spelling
+    # ("-framework QuartzCore"), not the two-item list form
+    # ("-framework" "QuartzCore").
+    #
+    # The two-item form breaks down silently: CMake de-duplicates the
+    # link items by name, so the repeated bare `-framework` entry
+    # survives only once and every framework after it loses its prefix
+    # -- the linker then looks for a *library* called "QuartzCore"
+    # ("ld: library 'QuartzCore' not found") instead of the framework.
+    # The single-string form keeps each framework paired with its
+    # prefix, so nothing is de-duplicated away.
     target_link_libraries(nimrtc_video_sink PRIVATE
-        "-framework;Metal"
-        "-framework;QuartzCore"
-        "-framework;AVFoundation"
-        "-framework;CoreMedia"
-        "-framework;CoreVideo"
-        "-framework;Foundation"
-        "-framework;AppKit")
+        "-framework Metal"
+        "-framework QuartzCore"
+        "-framework AVFoundation"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework Foundation"
+        "-framework AppKit")
 endif()
 
 # ----------------------------------------------------------------------------

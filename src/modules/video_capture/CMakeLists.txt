@@ -60,6 +60,11 @@ set(NIMRTC_VIDEO_CAPTURE_SOURCES
     src/platform/portable/portable_cursor_stubs.cpp
     # The portable camera capture layer (remote-desktop plan A9).
     src/camera_capture.cpp
+    # The portable pixel-diff (the "what changed" fallback).  It is the
+    # engine-independent half of the dirty-rect story: a device that
+    # cannot report per-frame dirty rectangles can compute them from
+    # two consecutive frames.
+    src/dirty_rect_diff.cpp
     )
 
 # ---------------------------------------------------------------------------
@@ -199,25 +204,6 @@ endif()
 
 add_library(nimrtc_video_capture STATIC
     ${NIMRTC_VIDEO_CAPTURE_SOURCES}
-
-    src/capture_source_adapter.cpp
-    src/cursor_compositor.cpp
-    src/dirty_rect_diff.cpp
-    )
-
-# Remote-desktop plan A3: the Windows display-capture backend.  The
-# file is compiled on every platform because it carries a portable
-# stub (the class exists everywhere; on a non-Windows host `open()`
-# fails with kErrUnsupported).  Only the *link* libraries are
-# Windows-only: d3d11 (the device and the staging texture) and dxgi
-# (the factory and the duplication object).
-target_sources(nimrtc_video_capture PRIVATE
-    src/platform/dxgi_desktop_dup.cpp
-    src/platform/win_cursor_source.cpp
-    src/platform/wgc_capture.cpp
-    src/platform/x11_capture.cpp
-    src/platform/x11_cursor_source.cpp
-    src/platform/portal_capture.cpp
     )
 
 # -----------------------------------------------------------------------------
@@ -236,9 +222,6 @@ target_sources(nimrtc_video_capture PRIVATE
 #   - CoreGraphics     — the screen-recording permission probe.
 # -----------------------------------------------------------------------------
 if(APPLE)
-    target_sources(nimrtc_video_capture PRIVATE
-        src/platform/screen_capture_kit.mm
-        )
     target_link_libraries(nimrtc_video_capture PRIVATE
         "-framework ScreenCaptureKit"
         "-framework AVFoundation"
@@ -260,13 +243,6 @@ if(APPLE)
         "-lobjc"
         )
     message(STATUS "  ScreenCaptureKit  : enabled (macOS)")
-else()
-    # The portable stub of the same backend, so that a host can name
-    # "sck" in a cross-platform configuration and get a clean
-    # "unsupported" rather than "plugin missing".
-    target_sources(nimrtc_video_capture PRIVATE
-        src/platform/screen_capture_kit_stub.cpp
-        )
 endif()
 
 if(WIN32)

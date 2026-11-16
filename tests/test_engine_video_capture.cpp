@@ -29,7 +29,6 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/plugins/video_capture.hpp>
-#include <nimrtc/video_capture/capture_source_adapter.hpp>
 
 #include <gtest/gtest.h>
 
@@ -122,12 +121,6 @@ public:
     }
     np::IVideoCapture* create(np::CaptureConfig cfg) const override {
         return new StubCaptureDevice(std::move(cfg), calls_);
-    }
-
-    np::IVideoSource* create_source(np::IVideoCapture* device,
-                                    np::VideoSourceConfig cfg) const override {
-        return nimrtc::video_capture::make_capture_source(device,
-                                                           std::move(cfg));
     }
 
 private:

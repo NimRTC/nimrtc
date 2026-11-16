@@ -608,32 +608,25 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   - rd_input_inject/key_map.hpp (the platform-neutral key
     //     layout and its translation into the OS virtual-key numbers)
     //
-    // Remote-desktop plan M1C bump: +10 public headers (188 -> 198) for
-    // the platform capture layer that landed from `main`
-    // (`src/modules/video_capture/`):
-    //   - video_capture/capture_source_adapter.hpp (the adapter that
-    //     turns a platform capture source into the capture seam)
-    //   - video_capture/dirty_rect_diff.hpp (the dirty-rect tracker)
-    //   - video_capture/dxgi_desktop_dup.hpp (the DXGI desktop
-    //     duplication source)
-    //   - video_capture/portal_capture.hpp (the Wayland / xdg-desktop-
-    //     portal source)
-    //   - video_capture/screen_capture_kit.hpp (the macOS
-    //     ScreenCaptureKit source)
-    //   - video_capture/wgc_capture.hpp (the Windows Graphics Capture
-    //     source)
-    //   - video_capture/win_cursor_source.hpp (the Windows cursor
-    //     source)
-    //   - video_capture/x11_capture.hpp (the X11 source)
-    //   - video_capture/x11_cursor_source.hpp (the X11 cursor source)
-    //   - video_capture/cursor_compositor.hpp (the cursor compositor
-    //     that merges the cursor into the captured surface)
+    // M1C bump: +1 public header (189 -> 190) for the M1C platform
+    //   capture layer that landed on `main` and was merged into this
+    //   branch:
+    //     - video_capture/dirty_rect_diff.hpp (the dirty-rectangle
+    //       detector -- the frame-difference core the platform backends
+    //       share)
+    //
+    //   The same merge also brought in
+    //   `core/gpu_device_registry.hpp` (the GPU device registry) and
+    //   dropped `video_capture/capture_source_adapter.hpp` (the
+    //   intermediary adapter this branch does not need -- the engine
+    //   polls `IVideoCapture::pop_frame()` directly), so the net move
+    //   is +1.
     //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 198;
+    constexpr std::size_t kBaselineHeaderCount = 190;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -80,12 +80,6 @@
 // plugin-seam header (it re-exports `nimrtc::video_frame`'s types), so
 // including it here creates no concrete-module dependency.
 #include "nimrtc/plugins/video_codec.hpp"
-// `IVideoSource` / `VideoSourceConfig` are the *source* seam the capture
-// device is presented through.  A capture plug-in does not have to know
-// about them -- but the *factory* does, because the factory is what
-// hands the engine a source it can drive (see
-// `IVideoCaptureFactory::create_source`).
-#include "nimrtc/plugins/video_source.hpp"
 // `GpuHandle` is the zero-copy currency (plan B10).  It lives in the
 // video_frame module, which `nimrtc::plugins` already re-exports
 // (see video_codec.hpp) — but video_capture.hpp must not depend on
@@ -548,6 +542,18 @@ struct NIMRTC_API_STABLE CaptureFrame {
      *  implicit layout). */
     std::uint32_t gpu_pitch_bytes = 0;
 
+    /** The GPU *device* that owns `gpu_handle`.
+     *
+     *  A surface is meaningless without the device it lives on: an
+     *  `ID3D11Texture2D*` may only be used with the `ID3D11Device` that
+     *  created it, and an encoder session is opened against one
+     *  device.  The producer and the consumer must therefore agree on
+     *  it, so it travels with the frame.
+     *
+     *  Null when the backend does not need it (CUDA arrays are
+     *  self-describing). */
+    void* gpu_device = nullptr;
+
     // ---- The zero-copy surface, as one handle -----------------------------
     //
     // The GPU half of a captured frame.  When it is set the frame's
@@ -575,6 +581,7 @@ struct NIMRTC_API_STABLE CaptureFrame {
         h.backend             = gpu_backend;
         h.handle              = gpu_handle;
         h.native_pitch_bytes  = gpu_pitch_bytes;
+        h.device              = gpu_device;
         return h;
     }
 
@@ -583,6 +590,7 @@ struct NIMRTC_API_STABLE CaptureFrame {
         gpu_backend     = h.backend;
         gpu_handle      = h.handle;
         gpu_pitch_bytes = h.native_pitch_bytes;
+        gpu_device      = h.device;
     }
 };
 
@@ -825,35 +833,6 @@ public:
      *  kConstructed state; the caller calls `open()`. */
     [[nodiscard]] virtual IVideoCapture* create(CaptureConfig cfg) const = 0;
 
-    /**
-     * @brief Create the *source* that presents @p device as a frame stream.
-     *
-     * The engine's video path speaks `IVideoSource` — a plain stream of
-     * `VideoSourceFrame`s — while a capture device is a *device*: it
-     * enumerates, negotiates a format and fills a bounded queue.  The
-     * piece that bridges the two is a *concrete* adapter, and it lives
-     * in the capture module.
-     *
-     * The engine must not name that adapter: it reaches it through this
-     * seam instead.  That keeps the engine free of any concrete
-     * module include (ADR-025's Layering Invariant 4) while still
-     * letting the capture module own the conversion from the device's
-     * layout into the source's layout.
-     *
-     * The returned source does **not** own @p device: the caller keeps
-     * the device alive for at least as long as the source is used, so
-     * that one device can back more than one stream.
-     *
-     * @param device The device to present.  Must not be null.
-     * @param cfg    The source configuration.  `cfg.format` is the
-     *               *output* pixel format; the adapter fills the
-     *               dimensions in from the device's negotiated format.
-     * @return A new source, or null when one could not be created.  The
-     *         caller owns it.
-     */
-    [[nodiscard]] virtual IVideoSource* create_source(
-        IVideoCapture* device,
-        VideoSourceConfig cfg) const = 0;
 };
 
 } // namespace nimrtc::plugins

@@ -226,7 +226,7 @@ struct NIMRTC_API_STABLE WindowsCaptureOptions {
  * The alias is here because this module's public header is what a host
  * that uses the Windows backends directly already includes.
  */
-using GpuCaptureFrame = plugins::GpuCaptureFrame;
+using NIMRTC_API_STABLE GpuCaptureFrame = plugins::GpuCaptureFrame;
 
 /**
  * @brief Callback invoked with a GPU frame.
@@ -235,7 +235,7 @@ using GpuCaptureFrame = plugins::GpuCaptureFrame;
  * implementation is expected to hand the frame straight to the encoder
  * and return.  The reference is valid for the duration of the call.
  */
-using GpuCaptureFrameCallback = plugins::GpuCaptureFrameCallback;
+using NIMRTC_API_STABLE GpuCaptureFrameCallback = plugins::GpuCaptureFrameCallback;
 
 /**
  * @brief Callback invoked when the capture device fails.

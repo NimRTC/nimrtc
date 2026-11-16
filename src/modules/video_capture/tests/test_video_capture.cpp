@@ -252,10 +252,10 @@ TEST(CaptureQueue, CarriesTheGpuSurfaceThroughTheQueue) {
     CaptureFrame f{};
     ASSERT_TRUE(q.pop(f));
     EXPECT_TRUE(f.has_gpu_handle);
-    EXPECT_EQ(f.gpu_surface.backend,
+    EXPECT_EQ(f.gpu_surface().backend,
               nimrtc::video_frame::GpuBackend::kWindowsD3D11Texture);
-    EXPECT_EQ(f.gpu_surface.handle, surface.handle);
-    EXPECT_EQ(f.gpu_surface.device, surface.device);
+    EXPECT_EQ(f.gpu_surface().handle, surface.handle);
+    EXPECT_EQ(f.gpu_surface().device, surface.device);
     // A GPU frame has no CPU pixels.
     EXPECT_EQ(f.pixels, nullptr);
     EXPECT_EQ(f.size, 0u);
@@ -274,7 +274,7 @@ TEST(CaptureQueue, PeekCarriesTheGpuSurfaceToo) {
     CaptureFrame peeked{};
     ASSERT_TRUE(q.peek(peeked));
     EXPECT_TRUE(peeked.has_gpu_handle);
-    EXPECT_EQ(peeked.gpu_surface.handle, surface.handle);
+    EXPECT_EQ(peeked.gpu_surface().handle, surface.handle);
 }
 
 TEST(CaptureQueue, RetiresTheSurfaceWhenTheNextFrameIsPopped) {
@@ -366,8 +366,8 @@ TEST(CaptureQueue, ACpuFrameCarriesNoSurface) {
     CaptureFrame f{};
     ASSERT_TRUE(q.pop(f));
     EXPECT_FALSE(f.has_gpu_handle);
-    EXPECT_EQ(f.gpu_surface.backend, nimrtc::video_frame::GpuBackend::kNone);
-    EXPECT_EQ(f.gpu_surface.handle, nullptr);
+    EXPECT_EQ(f.gpu_surface().backend, nimrtc::video_frame::GpuBackend::kNone);
+    EXPECT_EQ(f.gpu_surface().handle, nullptr);
 }
 
 // ---------------------------------------------------------------------------

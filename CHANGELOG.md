@@ -7,6 +7,68 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The merge of the M1C platform capture layer onto the remote-desktop
+  branch.**  `origin/main` carried the M1C capture layer (Windows
+  Graphics Capture / DXGI Desktop Duplication, macOS ScreenCaptureKit,
+  Linux X11 + the XDG-desktop-portal PipeWire path) while this branch
+  carried the remote-desktop plan's M1–M4 work.  The two sides
+  implemented the *same* seams twice, so the merge had to pick one
+  implementation of each and reconcile the rest.
+
+  - **The capture seam keeps the M1C layer; the cursor layer keeps the
+    remote-desktop one.**  The M1C platform backends
+    (`windows_capture.hpp`, `unix_capture.hpp`) and the portable cursor
+    layer (`cursor_compositor.hpp` / `cursor_source.hpp`) are
+    complementary, not competing, so both stay.  The *older* duplicate
+    platform backends (`dxgi_desktop_dup.*`, `wgc_capture.*`,
+    `portal_capture.*`, `screen_capture_kit.*`, `x11_capture.*`,
+    `win_cursor_source.*`, `x11_cursor_source.*`) and the *duplicate*
+    cursor classes (`AlphaCursorCompositor`, `CursorState`) were dropped
+    — the M1C layer already provides them.
+
+  - **There is no capture → frame-stream adapter.**  The M1C layer
+    shipped a `CaptureSourceAdapter` between the capture device and the
+    frame stream; this branch's engine pump polls
+    `IVideoCapture::pop_frame()` and translates the frame inline, so the
+    adapter is redundant and was removed (`capture_source_adapter.hpp` /
+    `.cpp` and its test).  `IVideoCaptureFactory::create_source()` went
+    with it — the factory only creates *devices*.
+
+  - **The zero-copy decision is now explicit.**  `VideoSourceFrame` grew
+    `capture_surface_contract`: a capture device that negotiated a
+    zero-copy surface says so, and the engine then hands the surface to
+    the encoder **unconditionally** (there is no CPU copy to fall back
+    to).  A frame that merely carries a GPU handle — a host's own
+    surface — stays *opt-in*, governed by
+    `EngineConfig::video_zero_copy`, exactly as before.  Before this
+    distinction existed the two cases were indistinguishable, so a host
+    that turned the flag off still got the zero-copy path.
+
+  - **The GPU device token travels with the frame.**
+    `CaptureFrame` / `VideoSourceFrame` carry the device that owns the
+    surface, and `GpuHandle::device` is filled from it.  A surface is
+    meaningless without its device: NVENC registers the texture against
+    the device the session was opened with and refuses a texture from
+    another one.
+
+  - **A capture device that reports an error is closed before it is
+    reopened.**  `open()` on an already-open device is a no-op for most
+    backends, so the recovery used to be silently ineffective; the pump
+    now tears the device down and builds it up again.
+
+  - **The synthetic capture device advertises its dirty rectangles.**
+    The negotiated format said `has_dirty_rects = false` while the
+    frames carried the rectangles, so a consumer that trusted the
+    format would ignore metadata that was present and correct.
+
+  - **The public-header baseline moved from 189 to 190.**  The merge
+    added `video_capture/dirty_rect_diff.hpp` and
+    `core/gpu_device_registry.hpp` and removed
+    `video_capture/capture_source_adapter.hpp` — a net `+1`.
+
+
 ### Added
 
 - **The capture → encoder zero-copy seam (v1.3, remote-desktop plan

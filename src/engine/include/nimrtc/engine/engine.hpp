@@ -498,8 +498,9 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  The `IVideoCapture` seam is deliberately *separate* from
      *  `IVideoSource`: capture is a *device* (enumeration, format
      *  negotiation, region selection, dirty-rect metadata), while the
-     *  source is a *frame stream*.  A capture plug-in is turned into a
-     *  source by an adapter, not by the engine.
+     *  source is a *frame stream*.  The engine's capture pump turns a
+     *  capture frame into a source frame inline, so there is no
+     *  intermediary adapter object between the device and the encoder.
      *
      *  @see `plugins/video_capture.hpp`. */
     std::string video_capture_name;
@@ -657,14 +658,14 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  CPU source, simply keeps the old path.
      *
      *  @note This flag does **not** gate the *capture seam's* zero-copy
-     *        contract (`VideoSourceFrame::gpu_surface`, remote-desktop
-     *        plan B10).  A capture device that negotiated a zero-copy
-     *        surface is telling the engine that the picture lives in GPU
-     *        memory and that there is no CPU copy to fall back to, so the
-     *        engine hands the surface to the encoder either way.
+     *        contract (`plugins::VideoSourceFrame::capture_surface_contract`,
+     *        remote-desktop plan B10).  A capture device that negotiated a
+     *        zero-copy surface is telling the engine that the picture lives
+     *        in GPU memory and that there is no CPU copy to fall back to, so
+     *        the engine hands the surface to the encoder either way.
      *
      *  @see `plugins::VideoSourceFrame::gpu_handle`
-     *  @see `plugins::VideoSourceFrame::gpu_surface`
+     *  @see `plugins::VideoSourceFrame::capture_surface_contract`
      *  @see `plugins::IVideoCodec::encode_zero_copy` */
     bool video_zero_copy = false;
 
@@ -745,56 +746,6 @@ struct NIMRTC_API_STABLE EngineConfig {
     // A request that carries the codec's parameter sets (a resolution
     // change) bypasses the limiter: deferring it breaks the decode.
     plugins::VideoKeyframeLimiterConfig video_keyframe_limiter{};
-
-    // ---- Video capture device (remote-desktop plan A10) -------------------
-    //
-    // The capture seam is *not* the source seam.  A source produces
-    // frames; a capture produces frames *from a device* — it enumerates
-    // devices, negotiates a format, selects a region and reports the
-    // changed region(s) of every frame.
-    //
-    // When `video_capture_name` is set, the engine:
-    //
-    //   1. resolves the `IVideoCaptureFactory` under that id through
-    //      `core::PluginRegistry`,
-    //   2. creates the device with `video_capture_config`,
-    //   3. starts it, and
-    //   4. **pumps** it: on every `tick()` it pops the next frame from
-    //      the device's bounded queue and drives the encoder with it.
-    //
-    // That last step is the point of A10: the host does *not* have to
-    // pull frames and call `send_video()` — the engine does it, on the
-    // tick thread, so the codec and the sender are only ever touched
-    // from one thread.
-    //
-    // `send_video()` remains the explicit manual path and is unchanged.
-    // Do **not** call it from another thread while a capture pump is
-    // running: `IVideoCodec` and `IVideoSender` are not thread-safe.
-    //
-    // Empty (the default) = no capture device; the engine behaves
-    // exactly as before.
-    // The device's *name* is declared with the other
-    // plugin-name fields above (`video_capture_name`);
-    // this block carries the rest of the capture
-    // configuration.
-
-
-    /** The capture request handed to the device's factory.
-     *
-     *  The device is the authority on the geometry it negotiates: read
-     *  it back from `Engine::video_capture()->config()` after `open()`
-     *  rather than assuming the request was granted.
-     */
-    plugins::CaptureConfig video_capture_config;
-
-    /** Whether the engine pumps the capture device on its tick thread.
-     *
-     *  Default = true when `video_capture_name` is set.  Set it to
-     *  false to open the device and let the host drive it by hand
-     *  (through `Engine::video_capture()`), without the engine
-     *  encoding anything.
-     */
-    bool video_capture_auto_pump = true;
 
     // ---- BWE plugin selection (ADR-001: resolved via PluginRegistry) --------
     //
@@ -3664,16 +3615,16 @@ public:
         // reached the encoder as a native GPU surface (and therefore
         // never crossed the PCI bus into host memory).
         //
-        // `video_capture_bytes_copied` is the one a host reads first: on a
+        // `video_capture_device_bytes_copied` is the one a host reads first: on a
         // working hardware path it stays at zero.
-        std::uint64_t video_capture_frames_captured = 0;
-        std::uint64_t video_capture_frames_dropped  = 0;
-        std::uint64_t video_capture_device_errors   = 0;
+        std::uint64_t video_capture_device_frames_captured = 0;
+        std::uint64_t video_capture_device_frames_dropped  = 0;
+        std::uint64_t video_capture_device_error_count   = 0;
         std::uint64_t video_capture_device_restarts = 0;
-        std::uint64_t video_capture_format_changes  = 0;
-        std::uint64_t video_capture_bytes_copied    = 0;
-        std::uint64_t video_capture_frames_zero_copy = 0;
-        std::uint64_t video_capture_frames_cpu_staged = 0;
+        std::uint64_t video_capture_device_format_changes  = 0;
+        std::uint64_t video_capture_device_bytes_copied    = 0;
+        std::uint64_t video_capture_device_frames_zero_copy = 0;
+        std::uint64_t video_capture_device_frames_cpu_staged = 0;
 
         // ---- The capture → engine pump (remote-desktop plan A10) --------
         //
@@ -3702,9 +3653,9 @@ public:
         //     surface.
         //
         // The acceptance criterion of B10 is `video_capture_gpu_frames`
-        // moving **while** `video_capture_bytes_copied` stays at zero:
-        // the picture went from the compositor to the encoder without
-        // entering host memory.
+        // moving **while** `video_capture_device_bytes_copied` stays at
+        // zero: the picture went from the compositor to the encoder
+        // without entering host memory.
         std::uint64_t video_capture_gpu_frames  = 0;
         std::uint64_t video_capture_gpu_errors  = 0;
         bool          video_capture_gpu_wired   = false;
@@ -4005,63 +3956,6 @@ private:
     // registered factory; null otherwise (the normal case — the encoder
     // keeps the bitrate it was configured with).
     std::unique_ptr<plugins::IVideoBitrateController> video_bitrate_controller_;
-
-    // The capture -> frame-stream adapter, held through the *source*
-    // seam (`plugins::IVideoSource`).  The adapter does not own the
-    // device — the engine does — and the engine drives it with
-    // `produce_one()` from its tick thread.
-    //
-    // Null when the capture module is not built into this
-    // configuration, or when no capture device is configured.
-    std::unique_ptr<plugins::IVideoSource>     video_capture_source_;
-
-    // The frame pump's own state.  Kept here rather than in the
-    // capture module so the engine's tick loop owns the cadence.
-    struct CapturePumpState {
-        /** The format the device negotiated at open() time.  A change
-         *  means the device renegotiated (a resolution change, a
-         *  format switch) and is counted in the stats. */
-        std::uint32_t width  = 0;
-        std::uint32_t height = 0;
-        std::string   tag;
-
-        /** The negotiated frame rate.  It sets the RTP media-clock
-         *  step: one frame interval per delivered frame. */
-        std::uint32_t fps = 30;
-
-        /** The next RTP media-clock value to stamp on a frame. */
-        std::uint32_t rtp_timestamp = 0;
-
-        /** True once the device has been opened successfully. */
-        bool running = false;
-
-        /** How many frames the pump has handed to the encoder. */
-        std::uint64_t pumped = 0;
-
-        /** How many times the device had to be reopened after an
-         *  error (the "device lost" recovery path). */
-        std::uint64_t restarts = 0;
-
-        /** The device's error counter as the pump last saw it.  The
-         *  pump compares against it to notice a *new* device error —
-         *  the counter only ever grows, so a plain comparison would
-         *  fire on every tick. */
-        std::uint64_t seen_device_errors = 0;
-
-        /** The device's counter of frames it captured, as the pump last
-         *  saw it.  Same reason as `seen_device_errors`: the counters
-         *  are cumulative, so the pump tracks the baseline it has
-         *  already accounted for. */
-        std::uint64_t seen_frames_captured = 0;
-
-        /** The device's counter of dropped frames, as the pump last saw
-         *  it. */
-        std::uint64_t seen_frames_dropped = 0;
-
-        /** The device's counter of bytes copied CPU↔GPU, as the pump
-         *  last saw it. */
-        std::uint64_t seen_bytes_copied = 0;
-    } capture_pump_;
 
     // ---- BWE / Scheduler plugins (ADR-001: resolved via PluginRegistry) ----
     // Created in init_bwe_scheduler() (called from pre_open/open).
@@ -4587,6 +4481,38 @@ private:
     void wire_capture_gpu_callback() noexcept;
 
     /**
+     * @brief Reopen the capture device after it reported an error.
+     *
+     * A device that is *lost* — a display that was unplugged, a portal
+     * that was revoked, a compositor that restarted — fails on the
+     * producer side, so the queue simply stays empty and the pump
+     * looks like a device that never delivers anything.  The device's
+     * own error counter is what tells the two apart.
+     *
+     * The device is reopened **once**: a transient loss does not end
+     * the session, and a device that cannot be reopened is reported
+     * through the error callback.
+     *
+     * A no-op when there is no capture device, or when the device has
+     * not reported a new error.
+     */
+    void recover_capture_device() noexcept;
+
+    /**
+     * @brief Publish the capture device's own counters (plan A11).
+     *
+     * The device owns the detailed bookkeeping (`plugins::CaptureStats`);
+     * the engine republishes the numbers a host watching a live session
+     * needs — how many frames the device captured, how many it dropped,
+     * how many bytes it copied — plus the *delta* of a mid-session
+     * renegotiation.
+     *
+     * The counters are cumulative, so the pump keeps the baseline it has
+     * already accounted for and publishes the difference.
+     */
+    void publish_capture_device_counters() noexcept;
+
+    /**
      * @brief Discard the capture frames that predate the zero-copy seam.
      *
      * The capture device is opened before the codec exists — the codec
@@ -4686,25 +4612,11 @@ private:
 
     // ---- Video capture pump (remote-desktop plan A10) --------------------
     //
-    // `init_video_capture()` resolves the capture device from
-    // `EngineConfig::video_capture_name`, wraps it in the shared
-    // capture -> frame-stream adapter and opens it.  It is called from
-    // `init_video_plugins()`, after the codec and the sender exist,
-    // because the pump drives them.
-    //
     // `pump_video_capture()` pops one frame from the device's bounded
     // queue and encodes it.  It is called from `tick()` — the engine
     // thread — so the codec and the sender are only ever touched from
-    // one thread.
-    //
-    // `pump_deliver_frame()` is the adapter's callback: it stamps the
-    // RTP media clock and hands the frame to `send_video()`.
-    //
-    // `shutdown_video_capture()` closes the device.  Idempotent.
-    void init_video_capture() noexcept;
-    void shutdown_video_capture() noexcept;
-    void pump_video_capture() noexcept;
-    void pump_deliver_frame(const plugins::VideoSourceFrame& frame) noexcept;
+    // one thread.  Its zero-copy counterpart is
+    // `pump_video_capture_gpu()`; both are declared above.
 
     // ---- Session model helpers (v1.2.0, session capability plan) --------
     //

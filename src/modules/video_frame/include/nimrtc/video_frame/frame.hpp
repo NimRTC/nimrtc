@@ -111,6 +111,10 @@ enum class NIMRTC_API_STABLE ColorRange : std::uint8_t {
     /** Full range (Y 0..255, C 0..255) — what a desktop compositor
      *  produces. */
     kFull        = 2,
+
+    // The spelling the plugin seam used before it settled on the
+    // module's.  Same value, so either spelling compiles.
+    kUnknown = kUnspecified,
 };
 
 /**
@@ -132,6 +136,13 @@ enum class NIMRTC_API_STABLE ColorMatrix : std::uint8_t {
     kBT709       = 2,
     /** BT.2020 — very wide gamut; HDR and UHD production. */
     kBT2020      = 3,
+
+    // The spellings the plugin seam used before it settled on the
+    // module's.  Same values, so either spelling compiles.
+    kUnknown = kUnspecified,
+    kBt601   = kBT601,
+    kBt709   = kBT709,
+    kBt2020  = kBT2020,
 };
 
 /** Human-readable colour-range name (for logs and SDP). */
@@ -168,6 +179,11 @@ struct NIMRTC_API_STABLE ColorDescription {
         return range != ColorRange::kUnspecified ||
                matrix != ColorMatrix::kUnspecified;
     }
+
+    /** The same question as `is_known()`, under the spelling the plugin
+     *  seam uses.  Both names are the same predicate, so a call written
+     *  with one can be read with the other. */
+    [[nodiscard]] bool known() const noexcept { return is_known(); }
 
     /** True iff the two descriptions agree on everything they state. */
     [[nodiscard]] bool agrees_with(const ColorDescription& other) const noexcept {

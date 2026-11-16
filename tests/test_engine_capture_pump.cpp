@@ -429,7 +429,7 @@ TEST(EngineCapturePump, ProducesStreamWithoutSendVideo) {
     const auto stats = engine.stats();
     EXPECT_GE(stats.video_capture_pumped_frames, 3u);
     EXPECT_EQ(stats.video_capture_pump_errors, 0u);
-    EXPECT_GT(stats.video_capture_frames_captured, 0u);
+    EXPECT_GT(stats.video_capture_device_frames_captured, 0u);
     EXPECT_EQ(stats.video_codec_backend, "thread_test");
     EXPECT_FALSE(stats.video_codec_hardware_accelerated);
     EXPECT_GE(stats.video_codec_frames_staged, 3u);

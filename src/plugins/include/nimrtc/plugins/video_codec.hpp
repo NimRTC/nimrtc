@@ -211,6 +211,26 @@ enum class NIMRTC_API_STABLE VideoCodecBackendPreference : std::uint8_t {
 };
 
 /**
+ * @brief The same question as `VideoCodecBackendPreference`, in the
+ *        codec module's own vocabulary.
+ *
+ * The two enums answer the identical question — "which class of
+ * encoder may be picked?" — and they carry the identical values, so
+ * one converts into the other without a table.  The seam keeps both
+ * spellings because the *engine* parses the host's configuration into
+ * the short one while the *codec module* speaks the long one.
+ */
+constexpr NIMRTC_API_STABLE VideoCodecBackendPreference
+to_backend_preference(CodecBackend policy) noexcept {
+    switch (policy) {
+        case CodecBackend::kHardware: return VideoCodecBackendPreference::kHardware;
+        case CodecBackend::kSoftware: return VideoCodecBackendPreference::kSoftware;
+        case CodecBackend::kAuto:     break;
+    }
+    return VideoCodecBackendPreference::kAuto;
+}
+
+/**
  * @brief Parse a backend preference from its configuration string.
  *
  * Accepts "auto" (the default), "hardware" and "software", case
@@ -305,21 +325,56 @@ inline NIMRTC_API_STABLE std::string_view content_hint_sdp_value(
 // ---------------------------------------------------------------------------
 // Colour description (remote-desktop plan C5)
 // ---------------------------------------------------------------------------
-//
-// The seam has **one** vocabulary for the colour description, and it is
-// the `VideoColor*` one below (`VideoColorRange`, `VideoColorMatrix`,
-// `VideoColorDescription`): it is the form that carries the *plumbing*
-// the pipeline needs — `known()` ("did anybody say?") and
-// `agrees_with()` ("do the two ends agree?").
-//
-// The shorter spellings (`ColorRange`, `ColorMatrix`,
-// `ColorDescription`) are kept as aliases *after* the definitions, so a
-// plug-in that prefers them still compiles; they are the same types, not
-// a second set.
 
+/** The range of the luma and chroma values (ITU-T H.273 "video_full_range"
+ *  / "video_range").
+ *
+ *  This is not a cosmetic detail: getting it wrong produces a picture
+ *  that looks washed out or crushed, and the usual reaction is "the
+ *  codec is broken".  A desktop compositor delivers **full range**
+ *  (the whole 0..255 code range carries signal); a camera in the
+ *  default BT.601 studio setup delivers **limited range** (16..235).
+ *  Conflating the two shifts the picture by a visible amount. */
+// The seam's colour vocabulary is the `video_frame` module's: the frame is
+// what carries the description, so the module is where it is defined, and
+// the seam re-exports it.
+//
+// The `VideoColor*` spellings are the seam's own (they predate the module
+// type) and are kept as aliases, so a plug-in written against either
+// spelling compiles — and, more importantly, the two spellings are the
+// *same* type, so a value written with one can be read with the other.
+using NIMRTC_API_STABLE VideoColorRange  = video_frame::ColorRange;
+using NIMRTC_API_STABLE VideoColorMatrix = video_frame::ColorMatrix;
+using NIMRTC_API_STABLE VideoColorDescription = video_frame::ColorDescription;
 
-/** Video codec configuration (passed at open() time). Mirrors the
- *  concrete module's `EncoderConfig` / `DecoderConfig`. */
+// ---- The shorter spellings (the same types, not a second set) -------------
+//
+// `plugins::ColorRange` and friends are what a plug-in that was written
+// against the shorter vocabulary expects; they are aliases of the
+// `VideoColor*` types above, so the two spellings cannot drift.
+
+using NIMRTC_API_STABLE ColorRange  = VideoColorRange;
+using NIMRTC_API_STABLE ColorMatrix = VideoColorMatrix;
+using NIMRTC_API_STABLE ColorDescription = VideoColorDescription;
+
+/** Human-readable colour-range name (for logs and SDP). */
+inline NIMRTC_API_STABLE std::string_view color_range_name(
+        ColorRange r) noexcept {
+    return video_frame::color_range_name(r);
+}
+
+/** Human-readable colour-matrix name (for logs and SDP). */
+inline NIMRTC_API_STABLE std::string_view color_matrix_name(
+        ColorMatrix m) noexcept {
+    return video_frame::color_matrix_name(m);
+}
+
+/** Video codec configuration (passed at open() time).
+ *
+ *  The open-time *negotiation*: geometry, codec family, payload type,
+ *  and the handful of policies the codec module needs while it builds
+ *  the backend.  Everything that changes while the session runs lives
+ *  in `VideoEncoderParams` instead. */
 struct NIMRTC_API_STABLE VideoCodecConfig {
     /** Target width in pixels. */
     std::uint32_t width = 0;
@@ -348,171 +403,71 @@ struct NIMRTC_API_STABLE VideoCodecConfig {
     /** Human-readable codec name (e.g. "h264"). */
     std::string_view name;
 
-    /**
-     * @brief Which class of backend to use (remote-desktop plan B2).
+    // ---- Backend selection (remote-desktop plan B2) ------------------------
+    //
+    // Two spellings of the same question, kept in step by the engine:
+    // `backend_preference` is the codec seam's own vocabulary, and
+    // `backend_policy` is the one the engine's configuration parses
+    // into.  A plug-in written against either spelling compiles, and
+    // because both are plain enums the engine copies one into the
+    // other when it fills the config.
+
+    /** Which class of backend to use (remote-desktop plan B2).
      *
      * The engine fills this from `EngineConfig::video_codec_backend` and
      * the module's backend selector honours it.  `kAuto` (the default)
      * is "hardware first, software as the fallback"; `kHardware` and
      * `kSoftware` restrict the selection to one class and *fail* rather
-     * than fall back.
-     */
+     * than fall back. */
     VideoCodecBackendPreference backend_preference =
         VideoCodecBackendPreference::kAuto;
 
-    /**
-     * @brief The GPU device the encoder should create its session on.
-     *
-     * ## Why this is in the config and not discovered later
-     *
-     * A hardware encoder registers the input surface with the driver's
-     * encode session, and the driver accepts the registration **only
-     * if the surface was created on the same device the session was
-     * opened with**.  On Windows this is not a policy choice — a
-     * texture from a different `ID3D11Device` (even on the same
-     * physical adapter) is refused with
-     * `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9).
-     *
-     * So the encoder has to be told *which* device to use, and the
-     * answer comes from the capture device that produces the frames.
-     * The engine fills this in from the capture device's
-     * `gpu_context()` before the codec is opened.
-     *
-     * Left empty (the default), the encoder creates its **own** device —
-     * which is correct for a codec that only ever sees CPU pixels, and
-     * wrong for one that is handed foreign surfaces.  A host that feeds
-     * its own GPU frames sets this explicitly.
-     */
-    GpuContext gpu_context;
-
-    // ---- Remote-desktop additions (plan B2 / B7 / C5) --------------------
-    //
-    // These ride along with the open-time configuration so the codec
-    // module can honour them while it builds the backend: the backend
-    // *selection* needs the policy (B2), and the encoder's tuning needs
-    // the content hint (B7) and the colour description (C5).
-
     /** Which class of encoder the host insists on (B2).
      *
-     *  The same question as `backend_preference` above, spelled with
-     *  the codec module's own vocabulary.  The two are kept in step by
-     *  the engine when it fills the config; the module reads whichever
-     *  it knows. */
+     * The same question as `backend_preference` above, spelled with
+     * the codec module's own vocabulary. */
     CodecBackend backend_policy = CodecBackend::kAuto;
+
+    // ---- The GPU device the encoder should create its session on (B2) -----
+    //
+    // A hardware encoder registers the input surface with the driver's
+    // encode session, and the driver accepts the registration **only
+    // if the surface was created on the same device the session was
+    // opened with**.  On Windows this is not a policy choice - a
+    // texture from a different `ID3D11Device` (even on the same
+    // physical adapter) is refused with
+    // `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9).
+    //
+    // So the encoder has to be told *which* device to use, and the
+    // answer comes from the capture device that produces the frames.
+    // The engine fills this in from the capture device's
+    // `gpu_context()` before the codec is opened.
+    //
+    // Left empty (the default), the encoder creates its **own** device -
+    // which is correct for a codec that only ever sees CPU pixels, and
+    // wrong for one that is handed foreign surfaces.  A host that feeds
+    // its own GPU frames sets this explicitly.
+    GpuContext gpu_context;
+
+    // ---- The picture the encoder is looking at (B7 / C5) -------------------
+    //
+    // These ride along with the open-time configuration so the codec
+    // module can honour them while it builds the backend: the encoder's
+    // tuning needs the content hint (B7) and the colour description (C5).
 
     /** What kind of picture the encoder is looking at (B7).
      *
-     *  The same question as the content hint in `VideoEncoderParams`
-     *  above — the open-time value is what the backend is *built*
-     *  for, the live one is what it is *tuned* for. */
+     * The same question as the content hint in `VideoEncoderParams`
+     * below - the open-time value is what the backend is *built* for,
+     * the live one is what it is *tuned* for. */
     ContentHint content_hint = ContentHint::kUnspecified;
 
     /** The luma/chroma range of the picture (C5). */
     ColorRange color_range = ColorRange::kUnspecified;
 
-    /** The YUV↔RGB matrix of the picture (C5). */
+    /** The YUV/RGB matrix of the picture (C5). */
     ColorMatrix color_matrix = ColorMatrix::kUnspecified;
 };
-
-// ---------------------------------------------------------------------------
-// Colour description (remote-desktop plan C5)
-// ---------------------------------------------------------------------------
-
-/** The range of the luma and chroma values (ITU-T H.273 "video_full_range"
- *  / "video_range").
- *
- *  This is not a cosmetic detail: getting it wrong produces a picture
- *  that looks washed out or crushed, and the usual reaction is "the
- *  codec is broken".  A desktop compositor delivers **full range**
- *  (the whole 0..255 code range carries signal); a camera in the
- *  default BT.601 studio setup delivers **limited range** (16..235).
- *  Conflating the two shifts the picture by a visible amount. */
-enum class NIMRTC_API_STABLE VideoColorRange : std::uint8_t {
-    kUnknown = 0,   ///< not stated — the consumer picks the default
-    kLimited = 1,   ///< 16..235 luma, 16..240 chroma (studio / camera)
-    kFull    = 2,   ///< 0..255 luma and chroma (desktop / screen content)
-};
-
-/** The matrix that maps RGB to YUV (ITU-T H.273 matrix_coefficients). */
-enum class NIMRTC_API_STABLE VideoColorMatrix : std::uint8_t {
-    kUnknown = 0,
-    kBt601   = 1,   ///< BT.601 — the classic camera matrix
-    kBt709   = 2,   ///< BT.709 — HD / screen content
-    kBt2020  = 3,   ///< BT.2020 non-constant luminance — UHD
-};
-
-/** The colour description of a video stream.
- *
- *  The description travels with the picture from the capture device, to
- *  the encoder, to the wire, and to the renderer.  The point is that
- *  the **encoder and the renderer agree**: if the encoder codes a
- *  full-range picture and the renderer interprets it as limited, the
- *  contrast is wrong in a way that is very hard to diagnose from the
- *  symptoms.
- *
- *  `kUnknown` is the honest default and means "nobody said". */
-struct NIMRTC_API_STABLE VideoColorDescription {
-    /** The luma / chroma range. */
-    VideoColorRange range = VideoColorRange::kUnknown;
-
-    /** The RGB↔YUV matrix. */
-    VideoColorMatrix matrix = VideoColorMatrix::kUnknown;
-
-    /** True iff anything was stated at all. */
-    [[nodiscard]] bool known() const noexcept {
-        return range != VideoColorRange::kUnknown ||
-               matrix != VideoColorMatrix::kUnknown;
-    }
-
-    /** True iff the two descriptions agree on everything that was
-     *  stated on both sides.  Two `kUnknown` halves compare equal. */
-    [[nodiscard]] bool agrees_with(const VideoColorDescription& other) const noexcept {
-        if (range != VideoColorRange::kUnknown &&
-            other.range != VideoColorRange::kUnknown &&
-            range != other.range) {
-            return false;
-        }
-        if (matrix != VideoColorMatrix::kUnknown &&
-            other.matrix != VideoColorMatrix::kUnknown &&
-            matrix != other.matrix) {
-            return false;
-        }
-        return true;
-    }
-};
-
-// ---- The shorter spellings (the same types, not a second set) -------------
-//
-// `plugins::ColorRange` and friends are what a plug-in that was written
-// against the shorter vocabulary expects; they are aliases of the
-// `VideoColor*` types above, so the two spellings cannot drift.
-
-using NIMRTC_API_STABLE ColorRange  = VideoColorRange;
-using NIMRTC_API_STABLE ColorMatrix = VideoColorMatrix;
-using NIMRTC_API_STABLE ColorDescription = VideoColorDescription;
-
-/** Human-readable colour-range name (for logs and SDP). */
-inline NIMRTC_API_STABLE std::string_view color_range_name(
-        ColorRange r) noexcept {
-    switch (r) {
-        case ColorRange::kLimited: return "limited";
-        case ColorRange::kFull:    return "full";
-        case ColorRange::kUnknown: break;
-    }
-    return "";
-}
-
-/** Human-readable colour-matrix name (for logs and SDP). */
-inline NIMRTC_API_STABLE std::string_view color_matrix_name(
-        ColorMatrix m) noexcept {
-    switch (m) {
-        case ColorMatrix::kBt601:  return "bt601";
-        case ColorMatrix::kBt709:  return "bt709";
-        case ColorMatrix::kBt2020: return "bt2020";
-        case ColorMatrix::kUnknown: break;
-    }
-    return "";
-}
 
 // ---------------------------------------------------------------------------
 // Encoder parameter set (remote-desktop plan B12)
@@ -1256,37 +1211,6 @@ public:
      *  Used by PLI / FIR feedback handlers. No-op for decoder-only
      *  implementations. */
     virtual Status force_keyframe() noexcept = 0;
-
-    /**
-     * @brief Push the encoder's live parameter set (plan B12).
-     *
-     * The single entry point through which the engine tells the encoder
-     * what to do: geometry, rate, quantiser, content hint, colour
-     * description and region of interest.  The encoder is *passive* —
-     * it never asks the bandwidth estimator anything, and the engine
-     * never pokes at codec internals.
-     *
-     * The default implementation folds the parameters back into
-     * `update_config()` so that a codec which only understands the
-     * open-time config still honours the bitrate / GOP / geometry
-     * changes.  A codec with real support for the extra knobs
-     * (content hint, QP, ROI) overrides this.
-     *
-     * @return kOk when the parameters were accepted.
-     */
-    virtual Status set_params(const VideoEncoderParams& params) noexcept {
-        // The default path maps the parameter set onto the config the
-        // codec already understands.  The fields that have no config
-        // counterpart (qp, content_hint, colour description, ROI) are
-        // silently dropped — a codec that cares overrides this.
-        VideoCodecConfig cfg = config();
-        if (params.width  != 0) cfg.width  = params.width;
-        if (params.height != 0) cfg.height = params.height;
-        if (params.fps    != 0) cfg.fps    = params.fps;
-        cfg.bitrate_bps       = params.bitrate_bps;
-        cfg.keyframe_interval = params.keyframe_interval;
-        return update_config(cfg);
-    }
 
     // ---- Zero-copy (HW surface) path --------------------------------------
     //

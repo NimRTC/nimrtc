@@ -462,11 +462,10 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         if (impl_->video_state.video_feedback_ssrc_ == 0) impl_->video_state.video_feedback_ssrc_ = 1;
     }
 
-    // The capture *device* is created at the very end of this function,
-    // by `init_video_capture()` (remote-desktop plan A10).  It cannot be
-    // created here: the device is turned into a frame stream by the
-    // capture module's shared adapter, and that adapter needs the codec
-    // and the sender to already exist.
+    // The capture *device* is created here, with the rest of the video
+    // plugins (remote-desktop plan A10).  It cannot be created earlier
+    // than the codec: the zero-copy seam needs the device's GPU context
+    // to open the encoder's session on the *same* device.
     //
     // The capture seam is *optional*: an empty video_capture_name means
     // "the host feeds frames itself", which is the normal case.  A
@@ -704,6 +703,34 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     const plugins::VideoPixelFormat want_pixel_format =
         plugins::VideoPixelFormat::kI420;
 
+    // ---- The backend preference (remote-desktop plan B2) ------------------
+    //
+    // `EngineConfig::video_codec_backend` says which *class* of backend
+    // to use: hardware only, software only, or (the default) "hardware
+    // first, software as the fallback".
+    //
+    // An unrecognised spelling is an error rather than a silent
+    // fallback: a host that wrote "hardwre" and got software would have
+    // a 1080p30 budget it cannot meet, and would not know why.
+    //
+    // It is parsed *here*, before the codec is created, because the
+    // "hardware only could not be honoured" diagnosis below needs the
+    // answer even when there is no codec to ask.
+    plugins::VideoCodecBackendPreference backend_pref =
+        plugins::VideoCodecBackendPreference::kAuto;
+    if (!plugins::parse_video_codec_backend_preference(
+            config_.video_codec_backend, backend_pref)) {
+        const std::string msg =
+            std::string{"engine: the video codec backend preference '"} +
+            config_.video_codec_backend +
+            "' is not one of 'auto', 'hardware', 'software'";
+        core::log::Logger::instance().error(msg);
+        if (on_error_) on_error_(core::kEngineInvalidParam, msg);
+        impl_->session_state.last_open_rc = core::kEngineInvalidParam;
+        shutdown_video_plugins();
+        return core::kEngineInvalidParam;
+    }
+
     if (!config_.video_codec_name.empty() && !video_codec_) {
         plugins::VideoCodecConfig cfg{};
         cfg.width = config_.video_width;
@@ -722,29 +749,6 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         // `open()`, and the device is fixed for the session's lifetime.
         cfg.gpu_context = capture_gpu_context;
 
-        // ---- The backend preference (remote-desktop plan B2) --------------
-        //
-        // `EngineConfig::video_codec_backend` says which *class* of
-        // backend to use: hardware only, software only, or (the
-        // default) "hardware first, software as the fallback".
-        //
-        // An unrecognised spelling is an error rather than a silent
-        // fallback: a host that wrote "hardwre" and got software would
-        // have a 1080p30 budget it cannot meet, and would not know why.
-        plugins::VideoCodecBackendPreference backend_pref =
-            plugins::VideoCodecBackendPreference::kAuto;
-        if (!plugins::parse_video_codec_backend_preference(
-                config_.video_codec_backend, backend_pref)) {
-            const std::string msg =
-                std::string{"engine: the video codec backend preference '"} +
-                config_.video_codec_backend +
-                "' is not one of 'auto', 'hardware', 'software'";
-            core::log::Logger::instance().error(msg);
-            if (on_error_) on_error_(core::kEngineInvalidParam, msg);
-            impl_->session_state.last_open_rc = core::kEngineInvalidParam;
-            shutdown_video_plugins();
-            return core::kEngineInvalidParam;
-        }
         cfg.backend_preference = backend_pref;
         impl_->video_state.video_codec_backend_preference = backend_pref;
 
@@ -895,21 +899,26 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             impl_->session_state.last_open_rc = core::kVideoCodecUnsupported;
             shutdown_video_plugins();
             return core::kVideoCodecUnsupported;
-
-        // A `hardware` policy that could not be honoured is a *hard*
-        // error (plan B2): the host said "hardware only", and a silent
-        // software fallback would show up much later as a CPU
-        // saturation the host never asked for.
-        if (video_codec_ == nullptr &&
-            backend_pref == plugins::VideoCodecBackendPreference::kHardware) {
-            const std::string msg =
-                std::string{"engine: the video codec policy is 'hardware', "
-                            "but no hardware encoder is available for '"}
-                + config_.video_codec_name
-                + "' (the software path was NOT used)";
-            core::log::Logger::instance().error(msg);
-            if (on_error_) on_error_(core::kVideoCodecOpenFailed, msg);
         }
+    }
+
+    // A `hardware` policy that could not be honoured is a *hard* error
+    // (plan B2): the host said "hardware only", and a silent software
+    // fallback would show up much later as a CPU saturation the host
+    // never asked for.
+    //
+    // It is diagnosed *outside* the capability check: the capability
+    // check only runs when there *is* a codec, and this is precisely
+    // the case where there is none.
+    if (video_codec_ == nullptr &&
+        backend_pref == plugins::VideoCodecBackendPreference::kHardware) {
+        const std::string msg =
+            std::string{"engine: the video codec policy is 'hardware', "
+                        "but no hardware encoder is available for '"}
+            + config_.video_codec_name
+            + "' (the software path was NOT used)";
+        core::log::Logger::instance().error(msg);
+        if (on_error_) on_error_(core::kVideoCodecOpenFailed, msg);
     }
 
     // The instantiated codec is the authority on the codec family.  A
@@ -1408,12 +1417,17 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             });
     }
 
-    // ---- Video capture device (remote-desktop plan A10) ----------------
+    // ---- The capture pump (remote-desktop plan A10) --------------------
     //
-    // The capture device is set up *last*, because the pump drives the
-    // codec and the sender: the device must not be able to deliver a
-    // frame before those two exist.
-    init_video_capture();
+    // The capture *device* was created above, with the rest of the video
+    // plugins, and the zero-copy callback was wired there.  What is left
+    // is the pump itself, which the tick thread drives: it pops at most
+    // one frame per tick from the device's bounded queue and hands it to
+    // the encoder.
+    //
+    // The pump needs the codec and the sender to already exist -- which
+    // they do, they were created above -- so nothing more has to happen
+    // here.
 
     return plugins::kOk;
 }
@@ -1492,15 +1506,6 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
         p.reset();
     };
     stop_video();   // stop video source if running
-    // Remote-desktop plan A10: close the capture device *before* the
-    // codec and the sender, so the pump cannot be mid-encode when the
-    // encoder disappears.
-    // The capture device (remote-desktop plan A1) is a *device*: it may
-    // own an OS handle (a DXGI duplication, a PipeWire stream), so it
-    // has to be closed explicitly rather than merely dropped.
-    // `shutdown_video_capture()` closes it (through the adapter that
-    // drives its lifecycle), so it is not closed a second time here.
-    shutdown_video_capture();
     close_all(video_source_);
     close_all(video_sink_);
     close_all(video_receiver_);
@@ -1518,11 +1523,11 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     // own an OS handle (a DXGI duplication, a PipeWire stream), so it
     // has to be closed explicitly rather than merely dropped.
     //
-    // The mailbox is cleared **before** the device is closed: the device's
-    // producer thread pushes into it, and a pending frame would hold a
-    // `GpuBuffer` whose texture belongs to the device that is about to
-    // be torn down.  Clearing it first drops that reference while the
-    // device is still alive.
+    // It is closed **last**, after the GPU mailbox has been cleared: the
+    // device's producer thread pushes into that mailbox, and a pending
+    // frame would hold a `GpuBuffer` whose texture belongs to the
+    // device that is about to be torn down.  Clearing it first drops
+    // that reference while the device is still alive.
     impl_->video_state.gpu_mailbox.clear();
     impl_->video_state.capture_gpu_wired = false;
     close_all(video_capture_);
@@ -1531,12 +1536,6 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     // video plugins.  (The default stream's instances are the members
     // closed above.)
     shutdown_extra_video_streams();
-
-    // The capture device (remote-desktop plan A1) is *not* closed here:
-    // `shutdown_video_capture()` above already closed it through the
-    // adapter that owns its lifecycle, and reset the pointer.  Closing
-    // it a second time is the bug the adapter was introduced to fix
-    // (remote-desktop plan A1 / A10).
 }
 
 
@@ -1874,7 +1873,9 @@ plugins::Status NimRTCEngine::start_video() noexcept {
         video_source_->start();
         return plugins::kOk;
     }
-    if (video_capture_source_) {
+    // A capture device needs no start: it was opened with the rest of
+    // the video plugins, and the pump drives it from the tick thread.
+    if (video_capture_) {
         return plugins::kOk;
     }
     return plugins::kErrNotReady;
@@ -2076,36 +2077,30 @@ void NimRTCEngine::apply_video_encoder_params(
     // Two producers can hand the engine a picture that lives in GPU
     // memory, and they spell it differently:
     //
-    //   - the *capture seam* (remote-desktop plan B10) fills in
-    //     `VideoSourceFrame::gpu_surface`, a full
-    //     `video_frame::GpuHandle` that also carries the **device** the
-    //     surface belongs to.  That is a promise: the picture is in GPU
-    //     memory and there is no CPU copy to fall back to.
+    //   - the *capture seam* (remote-desktop plan B10) hands the engine
+    //     a `GpuHandle` -- the picture is in GPU memory and there is no
+    //     CPU copy of it to fall back to.  That is a *promise*, and the
+    //     frame says so with `capture_surface_contract`.
     //
     //   - a Phase-3 / C3 source fills in the flat `gpu_backend` /
-    //     `gpu_handle` / `gpu_pitch_bytes` fields.  Those carry no
-    //     device token, and the host opts into them explicitly through
+    //     `gpu_handle` / `gpu_pitch_bytes` fields.  Those are an
+    //     *opt-in* optimisation, and the host turns them on with
     //     `EngineConfig::video_zero_copy`.
     //
     // The engine normalises both into one `GpuHandle` so the rest of the
     // path has a single shape, but keeps the two *contracts* distinct.
     video_frame::GpuHandle surface{};
-    bool surface_is_capture_contract = false;
-    if (frame.gpu_surface.backend != video_frame::GpuBackend::kNone &&
-        frame.gpu_surface.handle != nullptr) {
-        surface = frame.gpu_surface;
-        surface_is_capture_contract = true;
-    } else if (frame.has_gpu_handle()) {
-        surface.backend           = frame.gpu_backend;
-        surface.handle            = frame.gpu_handle;
-        surface.native_pitch_bytes = frame.gpu_pitch_bytes;
-        surface.native_fd         = -1;
-        // `device` stays null: the flat fields cannot carry it.
+    if (frame.has_gpu_handle()) {
+        surface = frame.gpu_surface();
     }
 
     const bool frame_has_gpu =
         surface.backend != video_frame::GpuBackend::kNone &&
         surface.handle != nullptr;
+    // The capture contract only counts when there *is* a surface: a
+    // promise about a picture that is not there promises nothing.
+    const bool surface_is_capture_contract =
+        frame.capture_surface_contract && frame_has_gpu;
     const bool has_cpu_pixels  = frame.plane_y != nullptr;
     const bool zero_copy_capable = video_codec_->supports_zero_copy_encode();
 
@@ -2303,26 +2298,10 @@ void NimRTCEngine::apply_video_encoder_params(
                 }
             } else {
                 impl_->video_state.stage_timings.record(Stage::kEncode, encode_ns);
-
-        const auto enc_rc = video_codec_->encode(raw,
-                                                 impl_->scratch.video_enc_buf.data(),
-                                                 impl_->scratch.video_enc_buf.capacity(),
-                                                 encoded);
-        ++impl_->video_state.video_staged_frames;
-        if (enc_rc != plugins::kOk) {
-            // Codec may need a larger buffer than reserved (e.g. very high
-            // bitrate IDR).  Resize to the codec's expected capacity and retry
-            // exactly once to avoid an unbounded loop on a misbehaving codec.
-            const std::size_t needed = encoded.payload.size();
-            if (needed == 0 || needed > impl_->scratch.video_enc_buf.capacity() * 4) {
-                return plugins::kErrInternal;  // give up on pathological sizes
-            }
-            impl_->scratch.video_enc_buf.reserve(needed);
-            if (video_codec_->encode(raw,
-                                     impl_->scratch.video_enc_buf.data(),
-                                     impl_->scratch.video_enc_buf.capacity(),
-                                     encoded) != plugins::kOk) {
-                return plugins::kErrInternal;
+                // The frame was staged through the CPU and encoded: the
+                // counterpart of `video_zero_copy_frames`, so a host can
+                // see the split between the two paths.
+                ++impl_->video_state.video_staged_frames;
             }
         }
     } else {
@@ -3094,14 +3073,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // re-derive them — it asks.
     if (video_capture_) {
         const plugins::CaptureStats cs = video_capture_->stats();
-        out.video_capture_frames_captured  = cs.frames_captured;
-        out.video_capture_frames_dropped   = cs.frames_dropped;
-        out.video_capture_device_errors    = cs.device_errors;
-        out.video_capture_device_restarts  = cs.device_restarts;
-        out.video_capture_format_changes   = cs.format_changes;
-        out.video_capture_bytes_copied     = cs.bytes_copied;
-        out.video_capture_frames_zero_copy = cs.frames_zero_copy;
-        out.video_capture_frames_cpu_staged = cs.frames_cpu_staged;
+        out.video_capture_device_frames_captured  = cs.frames_captured;
+        out.video_capture_device_frames_dropped   = cs.frames_dropped;
+        out.video_capture_device_error_count      = cs.device_errors;
+        out.video_capture_device_restarts         = cs.device_restarts;
+        out.video_capture_device_format_changes   = cs.format_changes;
+        out.video_capture_device_bytes_copied     = cs.bytes_copied;
+        out.video_capture_device_frames_zero_copy = cs.frames_zero_copy;
+        out.video_capture_device_frames_cpu_staged = cs.frames_cpu_staged;
     }
 
     // ---- The capture → engine pump (remote-desktop plan A10) ------------

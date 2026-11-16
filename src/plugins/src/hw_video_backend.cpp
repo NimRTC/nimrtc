@@ -181,6 +181,42 @@ HwVideoBackendRegistry::select_decoder(VideoCodecKind kind,
     return first_match(decoders_, kind, preferred_id, preference);
 }
 
+// ---- The `CodecBackend` spelling (remote-desktop plan B2) -----------------
+//
+// `CodecBackend` and `VideoCodecBackendPreference` are the same question
+// with two spellings: the codec module's vocabulary and the seam's.  The
+// seam keeps the longer one and the engine fills it from
+// `EngineConfig::video_codec_backend`; the overloads below are the
+// adapter, so a caller that holds the shorter spelling gets exactly the
+// same answer.
+
+namespace {
+
+VideoCodecBackendPreference to_preference(CodecBackend policy) noexcept {
+    switch (policy) {
+        case CodecBackend::kHardware: return VideoCodecBackendPreference::kHardware;
+        case CodecBackend::kSoftware: return VideoCodecBackendPreference::kSoftware;
+        case CodecBackend::kAuto:     break;
+    }
+    return VideoCodecBackendPreference::kAuto;
+}
+
+}  // anonymous namespace
+
+const VideoEncoderBackend*
+HwVideoBackendRegistry::select_encoder(VideoCodecKind kind,
+                                       std::string_view preferred_id,
+                                       CodecBackend policy) const noexcept {
+    return select_encoder(kind, preferred_id, to_preference(policy));
+}
+
+const VideoDecoderBackend*
+HwVideoBackendRegistry::select_decoder(VideoCodecKind kind,
+                                       std::string_view preferred_id,
+                                       CodecBackend policy) const noexcept {
+    return select_decoder(kind, preferred_id, to_preference(policy));
+}
+
 // ---------------------------------------------------------------------------
 // Listing
 // ---------------------------------------------------------------------------

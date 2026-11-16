@@ -315,6 +315,32 @@ struct VideoState {
     /** Metadata-only frames the pump skipped (no pixels to encode). */
     std::uint64_t video_capture_pumped_metadata = 0;
 
+    // ---- The pump's view of the device's own counters ------------------
+    //
+    // The device's counters (`plugins::CaptureStats`) are cumulative, so
+    // the pump keeps the baseline it has already accounted for and
+    // publishes the *delta*.  Without the baseline a plain comparison
+    // would either fire on every tick (the counters only grow) or
+    // underflow after a device restart (they restart from zero).
+
+    /** The device's error counter as the pump last saw it. */
+    std::uint64_t capture_seen_device_errors = 0;
+
+    /** The device's captured-frame counter as the pump last saw it. */
+    std::uint64_t capture_seen_frames_captured = 0;
+
+    /** The device's dropped-frame counter as the pump last saw it. */
+    std::uint64_t capture_seen_frames_dropped = 0;
+
+    /** The device's copied-byte counter as the pump last saw it. */
+    std::uint64_t capture_seen_bytes_copied = 0;
+
+    /** The format the device negotiated, as the pump last saw it.  A
+     *  change means the device renegotiated mid-session. */
+    std::uint32_t capture_negotiated_width  = 0;
+    std::uint32_t capture_negotiated_height = 0;
+    std::string   capture_negotiated_tag;
+
     // ---- The GPU-frame mailbox (remote-desktop plan B10) ----------------
     //
     // The zero-copy capture seam delivers a GPU surface on the

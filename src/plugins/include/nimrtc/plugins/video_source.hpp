@@ -197,6 +197,35 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
      *  implicit layout, or when the frame is CPU-side). */
     std::uint32_t gpu_pitch_bytes = 0;
 
+    /** The GPU *device* that owns `gpu_handle`.
+     *
+     *  The producer and the consumer must agree on the device: an
+     *  encoder session is opened against one device, and a surface
+     *  registered with it has to come from that same device. */
+    void*        gpu_device = nullptr;
+
+    /** True iff this frame is a **capture-contract** surface.
+     *
+     *  A capture device that negotiated a zero-copy surface promises
+     *  two things: the picture lives in GPU memory, and there is no
+     *  CPU copy of it to fall back to.  The engine honours that promise
+     *  *unconditionally* -- it hands the surface to the encoder even
+     *  when `EngineConfig::video_zero_copy` is off -- because a host
+     *  that cannot use the surface has no other picture to send, and
+     *  quietly staging it through the CPU would defeat the path the
+     *  device negotiated.
+     *
+     *  A frame that merely *carries* a handle (the flat
+     *  `gpu_backend` / `gpu_handle` fields) is **not** a capture
+     *  contract: it is an *opt-in* optimisation, and the host turns it
+     *  on with `EngineConfig::video_zero_copy`.  The difference is
+     *  deliberate -- the host owns the choice for a frame it produced
+     *  itself, while the capture device owns it for a frame it
+     *  negotiated.
+     *
+     *  @see `EngineConfig::video_zero_copy` */
+    bool        capture_surface_contract = false;
+
     /** True iff this frame carries a live GPU handle. */
     [[nodiscard]] bool has_gpu_handle() const noexcept {
         return gpu_backend != GpuBackend::kNone && gpu_handle != nullptr;
@@ -251,14 +280,23 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
         h.backend             = gpu_backend;
         h.handle              = gpu_handle;
         h.native_pitch_bytes  = gpu_pitch_bytes;
+        h.device              = gpu_device;
         return h;
     }
 
-    /** Set the GPU half from one handle (the inverse of `gpu_surface()`). */
+    /** Set the GPU half from one handle (the inverse of `gpu_surface()`).
+     *
+     *  This is the *capture seam's* setter: handing the engine a
+     *  `GpuHandle` is a promise that the picture lives in GPU memory,
+     *  so the frame is marked as a capture contract.  A host that
+     *  produces its own surfaces and wants the zero-copy path to be
+     *  *opt-in* fills the flat fields instead. */
     void set_gpu_surface(const GpuHandle& h) noexcept {
         gpu_backend     = h.backend;
         gpu_handle      = h.handle;
         gpu_pitch_bytes = h.native_pitch_bytes;
+        gpu_device      = h.device;
+        capture_surface_contract = true;
     }
 };
 

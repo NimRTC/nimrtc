@@ -60,6 +60,24 @@ bool NimRTCEngine::pump_video_capture() noexcept {
 
     auto& vstate = impl_->video_state;
 
+    // ---- The device's own bookkeeping ---------------------------------
+    //
+    // Two things are checked before the frame is popped, because both
+    // are about the *device* rather than about a frame:
+    //
+    //   1. **Did the device lose itself?**  A display that was
+    //      unplugged, a portal that was revoked, a compositor that
+    //      restarted: the producer side is where the failure happens,
+    //      so the queue would simply stay empty and the pump would
+    //      look like a device that never delivers anything.  The
+    //      device's own error counter is what tells the two apart.
+    //
+    //   2. **Did the device renegotiate?**  A resolution change or a
+    //      format switch is legal, and it is *visible* in the stats
+    //      instead of being invisible.
+    recover_capture_device();
+    publish_capture_device_counters();
+
     // ---- The zero-copy path (remote-desktop plan B10) -------------------
     //
     // The GPU mailbox is checked **first**: when the capture device is
@@ -145,9 +163,12 @@ bool NimRTCEngine::pump_video_capture() noexcept {
         // the codec may consume it directly.  The handle is *borrowed* —
         // it stays valid until the next `pop_frame()`, and the encode
         // happens inside this call, so the contract holds.
-        frame.gpu_backend      = captured.gpu_backend;
-        frame.gpu_handle       = captured.gpu_handle;
-        frame.gpu_pitch_bytes  = captured.gpu_pitch_bytes;
+        //
+        // The frame is a **capture contract**: the device negotiated a
+        // zero-copy surface, so the picture is in GPU memory and there
+        // is no CPU copy to fall back to.  The engine therefore hands
+        // the surface to the encoder unconditionally.
+        frame.set_gpu_surface(captured.gpu_surface());
         // A surface has no CPU mirror unless the device also filled one.
         if (captured.pixels != nullptr) {
             frame.plane_y   = captured.pixels;
@@ -230,10 +251,133 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     const plugins::Status rc = encode_and_send_video_frame(frame);
     if (rc == plugins::kOk) {
         ++vstate.video_capture_pumped_frames;
+        ++vstate.video_capture_frames_pumped;
     } else {
         ++vstate.video_capture_pump_errors;
     }
     return rc == plugins::kOk;
+}
+
+// ---------------------------------------------------------------------------
+// The device's health (remote-desktop plan A11)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::recover_capture_device() noexcept {
+    if (!video_capture_) return;
+
+    auto& vstate = impl_->video_state;
+
+    // The device's error counter only ever grows, so a plain comparison
+    // would fire on every tick.  The baseline is what makes the
+    // comparison meaningful.
+    const plugins::CaptureStats stats = video_capture_->stats();
+    if (stats.device_errors <= vstate.capture_seen_device_errors) return;
+
+    vstate.capture_seen_device_errors = stats.device_errors;
+    ++vstate.video_capture_device_errors;
+
+    core::log::Logger::instance().warn(
+        "engine: the video capture device reported an error; reopening it");
+
+    // A device that is reopened restarts its counters from zero, so the
+    // baselines have to follow -- otherwise the next delta would be a
+    // huge underflowed number.
+    //
+    // The device is **closed first**.  A lost device is torn down and
+    // built up again, not "re-opened" in place: `open()` on an already
+    // open device is a no-op for most backends (and would leave the
+    // stale device behind), so the reopen would silently do nothing.
+    video_capture_->close();
+    const plugins::Status rc = video_capture_->open();
+    if (rc != plugins::kOk) {
+        core::log::Logger::instance().error(
+            "engine: the video capture device could not be reopened; "
+            "the capture pump is stopped");
+        if (on_error_) {
+            on_error_(core::kVideoCaptureOpenFailed,
+                      "engine: the video capture device could not be "
+                      "reopened; the capture pump is stopped");
+        }
+        return;
+    }
+
+    ++vstate.video_capture_restarts;
+
+    const plugins::CaptureStats fresh = video_capture_->stats();
+    vstate.capture_seen_frames_captured = fresh.frames_captured;
+    vstate.capture_seen_frames_dropped  = fresh.frames_dropped;
+    vstate.capture_seen_bytes_copied    = fresh.bytes_copied;
+    vstate.capture_seen_device_errors  = fresh.device_errors;
+
+    // The device may have renegotiated while it was away.
+    const plugins::CaptureConfig again = video_capture_->config();
+    vstate.capture_negotiated_width  = again.format.width;
+    vstate.capture_negotiated_height = again.format.height;
+    vstate.capture_negotiated_tag    = again.format.tag;
+}
+
+void NimRTCEngine::publish_capture_device_counters() noexcept {
+    if (!video_capture_) return;
+
+    auto& vstate = impl_->video_state;
+
+    // The counters are read *after* the pop and compared against the
+    // baseline the pump recorded last time.  Reading them *before* the
+    // pop (and taking a delta) would miss everything that happened
+    // between the previous tick and this one -- most importantly the
+    // frames the device dropped while the queue was full, because those
+    // drops are counted by the *producer* thread and never by the pop.
+    const plugins::CaptureStats stats = video_capture_->stats();
+
+    if (stats.frames_captured >= vstate.capture_seen_frames_captured) {
+        vstate.video_capture_frames +=
+            stats.frames_captured - vstate.capture_seen_frames_captured;
+        vstate.capture_seen_frames_captured = stats.frames_captured;
+    } else {
+        // The device was reopened, so its counters restarted.  Take the
+        // new value as the baseline rather than counting a huge
+        // (underflowed) delta.
+        vstate.capture_seen_frames_captured = stats.frames_captured;
+    }
+
+    if (stats.frames_dropped >= vstate.capture_seen_frames_dropped) {
+        vstate.video_capture_dropped +=
+            stats.frames_dropped - vstate.capture_seen_frames_dropped;
+        vstate.capture_seen_frames_dropped = stats.frames_dropped;
+    } else {
+        vstate.capture_seen_frames_dropped = stats.frames_dropped;
+    }
+
+    if (stats.bytes_copied >= vstate.capture_seen_bytes_copied) {
+        vstate.video_capture_bytes_copied +=
+            stats.bytes_copied - vstate.capture_seen_bytes_copied;
+        vstate.capture_seen_bytes_copied = stats.bytes_copied;
+    } else {
+        vstate.capture_seen_bytes_copied = stats.bytes_copied;
+    }
+
+    // ---- Did the device renegotiate? ---------------------------------
+    const plugins::CaptureConfig now = video_capture_->config();
+    if (now.format.width != vstate.capture_negotiated_width
+        || now.format.height != vstate.capture_negotiated_height
+        || now.format.tag != vstate.capture_negotiated_tag) {
+        const bool first = vstate.capture_negotiated_width == 0
+                        && vstate.capture_negotiated_height == 0
+                        && vstate.capture_negotiated_tag.empty();
+        vstate.capture_negotiated_width  = now.format.width;
+        vstate.capture_negotiated_height = now.format.height;
+        vstate.capture_negotiated_tag    = now.format.tag;
+        // The *first* observation is the device's initial negotiation,
+        // not a change: it is what the device agreed to at open() time.
+        if (!first) {
+            ++vstate.video_capture_format_changes;
+            core::log::Logger::instance().warn(
+                "engine: the video capture device renegotiated its format "
+                "(now " + std::to_string(now.format.width) + "x"
+                + std::to_string(now.format.height)
+                + " tag=" + now.format.tag + ")");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

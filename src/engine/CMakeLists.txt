@@ -84,11 +84,10 @@ add_library(nimrtc_engine STATIC
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and
     # drives the encoder with it, so the host does not have to pull
-    # frames and call send_video() by hand.  This is the one engine TU
-    # that includes the capture module's shared adapter (the public
-    # header stays free of concrete module includes -- Layout Invariant
-    # 4).
-    src/engine_video_capture.cpp
+    # frames and call send_video() by hand.  The pump lives in
+    # `engine_video_pump.cpp` (above) together with its zero-copy
+    # counterpart; the engine's public header stays free of concrete
+    # module includes -- Layout Invariant 4.
 )
 
 nimrtc_apply_options(nimrtc_engine)
@@ -241,10 +240,10 @@ endif()
 # reason as the video_source entry above.
 #
 # Remote-desktop plan A10: the engine's capture pump lives in
-# `engine_video_capture.cpp` and uses the capture module's shared
-# adapter (`CaptureSourceAdapter`) to turn the device's frames into the
-# frame stream the encoder consumes.  That is a real dependency, not a
-# link-time-only one: the engine calls into the adapter.
+# `engine_video_pump.cpp` and polls the capture device's bounded
+# queue directly, through the `plugins::IVideoCapture` seam.  The
+# device-to-frame-stream translation is the pump's own job, so the
+# engine depends on the module only for the device it drives.
 if(NIMRTC_MODULE_VIDEO_CAPTURE)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_capture)
 endif()

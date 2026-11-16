@@ -738,10 +738,10 @@ int main(int argc, char** argv) {
             const auto s = tx_engine.stats();
             if (s.video_capture_gpu_frames > 0) {
                 measuring = true;
-                base_bytes_copied = s.video_capture_bytes_copied;
-                base_cpu_staged   = s.video_capture_frames_cpu_staged;
+                base_bytes_copied = s.video_capture_device_bytes_copied;
+                base_cpu_staged   = s.video_capture_device_frames_cpu_staged;
                 base_gpu_frames   = s.video_capture_gpu_frames;
-                base_captured     = s.video_capture_frames_captured;
+                base_captured     = s.video_capture_device_frames_captured;
                 std::printf("  (the seam is live — the measurement window "
                             "starts now)\n");
                 std::fflush(stdout);
@@ -767,13 +767,13 @@ int main(int argc, char** argv) {
     // The steady state: the counters as they stood when the seam went
     // live, subtracted from the counters now.
     const std::uint64_t steady_bytes_copied =
-        tx_stats.video_capture_bytes_copied - base_bytes_copied;
+        tx_stats.video_capture_device_bytes_copied - base_bytes_copied;
     const std::uint64_t steady_cpu_staged =
-        tx_stats.video_capture_frames_cpu_staged - base_cpu_staged;
+        tx_stats.video_capture_device_frames_cpu_staged - base_cpu_staged;
     const std::uint64_t steady_gpu_frames =
         tx_stats.video_capture_gpu_frames - base_gpu_frames;
     const std::uint64_t steady_captured =
-        tx_stats.video_capture_frames_captured - base_captured;
+        tx_stats.video_capture_device_frames_captured - base_captured;
 
     CountingSink* counter = g_counter_sink.instance();
     const std::uint64_t sink_frames = counter ? counter->frames() : 0;
@@ -815,10 +815,10 @@ int main(int argc, char** argv) {
     }
 
     std::printf("\n  the capture device (whole run)\n");
-    row_u64("frames captured", tx_stats.video_capture_frames_captured);
-    row_u64("frames dropped", tx_stats.video_capture_frames_dropped);
-    row_u64("frames zero-copy", tx_stats.video_capture_frames_zero_copy);
-    row_u64("device errors", tx_stats.video_capture_device_errors);
+    row_u64("frames captured", tx_stats.video_capture_device_frames_captured);
+    row_u64("frames dropped", tx_stats.video_capture_device_frames_dropped);
+    row_u64("frames zero-copy", tx_stats.video_capture_device_frames_zero_copy);
+    row_u64("device errors", tx_stats.video_capture_device_error_count);
 
     std::printf("\n  the pipeline\n");
     row_u64("frames pumped", tx_stats.video_capture_pumped_frames);
@@ -857,7 +857,7 @@ int main(int argc, char** argv) {
         // The CPU fallback run: the criterion is *not* expected to be
         // met, and saying so is the honest outcome.
         row("mode", "CPU fallback (--no-zero-copy)");
-        row_u64("cpu bytes copied", tx_stats.video_capture_bytes_copied);
+        row_u64("cpu bytes copied", tx_stats.video_capture_device_bytes_copied);
         row("zero-copy criterion", "not applicable for this mode");
         row("picture arrived", got_picture ? "yes" : "NO");
     } else {

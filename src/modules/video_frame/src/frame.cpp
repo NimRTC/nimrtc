@@ -538,7 +538,11 @@ void convert_bgra_to_i420(std::uint32_t width,
             const std::int32_t v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
             dst_u[col] = static_cast<std::uint8_t>(u < 0 ? 0 : (u > 255 ? 255 : u));
             dst_v[col] = static_cast<std::uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+    }
+}
 
+// ---------------------------------------------------------------------------
 // Colour-aware conversions (remote-desktop plan C3 / C5)
 // ---------------------------------------------------------------------------
 //

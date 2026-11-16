@@ -558,7 +558,7 @@ int DeviceSession::run() {
             std::fprintf(stderr,
                          "[rd_device] capture=%llu pumped=%llu ctrl_in=%llu "
                          "ctrl_sent=%llu injected=%llu denied=%llu refused=%llu\n",
-                         static_cast<unsigned long long>(stats.video_capture_frames_captured),
+                         static_cast<unsigned long long>(stats.video_capture_device_frames_captured),
                          static_cast<unsigned long long>(stats.video_capture_pumped_frames),
                          static_cast<unsigned long long>(control.messages_received),
                          static_cast<unsigned long long>(control.messages_sent),

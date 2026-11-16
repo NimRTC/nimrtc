@@ -647,8 +647,8 @@ TEST(CaptureZeroCopy, TheSurfaceReachesTheEncoderWithoutACpuCopy) {
     EXPECT_GT(codec_state->zero_copy_calls.load(), 0u);
 
     // And nothing was staged into host memory on the way.
-    EXPECT_EQ(stats.video_capture_bytes_copied, 0u);
-    EXPECT_EQ(stats.video_capture_frames_cpu_staged, 0u);
+    EXPECT_EQ(stats.video_capture_device_bytes_copied, 0u);
+    EXPECT_EQ(stats.video_capture_device_frames_cpu_staged, 0u);
 
     // The frame really went out on the wire.
     EXPECT_GT(stats.video_frames_sent, 0u);

@@ -795,8 +795,6 @@ TEST_F(AssemblyTest, BuiltInProfileTransportStrategy) {
         {"relay",                 "sfu-relay",                false},
         {"relay-agent",           "sfu-relay",                true },  // composite
         {"remote-desktop",        "agent-gateway",            true },
-
-        {"remote-desktop",        "teleop-ultra-low-latency", true },
     };
     for (const auto& e : expected) {
         SCOPED_TRACE("Profile: " + std::string{e.profile_name});
@@ -948,7 +946,20 @@ TEST_F(AssemblyTest, RemoteDesktopProfileDeclaresScreenContent) {
 
     // The transport: a separate control stack with its own congestion
     // control (plan G2), and the timeline + DataChannel on (G1).
-    EXPECT_EQ(p->transport.strategy, "teleop-ultra-low-latency");
+    //
+    // The strategy id is "agent-gateway", not
+    // "teleop-ultra-low-latency": the two describe the same *shape*
+    // (media on one stack, control on its own raw-udp-arq stack), but
+    // the strategy id decides the **media stack** (§5.3 rule table).
+    // "teleop-ultra-low-latency" puts media on raw-udp-arq — a
+    // DTLS-less stack — and the remote-desktop product needs browser
+    // interop on the media plane (the operator views the screen in a
+    // browser).  "agent-gateway" is the canonical strategy whose
+    // requirements have exactly this shape: browser interop +
+    // high-frequency control.
+    EXPECT_EQ(p->transport.strategy, "agent-gateway");
+    EXPECT_EQ(p->transport.media.stack, "webrtc-classic");
+    EXPECT_EQ(p->transport.control.stack, "raw-udp-arq");
     EXPECT_TRUE(p->transport.control.enabled);
     EXPECT_TRUE(p->timeline_enabled);
     EXPECT_TRUE(p->datachannel_enabled);

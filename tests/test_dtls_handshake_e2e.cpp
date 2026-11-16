@@ -117,6 +117,59 @@ int main() {
         "SRTP keying: client=%s server=%s\n",
         ck ? "present" : "missing", sk ? "present" : "missing");
 
+    // The keying material must not merely be *present* — it must be
+    // *derived*.  An all-zero master key is what a half-finished
+    // handshake produces, and "the optional has a value" does not
+    // distinguish the two: `srtp_keying_material()` fills a
+    // default-constructed struct when the export fails.  Checking
+    // only `has_value()` would let that regression pass forever, so
+    // the bytes themselves are checked here.
+    //
+    // The check is on the *whole* array rather than on byte 0: a
+    // single byte has a 1-in-256 chance of being zero in a
+    // legitimate key, which would make this test flaky in exactly
+    // the way that hides the bug it is here to catch.
+    const auto all_zero = [](const auto& key) {
+        for (const std::uint8_t byte : key) {
+            if (byte != 0) return false;
+        }
+        return true;
+    };
+
+    const bool client_key_derived =
+        ck && !all_zero(ck->client_master_key) &&
+        !all_zero(ck->server_master_key);
+    const bool server_key_derived =
+        sk && !all_zero(sk->client_master_key) &&
+        !all_zero(sk->server_master_key);
+
+    if (ck) {
+        std::fprintf(stderr,
+            "client key[0..3]=%02x%02x%02x%02x "
+            "server_key[0..3]=%02x%02x%02x%02x\n",
+            ck->client_master_key[0], ck->client_master_key[1],
+            ck->client_master_key[2], ck->client_master_key[3],
+            ck->server_master_key[0], ck->server_master_key[1],
+            ck->server_master_key[2], ck->server_master_key[3]);
+    }
+    if (sk) {
+        std::fprintf(stderr,
+            "server key[0..3]=%02x%02x%02x%02x "
+            "server_key[0..3]=%02x%02x%02x%02x\n",
+            sk->client_master_key[0], sk->client_master_key[1],
+            sk->client_master_key[2], sk->client_master_key[3],
+            sk->server_master_key[0], sk->server_master_key[1],
+            sk->server_master_key[2], sk->server_master_key[3]);
+    }
+
+    if (!client_key_derived || !server_key_derived) {
+        std::fprintf(stderr,
+            "the SRTP keying material was not derived: the handshake "
+            "reported success but the master keys are all zero "
+            "(client_derived=%d server_derived=%d)\n",
+            client_key_derived ? 1 : 0, server_key_derived ? 1 : 0);
+    }
+
     auto cstats = client.stats();
     auto sstats = server.stats();
     std::fprintf(stderr,
@@ -134,5 +187,5 @@ int main() {
         static_cast<unsigned long long>(sstats.retransmits),
         static_cast<unsigned long long>(sstats.errors));
 
-    return (ok && ck && sk) ? 0 : 2;
+    return (ok && ck && sk && client_key_derived && server_key_derived) ? 0 : 2;
 }

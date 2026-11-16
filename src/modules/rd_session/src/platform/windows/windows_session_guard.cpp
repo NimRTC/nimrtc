@@ -74,12 +74,6 @@ namespace {
  *  the tell-tale of a locked workstation. */
 constexpr wchar_t kLogonUi[] = L"LogonUI.exe";
 
-/** The input desktop's name when the session is unlocked.  The locked
- *  one is named "Winlogon", but we never rely on that name: the
- *  Winlogon desktop *denies access*, so the read-back below never
- *  even reaches it. */
-constexpr wchar_t kDefaultDesktop[] = L"Default";
-
 /** Read the Winlogon UI's session id out of a `PROCESSENTRY32` walk. */
 std::uint32_t process_session_id(HANDLE process) {
     // `ProcessIdToSessionId` is the direct route and needs no snapshot.
@@ -96,11 +90,7 @@ std::uint32_t process_session_id(HANDLE process) {
  * @return the process handle, or `nullptr`.
  *
  * The handle is opened with `PROCESS_QUERY_LIMITED_INFORMATION` and is
- * *not* closed when the process is found — the caller closes it.  (The
- * name is read from the *file* version of the API because the wide
- * version of `Process32FirstW` needs a `PROCESSENTRY32W`, and the
- * narrow one is available on every Windows version this project
- * supports.)
+ * *not* closed when the process is found — the caller closes it.
  */
 HANDLE find_logonui_process(std::uint32_t session_id) {
     HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -227,11 +217,11 @@ SessionGuardState windows_query_state() noexcept {
     const std::string desktop = input_desktop_name();
     if (!desktop.empty()) {
         // The desktop is open to us, so the session is interactive.
-        // "Default" is the ordinary one; anything else that we *can*
-        // read is still an unlocked, interactive desktop (a custom
-        // desktop, a UAC-shared desktop in some configurations), so
-        // the only thing that matters here is that it opened.
-        (void)kDefaultDesktop;
+        // The *name* is deliberately not checked: "Default" is the
+        // ordinary one, but anything else we can read is still an
+        // unlocked, interactive desktop (a custom desktop, a
+        // UAC-shared desktop in some configurations).  The only thing
+        // that matters here is that it opened.
         return SessionGuardState::kUsable;
     }
 

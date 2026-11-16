@@ -9,6 +9,37 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The VideoToolbox encoder emits its parameter sets in band.**  A
+  `VTCompressionSession` keeps the SPS / PPS / VPS out of band, in the
+  sample buffer's `CMFormatDescriptionRef`, and returns length-prefixed
+  (AVCC) slice NALs with no parameter sets in the bitstream at all.  A
+  keyframe produced that way carries no way to start decoding: a
+  cross-decoder pair (the VideoToolbox encoder against the OpenH264
+  decoder) failed with `kErrCorrupt` (4100).
+
+  The encoder now extracts the parameter sets through
+  `CMVideoFormatDescriptionGetH264ParameterSetAtIndex` /
+  `CMVideoFormatDescriptionGetHEVCParameterSetAtIndex`, collects them
+  once per session — outside the output callback, so the callback still
+  allocates nothing — and prepends them as Annex-B start codes on every
+  keyframe.  The prefixing itself is a reusable helper
+  (`prepend_parameter_sets()` in `vt_common.hpp`) with unit tests.
+
+- **`MakePluginOpts` no longer trips GCC's `-Wmissing-field-initializers`.**
+  `open_failure_detail` had no default member initializer, so every
+  designated initialization of the struct warned under GCC 13 with
+  `-Wextra -Werror`.  The member now has an explicit `= {}` initializer,
+  which fixes it at the declaration instead of at every call site.
+
+- **The zero-allocation hot-path gate and the codec round-trip test pin
+  the software backend.**  Both picked whichever backend the platform
+  preferred, so the hot-path benchmark measured the hardware codec's
+  memory behaviour on one CI leg and not on another, and the
+  round-trip test paired a hardware encoder with a software decoder.
+  Both now ask for the software backend explicitly, which is what makes
+  the zero-allocation budget and the cross-backend round-trip
+  deterministic.
+
 - **The merge of the M1C platform capture layer onto the remote-desktop
   branch.**  `origin/main` carried the M1C capture layer (Windows
   Graphics Capture / DXGI Desktop Duplication, macOS ScreenCaptureKit,

@@ -278,7 +278,7 @@ class V4l2CameraSource final : public ICameraFrameSource {
         return plugins::kOk;
     }
 
-    void close() noexcept {
+    void close() noexcept override {
         if (streaming_) {
             int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             ::ioctl(fd_, VIDIOC_STREAMOFF, &type);

@@ -282,6 +282,10 @@ public:
             // invalidated above, so the pool must not be released here.
             pool_ = nullptr;
         }
+        // The parameter sets belong to the session that produced them; a
+        // fresh session may carry different ones (a new geometry), so
+        // they must not outlive it.
+        parameter_sets_.clear();
     }
 
     [[nodiscard]] bool is_open() const noexcept { return session_ != nullptr; }
@@ -386,6 +390,26 @@ public:
 
     [[nodiscard]] std::uint64_t last_latency_us() const noexcept {
         return last_latency_us_;
+    }
+
+    /** The parameter sets the session produced, as Annex-B NAL units.
+     *
+     *  Empty until the first compressed sample has arrived (the format
+     *  description only exists then), and empty for AV1 (whose sequence
+     *  header travels inside the OBU stream). */
+    [[nodiscard]] const std::vector<std::uint8_t>& parameter_sets() const noexcept {
+        return parameter_sets_;
+    }
+
+    /** The session's reusable buffer for the merged access unit.
+     *
+     *  The parameter sets are prepended to a key frame's slices, and the
+     *  merge needs a buffer of its own.  This one belongs to the
+     *  session, so the merge does not allocate on the encode path — the
+     *  buffer grows to its steady-state size on the first key frame and
+     *  is reused from then on. */
+    [[nodiscard]] std::vector<std::uint8_t>& merged_bitstream() noexcept {
+        return merged_bitstream_;
     }
 
 private:
@@ -493,6 +517,34 @@ private:
             self->output_.clear();
             return;
         }
+
+        // ---- Remember the parameter sets ------------------------------
+        //
+        // VideoToolbox keeps the SPS / PPS (and the VPS for HEVC) *out
+        // of band*, in the sample buffer's format description.  The
+        // slice data alone is therefore not decodable by a decoder that
+        // expects in-band parameter sets — a software decoder answers
+        // `kErrCorrupt` (4100).
+        //
+        // The sets are collected here (this is the only place the format
+        // description is available) and are prepended to the key frame
+        // later, once the bitstream has been converted to Annex-B —
+        // prepending them to the *length-prefixed* bytes would produce
+        // a mixed-framing stream that no parser can read.
+        //
+        // The sets belong to the *session*, not to the frame: they only
+        // change when the session is re-created (a new geometry).  So
+        // they are collected once — when the session has none yet — and
+        // the steady state (every inter frame) touches no allocator at
+        // all.  Collecting them per frame would put a heap allocation
+        // on the encode hot path, which the zero-allocation benchmark
+        // measures.
+        if (self->parameter_sets_.empty()) {
+            CMFormatDescriptionRef fd =
+                CMSampleBufferGetFormatDescription(sample_buffer);
+            vt_detail::collect_parameter_sets(fd, self->codec_,
+                                              self->parameter_sets_);
+        }
     }
 
     VTCompressionSessionRef session_ = nullptr;
@@ -503,6 +555,13 @@ private:
     std::uint32_t             fps_     = kDefaultFps;
     std::uint32_t             frame_index_ = 0;
     std::vector<std::uint8_t> output_;
+    // The parameter sets the session produced, concatenated in the order
+    // they belong in the stream (SPS, PPS for H.264; VPS, SPS, PPS for
+    // HEVC).  They are prepended to a key frame's Annex-B bitstream.
+    std::vector<std::uint8_t> parameter_sets_;
+    // The session's reusable buffer for the merged (parameter sets +
+    // slices) access unit — see `merged_bitstream()`.
+    std::vector<std::uint8_t> merged_bitstream_;
     std::uint64_t             last_latency_us_ = 0;
     bool                      dropped_ = false;
     bool                      keyframe_seen_ = false;
@@ -955,6 +1014,33 @@ private:
             NIMRTC_LOG_ERROR("vt: the compressed bitstream is neither Annex-B "
                              "nor a well-formed length-prefixed stream");
             return plugins::kErrCorrupt;
+        }
+
+        // ---- The parameter sets ----------------------------------------
+        //
+        // VideoToolbox keeps the SPS / PPS (and the VPS for HEVC) out of
+        // band, in the sample buffer's format description.  A decoder
+        // that expects in-band parameter sets — which is what the rest
+        // of this tree ships — has nothing to decode against without
+        // them, and answers `kErrCorrupt` (4100).
+        //
+        // The parameter sets therefore go back in front of the key
+        // frame's slices as Annex-B NAL units, which is where the
+        // specification puts them.  Only a key frame carries them:
+        // repeating them on every inter frame would grow the stream for
+        // nothing.
+        //
+        // The merge goes into the session's *reusable* buffer, not into
+        // a fresh one: the merge helper is the portable one the unit
+        // tests cover, and a per-key-frame allocation on the encode
+        // path is exactly what the zero-allocation benchmark measures.
+        if (is_keyframe) {
+            const std::vector<std::uint8_t>& ps = session_.parameter_sets();
+            if (!ps.empty() &&
+                vt_detail::prepend_parameter_sets(ps, annex_b,
+                                                  session_.merged_bitstream())) {
+                annex_b.swap(session_.merged_bitstream());
+            }
         }
 
         if (annex_b.size() > output_capacity) {

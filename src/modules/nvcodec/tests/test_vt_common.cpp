@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -292,6 +293,69 @@ TEST(VtCommon, LooksLikeAnnexB) {
     EXPECT_TRUE(vt::looks_like_annex_b(four, sizeof(four)));
     EXPECT_TRUE(vt::looks_like_annex_b(three, sizeof(three)));
     EXPECT_FALSE(vt::looks_like_annex_b(none, sizeof(none)));
+}
+
+// ---------------------------------------------------------------------------
+// The in-band parameter sets
+//
+// VideoToolbox's compression session keeps the H.264 / HEVC parameter
+// sets out of band, in the sample buffer's format description.  The
+// *access unit* it produces is therefore only the slices — and a
+// decoder that expects in-band parameter sets (which is what this tree
+// ships) cannot decode that at all.
+//
+// The fix is to put the parameter sets back in front of the slices, as
+// Annex-B NAL units.  The merge is pure byte manipulation, so it is
+// verified here on every host — including the ones without
+// VideoToolbox.
+// ---------------------------------------------------------------------------
+
+TEST(VtCommon, PrependingTheParameterSetsPutsThemInFront) {
+    // SPS (7) + PPS (8), then an IDR (5).
+    const std::vector<std::uint8_t> parameter_sets = {
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x42,
+        0x00, 0x00, 0x00, 0x01, 0x68, 0xCE,
+    };
+    const std::vector<std::uint8_t> access_unit = {
+        0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB,
+    };
+
+    std::vector<std::uint8_t> merged;
+    ASSERT_TRUE(vt::prepend_parameter_sets(parameter_sets, access_unit, merged));
+    ASSERT_EQ(merged.size(), parameter_sets.size() + access_unit.size());
+
+    // The merged stream must scan as SPS, PPS, IDR — in that order.
+    const auto nalus = vt::scan_annex_b(vt::Codec::kH264, merged.data(), merged.size());
+    ASSERT_EQ(nalus.size(), 3u);
+    EXPECT_EQ(nalus[0].type, 7u) << "the SPS must come first";
+    EXPECT_EQ(nalus[1].type, 8u) << "the PPS must come second";
+    EXPECT_EQ(nalus[2].type, 5u) << "the slice must come last";
+}
+
+TEST(VtCommon, PrependingTheParameterSetsKeepsTheSliceBytesIntact) {
+    const std::vector<std::uint8_t> parameter_sets = {
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x42,
+    };
+    const std::vector<std::uint8_t> access_unit = {
+        0x00, 0x00, 0x00, 0x01, 0x65, 0x11, 0x22, 0x33,
+    };
+
+    std::vector<std::uint8_t> merged;
+    ASSERT_TRUE(vt::prepend_parameter_sets(parameter_sets, access_unit, merged));
+
+    // The slice's bytes must survive the merge byte for byte.
+    const std::size_t offset = parameter_sets.size();
+    EXPECT_TRUE(std::equal(access_unit.begin(), access_unit.end(),
+                            merged.begin() + static_cast<std::ptrdiff_t>(offset)));
+}
+
+TEST(VtCommon, AnEmptyAccessUnitIsNotMerged) {
+    const std::vector<std::uint8_t> parameter_sets = {
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x42,
+    };
+    std::vector<std::uint8_t> merged;
+    EXPECT_FALSE(vt::prepend_parameter_sets(parameter_sets, {}, merged));
+    EXPECT_TRUE(merged.empty());
 }
 
 // ---------------------------------------------------------------------------

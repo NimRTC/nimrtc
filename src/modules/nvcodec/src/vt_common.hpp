@@ -26,6 +26,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -723,5 +724,137 @@ inline bool ensure_annex_b(const std::uint8_t* data,
     out = avcc_to_annex_b(data, size);
     return !out.empty();
 }
+
+// ---------------------------------------------------------------------------
+// The parameter sets a compression session produced
+//
+// VideoToolbox's compression session stores the H.264 / HEVC parameter
+// sets (the SPS / PPS, and the VPS for HEVC) **out of band**, in the
+// sample buffer's `CMFormatDescriptionRef`.  The compressed NAL units
+// themselves carry only the slice data.
+//
+// That framing is legal, but it is not what the rest of this tree
+// expects: a software decoder (OpenH264, for instance) fed a bitstream
+// without the parameter sets has nothing to decode against and answers
+// `kErrCorrupt` (4100).  The parameter sets therefore have to be
+// prepended to the key frame as in-band Annex-B NAL units.
+//
+// The CoreMedia C API is the portable spelling of "give me the
+// parameter sets":
+//
+//   CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fd, index,
+//       &bytes, &size, &count, &nal_len)
+//   CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fd, index, ...)
+// ---------------------------------------------------------------------------
+
+/** Prepend the parameter sets to an Annex-B access unit.
+ *
+ *  The parameter sets belong *in front of* the slices, as Annex-B NAL
+ *  units with their own start codes — that is where the H.264 / HEVC
+ *  specifications put them, and that is what a decoder that expects
+ *  in-band parameter sets needs in order to decode at all.
+ *
+ *  This helper is *portable* (it is pure byte manipulation), so the
+ *  unit tests exercise it on every host — including the hosts where
+ *  VideoToolbox does not exist.
+ *
+ *  @param parameter_sets  The parameter sets, already in Annex-B form
+ *                         (start code + payload, one after another).
+ *  @param access_unit     The access unit (the slices), in Annex-B form.
+ *  @param out             Receives the merged access unit.
+ *  @return true on success; false when @p access_unit is empty. */
+inline bool prepend_parameter_sets(const std::vector<std::uint8_t>& parameter_sets,
+                                   const std::vector<std::uint8_t>& access_unit,
+                                   std::vector<std::uint8_t>& out) noexcept {
+    if (access_unit.empty()) return false;
+    out.clear();
+    // The capacity is grown *geometrically* rather than to the exact
+    // size: the caller reuses this buffer for every key frame, and the
+    // key frames' sizes differ slightly (the bitrate controller's
+    // output varies), so an exact reserve would reallocate on most of
+    // them.
+    const std::size_t needed = parameter_sets.size() + access_unit.size();
+    if (out.capacity() < needed) {
+        out.reserve(std::max(needed, out.capacity() * 2));
+    }
+    out.insert(out.end(), parameter_sets.begin(), parameter_sets.end());
+    out.insert(out.end(), access_unit.begin(), access_unit.end());
+    return true;
+}
+
+#if defined(__APPLE__)
+
+/** Collect the parameter sets a compression session produced.
+ *
+ *  The CoreMedia accessors report the *total* number of parameter sets
+ *  through the `parameterSetCountOut` argument, so the first call
+ *  establishes how many there are and the loop then asks for each one.
+ *
+ *  The H.264 accessor returns the SPS first and the PPS second; the
+ *  HEVC accessor returns the VPS, the SPS and the PPS — in both cases
+ *  already in the order the specification puts them in the stream.
+ *
+ *  The bytes are written in Annex-B form (a four-byte start code in
+ *  front of every parameter set), because that is the framing the
+ *  bitstream carries them in.
+ *
+ *  @param format_description  The sample buffer's format description.
+ *  @param codec               The codec family it describes.
+ *  @param out                 Receives the parameter sets, in Annex-B form.
+ *  @return true when at least one parameter set was found. */
+inline bool collect_parameter_sets(CMFormatDescriptionRef format_description,
+                                    Codec codec,
+                                    std::vector<std::uint8_t>& out) noexcept {
+    out.clear();
+    if (!format_description) return false;
+
+    constexpr std::uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
+
+    // The accessor differs per codec family, but the *shape* of the call
+    // is the same, so it is spelled once in a lambda and bound to the
+    // family the caller asked for.
+    const auto collect = [&](auto accessor) -> bool {
+        // The first call only asks for the *count* — the pointer and the
+        // size are optional out-parameters, and passing them is what
+        // would draw an "unused variable" warning.
+        std::size_t count = 0;
+        if (accessor(format_description, 0, nullptr, nullptr, &count,
+                     nullptr) != noErr) {
+            return false;
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::uint8_t* set_bytes = nullptr;
+            std::size_t set_size          = 0;
+            if (accessor(format_description, i, &set_bytes, &set_size,
+                         nullptr, nullptr) != noErr) {
+                continue;
+            }
+            if (!set_bytes || set_size == 0) continue;
+            out.insert(out.end(), kStartCode, kStartCode + sizeof(kStartCode));
+            out.insert(out.end(), set_bytes, set_bytes + set_size);
+        }
+        return !out.empty();
+    };
+
+    // ---- H.264: SPS then PPS -----------------------------------------
+    if (codec == Codec::kH264) {
+        return collect(CMVideoFormatDescriptionGetH264ParameterSetAtIndex);
+    }
+
+    // ---- HEVC: VPS, SPS, PPS -----------------------------------------
+    //
+    // The HEVC accessor walks the three sets in the order the
+    // specification requires (VPS, SPS, PPS).
+    if (codec == Codec::kH265) {
+        return collect(CMVideoFormatDescriptionGetHEVCParameterSetAtIndex);
+    }
+
+    // AV1 carries its sequence header inside the OBU stream itself — it
+    // has no out-of-band parameter sets — so there is nothing to
+    // collect.
+    return false;
+}
+
+#endif  // defined(__APPLE__)
 
 } // namespace nimrtc::nvcodec::vt_detail

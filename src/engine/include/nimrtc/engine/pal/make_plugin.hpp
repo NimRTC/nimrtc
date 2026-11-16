@@ -141,8 +141,16 @@ struct NIMRTC_API_STABLE MakePluginOpts {
      *
      * The hook is called *before* the slot is reset, so the plugin is
      * still readable.
+     *
+     * @note The explicit `= {}` is load-bearing: it gives the member a
+     *       default member initializer, so that a designated
+     *       initialiser that omits it (every call site that does not
+     *       want the detail) is *not* a missing-field-initialiser under
+     *       GCC's `-Wmissing-field-initializers`, which the build
+     *       promotes to an error.  The same reason is spelled out in
+     *       `assembly.hpp`'s `VideoSection video = {}`.
      */
-    std::function<std::string(const void*)> open_failure_detail;
+    std::function<std::string(const void*)> open_failure_detail = {};
 };
 
 /**

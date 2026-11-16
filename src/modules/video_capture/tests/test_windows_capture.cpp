@@ -1111,6 +1111,23 @@ TEST(WindowsCapture, ReopenAfterAFailedOpenIsSafe) {
     EXPECT_EQ(cap->last_error(), WindowsCaptureError::kDeviceNotFound);
 }
 
+TEST(WindowsCapture, AFailedOpenCarriesAnActionableReason) {
+    // The operator on site needs to tell "the screen is locked" from
+    // "the device does not exist" -- a generic failure line leaves
+    // them guessing.  The message is what the engine hands the host.
+    CaptureConfig cfg{};
+    cfg.device_id = "\\\\.\\NOSUCHDISPLAY";
+    const auto cap =
+        make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication, cfg);
+
+    EXPECT_EQ(cap->open(), nimrtc::plugins::kErrHardwareError);
+    const std::string reason = cap->last_error_message();
+    EXPECT_FALSE(reason.empty());
+    // The message names the device that was not found, so the operator
+    // can tell the capture *request* from the desktop being locked.
+    EXPECT_NE(reason.find("NOSUCHDISPLAY"), std::string::npos);
+}
+
 TEST(WindowsCapture, TheErrorCodesAreDistinct) {
     // The whole point of the Windows error enum: a host must be able to
     // tell "the user refused the consent" from "the device is gone".

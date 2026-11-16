@@ -65,6 +65,8 @@ constexpr const char* kPortalPrefix = "pipewire-portal:";
 /** The format tag the backend reports. */
 constexpr const char* kFormatTag = "bgra-pipewire";
 
+#    if defined(NIMRTC_HAS_PIPEWIRE_CAPTURE)
+
 std::int64_t now_us() noexcept {
     return std::chrono::duration_cast<std::chrono::microseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -77,8 +79,6 @@ bool have_wayland_display() noexcept {
     const char* display = std::getenv("WAYLAND_DISPLAY");
     return display != nullptr && display[0] != '\0';
 }
-
-#    if defined(NIMRTC_HAS_PIPEWIRE_CAPTURE)
 
 // ---------------------------------------------------------------------------
 // A minimal D-Bus client

@@ -547,6 +547,31 @@ public:
     bool can_encode()   const noexcept override { return true; }
     bool can_decode()   const noexcept override { return false; }
 
+    // ---- The decoder half (not supported by this encoder) ----------------
+    //
+    // `IVideoCodec` is the *combined* seam: one instance may serve
+    // both directions, so the interface carries the decoder's pure
+    // virtuals as well.  This encoder never decodes, so the decoder
+    // half answers "unsupported" rather than being left abstract --
+    // an abstract class cannot be marked `final`.
+    plugins::Status decode(const plugins::EncodedVideoFrame& encoded,
+                           plugins::VideoFrame& raw_out,
+                           std::uint8_t* const* output_buffers) noexcept override {
+        (void)encoded;
+        (void)raw_out;
+        (void)output_buffers;
+        return plugins::kErrUnsupported;
+    }
+
+    plugins::Status set_params(const plugins::VideoEncoderParams& params) noexcept override {
+        (void)params;
+        return plugins::kErrUnsupported;
+    }
+
+    plugins::VideoEncoderParams params() const noexcept override {
+        return {};
+    }
+
     plugins::VideoCodecKind kind() const noexcept override {
         return vt_detail::codec_kind(codec_);
     }

@@ -288,7 +288,13 @@ public:
         if (codec_ != vt_detail::Codec::kAv1) {
             vt_detail::extract_parameter_sets(codec_, data, size, sets);
             if (!desc_from_parameter_sets_ && sets.has_sps() && sets.has_pps()) {
-                if (!session_.open(codec_, &sets)) {
+                // `this->open(...)`, not `session_.open(...)`: the class
+                // has a *data* member called `session_` (the
+                // `VTDecompressionSessionRef`), so `session_.open` would
+                // resolve to the pointer member and Clang rejects it
+                // ("member reference type 'VTDecompressionSessionRef'
+                // is a pointer; did you mean to use '->'?").
+                if (!this->open(codec_, &sets)) {
                     NIMRTC_LOG_ERROR("vt: the decoder session could not be "
                                      "re-created with the stream's parameter "
                                      "sets");
@@ -338,9 +344,21 @@ public:
         }
 
         CMSampleBufferRef sample = nullptr;
+        // The sample buffer's timing is described by an *array* of
+        // `CMSampleTimingInfo`, so the count and the array are passed
+        // separately.  The size has to live in a named variable: the
+        // address of the temporary `converted.size()` cannot be taken
+        // ("cannot take the address of an rvalue"), and the array must
+        // outlive the call.
+        const std::size_t sample_size = converted.size();
+        const CMSampleTimingInfo timing = {
+            .duration = CMTimeMake(1, 1000),
+            .presentationTimeStamp = CMTimeMake(0, 1),
+            .decodeTimeStamp = kCMTimeInvalid,
+        };
         st = CMSampleBufferCreate(kCFAllocatorDefault, block, true, nullptr,
-                                  nullptr, desc, 1, 0, nullptr, 1,
-                                  &converted.size(), &sample);
+                                  nullptr, desc, 1, 0, &timing, 1,
+                                  &sample_size, &sample);
         if (owns_desc) CFRelease(desc);
         CFRelease(block);
         if (st != noErr || !sample) {
@@ -440,6 +458,40 @@ public:
 
     bool can_encode()   const noexcept override { return false; }
     bool can_decode()   const noexcept override { return true; }
+
+    // ---- The encoder half (not supported by this decoder) ----------------
+    //
+    // `IVideoCodec` is the *combined* seam: one instance may serve
+    // both directions, so the interface carries the encoder's pure
+    // virtuals as well.  This decoder never encodes, so the encoder
+    // half answers "unsupported" rather than being left abstract --
+    // an abstract class cannot be marked `final`.
+    plugins::Status encode(const plugins::VideoFrame& raw,
+                           std::uint8_t* output,
+                           std::size_t output_capacity,
+                           plugins::EncodedVideoFrame& encoded_out) noexcept override {
+        (void)raw;
+        (void)output;
+        (void)output_capacity;
+        (void)encoded_out;
+        return plugins::kErrUnsupported;
+    }
+
+    plugins::Status force_keyframe() noexcept override {
+        // A decoder never produces a key frame, so there is nothing to
+        // force.  "Unsupported" is the honest answer; the engine only
+        // asks an *encoder* for one.
+        return plugins::kErrUnsupported;
+    }
+
+    plugins::Status set_params(const plugins::VideoEncoderParams& params) noexcept override {
+        (void)params;
+        return plugins::kErrUnsupported;
+    }
+
+    plugins::VideoEncoderParams params() const noexcept override {
+        return {};
+    }
 
     plugins::VideoCodecKind kind() const noexcept override {
         return vt_detail::codec_kind(codec_);
@@ -651,7 +703,13 @@ private:
     plugins::VideoCodecConfig      cfg_;
     vt_detail::Codec               codec_ = vt_detail::Codec::kH264;
     VtDecoderSession               session_;
-    std::mutex                     mtx_;
+    // `mutable`: the `supports_zero_copy_decode()` accessor is a
+    // `const` member but still has to take the lock to read the
+    // session's state.  A plain `std::mutex` member would make the
+    // lock impossible to take from a const member function, which
+    // Clang rejects outright ("1st argument ('const std::mutex')
+    // would lose const qualifier").
+    mutable std::mutex              mtx_;
     bool                           opened_ = false;
     plugins::VideoCodecStats       stats_{};
 };

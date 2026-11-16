@@ -33,6 +33,17 @@
 #    include <cstdlib>
 #    include <cstring>
 
+// Xlib defines `Status` as a macro (`#define Status int`) -- a leftover
+// from the 1980s X11 API, still present in every modern Xlib header.
+// NimRTC's plugin seam has its own `plugins::Status` type alias, and the
+// macro turns `plugins::Status` into `plugins::int`, which does not
+// parse.
+//
+// The macro is undefined *after* the X11 headers are read, so the X11
+// declarations above are unaffected; everything below this point sees
+// NimRTC's own `Status`.
+#    undef Status
+
 namespace nimrtc::video_capture {
 
 namespace {
@@ -299,7 +310,11 @@ class X11Capture::Impl {
         const std::uint32_t bpp = has_alpha ? 4u : 3u;
 
         bgra_.resize(static_cast<std::size_t>(width) * height * 4u);
-        const std::uint8_t* src = image->data;
+        // Xlib types `XImage::data` as `char*`; the pixels are raw bytes,
+        // so the byte-wise reinterpretation is the intended one.  The
+        // cast is `reinterpret_cast` rather than a C-style cast because
+        // the tree builds with `-Wold-style-cast` as an error.
+        const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(image->data);
 
         for (std::uint32_t y = 0; y < height; ++y) {
             const std::uint8_t* src_row = src + static_cast<std::size_t>(y) * src_stride;

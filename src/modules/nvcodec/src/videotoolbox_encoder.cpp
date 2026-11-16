@@ -447,13 +447,22 @@ private:
         if (attachments) {
             CFIndex count = CFArrayGetCount(attachments);
             for (CFIndex i = 0; i < count; ++i) {
-                CFMutableDictionaryRef att =
-                    static_cast<CFMutableDictionaryRef>(
-                        CFArrayGetValueAtIndex(attachments, i));
+                // `CFArrayGetValueAtIndex` hands back a `const void *`,
+                // so the element is read through the *immutable*
+                // `CFDictionaryRef` view.  Casting it to
+                // `CFMutableDictionaryRef` would cast the const away,
+                // which Clang rejects -- and nothing here needs to
+                // mutate the attachment anyway.
+                CFDictionaryRef att = static_cast<CFDictionaryRef>(
+                    CFArrayGetValueAtIndex(attachments, i));
                 if (!att) continue;
                 CFTypeRef value =
                     CFDictionaryGetValue(att, kCMSampleAttachmentKey_NotSync);
-                if (value && CFBooleanGetValue(static_cast<CFBooleanRef>(value))) {
+                // The value is a CFBoolean by contract, but
+                // `CFBooleanGetValue` on anything else is undefined --
+                // so the type is checked before it is read.
+                if (value && CFGetTypeID(value) == CFBooleanGetTypeID() &&
+                    CFBooleanGetValue(static_cast<CFBooleanRef>(value))) {
                     not_sync = true;
                     break;
                 }

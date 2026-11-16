@@ -61,7 +61,7 @@ namespace np = nimrtc::plugins;
 class BgraFrame {
 public:
     BgraFrame(std::uint32_t w, std::uint32_t h, std::int64_t capture_ts_us)
-        : w_(w), h_(h), pixels_(static_cast<std::size_t>(w) * h * 4u, 0x20u) {
+        : pixels_(static_cast<std::size_t>(w) * h * 4u, 0x20u) {
         frame_.width  = w;
         frame_.height = h;
         frame_.format = np::VideoPixelFormat::kBGRA;
@@ -76,8 +76,6 @@ public:
     const np::VideoSourceFrame& get() const noexcept { return frame_; }
 
 private:
-    std::uint32_t w_;
-    std::uint32_t h_;
     std::vector<std::uint8_t> pixels_;
     np::VideoSourceFrame frame_;
 };

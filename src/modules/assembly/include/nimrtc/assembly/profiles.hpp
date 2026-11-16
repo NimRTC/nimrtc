@@ -206,6 +206,11 @@ inline const Profile kProfileCall = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,  // Opus
     .transport           = detail::ts_browser_call(200),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -256,7 +261,12 @@ inline const Profile kProfileLive = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
-    .transport           = detail::ts_browser_call(300),  // live = looser budget
+    .transport           = detail::ts_browser_call(300),  // live = looser budget,
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -296,6 +306,11 @@ inline const Profile kProfileTransport = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_sfu_relay(),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -347,6 +362,11 @@ inline const Profile kProfileAgent = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_agent_gateway(80),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -397,6 +417,11 @@ inline const Profile kProfileTeleop = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_teleop_ultra_low_latency(),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -442,6 +467,11 @@ inline const Profile kProfileRelay = Profile{
     .audio_channels      = 0,
     .audio_payload_type  = 0,
     .transport           = detail::ts_sfu_relay(),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -498,6 +528,11 @@ inline const Profile kProfileAgentGateway = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_agent_gateway(80),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -557,6 +592,11 @@ inline const Profile kProfileRelayAgent = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_sfu_agent(),
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------
@@ -615,7 +655,12 @@ inline const Profile kProfileAgentLowLatency = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
-    .transport           = detail::ts_agent_gateway(60),  // tighter than agent.json
+    .transport           = detail::ts_agent_gateway(60),  // tighter than agent.json,
+    // v1.2 additive: the declared per-stream bandwidth shares
+    // (remote-desktop plan D5).  Empty means "no declared
+    // split", which is the zero value and the right default
+    // for a profile that does not declare one.
+    .video_stream_weights = {},
 };
 
 // ---------------------------------------------------------------------------

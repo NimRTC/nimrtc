@@ -69,6 +69,22 @@ rd_viewer.bat --url ws://172.16.33.44:8765 --code 186534 ^
 - 两台机器在**同一网段**，或者网络允许 UDP 直连
 - 防火墙要放行 UDP（见下面的排查表）
 
+### 防火墙（两台机器都要做）
+
+ICE 用的是**临时端口**，所以不能只放行固定端口。两条命令，管理员权限的
+cmd 里跑：
+
+```bat
+netsh advfirewall firewall add rule name="nimrtc-signalling-tcp" dir=in action=allow protocol=TCP localport=8765
+netsh advfirewall firewall add rule name="nimrtc-udp-in" dir=in action=allow protocol=UDP
+```
+
+第一条是信令（TCP 8765），第二条放行所有入站 UDP —— ICE 的临时端口是
+随机的，没有别的办法精确放行。**UDP 出站默认就是通的**，不用加规则。
+
+如果两台机器之间还隔着 Wi-Fi 路由器，确认它没有开 "AP 隔离 / client
+isolation"，那个开关会让两台机器互相看不见。
+
 ## 排查
 
 | 现象 | 原因 |

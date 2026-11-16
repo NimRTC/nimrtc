@@ -96,7 +96,15 @@ public:
 
 protected:
     bool do_inject_mouse_move(std::int32_t dx, std::int32_t dy) override {
-        calls_.push_back({RecordedCall::Kind::kMouseMove, dx, dy});
+        // The aggregate is built field by field rather than with a brace
+        // list: a brace list would leave `text` uninitialized, which
+        // GCC's `-Wmissing-field-initializers` (fatal under `-Werror`)
+        // rejects.
+        RecordedCall call;
+        call.kind = RecordedCall::Kind::kMouseMove;
+        call.dx = dx;
+        call.dy = dy;
+        calls_.push_back(std::move(call));
         return true;
     }
 
@@ -110,7 +118,11 @@ protected:
     }
 
     bool do_inject_wheel(std::int32_t dx, std::int32_t dy) override {
-        calls_.push_back({RecordedCall::Kind::kWheel, dx, dy});
+        RecordedCall call;
+        call.kind = RecordedCall::Kind::kWheel;
+        call.dx = dx;
+        call.dy = dy;
+        calls_.push_back(std::move(call));
         return true;
     }
 

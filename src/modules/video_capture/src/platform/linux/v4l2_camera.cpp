@@ -102,13 +102,19 @@ class V4l2CameraSource final : public ICameraFrameSource {
             device.kind = plugins::CaptureDeviceKind::kCamera;
 
             // The largest format the device offers.
+            //
+            // `v4l2_capability` has no frame-size field, so the sizes
+            // are enumerated on their own: the driver is asked for the
+            // frame sizes of the NV12 format, and the largest one
+            // wins.  The loop is bounded so a driver that keeps saying
+            // "yes" cannot spin forever.
             v4l2_frmsizeenum sizes{};
             std::uint32_t max_w = 0;
             std::uint32_t max_h = 0;
-            for (std::uint32_t i = 0; i < cap.max_framesize && i < 4096; ++i) {
+            for (std::uint32_t i = 0; i < 4096; ++i) {
                 sizes.index = i;
                 sizes.pixel_format = V4L2_PIX_FMT_NV12;
-                sizes.which = V4L2_FRMSIZE_TYPE_DISCRETE;
+                sizes.type = V4L2_FRMSIZE_TYPE_DISCRETE;
                 if (::ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &sizes) != 0) continue;
                 if (sizes.discrete.width > max_w) max_w = sizes.discrete.width;
                 if (sizes.discrete.height > max_h) max_h = sizes.discrete.height;
@@ -131,10 +137,32 @@ class V4l2CameraSource final : public ICameraFrameSource {
         const int fd = ::open(device_id.c_str(), O_RDWR | O_NONBLOCK);
         if (fd < 0) return formats;
 
-        v4l2_fmtdesc desc{};
-        desc.index = 0;
-        desc.pixel_format = V4L2_PIX_FMT_NV12;
-        desc.which = V4L2_FMT_DESC_COMPRESSED;
+        // Does the device offer NV12 at all?
+        //
+        // `v4l2_fmtdesc` names the pixel format `pixelformat` and the
+        // buffer type `type`; there is no `which` field and no
+        // "compressed" flavour of the descriptor -- `V4L2_FMT_DESC_*`
+        // constants belong to `v4l2_frmsizeenum`, not to this struct.
+        //
+        // The check matters: the frame path below assumes NV12, so a
+        // camera that does not offer it is not usable by this adapter
+        // and must not be reported as supported.
+        bool has_nv12 = false;
+        for (std::uint32_t i = 0; i < 64; ++i) {
+            v4l2_fmtdesc desc{};
+            desc.index = i;
+            desc.pixelformat = V4L2_PIX_FMT_NV12;
+            desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if (::ioctl(fd, VIDIOC_ENUM_FMT, &desc) != 0) break;
+            if (desc.pixelformat == V4L2_PIX_FMT_NV12) {
+                has_nv12 = true;
+                break;
+            }
+        }
+        if (!has_nv12) {
+            ::close(fd);
+            return formats;
+        }
 
         // The NV12 sizes the device offers.
         v4l2_frmsizeenum sizes{};
@@ -143,7 +171,7 @@ class V4l2CameraSource final : public ICameraFrameSource {
         for (std::uint32_t i = 0; i < 4096; ++i) {
             sizes.index = i;
             sizes.pixel_format = V4L2_PIX_FMT_NV12;
-            sizes.which = V4L2_FRMSIZE_TYPE_DISCRETE;
+            sizes.type = V4L2_FRMSIZE_TYPE_DISCRETE;
             if (::ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &sizes) != 0) break;
             if (sizes.discrete.width > max_w) max_w = sizes.discrete.width;
             if (sizes.discrete.height > max_h) max_h = sizes.discrete.height;

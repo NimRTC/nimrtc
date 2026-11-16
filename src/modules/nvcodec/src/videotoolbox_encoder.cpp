@@ -553,16 +553,8 @@ public:
     // both directions, so the interface carries the decoder's pure
     // virtuals as well.  This encoder never decodes, so the decoder
     // half answers "unsupported" rather than being left abstract --
-    // an abstract class cannot be marked `final`.
-    plugins::Status decode(const plugins::EncodedVideoFrame& encoded,
-                           plugins::VideoFrame& raw_out,
-                           std::uint8_t* const* output_buffers) noexcept override {
-        (void)encoded;
-        (void)raw_out;
-        (void)output_buffers;
-        return plugins::kErrUnsupported;
-    }
-
+    // an abstract class cannot be marked `final`.  (The `decode()`
+    // override lives further down, next to the zero-copy path.)
     plugins::Status set_params(const plugins::VideoEncoderParams& params) noexcept override {
         (void)params;
         return plugins::kErrUnsupported;

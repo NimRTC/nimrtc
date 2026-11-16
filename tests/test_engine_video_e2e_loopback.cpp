@@ -557,6 +557,12 @@ struct RecordedFrame {
  */
 class E2ERecordingSink final : public np::IVideoSink {
 public:
+    // `IVideoSink` has three `render()` overloads; overriding one of
+    // them hides the others (the usual C++ name-hiding rule), which
+    // GCC's `-Woverloaded-virtual` rejects.  The `using` declaration
+    // brings the base overloads back into scope.
+    using np::IVideoSink::render;
+
     explicit E2ERecordingSink(np::VideoSinkConfig cfg) : cfg_(cfg) {}
 
     // ---- IPlugin ----------------------------------------------------------

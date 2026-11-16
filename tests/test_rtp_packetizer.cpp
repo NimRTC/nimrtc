@@ -77,8 +77,14 @@ RtpPacketSpec sample_spec() {
     spec.timestamp    = 0x0A0B0C0Du;
     spec.payload_type = 96;
     spec.marker       = true;
-    const std::uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
-    spec.payload      = ByteSpan(payload, sizeof(payload));
+    // The payload lives in *static* storage on purpose.  `ByteSpan` is
+    // a non-owning `std::span`, so a span over a function-local array
+    // would dangle the moment `sample_spec()` returns — and the test
+    // would then compare two packets built from *different* garbage.
+    // The bytes are a compile-time constant, so static storage costs
+    // nothing and the span stays valid for the whole test.
+    static constexpr std::uint8_t kPayload[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    spec.payload      = ByteSpan(kPayload, sizeof(kPayload));
     return spec;
 }
 
@@ -108,7 +114,9 @@ TEST(RtpPacketizer, MatchesTheRtpModuleBuilderByteForByte) {
 // extension block, and the negotiated id decides the RFC 5285 one-byte
 // form vs. the RFC 8285 two-byte form.
 TEST(RtpPacketizer, MatchesTheRtpModuleBuilderWithTheExtension) {
-    for (const std::uint16_t ext_id : {1u, 4u, 14u, 15u, 255u}) {
+    for (const std::uint16_t ext_id :
+         {std::uint16_t{1}, std::uint16_t{4}, std::uint16_t{14}, std::uint16_t{15},
+          std::uint16_t{255}}) {
         RtpPacketSpec spec = sample_spec();
         spec.abs_send_time_ext_id = static_cast<std::uint16_t>(ext_id);
         spec.abs_send_time_24mhz = 0x00ABCDEFu;

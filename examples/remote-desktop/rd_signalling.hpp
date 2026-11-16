@@ -279,10 +279,10 @@ inline bool read_line(std::string* line, int timeout_ms) {
     // A line already in the buffer is returned immediately.
     if (detail::take_line(line)) return true;
 
+#ifdef _WIN32
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(timeout_ms);
 
-#ifdef _WIN32
     const HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
     const bool is_pipe = GetFileType(h) != FILE_TYPE_CHAR;
     if (is_pipe) {

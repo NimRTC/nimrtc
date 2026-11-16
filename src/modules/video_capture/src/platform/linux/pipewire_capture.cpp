@@ -155,8 +155,12 @@ class DBusMessage {
         align(4);
     }
 
-    /** The serialised message. */
-    [[nodiscard]] std::vector<char> serialise() const {
+    /** The serialised message.
+     *
+     * Not `const`: every message on the bus needs a *unique* serial, so
+     * serialising advances the counter.
+     */
+    [[nodiscard]] std::vector<char> serialise() {
         // The header is fixed-size (the fields the portal needs are
         // strings, so the header is 12 bytes + the string fields).
         struct Field {
@@ -319,7 +323,7 @@ class DBusConnection {
      * a string (the session handle / the node id) and a file descriptor
      * (the PipeWire fd).
      */
-    bool call(const DBusMessage& msg, std::string* out_string = nullptr,
+    bool call(DBusMessage& msg, std::string* out_string = nullptr,
               int* out_fd = nullptr) noexcept {
         if (fd_ < 0)
             return false;
@@ -335,24 +339,25 @@ class DBusConnection {
 
         // Read the reply.  The reply carries the fd, so `recvmsg` is
         // required (a plain `recv` would drop it).
-        struct msghdr msg{};
+        struct msghdr recv_msg{};
         char buffer[4096];
         iovec iov{};
         iov.iov_base = buffer;
         iov.iov_len = sizeof(buffer);
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
+        recv_msg.msg_iov = &iov;
+        recv_msg.msg_iovlen = 1;
         char control[CMSG_SPACE(sizeof(int))];
 
-        msg.msg_control = control;
-        msg.msg_controllen = sizeof(control);
+        recv_msg.msg_control = control;
+        recv_msg.msg_controllen = sizeof(control);
 
-        const ssize_t n = ::recvmsg(fd_, &msg, 0);
+        const ssize_t n = ::recvmsg(fd_, &recv_msg, 0);
         if (n <= 0)
             return false;
 
         // Pull the fd out of the control data.
-        for (cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        for (cmsghdr* cmsg = CMSG_FIRSTHDR(&recv_msg); cmsg != nullptr;
+             cmsg = CMSG_NXTHDR(&recv_msg, cmsg)) {
             if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
                 if (out_fd != nullptr) {
                     int fd = -1;
@@ -531,7 +536,8 @@ class PipeWireCapture::Impl {
 
         node_id_ = 0;
         try {
-            node_id_ = std::stoul(node_string);
+            const unsigned long parsed = std::stoul(node_string);
+            node_id_ = static_cast<std::uint32_t>(parsed);
         } catch (const std::exception&) {
             node_id_ = 0;
         }
@@ -555,8 +561,10 @@ class PipeWireCapture::Impl {
             return plugins::kErrHardwareError;
         }
 
-        pw_core_ = pw_context_connect(pw_context_, pipewire_fd, nullptr, 0);
-        ::close(pipewire_fd);
+        // The portal handed back a connected PipeWire socket; the
+        // context takes that fd over (`pw_context_connect_fd` closes it
+        // on disconnect).
+        pw_core_ = pw_context_connect_fd(pw_context_, pipewire_fd, nullptr, 0);
         if (pw_core_ == nullptr) {
             pw_context_destroy(pw_context_);
             pw_context_ = nullptr;
@@ -567,26 +575,62 @@ class PipeWireCapture::Impl {
         }
 
         // The stream: a video stream that only *reads* the node.
-        pw_stream_ = pw_stream_new(pw_core_, "NimRTC screen capture", pw_stream_type_video,
-                                   PW_STREAM_FLAG_DONT_RECONNECT);
+        //
+        // `pw_stream_new()` takes the stream's *properties*, not a
+        // media type and not the stream flags -- the flags belong to
+        // `pw_stream_connect()`.
+        pw_properties* stream_props = pw_properties_new(
+            nullptr, nullptr);
+        if (stream_props != nullptr) {
+            pw_properties_set(stream_props, PW_KEY_MEDIA_TYPE, "Video");
+            pw_properties_set(stream_props, PW_KEY_MEDIA_CATEGORY, "Capture");
+            pw_properties_set(stream_props, PW_KEY_MEDIA_ROLE, "Screen");
+        }
+        pw_stream_ = pw_stream_new(pw_core_, "NimRTC screen capture", stream_props);
         if (pw_stream_ == nullptr) {
             close_device();
             error = UnixCaptureError::kCaptureFailed;
             return plugins::kErrHardwareError;
         }
 
-        static pw_stream_events stream_events{};
-        stream_events.version = PW_VERSION;
-        stream_events.process = &Impl::on_stream_process;
-        pw_stream_add_listener(pw_stream_, &stream_events_, this);
+        // The listener is a *mutable* copy of the events table: the
+        // `process` callback is filled in per instance, so it cannot be
+        // `static`.
+        stream_events_.version = PW_VERSION_STREAM_EVENTS;
+        stream_events_.process = &Impl::on_stream_process;
+        stream_events_.param_changed = &Impl::on_stream_param_changed;
+        pw_stream_add_listener(pw_stream_, &stream_hook_, &stream_events_, this);
 
-        spa_hook connect_hook{};
-        spa_hook spa_connect_hook{};
+        // ---- The format we ask for --------------------------------------
+        //
+        // The stream has to *offer* a format; PipeWire then negotiates
+        // one.  The offer is built as a `SPA_PARAM_Format` pod
+        // describing a raw BGRA video frame.
+        std::uint8_t pod_buffer[1024];
+        spa_pod_builder builder = SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
+        spa_video_info_raw raw_info = {};
+        raw_info.format = SPA_VIDEO_FORMAT_BGRA;
+        // `spa_rectangle::width` / `::height` are `uint32_t`.
+        raw_info.size.width = cfg_.format.width != 0 ? cfg_.format.width : 1920u;
+        raw_info.size.height = cfg_.format.height != 0 ? cfg_.format.height : 1080u;
+        raw_info.framerate.num = 30;
+        raw_info.framerate.denom = 1;
+        spa_pod* format_pod = spa_format_video_raw_build(
+            &builder, SPA_PARAM_Format, &raw_info);
+        if (format_pod == nullptr) {
+            close_device();
+            error = UnixCaptureError::kCaptureFailed;
+            return plugins::kErrHardwareError;
+        }
+        const spa_pod* params[] = { format_pod };
 
-        pw_stream_connect(pw_stream_, PW_DIRECTION_INPUT, node_id_,
-                          static_cast<spa_format_video_raw>(SPA_VIDEO_FORMAT_BGRA), 0);
-        (void)connect_hook;
-        (void)spa_connect_hook;
+        const int rc = pw_stream_connect(pw_stream_, PW_DIRECTION_INPUT, node_id_,
+                                         PW_STREAM_FLAG_DONT_RECONNECT, params, 1);
+        if (rc < 0) {
+            close_device();
+            error = UnixCaptureError::kCaptureFailed;
+            return plugins::kErrHardwareError;
+        }
 
         started_ = true;
 
@@ -701,40 +745,69 @@ class PipeWireCapture::Impl {
         if (self == nullptr || self->pw_stream_ == nullptr)
             return;
 
-        pw_buffer* buffer = nullptr;
-        int nbuffers = 0;
-        if (pw_stream_dequeue_buffer(self->pw_stream_, &buffer, &nbuffers) != 0) {
+        // For a capture stream `pw_stream_dequeue_buffer()` hands back
+        // the *one* buffer that is ready; there is no array and no
+        // count.
+        pw_buffer* buffer = pw_stream_dequeue_buffer(self->pw_stream_);
+        if (buffer == nullptr)
             return;
-        }
 
-        for (int i = 0; i < nbuffers; ++i) {
-            pw_buffer* b = &buffer[i];
-            spa_buffer* sbuf = b->buffer;
-            if (sbuf == nullptr)
-                continue;
+        spa_buffer* sbuf = buffer->buffer;
+        if (sbuf == nullptr || sbuf->n_datas == 0)
+            return;
 
-            spa_data* data = &sbuf->datas[0];
-            if (data->type != SPA_TYPE_video_raw)
-                continue;
+        spa_data* data = &sbuf->datas[0];
+        if (data->data == nullptr || data->chunk == nullptr)
+            return;
 
-            spa_video_info_raw* info = reinterpret_cast<spa_video_info_raw*>(data->info);
-            if (info == nullptr)
-                continue;
+        // The *size* of the frame comes from the chunk, and the stride
+        // from the chunk too -- `spa_data` has no `info` member.  The
+        // frame's width and height come from the negotiated format,
+        // which PipeWire reports through the `param_changed` event.
+        const std::uint32_t stride =
+            data->chunk->stride > 0 ? static_cast<std::uint32_t>(data->chunk->stride) : 0u;
+        const std::uint32_t height =
+            data->chunk->size > 0 && stride > 0
+                ? static_cast<std::uint32_t>(data->chunk->size) / stride
+                : 0u;
+        const std::uint32_t width = self->frame_width_;
+        if (width == 0 || height == 0 || stride == 0)
+            return;
 
-            const std::uint32_t width = info->size.width;
-            const std::uint32_t height = info->size.height;
-            const std::uint32_t stride = info->stride;
-            if (width == 0 || height == 0 || data->data == nullptr)
-                continue;
+        std::vector<std::uint8_t> pixels(
+            static_cast<std::size_t>(stride) * static_cast<std::size_t>(height));
+        const std::size_t copy = pixels.size() < data->chunk->size
+            ? pixels.size()
+            : static_cast<std::size_t>(data->chunk->size);
+        std::memcpy(pixels.data(), data->data, copy);
 
-            std::vector<std::uint8_t> pixels(static_cast<std::size_t>(stride) * height);
-            std::memcpy(pixels.data(), data->data, pixels.size());
+        std::lock_guard<std::mutex> lock(self->mutex_);
+        self->latest_ = std::move(pixels);
+        self->latest_width_ = width;
+        self->latest_height_ = height;
+    }
 
-            std::lock_guard<std::mutex> lock(self->mutex_);
-            self->latest_ = std::move(pixels);
-            self->latest_width_ = width;
-            self->latest_height_ = height;
-        }
+    /** PipeWire's `param_changed` event: the format was negotiated. */
+    static void on_stream_param_changed(void* userdata, std::uint32_t id,
+                                        const spa_pod* param) {
+        auto* self = static_cast<Impl*>(userdata);
+        if (self == nullptr || id != SPA_PARAM_Format || param == nullptr)
+            return;
+
+        spa_video_info_raw info = {};
+        if (spa_format_video_raw_parse(param, &info) != 0)
+            return;
+
+        const std::uint32_t width =
+            info.size.width > 0 ? static_cast<std::uint32_t>(info.size.width) : 0u;
+        const std::uint32_t height =
+            info.size.height > 0 ? static_cast<std::uint32_t>(info.size.height) : 0u;
+        if (width == 0 || height == 0)
+            return;
+
+        std::lock_guard<std::mutex> lock(self->mutex_);
+        self->frame_width_ = width;
+        self->frame_height_ = height;
     }
 
     bool take_latest(std::vector<std::uint8_t>& out, std::uint32_t& width,
@@ -764,10 +837,18 @@ class PipeWireCapture::Impl {
     std::uint32_t latest_width_ = 0;
     std::uint32_t latest_height_ = 0;
 
+    /** The negotiated frame size (from PipeWire's `param_changed`). */
+    std::uint32_t frame_width_ = 0;
+    std::uint32_t frame_height_ = 0;
+
     pw_loop* pw_loop_ = nullptr;
     pw_context* pw_context_ = nullptr;
     pw_core* pw_core_ = nullptr;
     pw_stream* pw_stream_ = nullptr;
+
+    /** The listener hook and the events table for the stream. */
+    spa_hook stream_hook_{};
+    pw_stream_events stream_events_{};
 #    endif
 };
 

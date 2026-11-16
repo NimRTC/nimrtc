@@ -71,6 +71,10 @@
     #if defined(NIMRTC_VIDEO_SINK_HAS_X11)
         #include <X11/Xlib.h>
         #include <X11/Xutil.h>
+        // `<X11/Xlib.h>` defines `Status` as a macro expanding to `int`,
+        // which would rewrite `plugins::Status` into `plugins::int`.
+        // Undefine it so the plugin status type keeps working.
+        #undef Status
     #endif
 
     #if defined(NIMRTC_VIDEO_SINK_HAS_XCB_SHM)
@@ -263,8 +267,8 @@ struct X11State {
 
     #if defined(NIMRTC_VIDEO_SINK_HAS_XCB_SHM)
     xcb_connection_t*  xcb_conn   = nullptr;
-    xcb_shm_segment_t* xcb_shm    = nullptr;
-    xcb_shmid_t        xcb_shm_id = 0;
+    xcb_shm_seg_t*     xcb_shm    = nullptr;
+    std::uint32_t      xcb_shm_id = 0;
     void*              xcb_shm_data = nullptr;
     std::uint32_t      xcb_shm_w  = 0;
     std::uint32_t      xcb_shm_h  = 0;
@@ -708,7 +712,13 @@ bool EglRenderer::Impl::init_x11() {
 
     const int screen = DefaultScreen(x11_->display);
     if (cfg_.native_window != nullptr) {
-        x11_->window = static_cast<Window>(cfg_.native_window);
+        // `native_window` is an opaque `void*` that carries the X11
+        // `Window` id.  `Window` is `unsigned long`, which cannot be
+        // produced by a plain `static_cast` from `void*` under
+        // `-Wold-style-cast`/strict conversion rules, so go through
+        // `uintptr_t` explicitly.
+        x11_->window = static_cast<Window>(
+            reinterpret_cast<std::uintptr_t>(cfg_.native_window));
     } else {
         x11_->window = XCreateSimpleWindow(
             x11_->display, RootWindow(x11_->display, screen), 0, 0, 1280, 720,
@@ -769,7 +779,8 @@ bool EglRenderer::Impl::present_via_x11(const PresentedFrame& frame) {
         const int screen = DefaultScreen(x11_->display);
         x11_->image = XCreateImage(
             x11_->display, DefaultVisual(x11_->display, screen),
-            DefaultDepth(x11_->display, screen), ZPixmap, 0, nullptr,
+            static_cast<unsigned int>(DefaultDepth(x11_->display, screen)),
+            ZPixmap, 0, nullptr,
             static_cast<unsigned int>(w), static_cast<unsigned int>(h), 32,
             stride);
         if (x11_->image == nullptr) return false;
@@ -779,14 +790,14 @@ bool EglRenderer::Impl::present_via_x11(const PresentedFrame& frame) {
     // native byte order; on a little-endian host that is exactly the
     // BGRA order the sink carries.
     for (std::uint32_t row = 0; row < h; ++row) {
-        auto* dst = static_cast<std::uint8_t*>(x11_->image->data) +
+        auto* dst = reinterpret_cast<std::uint8_t*>(x11_->image->data) +
                     static_cast<std::ptrdiff_t>(row) * x11_->image->bytes_per_line;
         const std::uint8_t* src =
             frame.pixels.data() + static_cast<std::ptrdiff_t>(row) * stride;
         std::memcpy(dst, src, static_cast<std::size_t>(stride));
     }
 
-    XPutImage(x11_->display, x11_->window, x11_->gc_, x11_->image, 0, 0, 0, 0,
+    XPutImage(x11_->display, x11_->window, x11_->gc, x11_->image, 0, 0, 0, 0,
               static_cast<unsigned int>(w), static_cast<unsigned int>(h));
     XFlush(x11_->display);
     return true;
@@ -803,7 +814,11 @@ bool EglRenderer::Impl::present_via_x11(const PresentedFrame& frame) {
 bool EglRenderer::Impl::init_egl() {
     egl_ = std::make_unique<EglState>();
 
+    #if defined(NIMRTC_VIDEO_SINK_HAS_WAYLAND)
     const bool wayland = (wl_ != nullptr);
+    #else
+    const bool wayland = false;
+    #endif
 
     // ---- The display ------------------------------------------------------
     if (wayland) {

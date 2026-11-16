@@ -115,10 +115,12 @@ TEST(VideoSyncDecision, TheCountersMoveWithTheDecisions) {
     cfg.tolerance_ms = 40;
     c.configure(cfg);
 
-    c.decide(0, 1);                      // present
-    c.decide(-100'000, 2);               // drop
-    c.decide(100'000, 3);                // delay
-    c.decide(10'000, 4);                 // present
+    // `decide()` is `[[nodiscard]]`; the decisions are checked through
+    // the counters below, so the return value is explicitly discarded.
+    (void)c.decide(0, 1);                 // present
+    (void)c.decide(-100'000, 2);          // drop
+    (void)c.decide(100'000, 3);           // delay
+    (void)c.decide(10'000, 4);            // present
 
     const auto& k = c.counters();
     EXPECT_EQ(k.frames_presented, 2u);
@@ -181,9 +183,8 @@ TEST(VideoSyncDecision, ADropCancelsThePendingDebt) {
     cfg.max_delay_ms = 2'000;   // 2 s — far above the 1 s skew below
     c.configure(cfg);
 
-    c.decide(1'000'000, 1);   // delay — the debt is now pending
+    (void)c.decide(1'000'000, 1);   // delay — the debt is now pending
     EXPECT_EQ(c.decide(-1'000'000, 2).decision, ns::VideoSyncDecision::kDrop);
-
     // The debt was cancelled by the drop, so the next delay is the skew
     // minus the band again (not less) — and with a non-binding cap that
     // value is exactly the skew minus the band.
@@ -202,9 +203,9 @@ TEST(VideoSyncDecision, TheHistoryRingKeepsTheRecentDecisions) {
     c.configure(cfg);
 
     // The skews must be outside the band for the decisions to differ.
-    c.decide(0, 1);                       // present (inside the band)
-    c.decide(-100'000, 2);               // drop   (video ahead)
-    c.decide(100'000, 3);                // delay  (video behind)
+    (void)c.decide(0, 1);                 // present (inside the band)
+    (void)c.decide(-100'000, 2);          // drop   (video ahead)
+    (void)c.decide(100'000, 3);           // delay  (video behind)
 
     // Slot 0 is the most recent.
     EXPECT_EQ(c.history_decision(0), ns::VideoSyncDecision::kDelay);

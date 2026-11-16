@@ -217,12 +217,6 @@ plugins::Status pa_status(PaError err) noexcept {
     }
 }
 
-/** The PaError's human-readable text, for the log. */
-std::string pa_error_text(PaError err) noexcept {
-    const char* text = Pa_GetErrorText(err);
-    return text != nullptr ? std::string(text) : std::string("unknown");
-}
-
 /** Parse a device id back into a PortAudio index. */
 bool parse_device_id(const std::string& id, PaDeviceIndex* out) noexcept {
     if (id.empty()) {

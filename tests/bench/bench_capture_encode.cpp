@@ -315,7 +315,6 @@ CaptureResult bench_capture(const Resolution& res, int frames, int warmup) {
         (void)device.produce_one();
         const auto t1 = Clock::now();
         (void)device.pop_frame(frame);
-        const auto t2 = Clock::now();
         produce_us += micros_since(t0);
         pop_us += micros_since(t1);
     }

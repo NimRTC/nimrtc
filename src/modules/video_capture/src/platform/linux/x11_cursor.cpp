@@ -120,66 +120,52 @@ class X11CursorSource final : public ICursorSource {
             return false;
         }
 
-        root_default_ = ::DefaultRootWindow(display_);
-        screen_number_ = ::DefaultScreen(display_);
+        // `DefaultRootWindow` and `DefaultScreen` are Xlib *macros*,
+        // not functions, so they must be spelled without the `::`
+        // qualifier -- `::DefaultRootWindow(dpy)` does not parse
+        // because the macro expands in the middle of the qualified-id.
+        root_default_ = DefaultRootWindow(display_);
+        screen_number_ = DefaultScreen(display_);
         return true;
     }
 
     /**
      * @brief Convert an XFixes cursor image into the BGRA image.
+     *
+     * The XFixes cursor image is **not** a byte bitmap: `pixels` is an
+     * array of `unsigned long`, one entry per pixel, each holding a
+     * 32-bit ARGB value (0xAARRGGBB).  There is no row padding and no
+     * depth field -- the server always reports ARGB.
+     *
+     * The output is the BGRA byte layout `CursorImage` asks for, so the
+     * conversion unpacks each ARGB word and re-orders the channels.
      */
     static bool convert(XFixesCursorImage* image, CursorImage& out) noexcept {
         if (image == nullptr || image->width <= 0 || image->height <= 0) return false;
+        if (image->pixels == nullptr) return false;
 
         const int width = image->width;
         const int height = image->height;
-        const std::size_t pixels_per_row = static_cast<std::size_t>(image->width) *
-                                          static_cast<std::size_t>(image->pixels_per_row);
-        const std::size_t stride = pixels_per_row * 4u;
+
+        // The output rows are packed: `width * 4` bytes each.
+        const std::size_t stride = static_cast<std::size_t>(width) * 4u;
 
         std::vector<std::uint8_t> pixels(stride * static_cast<std::size_t>(height));
 
-        // The image's depth says how the pixels are laid out.  A
-        // depth of 1 is a monochrome cursor, whose pixels are 0 or 1
-        // and whose "alpha" is implied.
-        const bool monochrome = (image->depth == 1);
-
         for (int y = 0; y < height; ++y) {
-            const std::uint8_t* src_row =
-                image->pixels + static_cast<std::size_t>(y) * pixels_per_row;
+            const unsigned long* src_row =
+                image->pixels + static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
             std::uint8_t* dst_row = pixels.data() + static_cast<std::size_t>(y) * stride;
 
             for (int x = 0; x < width; ++x) {
                 std::uint8_t* dst = dst_row + static_cast<std::size_t>(x) * 4u;
 
-                if (monochrome) {
-                    // One bit per pixel: the byte's high bit is the
-                    // left-most pixel on a big-endian server and the
-                    // low bit on a little-endian one.  The pixel value
-                    // is 0 (drawn) or 1 (transparent).
-                    const std::size_t byte_index = static_cast<std::size_t>(x) / 8u;
-                    if (byte_index >= pixels_per_row) continue;
-                    const std::uint8_t byte = src_row[byte_index];
-                    const int shift = (x % 8);
-#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-                    const std::uint8_t bit =
-                        static_cast<std::uint8_t>((byte >> (7 - shift)) & 0x01u);
-#else
-                    const std::uint8_t bit = static_cast<std::uint8_t>((byte >> shift) & 0x01u);
-#endif
-                    // In the monochrome convention a 1 means "the
-                    // background shows through".
-                    dst[0] = dst[1] = dst[2] = 0x00;
-                    dst[3] = (bit != 0) ? 0x00 : 0xFF;
-                    continue;
-                }
-
-                // A 32-bit ARGB image.
-                const std::uint8_t* src = src_row + static_cast<std::size_t>(x) * 4u;
-                dst[0] = src[0];  // B
-                dst[1] = src[1];  // G
-                dst[2] = src[2];  // R
-                dst[3] = src[3];  // A
+                // 0xAARRGGBB -> BGRA.
+                const unsigned long argb = src_row[x];
+                dst[0] = static_cast<std::uint8_t>((argb >>  0) & 0xFFu); // B
+                dst[1] = static_cast<std::uint8_t>((argb >>  8) & 0xFFu); // G
+                dst[2] = static_cast<std::uint8_t>((argb >> 16) & 0xFFu); // R
+                dst[3] = static_cast<std::uint8_t>((argb >> 24) & 0xFFu); // A
             }
         }
 

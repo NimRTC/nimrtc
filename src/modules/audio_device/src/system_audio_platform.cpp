@@ -69,7 +69,15 @@ namespace {
 
 // ---------------------------------------------------------------------------
 // Shared helpers
+//
+// These back the WASAPI loopback source, which is the only consumer.
+// They live in an anonymous namespace, so on the platforms that do not
+// build the WASAPI leg (Linux, macOS) they would be reported as
+// unused functions under `-Wunused-function` (fatal with `-Werror`).
+// Guarding them keeps one definition and no dead code.
 // ---------------------------------------------------------------------------
+
+#if NIMRTC_SYSTEM_AUDIO_WASAPI
 
 constexpr std::uint32_t kDefaultSampleRate = 48000;
 constexpr std::uint16_t kDefaultChannels   = 2;
@@ -103,6 +111,8 @@ std::int64_t now_us() noexcept {
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
+
+#endif  // NIMRTC_SYSTEM_AUDIO_WASAPI
 
 } // namespace
 

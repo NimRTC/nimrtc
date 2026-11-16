@@ -150,6 +150,12 @@ TEST(VideoRenderPath, EveryCombinationIsDecided) {
  *  It does not stub out the GPU overload at all. */
 class CpuOnlySink final : public nimrtc::plugins::IVideoSink {
 public:
+    // `IVideoSink` has three `render()` overloads; overriding one of
+    // them hides the others (the usual C++ name-hiding rule), which
+    // GCC's `-Woverloaded-virtual` rejects.  The `using` declaration
+    // brings the base overloads back into scope.
+    using nimrtc::plugins::IVideoSink::render;
+
     const char* name() const noexcept override { return "cpu-only"; }
     nimrtc::plugins::Status open() noexcept override { return nimrtc::plugins::kOk; }
     void close() noexcept override {}
@@ -174,6 +180,12 @@ public:
  *  not stub out the CPU overload either. */
 class GpuOnlySink final : public nimrtc::plugins::IVideoSink {
 public:
+    // `IVideoSink` has three `render()` overloads; overriding one of
+    // them hides the others (the usual C++ name-hiding rule), which
+    // GCC's `-Woverloaded-virtual` rejects.  The `using` declaration
+    // brings the base overloads back into scope.
+    using nimrtc::plugins::IVideoSink::render;
+
     const char* name() const noexcept override { return "gpu-only"; }
     nimrtc::plugins::Status open() noexcept override { return nimrtc::plugins::kOk; }
     void close() noexcept override {}

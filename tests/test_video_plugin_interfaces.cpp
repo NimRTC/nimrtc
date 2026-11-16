@@ -93,6 +93,13 @@ private:
 // ---------------------------------------------------------------------------
 class StubVideoSink : public np::IVideoSink {
 public:
+    // `IVideoSink` has three `render()` overloads.  Overriding one of
+    // them hides the others by the usual C++ name-hiding rule, which
+    // GCC's `-Woverloaded-virtual` (fatal under `-Werror`) rejects.
+    // The `using` declaration brings the base overloads back into
+    // scope -- this is the fix the interface's own `@note` documents.
+    using np::IVideoSink::render;
+
     explicit StubVideoSink(np::VideoSinkConfig) noexcept {}
     ~StubVideoSink() override = default;
 

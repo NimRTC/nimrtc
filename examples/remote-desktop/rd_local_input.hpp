@@ -119,6 +119,14 @@ public:
     [[nodiscard]] int pointer_y() const noexcept { return pointer_y_; }
 
 private:
+    /** The pointer's last known position, in virtual-screen pixels. */
+    //
+    // These live outside the `_WIN32` block because the accessors below
+    // are part of the class on every platform -- only the *polling* is
+    // Windows-only.
+    int pointer_x_ = 0;
+    int pointer_y_ = 0;
+
 #ifdef _WIN32
     /** The keyboard's state at the previous poll. */
     bool key_down_[256] = {};
@@ -127,9 +135,7 @@ private:
     /** The mouse buttons' state at the previous poll. */
     bool button_down_[3] = {};
 
-    /** The pointer's position at the previous poll. */
-    int pointer_x_ = 0;
-    int pointer_y_ = 0;
+    /** Whether the pointer's position is known yet. */
     bool pointer_known_ = false;
 
     void poll_windows(std::uint64_t now_us, std::vector<rdi::InputEvent>& out) {

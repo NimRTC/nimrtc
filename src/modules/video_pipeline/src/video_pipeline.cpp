@@ -927,6 +927,31 @@ struct VideoSender::Impl {
             use_fua[i] = nalus[i].size() > cfg.mtu;
         }
 
+        // ---- The marker bit (RFC 6184 §5.1) --------------------------------
+        //
+        // The marker marks the LAST packet of a *frame* — that is, the
+        // packet that carries the frame's LAST NAL unit.  It does **not**
+        // mark the last packet of every NAL group.
+        //
+        // Getting this wrong is not cosmetic.  The jitter buffer groups
+        // the packets of a frame by RTP timestamp and uses the marker bit
+        // to decide that a frame is complete, so a marker on an
+        // intermediate packet makes the receiver emit a *truncated* frame
+        // and then discard everything that arrives after it.
+        //
+        // The case that bites is the classic NVENC output: an IDR frame
+        // that carries `SPS | PPS | <oversized IDR slice>`.  The SPS and
+        // the PPS are small, so they are aggregated into one STAP-A
+        // packet, while the slice is fragmented into FU-A packets.  The
+        // STAP-A is *not* the last packet of the frame — but a marker
+        // there made the receiver emit "SPS + PPS" as if it were the
+        // whole picture, and the IDR slice that followed was dropped
+        // because its frame had already been played out.
+        //
+        // `last_nalu` is therefore the index of the frame's last NAL unit:
+        // the marker goes on the packet that carries it.
+        const std::size_t last_nalu = nalus.size() - 1;
+
         // Walk through nalus; for each, either emit FU-A fragments OR
         // try to bundle with neighbouring small NALUs into a STAP-A.
         std::size_t i = 0;
@@ -965,7 +990,8 @@ struct VideoSender::Impl {
                     fua_buf[0] = static_cast<std::uint8_t>(
                         (fua_buf[0] & ~kNriMask) | ((nri & 0x03) << 5));
                     emit(core::ByteSpan{fua_buf.data(), wrote},
-                         rtp_ts, /*marker=*/end);
+                         rtp_ts,
+                         /*marker=*/end && (i == last_nalu));
                     offset += this_len;
                 }
                 stats.fua_frames_packetized++;
@@ -1003,16 +1029,21 @@ struct VideoSender::Impl {
                 const std::size_t wrote = build_stap_a(
                     group.data(), group.size(),
                     core::MutableByteSpan{group_out.data(), group_out.size()});
+                // The group spans the NAL units [i, j) — the marker goes on
+                // the packet only when the group carries the frame's LAST
+                // NAL unit (see the marker note above).
+                const bool group_is_last = (j - 1 == last_nalu);
                 if (wrote == 0) {
                     // STAP-A build failed (e.g. too big).  Fall back to
                     // single NALUs one by one.
-                    for (auto& g : group) {
-                        emit(g, rtp_ts, /*marker=*/false);
+                    for (std::size_t k = 0; k < group.size(); ++k) {
+                        emit(group[k], rtp_ts,
+                             /*marker=*/(i + k == last_nalu));
                         stats.single_nal_frames_packetized++;
                     }
                 } else {
                     emit(core::ByteSpan{group_out.data(), wrote},
-                         rtp_ts, /*marker=*/true);
+                         rtp_ts, /*marker=*/group_is_last);
                     stats.stapa_frames_packetized++;
                 }
                 i = j;
@@ -1021,7 +1052,7 @@ struct VideoSender::Impl {
 
             // group.size() == 1: emit single NALU.
             if (group.size() == 1) {
-                emit(group[0], rtp_ts, /*marker=*/true);
+                emit(group[0], rtp_ts, /*marker=*/(i == last_nalu));
                 stats.single_nal_frames_packetized++;
                 i = j;
                 continue;

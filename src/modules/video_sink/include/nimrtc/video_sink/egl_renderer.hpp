@@ -70,6 +70,12 @@ namespace nimrtc::video_sink {
  */
 class NIMRTC_API_STABLE EglRenderer final : public plugins::IVideoSink {
 public:
+    // `IVideoSink` declares three `render()` overloads.  A derived
+    // class that overrides one of them hides the others (the usual C++
+    // name-hiding rule), which GCC's `-Woverloaded-virtual` rejects.
+    // The `using` declaration brings the base overloads back.
+    using plugins::IVideoSink::render;
+
     explicit EglRenderer(plugins::VideoSinkConfig cfg) noexcept;
 
     ~EglRenderer() override;

@@ -48,6 +48,12 @@ namespace nimrtc::video_sink {
  *  responsibility — the sink does not serialize concurrent renders. */
 class NIMRTC_API_STABLE HeadlessSink : public plugins::IVideoSink {
 public:
+    // `IVideoSink` declares three `render()` overloads.  A derived
+    // class that overrides one of them hides the others (the usual C++
+    // name-hiding rule), which GCC's `-Woverloaded-virtual` rejects.
+    // The `using` declaration brings the base overloads back.
+    using plugins::IVideoSink::render;
+
     explicit HeadlessSink(plugins::VideoSinkConfig cfg) noexcept;
     ~HeadlessSink() override;
 
@@ -90,6 +96,9 @@ private:
  *  is strictly increasing. Catches timestamp mishandling in tests. */
 class NIMRTC_API_STABLE PinnedSink : public plugins::IVideoSink {
 public:
+    // See `HeadlessSink` for why the `using` declaration is needed.
+    using plugins::IVideoSink::render;
+
     explicit PinnedSink(plugins::VideoSinkConfig cfg) noexcept;
     ~PinnedSink() override;
 
@@ -150,6 +159,9 @@ NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoSink> create_pinned_sink(
  *  (or wraps in unique_ptr) after no longer needed. */
 class NIMRTC_API_STABLE PluginAdapter : public plugins::IVideoSink {
 public:
+    // See `HeadlessSink` for why the `using` declaration is needed.
+    using plugins::IVideoSink::render;
+
     explicit PluginAdapter(std::unique_ptr<plugins::IVideoSink> concrete) noexcept;
     ~PluginAdapter() override;
 

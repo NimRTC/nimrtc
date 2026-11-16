@@ -538,8 +538,6 @@ TEST(EngineVideoKeyframeLimiter, AStormProducesABoundedIdrRate) {
     // A burst of PLIs — one every 10 ms, far faster than the 250 ms
     // minimum interval the limiter enforces.
     const auto pli = make_pli(0xDEADBEEF, 0x12345678);
-    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
 
     for (int i = 0; i < 100; ++i) {
         (void)sender->apply_feedback_rtcp(np::BufferView{pli.data(), pli.size()});

@@ -298,13 +298,41 @@ _nimrtc_openh264_configure_target(nimrtc_vendor_openh264_decoder)
 # an INTERFACE target so the three upstream archives stay separate objects
 # (which is what keeps the header collisions apart) while still presenting
 # one name to consumers.
+#
+# WHY THE ARCHIVES ARE IN THIS ORDER
+# ----------------------------------
+# A GNU linker resolves a static archive **left to right**: an archive is
+# scanned only for the symbols that are still undefined *at that point*.
+# The three upstream archives are mutually dependent:
+#
+#     common    provides `WelsLog()` and `g_kuiMbCountScan4Idx`
+#     encoder   needs both of the above (`welsEncoderExt.cpp`,
+#               `svc_set_mb_syn_cavlc.cpp`, ...)
+#     decoder   needs `g_kuiMbCountScan4Idx` (`deblocking.cpp`)
+#
+# and `common` needs *nothing* from the encoder or the decoder.  So the
+# archives are listed encoder / decoder / common: the two consumers come
+# first (which pulls their objects in) and `common` comes last (which
+# resolves the symbols they left undefined).
+#
+# With `common` listed *first* — the obvious alphabetical order — the
+# linker scans it before anything needs `WelsLog()`, so
+# `welsCodecTrace.cpp.o` is not pulled in, and the link then fails with
+#
+#     undefined reference to `WelsLog(TagLogContext*, int, char const*, ...)'
+#     undefined reference to `WelsCommon::g_kuiMbCountScan4Idx'
+#
+# Upstream avoids the whole question with Meson's `link_whole`, which
+# forces *every* object of every archive into the link.  MSVC ignores
+# archive order entirely, so the order below is a no-op there — the fix
+# is harmless on every toolchain.
 # -----------------------------------------------------------------------------
 add_library(nimrtc_vendor_openh264 INTERFACE)
 add_library(nimrtc::vendor::openh264 ALIAS nimrtc_vendor_openh264)
 target_link_libraries(nimrtc_vendor_openh264 INTERFACE
-    nimrtc_vendor_openh264_common
     nimrtc_vendor_openh264_encoder
     nimrtc_vendor_openh264_decoder
+    nimrtc_vendor_openh264_common
 )
 
 find_package(Threads REQUIRED)

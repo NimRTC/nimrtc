@@ -160,6 +160,12 @@ private:
 
 class CountingSink final : public np::IVideoSink {
 public:
+    // `IVideoSink` has three `render()` overloads; overriding one of
+    // them hides the others (the usual C++ name-hiding rule), which
+    // GCC's `-Woverloaded-virtual` rejects.  The `using` declaration
+    // brings the base overloads back into scope.
+    using np::IVideoSink::render;
+
     const char* name() const noexcept override { return "CountingSink"; }
     np::Status open() noexcept override { open_ = true; return np::kOk; }
     void close() noexcept override { open_ = false; }

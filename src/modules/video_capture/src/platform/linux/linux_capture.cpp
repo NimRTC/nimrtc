@@ -26,8 +26,10 @@
 
 #if defined(__linux__)
 
-#    include "linux/pipewire_capture.hpp"
-#    include "linux/x11_capture.hpp"
+// The two backends' headers sit next to this file, not in a `linux/`
+// subdirectory -- the include is by plain file name.
+#    include "pipewire_capture.hpp"
+#    include "x11_capture.hpp"
 
 #    include <cstdlib>
 

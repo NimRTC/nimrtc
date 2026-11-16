@@ -50,6 +50,14 @@ if(WIN32)
 elseif(APPLE)
     list(APPEND NIMRTC_RD_INPUT_INJECT_SOURCES
         src/platform/macos/macos_input.cpp)
+    # The macOS backend uses Objective-C (the `NSString` transcoding in
+    # `do_inject_text()`), so the translation unit is compiled as
+    # Objective-C++ with ARC.  Without the dialect switch the compiler
+    # treats the file as plain C++ and rejects the `#import` directives
+    # ("#import is a language extension") and the Objective-C message
+    # sends ("unknown type name 'NSString'").
+    set_source_files_properties(src/platform/macos/macos_input.cpp PROPERTIES
+        COMPILE_OPTIONS "-x;objective-c++;-fobjc-arc")
 elseif(UNIX)
     list(APPEND NIMRTC_RD_INPUT_INJECT_SOURCES
         src/platform/linux/linux_input.cpp)

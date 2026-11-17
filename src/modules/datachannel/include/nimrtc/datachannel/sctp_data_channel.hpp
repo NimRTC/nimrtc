@@ -1,6 +1,6 @@
 ﻿/**
  * @file nimrtc/datachannel/sctp_data_channel.hpp
- * @brief SctpDataChannel — usrsctp-backed implementation of IDataChannel.
+ * @brief SctpDataChannel — SCTP-backed implementation of IDataChannel.
  *
  * P2 of the datachannel module (P1 was interface-only). This header
  * is the public module surface for the production channel; concrete
@@ -27,9 +27,9 @@
  *     thread.
  *   - `send()` is thread-safe — implementations must queue outbound data.
  *     SctpDataChannel forwards directly to the underlying ISctpSocket,
- *     which (via usrsctp) is thread-safe for outbound writes.
+ *     whose outbound writes are thread-safe.
  *   - The on-message / on-state callbacks fire from the SCTP backend's
- *     worker thread (usrsctp's internal UDP-loop). SctpDataChannel
+ *     worker thread. SctpDataChannel
  *     dispatches them onto `on_msg_` / `on_state_` directly — the user
  *     is responsible for marshalling into the engine thread if required.
  *
@@ -62,7 +62,7 @@
  *
  * `SctpDataChannel(std::unique_ptr<sctp::ISctpSocket>)` is a public
  * constructor intended for tests only — it skips the
- * `PluginRegistry::get_sctp_socket("usrsctp")` lookup and accepts a
+ * `PluginRegistry::get_sctp_socket("stub")` lookup and accepts a
  * caller-supplied socket (typically a MockSctpSocket). Production
  * code MUST use the default constructor.
  *
@@ -160,7 +160,7 @@ using plugins::kErrInternal;
 #endif
 
 /**
- * @brief SCTP-backed (usrsctp 0.9.5.0) implementation of IDataChannel.
+ * @brief SCTP-backed implementation of IDataChannel.
  *
  * Wraps a `nimrtc::sctp::ISctpSocket` instance and dispatches:
  *   - `send()` → `send_stream` / `send_datagram` / `send_partial_reliable`
@@ -176,11 +176,11 @@ class NIMRTC_API_STABLE SctpDataChannel final : public plugins::IDataChannel {
 public:
     /**
      * @brief Production constructor — creates the underlying
-     *        `ISctpSocket` by looking up the `UsrsctpSocketFactory`
-     *        (`id="usrsctp"`) in `core::PluginRegistry` and calling
+     *        `ISctpSocket` by looking up the SCTP factory
+     *        (`id="stub"`) in `core::PluginRegistry` and calling
      *        `factory->create({...})`.
      *
-     * If the registry has no `id="usrsctp"` factory registered, the
+     * If the registry has no `id="stub"` factory registered, the
      * channel is created in a "no-socket" state and every `send()`
      * returns `plugins::kErrNotReady`. The factory pointer is
      * resolved at construction time so callers do not need to call
@@ -194,7 +194,7 @@ public:
      *
      * Production code MUST use the default constructor. This overload
      * exists so unit tests can drive the channel end-to-end without
-     * standing up a real usrsctp socket.
+     * standing up a real SCTP socket.
      */
     explicit SctpDataChannel(std::unique_ptr<sctp::ISctpSocket> injected);
 
@@ -261,7 +261,8 @@ private:
      *  the v0.14.x seam). Returns the result of that send. */
     Status route_send(plugins::BufferView data) noexcept;
 
-    /** Forwarding trampoline from usrsctp's recv thread to `on_msg_`. */
+    /** Forwarding trampoline from the SCTP backend's recv thread to
+     *  `on_msg_`. */
     void on_sctp_recv(uint16_t stream, core::ByteSpan data) noexcept;
 
     /** PPID-aware inbound demux (v0.14.x): DCEP OPEN → reply ACK and
@@ -329,7 +330,7 @@ public:
 
     /** Short human-readable name, surfaced in logs / registry listings. */
     std::string_view display_name() const noexcept override {
-        return "usrsctp-backed DataChannel (SCTP / PR-SCTP / SCTP-over-DTLS)";
+        return "SCTP-backed DataChannel (SCTP / PR-SCTP / SCTP-over-DTLS)";
     }
 
     /** Allocate a fresh `SctpDataChannel`. Ownership passes to the caller;

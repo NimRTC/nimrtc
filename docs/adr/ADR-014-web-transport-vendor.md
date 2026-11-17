@@ -317,7 +317,7 @@ section above is the fallback rationale.
 | msquic 4-platform CI green at the build level (compile + link) | `cmake --preset release.{msvc,linux-gcc,macos-clang,linux-aarch64}` | yes (per `v1.0-plan.md` §12.3.3 Gate #1) |
 | `WebTransportDataChannel` impl + `test_web_transport_msquic` 8/8 PASS at the beta.1 cut | `tests/test_web_transport_msquic.cpp` | yes (per `v1.0-plan.md` §12.3.3 Gate #2) |
 | Chrome e2e Case E PASS 3 consecutive runs on Windows + Linux x86_64 | `python tools/run_e2e_acceptance.py --case e` | yes (per `v1.0-plan.md` §12.3.3 Gate #3 — the v1.0.0 headline gate) |
-| `test_sctp_usrsctp` 4/4 PASS at the beta.1 cut (usrsctp stays in tree through v1.2.0) | `ctest -R test_sctp_usrsctp` | yes (per `v1.0-plan.md` §12.3.3 Gate #7) |
+| `test_sctp_usrsctp` 4/4 PASS at the beta.1 cut (the test was removed in v1.2.0 — plan E7 deleted the usrsctp backend and its vendored tree) | `ctest -R test_sctp_usrsctp` | yes (per `v1.0-plan.md` §12.3.3 Gate #7) |
 
 ## Implementation notes
 

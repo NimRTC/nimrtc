@@ -626,7 +626,7 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
 // selector (`docs/plan/datachannel-capability-plan.md` WP-A, DEC-4 = A1).
 // The SCTP factory stays registered as an in-tree **test backend** — the
 // module tests drive it directly — but the engine refuses to select it,
-// because it opens an in-process usrsctp loopback socket that can never
+// because it opens an in-process loopback socket that can never
 // reach a peer.  The historical SCTP-over-DTLS wiring sketch below is kept
 // for reference only; it was never implemented and is not planned (ADR-014).
 //
@@ -642,7 +642,7 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
 //      the SCTP socket's `send_datagram()` -- that's where
 //      SCTP-over-DTLS packets are emitted onto the wire.
 //   3. Hook the DTLS transport's inbound (decrypted) datagrams
-//      into `ISctpSocket::feed_inbound_datagram()` so usrsctp
+//      into `ISctpSocket::feed_inbound_datagram()` so the backend
 //      can drain its receive queue.
 //   Only the (void*) transport pointer placeholder
 // (`Impl::datachannel_transport_cookie`) was reserved; the WebTransport path
@@ -759,7 +759,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
         //      WP-A / DEC-4 decision A1) --------------------------
         //
         // The SCTP backend is a **test-only** backend: `SctpDataChannel`
-        // opens an in-process usrsctp socket bound to 127.0.0.1 and the
+        // opens an in-process loopback socket and the
         // engine never wires the DTLS transport's outbound/inbound
         // datagram paths into that socket, so a channel created here can
         // never reach a remote peer.  Silently resolving it would hand
@@ -772,7 +772,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
         // What is retired is the *public selector*, not the backend.
         std::string msg =
             std::string("engine: datachannel_backend='sctp' is a test-only "
-                        "backend (an in-process usrsctp loopback socket) and "
+                        "backend (an in-process loopback socket) and "
                         "was retired from the public backend selector; it "
                         "cannot reach a peer. Use \"web_transport\" (the "
                         "default) for the WebTransport/QUIC data plane, or "

@@ -17,21 +17,19 @@
  *   This header is the SEAM ONLY. The default impl
  *   (`SctpStubSocket : ISctpSocket`, id="stub") returns
  *   `plugins::kErrNotReady` from every send method and is documented as a
- *   placeholder pending v0.11.0 usrsctp integration per
- *   `docs/plan/transport-selection.md` §7.
+ *   placeholder: the stub is honest about not being ready (sends fail
+ *   loudly instead of being silently dropped).
  *
- * v0.11.0 work (out of scope for Slice 5) will:
- *   1. Land `UsrsctpSocket : ISctpSocket` (id="usrsctp") as the production
- *      default impl — see `docs/plan/transport-selection.md` §6.2 / §7.
- *   2. Wire it into `nimrtc::sctp::register_default_plugins()` via an
- *      idempotent static-local latch (same pattern as
- *      `nimrtc::ice::register_default_plugins()`).
+ * v1.2.0 (plan E7): the usrsctp backend that was planned for this seam
+ * was deleted, so "stub" remains the only registered SCTP backend. The
+ * production data plane is WebTransport over QUIC, which does not go
+ * through this seam.
  *
  * Thread model:
  *   - `set_on_recv` and `send_*` are called from a single thread (the
  *     engine thread) per the IDataChannel contract.
- *   - The on-recv callback fires on the SCTP backend's own thread (usrsctp's
- *     internal UDP-loop thread in v0.11.0); implementations must be
+ *   - The on-recv callback fires on the SCTP backend's own thread;
+ *     implementations must be
  *     thread-safe with respect to it.
  *   - All methods are `noexcept` per the doc contract.
  *
@@ -62,9 +60,9 @@ namespace nimrtc::sctp {
 /**
  * @brief SCTP socket seam — methods are all `noexcept` per §5.2.
  *
- * The default impl in v0.10.x is `SctpStubSocket` (returns kErrNotReady);
- * v0.11.0 will replace the registration id "stub" with "usrsctp" once
- * `UsrsctpSocket` lands. Until then the seam compiles and registers; the
+ * The default impl is `SctpStubSocket` (returns kErrNotReady);
+ * since v1.2.0 (plan E7) it is the only registered SCTP backend.
+ * The seam compiles and registers; the
  * stub is honest about not being ready (sends fail loudly instead of being
  * silently dropped).
  */
@@ -100,8 +98,8 @@ public:
     // Non-pure-virtual with safe defaults so existing backends keep
     // compiling: the default routes through the matching legacy send
     // (unordered / ordered / partial-reliable) and ignores `ppid` /
-    // `unordered`. Backends that speak real SCTP (usrsctp AF_CONN)
-    // override to stamp the wire PPID (DCEP=50, string=51, binary=53).
+    // `unordered`. Backends that speak real SCTP override to stamp the
+    // wire PPID (DCEP=50, string=51, binary=53).
     //
     // `unordered=true` forces SCTP_UNORDERED regardless of reliability.
     // All methods are `noexcept` per §5.2 contract.
@@ -132,11 +130,11 @@ public:
     //
     // Non-pure-virtual with safe defaults so AF_INET loopback backends
     // keep compiling. AF_CONN backends override:
-    //   - `set_on_packet` — usrsctp `conn_output` trampoline forwards
+    //   - `set_on_packet` — the backend's `conn_output` trampoline forwards
     //     each outbound SCTP packet here; the engine encrypts it via
     //     IDtlsSession::send_app_data.
     //   - `feed_inbound_packet` — engine feeds DTLS-decrypted SCTP
-    //     packets here; the backend passes them to usrsctp_conninput.
+    //     packets here; the backend passes them to its own stack.
     //   - `set_on_recv_with_ppid` — PPID-aware inbound delivery.
     virtual void set_on_packet(plugins::OnSctpPacketCb cb) noexcept {
         (void)cb;
@@ -155,7 +153,7 @@ public:
     //
     // Non-pure-virtual with safe no-op defaults so existing backends keep
     // compiling. WebRtcClassicStack::start()/close() drives these; the stub
-    // stays no-op, UsrsctpSocket overrides to manage listen/connect state.
+    // stays no-op.
     virtual plugins::Status open() noexcept { return plugins::kOk; }
     virtual void close() noexcept {}
 

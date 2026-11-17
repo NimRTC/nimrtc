@@ -201,7 +201,8 @@ void do_register_default_plugins() noexcept {
                 std::string(f->id()) +
                 "\"), via Slice 7.5; "
                 "real ICE/DTLS/RTP/SCTP composition — "
-                " SCTP stub until v0.11.0 adds usrsctp)");
+                " SCTP is the stub backend; the production data plane is "
+                "WebTransport/QUIC)");
         }
     } s_registrar2;
 

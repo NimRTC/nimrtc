@@ -18,40 +18,17 @@
  *   - guarantees the symbol is emitted inside `nimrtc_sctp.lib` (which the
  *     MSVC static-link workaround requires — see ice.cpp comment).
  *
- * ## Slice 5 vs. v0.11.0
+ * ## The stub is the only SCTP backend (v1.2.0 / plan E7)
  *
- * v0.11.0 ships with the **stub-only** registration. The usrsctp
- * production backend (`UsrsctpSocketFactory`, id="usrsctp") is built
- * and linked into `nimrtc_sctp.lib` (so anyone who wants to wire it
- * manually can), but it is **NOT auto-registered** with the global
- * PluginRegistry — see "Why usrsctp is not the default" below.
+ * "stub" is the only registered SCTP id. The usrsctp backend that used
+ * to be planned for this slot was never published into the registry
+ * (v0.11.0), its public selector entry was retired in v1.2.0
+ * (WP-A / DEC-4 = A1), and in v1.2.0 the backend, its two public
+ * headers and the vendored `src/third_party/usrsctp/` tree were deleted.
  *
- * ## Why usrsctp is not the default in v0.11.0
- *
- * Per `docs/plan/v0.11-plan.md` §1 (the v0.11.0 cut at tag prep
- * time) and the deferred status recorded in §2.2 of the same plan:
- *
- *   - The SCTP-over-DTLS physical wiring (set_dtls_keys() +
- *     DTLS↔SCTP inbound/outbound hookup) was never landed on
- *     `main`; only the in-process `tests/test_datachannel_engine`
- *     path passes 5/5. Chrome-headless e2e stays 0/4.
- *   - usrsctp 0.9.5.0 carries a heavy third-party build cost
- *     (`src/third_party/usrsctp/`: ~25 source files, ~440 compilation
- *     units) and a Windows MSVCRT WSAELOOP limitation on
- *     self-loopback that the in-process test tolerates but a real
- *     DataChannel e2e would not.
- *   - Chrome is moving DataChannel to **WebTransport over QUIC** in
- *     the medium term; the SCTP-over-DTLS path is on Google's
- *     deprecation roadmap. v1.x will revisit the data-plane
- *     problem on top of WebTransport / QUIC instead of
- *     SCTP-over-DTLS. Keeping usrsctp in the default registration
- *     would commit v0.11.0 to a path the upstream is moving away
- *     from.
- *
- * The class still compiles and links; opt-in callers can construct
- * a `UsrsctpSocketFactory` directly and call `factory->create(cfg)`
- * without going through the global registry. The header carries a
- * `@deprecated` comment directing readers to the v1.x plan.
+ * The production data plane is **WebTransport over QUIC** (msquic), which
+ * does not go through the `ISctpSocket` seam at all — see
+ * `docs/plan/datachannel-capability-plan.md`.
  *
  * ## Note on PluginRegistry::register_sctp_socket
  *
@@ -95,18 +72,10 @@ void register_default_plugins() noexcept {
     // Static-local latch — runs once, idempotent. Same pattern as
     // `nimrtc::ice::register_default_plugins()` (see ice.cpp).
     static const int once = []() {
-        // v0.11.0 ships the stub-only default registration. The
-        // `UsrsctpSocketFactory` (id="usrsctp") is intentionally NOT
-        // registered here — see the file-header "Why usrsctp is not
-        // the default in v0.11.0" block for the v1.x WebTransport
-        // re-design rationale.
-        //
-        // The class still compiles and links into `nimrtc_sctp.lib`
-        // (see `src/sctp/CMakeLists.txt` — the usrsctp_*.cpp sources
-        // are still built); opt-in callers can `new
-        // UsrsctpSocketFactory()` and call `factory->create(cfg)`
-        // directly. The header carries a `@deprecated` comment
-        // pointing at the v1.x plan.
+        // The stub factory is the only SCTP backend since v1.2.0
+        // (plan E7) — the usrsctp backend was deleted together with
+        // its vendored tree.  See the file-header block for the
+        // WebTransport/QUIC re-design rationale.
         static const SctpStubFactory s_stub_factory{};
 
         // Canonical path (Slice 8): publish via the typed registry hook.
@@ -125,8 +94,8 @@ void register_default_plugins() noexcept {
         core::log::Logger::instance().info(
             "nimrtc::sctp: registered default plugins "
             "(id=\"" + std::string{s_stub_factory.id()} +
-            "\" [Slice 5 stub]; usrsctp production backend is "
-            "@deprecated — see v0.11-plan.md §2.2 / v1.x WebTransport plan)");
+            "\" [Slice 5 stub]; the production data plane is "
+            "WebTransport/QUIC — see docs/plan/datachannel-capability-plan.md");
         return 1;
     }();
     (void)once;

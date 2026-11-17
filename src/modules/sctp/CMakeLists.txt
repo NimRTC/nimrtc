@@ -9,38 +9,31 @@
 #   - register_default_plugins() entry point (Meyers-singleton latch).
 #
 # Slice 5 scope:
-#   - Lay the seam ONLY — do NOT link usrsctp yet (the production default
-#     impl lands in v0.11.0 per §7).
+#   - Lay the seam ONLY — do NOT link a production SCTP stack.
 #   - The stub factory is registered under id "stub" (NOT "usrsctp") so
-#     downstream code cannot accidentally believe the v0.11.0 backend is
+#     downstream code cannot accidentally believe a production backend is
 #     already integrated — see sctp_stub_factory.cpp header rationale.
 #
-# v0.11.0 scope (NOT in this file's registration body — see
-#                  sctp_plugin.cpp "Why usrsctp is not the default" header):
-#   - usrsctp source files (`usrsctp_socket.cpp`, `usrsctp_factory.cpp`) are
-#     STILL BUILT and linked into `nimrtc_sctp.lib` so opt-in callers
-#     (out-of-tree integrators, the v1.x WebTransport / QUIC comparison
-#     work, the in-process `tests/test_sctp_usrsctp` regression test) can
-#     keep using the class directly without an ABI break. The default
-#     registration in `sctp_plugin.cpp` no longer publishes
-#     `UsrsctpSocketFactory` into `core::PluginRegistry` — see
-#     `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 / TPAL-5 deferred) and
-#     the `@deprecated` comments in the matching headers.
+# v0.11.0 scope:
+#   - The usrsctp backend (`usrsctp_socket.cpp`, `usrsctp_factory.cpp`) was
+#     built into `nimrtc_sctp.lib` but was never published into
+#     `core::PluginRegistry` (see `docs/plan/v0.11-plan.md` §2.2). It
+#     survived as dead weight after the "sctp" DataChannel backend was
+#     retired from the public selector in v1.2.0 (WP-A / DEC-4 = A1).
 #
-# v1.x (planned, NOT this file):
-#   - Replace `UsrsctpSocket` with a WebTransport-over-QUIC backend
-#     (likely msquic, MIT-licensed, Windows-first, cross-platform CI). The
-#     `ISctpSocket` seam is the wrong shape for WebTransport streams and
-#     will either be replaced by an `IWebTransportSession` seam or wrapped
-#     behind a polymorphic `IDataPlane` facade. This CMakeLists will
-#     probably delete `src/usrsctp_*.cpp` and `src/third_party/usrsctp/`
-#     at v1.2.0.
+# v1.2.0 (plan E7) — usrsctp removed:
+#   - `usrsctp_socket.cpp` / `usrsctp_factory.cpp` and their two
+#     `@deprecated` public headers are deleted, along with the vendored
+#     `src/third_party/usrsctp/` tree and the `nimrtc_vendor_usrsctp`
+#     target. The public selector can no longer reach a usrsctp backend,
+#     so keeping the sources served no one.
+#   - The seam itself is unchanged: `ISctpSocket` / `ISctpSocketFactory`
+#     stay, and the stub factory stays the only registered SCTP id
+#     ("stub"). The production data plane is WebTransport over QUIC.
 #
 # Mirrors `src/modules/ice/CMakeLists.txt` structurally (static lib, one
 # include root, enable_testing() + add_subdirectory(tests) when tests dir
-# exists). The path is `src/sctp/` (NOT `src/modules/sctp/`) per the
-# Slice 5 task brief and §6.2 of the plan — Slice 5 is a forward-looking
-# module that will sit alongside the existing module tree.
+# exists).
 #
 # Dependencies:
 #   - core (always; nimrtc_apply_options + log + (future) registry hooks)
@@ -51,13 +44,6 @@ add_library(nimrtc_sctp STATIC
     src/sctp_stub_factory.cpp
     src/sctp_plugin.cpp
     src/dcep.cpp
-    # usrsctp production backend (id="usrsctp"). @deprecated v0.11.0 —
-    # see file header and sctp_plugin.cpp for the v0.11.0 cut rationale.
-    # The sources are kept so the class compiles for opt-in callers
-    # and the v1.x WebTransport / QUIC work can compare approaches
-    # without reviving the upstream fork.
-    src/usrsctp_socket.cpp
-    src/usrsctp_factory.cpp
     )
 
 nimrtc_apply_options(nimrtc_sctp LENIENT)
@@ -66,11 +52,6 @@ target_link_libraries(nimrtc_sctp
     PUBLIC
         nimrtc::core
         nimrtc::plugins       # plugin base types (Status, BufferView, ...)
-    PRIVATE
-        # TPAL-5: usrsctp backend is only linked into the production
-        # library, not re-exported (consumers must go through the
-        # ISctpSocket seam — the factory pointer in the registry).
-        nimrtc::vendor::usrsctp
     )
 
 target_include_directories(nimrtc_sctp

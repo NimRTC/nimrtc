@@ -638,11 +638,17 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - rd_session/session_guard.hpp (the module's public API --
     //       the guard state vocabulary, the query and the recovery)
     //
+    // v1.2.0 (plan E7): -2 public headers (191 -> 189).  The usrsctp
+    //   backend was deleted together with its vendored tree, so its two
+    //   `@deprecated` public headers are gone:
+    //     - sctp/usrsctp_factory.hpp (the opt-in factory)
+    //     - sctp/usrsctp_socket.hpp  (the opt-in socket)
+    //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 191;
+    constexpr std::size_t kBaselineHeaderCount = 189;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

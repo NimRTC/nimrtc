@@ -555,18 +555,17 @@ TEST_F(EnginePluginLoading, slice75_idempotent_register_does_not_duplicate) {
     // `get_transport_stack("default")`.
     //
     // v0.11.0 cut: only the Slice 5 stub ("stub") is auto-registered. The
-    // production usrsctp factory ("usrsctp") is NOT auto-registered (see
-    // sctp_plugin.cpp "Why usrsctp is not the default" header) — opt-in
-    // callers construct it directly. The SCTP slot therefore holds
+    // production usrsctp factory was removed entirely in v1.2.0 (plan E7),
+    // so "stub" is now the *only* SCTP backend that exists.
+    // The SCTP slot therefore holds
     // exactly 1 entry, and re-registration must NOT duplicate it.
-    // See tests/test_sctp_usrsctp.cpp UsrsctpNotAutoRegistered for the
-    // negative assertion that locks the new contract.
     EXPECT_EQ(PluginRegistry::instance().list_dtls_sessions().size(), 1u)
         << "Slice 8: DTLS slot duplicated after repeated registration";
     EXPECT_EQ(PluginRegistry::instance().list_sctp_sockets().size(), 1u)
-        << "v0.11.0: SCTP slot must hold ONLY the Slice 5 stub (1 entry); "
-           "usrsctp is opt-in only and not auto-registered. Duplication "
-           "here means register_default_plugins() is no longer idempotent";
+        << "v1.2.0 (E7): SCTP slot must hold ONLY the Slice 5 stub (1 entry); "
+           "the usrsctp backend was deleted, so nothing else may register "
+           "here. Duplication here means register_default_plugins() is no "
+           "longer idempotent";
     EXPECT_EQ(PluginRegistry::instance().list_raw_udp_datagrams().size(), 1u)
         << "Slice 8: raw-UDP slot duplicated after repeated registration";
     EXPECT_EQ(PluginRegistry::instance().list_transport_stacks().size(), 3u)
@@ -1144,7 +1143,7 @@ TEST_F(EnginePluginLoading, dc0141_backend_default_resolves_wire_capable_factory
     //
     // v1.2.0 (WP-A / DEC-4 = A1): the default must resolve to a backend
     // that has a **wire path**.  The retired "sctp" backend was an
-    // in-process usrsctp loopback socket and could never reach a peer,
+    // in-process loopback socket and could never reach a peer,
     // so it must not be the default (and must not be selectable — see
     // dc0141_backend_sctp_is_rejected_as_test_only below).
     EngineConfig cfg;
@@ -1205,8 +1204,8 @@ TEST_F(EnginePluginLoading, dc0141_backend_default_resolves_wire_capable_factory
 
 TEST_F(EnginePluginLoading, dc0141_backend_sctp_is_rejected_as_test_only) {
     // v1.2.0 (WP-A / DEC-4 = A1): the SCTP backend is a **test-only**
-    // backend — its factory opens an in-process usrsctp socket bound to
-    // 127.0.0.1 and the engine never wires SCTP-over-DTLS, so a channel
+    // backend — its factory opens an in-process loopback socket and the
+    // engine never wires SCTP-over-DTLS, so a channel
     // created on it can never reach a remote peer.  Selecting it must
     // fail loudly (kEngineInternal) instead of silently handing the
     // caller a data plane that cannot work.

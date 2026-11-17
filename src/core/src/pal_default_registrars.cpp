@@ -188,8 +188,8 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
     // unconditional entries above — there are no `NIMRTC_HAS_*` guards
     // because every transport-layer backend is now a real Seam:
     //   - DTLS:  WolfsslDtlsFactory    (id="wolfssl")
-    //   - SCTP:  SctpStubFactory       (id="stub"; v0.11.0 adds
-    //                                    "usrsctp" alongside)
+    //   - SCTP:  SctpStubFactory       (id="stub"; the only SCTP
+    //                                    backend since v1.2.0 / plan E7)
     //   - raw_udp: ArqRawUdpFactory    (id="arq")
     //   - transport: CapabilitySelectorStackFactory (id="default")
     // Adding a new transport-layer backend means adding a new entry

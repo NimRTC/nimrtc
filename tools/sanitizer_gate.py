@@ -5,7 +5,7 @@ Why this script exists
 ----------------------
 The CI sanitizer leg (linux-sanitizers in .github/workflows/ci.yml) runs the
 test suite under AddressSanitizer / UndefinedBehaviorSanitizer /
-ThreadSanitizer.  The vendored third-party stacks -- wolfSSL, usrsctp,
+ThreadSanitizer.  The vendored third-party stacks -- wolfSSL,
 libjuice, msquic, libopus, mbedTLS -- are upstream code and do trip the
 sanitizers on their own.  A gate that fails on every upstream finding
 teaches everyone to ignore the gate; a gate that ignores everything finds
@@ -326,9 +326,9 @@ VENDOR_ASAN = """
 =================================================================
 ==12345==ERROR: AddressSanitizer: heap-use-after-free on address 0x60200000ff00
 READ of size 8 at 0x60200000ff00 thread T0
-    #0 0x4f1a2b in usrsctp_read() src/third_party/usrsctp/usrsctplib/netinet/sctp_callon.c:512:9
-    #1 0x4f22c1 in nimrtc::sctp::OnRead() src/transport/src/raw_udp_arq_stack.cpp:301:5
-SUMMARY: AddressSanitizer: heap-use-after-free src/third_party/usrsctp/usrsctplib/netinet/sctp_callon.c:512:9 in usrsctp_read()
+    #0 0x4f1a2b in wolfSSL_read() src/third_party/wolfssl/wolfcrypt/src/tls.c:1234:9
+    #1 0x4f22c1 in nimrtc::dtls::OnRead() src/transport/src/raw_udp_arq_stack.cpp:301:5
+SUMMARY: AddressSanitizer: heap-use-after-free src/third_party/wolfssl/wolfcrypt/src/tls.c:1234:9 in wolfSSL_read()
 """
 
 OWNED_UBSAN = """
@@ -341,7 +341,7 @@ SHARED_TSAN = """
 ==================
 WARNING: ThreadSanitizer: data race (pid=1234)
   Write of size 4 at 0x7b0400000000 by thread T1:
-    #0 0x4f1a2b in usrsctp_inp_set() src/third_party/usrsctp/usrsctplib/netinet/sctp_input.c:188:3
+    #0 0x4f1a2b in msquic_recv() src/third_party/msquic/src/core/packet.cpp:188:3
     #1 0x4f22c1 in nimrtc::sctp::Pump() src/transport/src/raw_udp_arq_stack.cpp:412:5
   Previous write of size 4 at 0x7b0400000000 by main thread T0:
     #0 0x4f1a2b in nimrtc::sctp::Pump() src/transport/src/raw_udp_arq_stack.cpp:412:5
@@ -364,7 +364,7 @@ SANITIZER_RUNTIME_LEAK = """
 
 Direct leak of 152 byte(s) in 1 object(s) allocated from:
     #0 0x4f1a2b in __interceptor_malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:145
-    #1 0x4f22c1 in sctp_invoke_recv_callback() src/third_party/usrsctp/usrsctplib/netinet/sctputil.c:5234
+    #1 0x4f22c1 in mbedtls_ssl_read() src/third_party/mbedtls/library/ssl_tls.c:5234
 SUMMARY: AddressSanitizer: detected memory leaks
 """
 
@@ -390,7 +390,7 @@ def _self_test():
     check(
         "asan-vendor root",
         f[0]["root"][0],
-        "src/third_party/usrsctp/usrsctplib/netinet/sctp_callon.c",
+        "src/third_party/wolfssl/wolfcrypt/src/tls.c",
     )
     check("asan-vendor participants", len(f[0]["participants"]), 1)
 

@@ -20,8 +20,8 @@
  *
  * All tests use a `MockSctpSocket` injected via the test-only
  * `SctpDataChannel(std::unique_ptr<ISctpSocket>)` constructor so we
- * don't depend on a real usrsctp handshake — those are exercised
- * elsewhere (see test_sctp_factory.cpp + the sctp loopback tests).
+ * don't depend on a real SCTP handshake — those are exercised
+ * elsewhere (see test_sctp_factory.cpp).
  */
 
 #include <gtest/gtest.h>
@@ -79,8 +79,8 @@ struct MockSctpSpy {
 //
 // Used by every test that needs to verify "the channel routed to the
 // right ISctpSocket method". Counter values are atomic so we can poke
-// at them from any thread (the recv trampoline fires on usrsctp's
-// worker thread in production; here we just call it from the test
+// at them from any thread (the recv trampoline fires on the SCTP
+// backend's worker thread in production; here we just call it from the test
 // thread, but the atomicity makes the test future-proof against
 // threaded scenarios).
 //
@@ -601,7 +601,7 @@ TEST(SctpDataChannel, CloseIsIdempotentAndTearsDownSocket) {
     // teardown this test asserts), so the "callback was cleared" check
     // reads the out-of-band spy instead of the (freed) mock.
     EXPECT_TRUE(spy->recv_callback_cleared.load())
-        << "close() must clear the SCTP recv callback so usrsctp's "
+        << "close() must clear the SCTP recv callback so the backend's "
            "worker thread can't fire into a torn-down channel";
     ASSERT_EQ(state_events.size(), 1u);
     EXPECT_EQ(state_events[0], "closed");

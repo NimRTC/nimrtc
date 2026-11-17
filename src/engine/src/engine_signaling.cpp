@@ -676,7 +676,7 @@ std::string NimRTCEngine::create_offer() noexcept {
     //   Chrome tolerates this minimal form: as long as both sides
     //   advertise `m=application` with the same SCTP port and the
     //   DTLS fingerprint matches, the SCTP association is negotiated
-    //   in-band once usrsctp starts emitting INIT chunks.
+    //   in-band once the SCTP stack starts emitting INIT chunks.
     //
     //   v0.15.0 (WebTransport product route): when
     //   `datachannel_backend == "web_transport"` the DataChannel rides

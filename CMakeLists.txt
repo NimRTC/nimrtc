@@ -280,7 +280,7 @@ include(NimRTCTest)            # declares nimrtc_add_test() (no-op if tests OFF)
 #
 # Rationale (P0 hardening): a sanitizer runtime has to be linked into every
 # final binary.  The vendored third-party static libraries (wolfSSL,
-# usrsctp, libjuice, msquic, opus, …) are linked into the test executables
+# libjuice, msquic, opus, …) are linked into the test executables
 # and into the module libraries, so instrumenting only the nimrtc_* targets
 # would leave the final link line without -fsanitize=address and produce
 # undefined references to the runtime.

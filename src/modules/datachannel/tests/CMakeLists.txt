@@ -7,7 +7,7 @@
 #                                    + DataChannelConfig / Reliability enum.
 #   - test_sctp_data_channel   (P2): SctpDataChannel + SctpDataChannelFactory +
 #                                    register_default_plugins() — backed by a
-#                                    MockSctpSocket so no real usrsctp handshake
+#                                    MockSctpSocket so no real SCTP handshake
 #                                    is required.
 #
 # Built via GoogleTest (FetchContent if not installed) — mirrors the

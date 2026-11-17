@@ -193,7 +193,7 @@ using NIMRTC_API_STABLE OnSctpRecvWithPpidCb = std::function<void(uint16_t strea
                                         core::ByteSpan data)>;
 
 /** Outbound SCTP packet sink for SCTP-over-DTLS (RFC 8831 §5).
- *  The usrsctp AF_CONN `conn_output` trampoline calls this with one
+ *  The backend's `conn_output` trampoline calls this with one
  *  complete SCTP packet; the engine encrypts it via
  *  IDtlsSession::send_app_data. Returns 0 on accept, non-zero on drop. */
 using NIMRTC_API_STABLE OnSctpPacketCb = std::function<int(core::ByteSpan packet)>;
@@ -262,7 +262,7 @@ public:
     /** Unique identifier, e.g. "sctp", "quic". */
     virtual std::string_view id() const noexcept = 0;
 
-    /** Short human-readable name, e.g. "SCTP (usrsctp)". */
+    /** Short human-readable name, e.g. "SCTP (stub)". */
     virtual std::string_view display_name() const noexcept = 0;
 };
 

@@ -134,9 +134,12 @@ endif()
 # (observed: 82x LNK2001 juice_*/srtp_*/wolfSSL_*/opus_*/MsQuicOpenVersion
 # when only the nimrtc_* archives were chained). Most install via their
 # OWN upstream install() rules (srtp3/juice/wolfssl/msquic); `opus`
-# (EXCLUDE_FROM_ALL) and `nimrtc_vendor_usrsctp` (built directly) are
-# installed by cmake/NimRTCInstall.cmake §2b. Either way, chain whatever
-# is present — missing entries are simply skipped (module-OFF builds).
+# (EXCLUDE_FROM_ALL) is installed by cmake/NimRTCInstall.cmake §2b.
+# Either way, chain whatever is present — missing entries are simply
+# skipped (module-OFF builds).
+#
+# v1.2.0 (plan E7): `nimrtc_vendor_usrsctp` / `usrsctp` used to be listed
+# here; the usrsctp vendor tree was removed with the usrsctp backend.
 set(_nimrtc_vendor_names
   opus
   srtp3
@@ -144,8 +147,6 @@ set(_nimrtc_vendor_names
   wolfssl
   msquic
   msquic_platform
-  nimrtc_vendor_usrsctp
-  usrsctp
 )
 foreach(_vname IN LISTS _nimrtc_vendor_names)
   unset(_nimrtc_vendor_path)
@@ -198,8 +199,8 @@ unset(_nimrtc_apm_dir)
 
 # System libs the vendored stacks need on the final link line. In the
 # build tree these propagate via the vendor targets' own
-# INTERFACE_LINK_LIBRARIES (juice PRIVATE ws2_32/bcrypt, usrsctp PUBLIC
-# ws2_32/iphlpapi); the installed archives lose those properties, so
+# INTERFACE_LINK_LIBRARIES (juice PRIVATE ws2_32/bcrypt); the installed
+# archives lose those properties, so
 # re-attach the equivalent plain names here.
 if(WIN32)
   list(APPEND _nimrtc_found_libs ws2_32 bcrypt iphlpapi winmm crypt32)

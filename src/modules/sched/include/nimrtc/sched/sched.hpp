@@ -75,7 +75,7 @@
  *
  *   No shipped backend puts the two planes on one connection: the legacy
  *   `"sctp"` backend was retired in v1.2.0 (WP-A / DEC-4 = A1) and is now a
- *   test-only in-process usrsctp loopback socket that never reaches a peer,
+ *   test-only in-process loopback socket that never reaches a peer,
  *   so it cannot provide wire-level cross-plane priority either.
  *
  *   The honest statement, then: **the scheduler arbitrates within a

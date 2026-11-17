@@ -1,10 +1,10 @@
 /**
  * @file src/modules/datachannel/src/sctp_data_channel.cpp
- * @brief SctpDataChannel — usrsctp-backed IDataChannel implementation.
+ * @brief SctpDataChannel — SCTP-backed IDataChannel implementation.
  *
  * Implements the QoS → SCTP send-method routing and the recv-callback
  * forwarder. Construction looks up the production SCTP backend
- * (`id="usrsctp"` in `core::PluginRegistry`) so the channel is ready
+ * (`id="stub"` in `core::PluginRegistry`) so the channel is ready
  * to dispatch as soon as `open()` is called.
  *
  * ## Stream id
@@ -32,8 +32,8 @@
  *   - kPartialReliableTTL   → send_partial_reliable(ttl = cfg.max_packet_lifetime_ms)
  *   - kPartialReliableCount → send_partial_reliable(ttl = max_retransmits * 100 ms)
  *
- * The count-mode TTL is a conservative heuristic — usrsctp exposes TTL
- * not count, so we approximate "N retransmits" by "N * 100ms of TTL".
+ * The count-mode TTL is a conservative heuristic — the PR-SCTP API exposes
+ * TTL not count, so we approximate "N retransmits" by "N * 100ms of TTL".
  * This is an approximation of the count policy, not the count policy
  * itself (v1.2.0, WP-D3): the SCTP backend is a test-only backend
  * that acts as the PR-SCTP oracle for WP-D, and the approximation is
@@ -59,8 +59,8 @@
  * ## Non-blocking I/O
  *
  * `send_*` calls on `ISctpSocket` are noexcept and non-blocking; they
- * return `kOk` as soon as the message is enqueued in usrsctp's send
- * buffer. The recv callback fires on usrsctp's worker thread; we
+ * return `kOk` as soon as the message is enqueued in the backend's send
+ * buffer. The recv callback fires on the backend's worker thread; we
  * forward to `on_msg_` directly (no marshalling).
  */
 
@@ -75,7 +75,6 @@
 #include <nimrtc/sctp/dcep.hpp>
 #include <nimrtc/sctp/sctp_socket_factory.hpp>
 #include <nimrtc/sctp/sctp_socket_iface.hpp>
-#include <nimrtc/sctp/usrsctp_factory.hpp>
 
 // ---------------------------------------------------------------------------
 // MSVC POSIX `open` / `close` macro guard (mirrors sctp_data_channel.hpp).
@@ -115,19 +114,19 @@ namespace {
  *  inside the DCEP OPEN (RFC 8832 §5.1). */
 constexpr std::uint16_t kSctpStreamId = 0;
 
-/** Approximate retransmit count → TTL (usrsctp's PR-SCTP API exposes
+/** Approximate retransmit count → TTL (the PR-SCTP API exposes
  *  TTL, not count). 100 ms per retransmit is the WebRTC default.
  *
  *  v1.2.0 (WP-D3): this is an **approximation, not the count
- *  policy** — usrsctp has no per-message retransmit budget.  It is
- *  acceptable only because the SCTP backend is a test-only backend
+ *  policy** — the PR-SCTP seam has no per-message retransmit budget.
+ *  It is acceptable only because the SCTP backend is a test-only backend
  *  (WP-A / DEC-4 = A1) that serves as the PR-SCTP *oracle* for WP-D:
  *  the WebTransport implementation's per-message budget is tested
  *  against the behaviours this approximation models (a message that
  *  outlives its budget is dropped; the channel stays open). */
 inline std::chrono::milliseconds s_ttl_from_retransmits(
     std::uint16_t max_retransmits) noexcept {
-    // Cap at 60s to avoid pathological values; usrsctp's max TTL is
+    // Cap at 60s to avoid pathological values; the PR-SCTP max TTL is
     // effectively unbounded but a sane upper bound keeps test
     // expectations stable.
     const auto ms = static_cast<std::int64_t>(max_retransmits) * 100;
@@ -144,15 +143,24 @@ inline std::chrono::milliseconds s_ttl_from_retransmits(
 
 SctpDataChannel::SctpDataChannel()
     : sock_(nullptr) {
-    // Production ctor — resolve the usrsctp backend through the
-    // registry. If the registry is empty (e.g. datachannel registered
-    // before sctp::register_default_plugins()), `sock_` stays null
-    // and `send()` returns `kErrNotReady`.
+    // Production ctor — resolve the SCTP backend through the registry.
+    //
+    // v1.2.0 (plan E7): the usrsctp backend is gone, so the only
+    // registered SCTP id is "stub" (see
+    // `nimrtc::sctp::register_default_plugins()`).  The stub socket
+    // accepts every association but returns `kErrNotReady` from every
+    // send method, so a production channel built on it is a
+    // well-defined "no data plane" channel rather than an inert
+    // null-pointer one.
+    //
+    // If the registry has not been populated yet (e.g. the datachannel
+    // module was registered before `sctp::register_default_plugins()`),
+    // `sock_` stays null and `send()` returns `kErrNotReady`.
     const auto* sctp_factory =
-        core::PluginRegistry::instance().get_sctp_socket("usrsctp");
+        core::PluginRegistry::instance().get_sctp_socket("stub");
     if (!sctp_factory) {
         core::log::Logger::instance().warn(
-            "SctpDataChannel: no usrsctp factory registered (id=\"usrsctp\"); "
+            "SctpDataChannel: no SCTP factory registered (id=\"stub\"); "
             "channel will report kErrNotReady from every send(). Call "
             "nimrtc::sctp::register_default_plugins() before creating the "
             "channel to enable the production backend.");
@@ -162,11 +170,11 @@ SctpDataChannel::SctpDataChannel()
     sctp::SctpConfig sctp_cfg{};
     sctp_cfg.label           = "datachannel.sctp";
     sctp_cfg.max_num_streams = 16;   // matches WebRTC DataChannel default
-    sctp_cfg.local_port      = 0;    // usrsctp picks an ephemeral port
+    sctp_cfg.local_port      = 0;    // the backend picks an ephemeral port
     sock_ = sctp_factory->create(sctp_cfg);
     if (!sock_) {
         core::log::Logger::instance().error(
-            "SctpDataChannel: UsrsctpSocketFactory::create() returned null");
+            "SctpDataChannel: SctpSocketFactory::create() returned null");
     }
 }
 
@@ -180,7 +188,7 @@ SctpDataChannel::SctpDataChannel(std::unique_ptr<sctp::ISctpSocket> injected)
 SctpDataChannel::~SctpDataChannel() {
     // `close()` already tears down the socket + clears callbacks, but
     // belt-and-braces: if the user forgot to call close() before
-    // destruction, drop the socket here so usrsctp's recv thread
+    // destruction, drop the socket here so the backend's recv thread
     // doesn't fire callbacks into a freed object.
     //
     // A destructor must not invoke user callbacks either: the
@@ -255,7 +263,7 @@ void SctpDataChannel::close() noexcept {
     // Idempotent. Reset state in a safe order:
     //   1. Clear the recv callback first so the SCTP worker thread
     //      can't fire into a half-destroyed channel.
-    //   2. Drop the socket — usrsctp tears down its send buffer and
+    //   2. Drop the socket — the backend tears down its send buffer and
     //      the per-instance handle here.
     //   3. Mark the channel closed.
     const bool was_open = opened_;
@@ -368,8 +376,8 @@ Status SctpDataChannel::route_send(plugins::BufferView data) noexcept {
         }
 
         case plugins::DataChannelReliability::kPartialReliableCount: {
-            // See header comment — usrsctp exposes TTL not count, so
-            // we approximate count by N * 100 ms.
+            // See header comment — the PR-SCTP seam exposes TTL not count,
+            // so we approximate count by N * 100 ms.
             const auto ttl = s_ttl_from_retransmits(cfg_.max_retransmits);
             return sock_->send_partial_reliable_with_ppid(stream, data, ttl,
                                                           ppid, unordered);

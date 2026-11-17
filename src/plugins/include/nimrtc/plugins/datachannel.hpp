@@ -6,7 +6,7 @@
  * data channels on top of an ITransport (ICE + DTLS-SRTP).
  *
  * P1: interface + factory only, no concrete SCTP implementation.
- * P2: usrsctp-backed SCTP via IDataChannel.
+ * P2: SCTP-backed data channel via IDataChannel.
  *
  * ## Channel semantics
  *

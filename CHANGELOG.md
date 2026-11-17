@@ -153,6 +153,43 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rd_device --recover-session` performs the recovery on demand (it
   needs an elevated prompt).
 
+### Removed
+
+- **The vendored `usrsctp` SCTP stack (plan E7).**  `src/third_party/usrsctp/`
+  — 269 files, ~5.5 MB — is gone, together with the `nimrtc_vendor_usrsctp`
+  CMake target, the two `@deprecated` public headers
+  (`nimrtc/sctp/usrsctp_factory.hpp`, `nimrtc/sctp/usrsctp_socket.hpp`), the
+  `usrsctp_socket.cpp` / `usrsctp_factory.cpp` implementations, and the
+  in-process `tests/test_sctp_usrsctp.cpp` regression test.
+
+  The scope turned out to be **much smaller than the plan first read**, and
+  the reason is worth stating: the SCTP data plane was already retired from
+  the *public* selector in v1.2.0 (`datachannel_backend = "sctp"` is
+  rejected by the engine with a hard error — WP-A / DEC-4 = A1), and
+  `nimrtc::sctp::register_default_plugins()` has published only the `"stub"`
+  factory since v0.11.0.  The `"usrsctp"` factory was therefore *unreachable
+  in production* long before this change; what remained was dead weight that
+  the build still paid for on every platform.
+
+  Concretely:
+
+  - `SctpDataChannel`'s production constructor no longer looks up
+    `get_sctp_socket("usrsctp")` — it resolves `"stub"`, the only registered
+    SCTP id.  The channel is still a well-defined "no data plane" channel
+    (every send returns `kErrNotReady`), and it is no longer a null-pointer
+    one.
+  - The `ISctpSocket` / `ISctpSocketFactory` seam is **unchanged**.  The
+    production data plane is WebTransport over QUIC (msquic), which never
+    went through this seam.
+  - The public header set shrinks from **191 to 189**; the manifest
+    (`docs/api/public_headers.manifest`) and the count-based gate
+    (`tests/test_api_classification.cpp`) are regenerated in the same PR, as
+    D-N6 requires.
+
+  The vendored tree was BSD-3-Clause; the removal is licence-neutral for
+  downstream consumers (the installed bundle ships fewer archives, and
+  `cmake/NimRTCConfig.cmake.in` no longer looks for `usrsctp`).
+
 ### Fixed
 
 - **The audio allocation gate counted allocations made by *other* threads, so

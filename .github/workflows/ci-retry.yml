@@ -110,6 +110,21 @@ jobs:
     name: ci-retry / starved jobs
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    # Only a *failed* run is worth inspecting.  Without this guard the
+    # workflow would claim a runner after every green CI run -- the
+    # workflow_run event carries no conclusion filter of its own, so
+    # the check has to happen here.
+    #
+    # `cancelled` counts as failure: a run that was cancelled may have
+    # been cancelled because one of its jobs was starved of a runner.
+    #
+    # The manual dispatch path is exempt: it has no workflow_run payload
+    # at all (the conclusion is null), and the operator named the run
+    # explicitly.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'cancelled'
     steps:
       - uses: actions/checkout@v7
         with:

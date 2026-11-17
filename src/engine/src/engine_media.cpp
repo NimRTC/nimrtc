@@ -3426,13 +3426,16 @@ core::StatsDelta NimRTCEngine::stats_delta_since(
     const core::StatSnapshot& previous) const noexcept {
     if (impl_ == nullptr) return core::StatsDelta{};
 
-    const Stats flat = stats();
+    // The `stats()` call publishes the flat struct into the registry,
+    // so the registry now holds the *end* of the interval; the diff
+    // reads the end from there and the start from `previous`.
+    (void)stats();
     core::StatLookup from = [&previous](std::string_view group,
                                         std::string_view name,
                                         std::int64_t& out) {
         return previous.value_of(group, name, out);
     };
-    return impl_->stats_state.diff_since(flat, previous, from);
+    return impl_->stats_state.diff_since(previous, from);
 }
 
 // ---------------------------------------------------------------------------

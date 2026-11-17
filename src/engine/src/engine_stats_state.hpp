@@ -287,12 +287,18 @@ struct StatsState {
      * The publication already happened (see `publish()`), so this
      * only diffs — it does not publish again.
      *
-     * @param flat     The flat statistics (the authority).
+     * The *end* of the interval is read from the registry, which holds
+     * the projection of the flat statistics taken by the `publish()`
+     * that preceded this call.  The projection and the flat struct
+     * cannot drift apart (the flat struct is the authority and the
+     * publication copies it), so the registry is the right source for
+     * the end of the interval — and it is the only source that can
+     * answer *by name*, which is what the diff walks.
+     *
      * @param previous The earlier reading.
      * @param from     The lookup for the baseline's values.
      */
-    core::StatsDelta diff_since(const NimRTCEngine::Stats& flat,
-                                 const core::StatSnapshot& previous,
+    core::StatsDelta diff_since(const core::StatSnapshot& previous,
                                  const core::StatLookup& from) {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_declared();

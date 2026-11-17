@@ -612,4 +612,148 @@ TEST_F(EngineVideoFeedback, video_stats_counters_track_traffic) {
     engine.close();
 }
 
+// ---------------------------------------------------------------------------
+// Plan Track S / S4: the feedback breakdown, by type
+// ---------------------------------------------------------------------------
+
+TEST_F(EngineVideoFeedback, rtcp_feedback_is_broken_down_by_type) {
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    FakeIceTransport* ice = FakeIceFactory::last_created();
+    ASSERT_NE(ice, nullptr);
+    ice->clear_sent();
+
+    // Every per-type counter starts at zero.
+    const auto s0 = engine.stats();
+    EXPECT_EQ(s0.video_feedback_rx_pli, 0u);
+    EXPECT_EQ(s0.video_feedback_rx_fir, 0u);
+    EXPECT_EQ(s0.video_feedback_rx_nack, 0u);
+    EXPECT_EQ(s0.video_feedback_rx_remb, 0u);
+    EXPECT_EQ(s0.video_feedback_rx_transport_cc, 0u);
+    EXPECT_EQ(s0.video_feedback_tx_pli, 0u);
+    EXPECT_EQ(s0.video_feedback_tx_nack, 0u);
+
+    // ---- A NACK from the peer ------------------------------------------
+    // It is about our outbound stream, so it lands in the `_rx_` counter
+    // (the peer *sent* it to us).
+    const std::uint8_t tx_pt = cfg.video_sender_tuning.payload_type;
+    np::VideoSourceFrame vf{};
+    vf.width = 320;
+    vf.height = 240;
+    vf.format = np::VideoPixelFormat::kI420;
+    vf.capture_ts_us = 1000;
+    vf.frame_seq = 1;
+    vf.rtp_timestamp = 90000;
+    ASSERT_EQ(engine.send_video(vf), np::kOk);
+
+    const auto* original = find_sent(ice->sent(), [tx_pt](const std::vector<std::uint8_t>& p) {
+        return is_rtp_with_pt(p, tx_pt);
+    });
+    ASSERT_NE(original, nullptr) << "send_video() emitted no RTP packet";
+    const std::uint16_t seq = be16(original->data() + 2);
+    const auto nack = make_nack(/*sender_ssrc=*/0x0BADF00D,
+                                 /*media_ssrc=*/cfg.video_sender_tuning.ssrc,
+                                 /*pid=*/seq,
+                                 /*blp=*/0);
+    engine.feed_media_inbound(nack.data(), nack.size());
+
+    const auto s1 = engine.stats();
+    EXPECT_GT(s1.video_feedback_rx_nack, s0.video_feedback_rx_nack)
+        << "an inbound NACK must raise video_feedback_rx_nack";
+    EXPECT_EQ(s1.video_feedback_rx_pli, s0.video_feedback_rx_pli)
+        << "a NACK must NOT be counted as a PLI";
+    EXPECT_EQ(s1.video_feedback_rx_fir, s0.video_feedback_rx_fir)
+        << "a NACK must NOT be counted as a FIR";
+
+    // ---- A PLI from the peer --------------------------------------------
+    const auto pli = make_pli(/*sender_ssrc=*/0x0BADF00D,
+                              /*media_ssrc=*/cfg.video_sender_tuning.ssrc);
+    engine.feed_media_inbound(pli.data(), pli.size());
+
+    const auto s2 = engine.stats();
+    EXPECT_GT(s2.video_feedback_rx_pli, s1.video_feedback_rx_pli)
+        << "an inbound PLI must raise video_feedback_rx_pli";
+    EXPECT_EQ(s2.video_feedback_rx_nack, s1.video_feedback_rx_nack)
+        << "a PLI must NOT be counted as a NACK";
+
+    // ---- The total still moves -------------------------------------------
+    // `video_feedback_applied` is the pre-existing aggregate; splitting
+    // the feedback by type must not change what it counts.
+    EXPECT_GT(s2.video_feedback_applied, s1.video_feedback_applied)
+        << "the aggregate must keep counting feedback actions";
+
+    engine.close();
+}
+
+TEST_F(EngineVideoFeedback, an_unrelated_rtcp_block_counts_as_no_feedback) {
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    // A Receiver Report (PT 201) is not feedback about the picture, so
+    // no per-type counter may move.
+    std::vector<std::uint8_t> rr = {0x80, 201, 0x00, 0x01,
+                                     0x00, 0x00, 0x00, 0x01,
+                                     0x00, 0x00, 0x00, 0x02};
+    const auto s0 = engine.stats();
+    engine.feed_media_inbound(rr.data(), rr.size());
+    const auto s1 = engine.stats();
+
+    EXPECT_EQ(s1.video_feedback_rx_pli, s0.video_feedback_rx_pli);
+    EXPECT_EQ(s1.video_feedback_rx_fir, s0.video_feedback_rx_fir);
+    EXPECT_EQ(s1.video_feedback_rx_nack, s0.video_feedback_rx_nack);
+    EXPECT_EQ(s1.video_feedback_rx_remb, s0.video_feedback_rx_remb);
+    EXPECT_EQ(s1.video_feedback_rx_transport_cc, s0.video_feedback_rx_transport_cc);
+
+    engine.close();
+}
+
+// ---------------------------------------------------------------------------
+// transport-cc is counted on its own
+// ---------------------------------------------------------------------------
+//
+// A transport-cc message is the peer's *congestion* signal, not a
+// complaint about a picture, so it must not be mistaken for a NACK --
+// and it must not be missed either: the two call for different fixes
+// ("these packets are missing" versus "the path is congested").
+
+TEST_F(EngineVideoFeedback, a_transport_cc_message_is_counted_on_its_own) {
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    const auto s0 = engine.stats();
+
+    // An RTPFB message with FMT 15 is a transport-cc
+    // (draft-holmer-rmcat-transport-wide-cc-extensions-01).  The body
+    // is the smallest legal one: the 16-byte transport-cc header plus
+    // a single run-length chunk describing one received packet.
+    std::vector<std::uint8_t> cc = {
+        0x8F,                          // V=2, P=0, FMT=15 (transport-cc)
+        205,                           // RTPFB
+        0x00, 0x00,                    // length = 1 (i.e. 8 bytes)
+        0x00, 0x00, 0x00, 0x01,        // sender SSRC
+        0x00, 0x00, 0x00, 0x02,        // media SSRC
+        0x00, 0x00,                    // base sequence number
+        0x00, 0x00,                    // packet status count
+        0x00, 0x00,                    // reference time / fb pkt count
+        0x00, 0x00,                    // packet status chunk
+        0x00, 0x00, 0x00, 0x00,        // receive deltas (none)
+        0x00, 0x00,
+    };
+    engine.feed_media_inbound(cc.data(), cc.size());
+
+    const auto s1 = engine.stats();
+    EXPECT_GT(s1.video_feedback_rx_transport_cc, s0.video_feedback_rx_transport_cc)
+        << "an inbound transport-cc must raise video_feedback_rx_transport_cc";
+    EXPECT_EQ(s1.video_feedback_rx_nack, s0.video_feedback_rx_nack)
+        << "a transport-cc must NOT be counted as a NACK";
+    EXPECT_EQ(s1.video_feedback_rx_pli, s0.video_feedback_rx_pli)
+        << "a transport-cc must NOT be counted as a PLI";
+
+    engine.close();
+}
+
 } // namespace

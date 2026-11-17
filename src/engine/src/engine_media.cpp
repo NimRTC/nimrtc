@@ -2521,6 +2521,22 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 if (blk.fmt == 1) {
                     impl_->video_state.video_stats.on_rtcp_feedback_tx(
                         detail::VideoFeedbackKind::kNACK);
+                    // Plan Track S / S4: the per-type breakdown.  A NACK
+                    // is the peer saying "some of your packets arrived
+                    // damaged" — a *packet*-level complaint about our
+                    // outbound stream, not a frame-level one.
+                    ++impl_->video_state.video_feedback_rx_nack;
+                } else if (blk.fmt == 15) {
+                    // A transport-cc message
+                    // (draft-holmer-rmcat-transport-wide-cc-extensions-01)
+                    // is the peer's *congestion* signal: it reports the
+                    // arrival times of our packets, so it says how much
+                    // of the path is actually usable right now.  It is
+                    // counted separately from a NACK because the two
+                    // call for different fixes: a NACK says "these
+                    // specific packets are missing", a transport-cc says
+                    // "the path is congested".
+                    ++impl_->video_state.video_feedback_rx_transport_cc;
                 }
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
@@ -2545,9 +2561,23 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 if (blk.fmt == 1) {   // PLI — RFC 4585 §6.3.1
                     impl_->video_state.video_stats.on_rtcp_feedback_tx(
                         detail::VideoFeedbackKind::kPLI);
+                    // Plan Track S / S4: a PLI is the strongest signal a
+                    // peer can send about our stream — it could not
+                    // decode a *reference* frame, so everything after it
+                    // is undecodable until the next IDR.
+                    ++impl_->video_state.video_feedback_rx_pli;
                 } else if (blk.fmt == 4) {   // FIR — RFC 5104 §4.3.1
                     impl_->video_state.video_stats.on_rtcp_feedback_tx(
                         detail::VideoFeedbackKind::kFIR);
+                    ++impl_->video_state.video_feedback_rx_fir;
+                } else if (blk.fmt == 15) {
+                    // A REMB (draft-alvestrand-rmcat-remb-03) is the
+                    // peer's *bandwidth estimate*, not a complaint about a
+                    // frame: it says how much it thinks the path can
+                    // carry.  It is counted separately so a host can tell
+                    // "the peer needs less bandwidth" from "the peer lost
+                    // a frame" — the two call for different fixes.
+                    ++impl_->video_state.video_feedback_rx_remb;
                 }
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
@@ -2697,10 +2727,16 @@ void NimRTCEngine::queue_video_feedback(
     if (!report.missing_seqs.empty()) {
         impl_->video_state.video_stats.on_rtcp_feedback(
             detail::VideoFeedbackKind::kNACK);
+        // Plan Track S / S4: the per-type breakdown, outbound direction.
+        // This NACK describes *our* inbound stream — packets arriving at
+        // the peer damaged — so it is the mirror image of the
+        // `video_feedback_rx_nack` counter above.
+        ++impl_->video_state.video_feedback_tx_nack;
     }
     if (report.want_keyframe) {
         impl_->video_state.video_stats.on_rtcp_feedback(
             detail::VideoFeedbackKind::kPLI);
+        ++impl_->video_state.video_feedback_tx_pli;
     }
 
     // Merge into the pending report: two gaps detected back to back must
@@ -2990,6 +3026,18 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_keyframes_q       = impl_->video_state.video_keyframes_q;
     out.video_feedback_applied  = impl_->video_state.video_feedback_applied;
     out.video_keyframes_applied = impl_->video_state.video_keyframes_applied;
+
+    // Plan Track S / S4: the same feedback, broken down by type, so a
+    // host can tell *what the peer is asking for* rather than only that
+    // something arrived.  `video_feedback_applied` stays as the total.
+    out.video_feedback_rx_pli  = impl_->video_state.video_feedback_rx_pli;
+    out.video_feedback_rx_fir  = impl_->video_state.video_feedback_rx_fir;
+    out.video_feedback_rx_nack = impl_->video_state.video_feedback_rx_nack;
+    out.video_feedback_rx_remb = impl_->video_state.video_feedback_rx_remb;
+    out.video_feedback_rx_transport_cc =
+        impl_->video_state.video_feedback_rx_transport_cc;
+    out.video_feedback_tx_pli  = impl_->video_state.video_feedback_tx_pli;
+    out.video_feedback_tx_nack = impl_->video_state.video_feedback_tx_nack;
 
     // Remote-desktop plan H4: the per-stream statistics list.  The flat
     // `video_*` fields above describe the **default** stream; the list

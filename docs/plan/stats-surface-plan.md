@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **scheduled — v1.2.0**（owner 决策 D-N3，见 `docs/plan/v1.2-next-plan.md` §0；D-N6 规定基线冻结顺序） |
+| Status | **scheduled — v1.2.0**（owner 决策 D-N3，见 `docs/plan/v1.2-next-plan.md` §0；D-N6 规定基线冻结顺序）。**本计划条目的编号是 `DS-1`..`DS-8`**，与 Track S 的 `S1`–`S8` 不是同一套，见 §4 的对照表 |
 | Plan opened | 2026-11-09 |
 | Baseline | `main` @ post-v1.1 consolidation |
 | Scope class | 观测面（observability）— 纯增量统计字段与查询面，不改 wire format |
@@ -94,19 +94,19 @@ Grep "video_stats|VideoStreamStats|IVideoStatsSink"  →  src/engine/  零命中
 
 | ID | Item | Landing | Acceptance |
 |---|---|---|---|
-| **S1** | **统计快照加时间戳与区间语义**：`Engine::Stats` 增加 `snapshot_time_us`（engine 单调原点，与 `tick()` 的 `now_us` 同源），并新增一个 `StatsDelta` 或等价机制，让宿主能算出区间速率，而不只是自 `open()` 起的累计值。字段**加法式**扩展，不改动已有字段含义。 | `E` | 两次 `stats()` 之间的差值等于两次调用之间实际发生的增量；对 `snapshot_time_us` 的断言能区分"同一时刻"与"不同时刻" |
-| **S2** | **插件统计统一聚合入口**：新增一个聚合查询面，把 §2.3 表格里的插件统计一次性收进一份快照，宿主不必逐个 accessor 取。字段名冲突按"最具体者胜出"处理（如 `frames_dropped` 拆为 `frames_dropped_jb` / `frames_dropped_decoder`），并在文档里给出**字段 → 来源插件 → 含义**的三列表。 | `E` + `M`（若需新增插件侧聚合接口，放 `src/plugins/` 的接口声明，实现落在模块侧） | 一次查询返回 §2.3 表格中所有插件的统计字段；字段来源表在 `docs/api/engine_api.md` 中与代码一致 |
-| **S3** | **`video_stats` 接入引擎（R1 的执行）**：引擎创建 `IVideoStatsSink` 实现，喂入帧到达 / 解码 / 渲染 / 丢弃 / RTCP 反馈 / QP 样本，`snapshot()` 的结果并入统计面。这是冻结计数、关键帧间隔、QP、按原因区分的丢帧的唯一来源。 | `M`（模块已存在）+ `E`（引擎侧接线） | 引擎统计面能给出 `freeze_count` / `freeze_total_ms` / `keyframe_interval_avg_ms` / `qp_sum` / `qp_count`；注入一次帧丢失后 `frames_dropped_*` 相应增长且原因区分正确 |
-| **S4** | **区分 RTCP 反馈类型**：把 `video_feedback_applied` 这一个总数拆成按类型的计数（PLI / FIR / NACK / REMB / transport-cc），让宿主能判断"对端到底在要什么"。 | `E`（计数点已存在，`engine_rtcp.cpp`） | 注入一次 PLI 后，PLI 计数 +1 而 NACK 计数不变；未收到的反馈类型为 0 |
+| **DS-1** | **统计快照加时间戳与区间语义**：`Engine::Stats` 增加 `snapshot_time_us`（engine 单调原点，与 `tick()` 的 `now_us` 同源），并新增一个 `StatsDelta` 或等价机制，让宿主能算出区间速率，而不只是自 `open()` 起的累计值。字段**加法式**扩展，不改动已有字段含义。 | `E` | 两次 `stats()` 之间的差值等于两次调用之间实际发生的增量；对 `snapshot_time_us` 的断言能区分"同一时刻"与"不同时刻" |
+| **DS-2** | **插件统计统一聚合入口**：新增一个聚合查询面，把 §2.3 表格里的插件统计一次性收进一份快照，宿主不必逐个 accessor 取。字段名冲突按"最具体者胜出"处理（如 `frames_dropped` 拆为 `frames_dropped_jb` / `frames_dropped_decoder`），并在文档里给出**字段 → 来源插件 → 含义**的三列表。 | `E` + `M`（若需新增插件侧聚合接口，放 `src/plugins/` 的接口声明，实现落在模块侧） | 一次查询返回 §2.3 表格中所有插件的统计字段；字段来源表在 `docs/api/engine_api.md` 中与代码一致 |
+| **DS-3** | **`video_stats` 接入引擎（R1 的执行）**：引擎创建 `IVideoStatsSink` 实现，喂入帧到达 / 解码 / 渲染 / 丢弃 / RTCP 反馈 / QP 样本，`snapshot()` 的结果并入统计面。这是冻结计数、关键帧间隔、QP、按原因区分的丢帧的唯一来源。 | `M`（模块已存在）+ `E`（引擎侧接线） | 引擎统计面能给出 `freeze_count` / `freeze_total_ms` / `keyframe_interval_avg_ms` / `qp_sum` / `qp_count`；注入一次帧丢失后 `frames_dropped_*` 相应增长且原因区分正确 |
+| **DS-4** | **区分 RTCP 反馈类型**：把 `video_feedback_applied` 这一个总数拆成按类型的计数（PLI / FIR / NACK / REMB / transport-cc），让宿主能判断"对端到底在要什么"。 | `E`（计数点已存在，`engine_rtcp.cpp`） | **已落地 2026-11-17**：`Stats::video_feedback_rx_{pli,fir,nack,remb,transport_cc}` 与 `video_feedback_tx_{pli,nack}`，计数点 `engine_media.cpp`，测试 `tests/test_engine_video_feedback.cpp`（NACK 不记成 PLI、RR 不计入、transport-cc 单独计数） |
 
 ### Track R — 报告形状与传输层维度
 
 | ID | Item | Landing | Acceptance |
 |---|---|---|---|
-| **S5** | **流级记录形状**：为多流场景提供"每个流一条记录"的查询形状（每条记录含流标识、方向、上述字段），而不是一个全局扁平结构体。libwebrtc 的 `RTCStatsReport` 是参照物，但**不追求 wire 兼容**——NimRTC 是 C++ 库，不做 W3C 形状的逐字段复刻。 | `E` | 两路流同时存在时，查询能分别返回各自的计数，不会混在一个总数里 |
-| **S6** | **ICE candidate-pair 统计**：暴露选中候选对的地址 / 协议 / RTT，以及候选对的可用性状态。RTT 取自引擎已有的 DTLS / SRTP / RTCP 反馈面，**不新增探针**。 | `E` + `M`（若 ICE 模块侧无该接口，在 `src/plugins/` 声明、在模块侧实现） | 选中对可查询到地址与 RTT；未选中的候选对标记为不可用 |
-| **S7** | **对端反馈消费**：消费对端 RR 里的 RTT 与 fraction lost，纳入统计面。这是引擎当前完全没读的一类信息（只发不收）。 | `M`（`src/modules/rtp` 已有 `parse_rr`）+ `E`（接线） | 收到带 RTT 的 RR 后，统计面能给出该 RTT 值与 fraction lost |
-| **S8** | **视频侧丢包与抖动**：音频侧已有 `audio_packets_lost` / `audio_jitter_ms`，视频侧补齐对等字段。 | `E` | 视频接收侧在丢包与抖动变化时，统计面数值相应变化 |
+| **DS-5** | **流级记录形状**：为多流场景提供"每个流一条记录"的查询形状（每条记录含流标识、方向、上述字段），而不是一个全局扁平结构体。libwebrtc 的 `RTCStatsReport` 是参照物，但**不追求 wire 兼容**——NimRTC 是 C++ 库，不做 W3C 形状的逐字段复刻。 | `E` | 两路流同时存在时，查询能分别返回各自的计数，不会混在一个总数里 |
+| **DS-6** | **ICE candidate-pair 统计**：暴露选中候选对的地址 / 协议 / RTT，以及候选对的可用性状态。RTT 取自引擎已有的 DTLS / SRTP / RTCP 反馈面，**不新增探针**。 | `E` + `M`（若 ICE 模块侧无该接口，在 `src/plugins/` 声明、在模块侧实现） | 选中对可查询到地址与 RTT；未选中的候选对标记为不可用 |
+| **DS-7** | **对端反馈消费**：消费对端 RR 里的 RTT 与 fraction lost，纳入统计面。这是引擎当前完全没读的一类信息（只发不收）。 | `M`（`src/modules/rtp` 已有 `parse_rr`）+ `E`（接线） | 收到带 RTT 的 RR 后，统计面能给出该 RTT 值与 fraction lost |
+| **DS-8** | **视频侧丢包与抖动**：音频侧已有 `audio_packets_lost` / `audio_jitter_ms`，视频侧补齐对等字段。 | `E` | 视频接收侧在丢包与抖动变化时，统计面数值相应变化 |
 
 ### Track D — 文档与口径
 
@@ -118,42 +118,42 @@ Grep "video_stats|VideoStreamStats|IVideoStatsSink"  →  src/engine/  零命中
 
 ---
 
-## 4. 里程碑建议
+## 4. 里程碑（仅保留设计依赖，不再排期）
 
-| 里程碑 | 工作项 | 理由 |
+> 本表说明**设计依赖**（谁依赖谁、为什么要这个顺序），
+> **不再表示任何版本的落位**。落位以 `v1.2-next-plan.md` §4 里程碑为准。
+> 表内编号是 2026-11-17 之前的旧编号，对应现在的 `DS-<n>`。
+
+| 里程碑 | 工作项 | 理由（设计依赖） |
 |---|---|---|
-| **v1.2.0** | S1, S2, S3, S4, D1, D2, D3 | S3 是 R1 的执行、已属 v1.2.0；S1/S2/S4 与 D 组是纯增量、低风险。S3 的接线依赖 O1 的遥测字段落地，二者同属 v1.2.0 可避免跨版本返工 |
-| **v1.3.0** | S5, S7, S8 | 流级记录形状（S5）需要 S1/S2 的快照基础设施稳定后再做，否则要改两次；S7 / S8 是协议侧增量 |
-| **v1.4.0** | S6 | candidate-pair 统计涉及 ICE 模块接口扩展，跨版本改动成本更高 |
+| ~~v1.2.0~~ | DS-1, DS-2, DS-3, DS-4, D1, D2, D3 | DS-3 是 R1 的执行、本就在 v1.2.0；DS-1/DS-2/DS-4 与 D 组是纯增量、低风险。DS-3 的接线依赖 O1 的遥测字段落地，二者同属 v1.2.0 可避免跨版本返工 |
+| ~~v1.3.0~~ | DS-5, DS-7, DS-8 | 流级记录形状（DS-5）需要 DS-1/DS-2 的快照基础设施稳定后再做，否则要改两次；DS-7 / DS-8 是协议侧增量 |
+| ~~v1.4.0~~ | DS-6 | candidate-pair 统计涉及 ICE 模块接口扩展，越晚改成本越高 |
 
-**与 `session-capability-plan.md`（会话能力第 5/6/7/9 项）的依赖关系**：本计划与该计划**无双向依赖**。Renegotiation（第 5 项）会改变流的增删方式，届时 S5 的流级记录形状需要支持动态增删的流——因此 **S5 必须排在 renegotiation 落地之后**，且实现时应预留流记录可增删的结构，而不是固定数组。**2026-11-10 更新**：renegotiation 与 transceiver 的排期已由 owner 压缩到 `v1.2.0`（见 `session-capability-plan.md` §4），而 S5 仍排在 `v1.3.0`——两者同属 v1.2.0，所以 S5 排在 renegotiation 之后这个约束仍然满足。另一侧，transceiver 现在比 S5 **更早**落地，因此 S5 实现时可以直接对齐 transceiver 的方向取值，不必像原草案那样只求"字段可扩展"。DTMF（第 7 项）不产生统计面需求。
+**排期归属（2026-11-17）。** D-N3 已把整个 Track S 提前进 v1.2.0，因此上表的作废是
+最终结论而非暂定。**范围与排期归 `v1.2-next-plan.md`，本文件只负责字段级设计。**
+仍然成立的 DS-5 约束：它必须排在 renegotiation 之后（现在两者同属 v1.2.0），
+且实现时应直接对齐 transceiver 的方向取值，而不是固定数组的流记录。
 
-**排期状态说明**：`session-capability-plan.md` 的落位已定（v1.2.0），但**本计划自身的落位仍是待排期状态**——S5 / S7 / S8 是否也压进 v1.2.0 尚未由 owner 决定。上表中的 v1.3.0 / v1.4.0 仍是建议值。
+**与 `session-capability-plan.md`（会话能力第 5/6/7/9 项）的依赖关系**：本计划与该计划**无双向依赖**。Renegotiation（第 5 项）会改变流的增删方式，因此 DS-5 的流级记录形状必须支持动态增删的流，而不是固定数组。DTMF（第 7 项）不产生统计面需求。
 
-**2026-11-17 更新 — owner 决策 D-N3 与 D-N6 覆盖了上表。**
-`docs/plan/v1.2-next-plan.md` §0 的 **D-N3** 把"完整 `getStats` 面"整体提升进 v1.2.0，
-因此上表的 v1.3.0 / v1.4.0 行**已作废**：本计划的 S1–S8 全部随 v1.2.0 发布。
-**D-N6** 同时规定：API 基线（E1 的 `docs/api/public_headers.manifest`）**先冻结**，
-本计划新增的每个公开符号都必须以**显式的、可评审的 manifest bump** 落地
-（同一 PR 内跑 `scripts/check_api_manifest.py --write`，并在 PR 描述中点名新增符号）。
+**编号对照表（已合并，2026-11-17）。** §3 的表格已把本计划条目改名为
+**`DS-1`..`DS-8`**（Design Scope），"同一个 `S<n>` 指两件事"的问题不再存在。
+下表只作对照，**不要**再用 `S<n>` 指本计划的条目：
 
-**编号冲突警告（重要）。** 本计划的 S1–S8 与 `v1.2-next-plan.md` §3 Track S 的
-S1–S8 **是两套不同的条目**，两者在 S1、S2、S4、S5、S6、S7、S8 上**都指向不同的工作**：
-
-| ID | 本计划（`stats-surface-plan.md`） | `v1.2-next-plan.md` §3 Track S |
+| 本计划 | 内容 | `v1.2-next-plan.md` §3 Track S |
 |---|---|---|
-| S1 | 快照时间戳 + 区间语义（`snapshot_time_us` / `StatsDelta`） | 引擎内的统计注册表 + 快照生命周期 |
-| S2 | 插件统计统一聚合入口 | 入站 / 出站 RTP 会话统计（按 SSRC） |
-| S3 | `video_stats` 接入引擎 | 视频管线统计桥 |
-| S4 | 区分 RTCP 反馈类型（PLI / FIR / NACK / REMB / transport-cc） | 音频管线统计 |
-| S5 | 流级记录形状 | ICE / DTLS / SRTP 传输统计 |
-| S6 | ICE candidate-pair 统计 | DataChannel 统计 |
-| S7 | 消费对端 RR 的 RTT / fraction lost | 远控（采集 / 编码 / 解码）统计 |
-| S8 | 视频侧丢包与抖动 | 文档化的稳定字段集 + 示例程序输出 |
+| `DS-1` | 快照时间戳 + 区间语义（`snapshot_time_us` / `StatsDelta`） | S1（注册表 + 快照生命周期）——同一件工作 |
+| `DS-2` | 插件统计统一聚合入口 | 无对应行（S2 是 RTP 按 SSRC，另立） |
+| `DS-3` | `video_stats` 接入引擎 | S3（视频管线统计桥）——**已落地** |
+| `DS-4` | 区分 RTCP 反馈类型（PLI / FIR / NACK / REMB / transport-cc） | 无对应行——**已落地 2026-11-17**，`Stats::video_feedback_rx_*` / `_tx_*` |
+| `DS-5` | 流级记录形状 | 无直接对应行 |
+| `DS-6` | ICE candidate-pair 统计 | S5（ICE/DTLS/SRTP 传输统计的一部分） |
+| `DS-7` | 消费对端 RR 的 RTT / fraction lost | 无直接对应行（S5 需要它提供 RTT） |
+| `DS-8` | 视频侧丢包与抖动 | 无直接对应行 |
 
 **引用规则**：范围（做什么、做多少）以 `v1.2-next-plan.md` §3 Track S 为准；
-字段级细节（每个字段的口径、来源、验收断言）以本计划为准。**不要跨文档按 ID 交叉引用**——
-在 Track S 落地细排期之前，必须先把两套编号合并成一套。
+字段级细节（每个字段的口径、来源、验收断言）以本计划为准。
 
 ---
 
@@ -164,7 +164,7 @@ S1–S8 **是两套不同的条目**，两者在 S1、S2、S4、S5、S6、S7、S
 | 目的 | 服务视频质量闭环的**内部控制决策**（码率控制器需要知道当前档位、pacing、冻结情况） | 服务**宿主观测**（宿主要知道会话此刻健康吗） |
 | 形状 | 逐流可观测面，偏视频 | 跨音视频统一，含 ICE / RTT / 传输层维度 |
 | 消费方 | 引擎内部的码率控制器与 benchmark 工具（O2 / O5） | 宿主应用、运维监控 |
-| 重叠 | S3（`video_stats` 接入引擎）是两者的公共前置 | O1 依赖它拿冻结计数 |
+| 重叠 | DS-3（`video_stats` 接入引擎）是两者的公共前置 | O1 依赖它拿冻结计数 |
 
 **结论**：O1 是本计划的**子集与前置**，不重复立项。O1 已定义并已排期 v1.2.0 的字段不再在本计划里重写；本计划只补 O1 未覆盖的部分（音频侧、视频侧丢包/抖动、ICE candidate-pair、RTT、流级形状、时间戳、字段口径）。
 

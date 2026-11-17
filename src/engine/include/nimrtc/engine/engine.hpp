@@ -3396,6 +3396,49 @@ public:
         std::uint64_t video_keyframes_q        = 0;  // keyframe reqs queued
         std::uint64_t video_feedback_applied   = 0;  // inbound RTCP actions
         std::uint64_t video_keyframes_applied  = 0;  // inbound keyframe reqs
+        // ---- RTCP feedback, by type (plan Track S / S4, additive) --------
+        //
+        // `video_feedback_applied` above counts every feedback action as
+        // one number, so a host that watches it climb cannot tell *what
+        // the peer is asking for*.  These counters can: a peer that sends
+        // PLIs and no NACKs has a different problem from one that sends
+        // NACKs and no PLIs, and the two call for different fixes.
+        //
+        // The two directions are separate because they describe opposite
+        // things:
+        //
+        //   * `video_feedback_rx_*` — feedback the **peer sent us**, about
+        //     *our outbound* stream.  A PLI here means "I could not
+        //     decode what you sent": our *transmit* loss.
+        //   * `video_feedback_tx_*` — feedback **we sent the peer**, about
+        //     *its inbound* stream.  A NACK here means "your packets are
+        //     arriving damaged": the receive path's loss.
+        //
+        // All cumulative since `open()`.
+        //
+        // The `_tx_` set is deliberately shorter than the `_rx_` set:
+        // the engine's outbound video feedback can only ever carry a
+        // NACK (the receiver's loss report) or a PLI (the receiver's
+        // key-frame request).  It never emits a FIR — the wire format
+        // has no room for it in the report the receiver hands back —
+        // and it never emits a REMB, because a REMB is a *receiver's*
+        // bandwidth estimate and we are the sender here.  Publishing
+        // counters that can never move would be dead public surface,
+        // so the `_tx_` side carries exactly what the engine sends.
+        /** PLI (picture-loss indication) the peer sent us. */
+        std::uint64_t video_feedback_rx_pli  = 0;
+        /** FIR (full intra request) the peer sent us. */
+        std::uint64_t video_feedback_rx_fir  = 0;
+        /** NACK (retransmission request) the peer sent us. */
+        std::uint64_t video_feedback_rx_nack = 0;
+        /** REMB (receiver bandwidth estimate) the peer sent us. */
+        std::uint64_t video_feedback_rx_remb = 0;
+        /** transport-cc (RFC 8888) reports the peer sent us. */
+        std::uint64_t video_feedback_rx_transport_cc = 0;
+        /** PLI we sent the peer. */
+        std::uint64_t video_feedback_tx_pli  = 0;
+        /** NACK we sent the peer. */
+        std::uint64_t video_feedback_tx_nack = 0;
         // ---- The key-frame storm limiter (remote-desktop plan B14) ------
         // The counters make the limiter observable: a host that sees
         // `video_keyframes_deferred` climbing knows the peer is asking

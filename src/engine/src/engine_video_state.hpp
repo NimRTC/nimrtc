@@ -66,6 +66,47 @@ struct VideoState {
     std::uint64_t video_feedback_applied  = 0;
     std::uint64_t video_keyframes_applied = 0;
 
+    // ---- RTCP feedback, broken down by type (plan Track S / S4) -------
+    //
+    // `video_feedback_applied` above is a single total, so a host that
+    // sees it climb cannot tell *what the peer is asking for*.  The
+    // counters below say it: a peer that sends PLIs and no NACKs has a
+    // different problem from one that sends NACKs and no PLIs, and the
+    // two call for different fixes.
+    //
+    // The two directions are kept apart because they describe opposite
+    // things:
+    //
+    //   * `..._rx_*` — feedback the peer sent us, about *our* outbound
+    //     stream.  A PLI here means "I could not decode what you sent".
+    //     This is our *transmit* loss.
+    //   * `..._tx_*` — feedback we sent the peer, about *its* inbound
+    //     stream.  A NACK here means "your packets are arriving
+    //     damaged".  This is the *receive* path's loss.
+    //
+    // The names follow the same convention as the rest of the surface:
+    // `_rx_` is what arrived, `_tx_` is what went out.
+
+    /** Key-frame requests (PLI) the peer sent us. */
+    std::uint64_t video_feedback_rx_pli  = 0;
+    /** Full intra requests (FIR) the peer sent us. */
+    std::uint64_t video_feedback_rx_fir  = 0;
+    /** NACKs (retransmission requests) the peer sent us. */
+    std::uint64_t video_feedback_rx_nack = 0;
+    /** REMB (bandwidth estimate) messages the peer sent us. */
+    std::uint64_t video_feedback_rx_remb = 0;
+    /** transport-cc (RFC 8888) reports the peer sent us. */
+    std::uint64_t video_feedback_rx_transport_cc = 0;
+
+    // The `_tx_` side is deliberately shorter: the engine's outbound
+    // video feedback can only carry a NACK (the receiver's loss report)
+    // or a PLI (the receiver's key-frame request).  It never emits a FIR
+    // or a REMB, so counters for them would never move.
+    /** Key-frame requests (PLI) we sent the peer. */
+    std::uint64_t video_feedback_tx_pli  = 0;
+    /** NACKs (retransmission requests) we sent the peer. */
+    std::uint64_t video_feedback_tx_nack = 0;
+
     // ---- Video zero-copy counters (Phase 3 / C3) ------------------------
     //
     // `video_zero_copy_frames` counts the frames that took the GPU path

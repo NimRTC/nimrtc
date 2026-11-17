@@ -113,6 +113,14 @@ jobs:
       - name: API freeze — marker include hygiene
         run: python scripts/check_api_marker_includes.py
 
+      # API freeze -- public header manifest.  The per-symbol scan checks
+      # the *markers*; this checks the *set*.  A count cannot tell a swap
+      # from a change: deleting `a.hpp` and adding `b.hpp` in the same
+      # PR leaves the count untouched, so CI would stay green while the
+      # public surface moved.
+      - name: API freeze — public header manifest
+        run: python scripts/check_api_manifest.py
+
       # Fail fast: detect missing tools before wasting minutes on configure.
       - name: Pre-flight tool check
         shell: pwsh

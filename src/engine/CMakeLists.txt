@@ -80,6 +80,13 @@ add_library(nimrtc_engine STATIC
     # concrete `rtp::` type for *outbound* packets, so the engine's
     # exemption from Layout Invariant 4 has a visible boundary.
     src/rtp_packetizer.cpp
+    # v1.2.0 (plan Track S / S5): the transport-plane statistics
+    # projection — the ICE agent's state and nominated candidate pair,
+    # the DTLS session's state and role, the SRTP counters and the
+    # round-trip time the feedback path measured.  It lives in its own
+    # TU so the transport surface has ONE visible owner, and so the
+    # engine's other TUs do not grow the projection's vocabulary.
+    src/engine_transport_stats.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and

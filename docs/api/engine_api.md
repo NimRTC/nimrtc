@@ -1277,6 +1277,98 @@ moment of the reading.
 as the canonical string so a host does not have to know the enum's
 numeric values.  A host that wants to know *why* a message was dropped
 reads this field: the two partial modes are the only ones that drop.
+### 13.5 The transport plane (v1.2.0, plan Track S / S5)
+
+The statistics surface above describes the *media*.  `Stats::transport`
+describes the **path the media travels over**: ICE (RFC 8445) → DTLS
+(RFC 6347) → SRTP (RFC 3711).
+
+Before S5 the transport had no statistics of its own: `Stats::srtp_drops`
+counted the packets the outbound path could not encrypt, `dtls_state()`
+exposed the DTLS state, and ICE — the plane that decides *where the
+packets go* — had **nothing at all**: no candidate pair, no round-trip
+time, no restart count.
+
+```cpp
+struct Stats {
+    // ---- The transport plane (v1.2.0, plan Track S / S5) ----
+    TransportStats transport;
+};
+```
+
+#### `TransportStats`
+
+**ICE (RFC 8445)**
+
+| Field | Meaning |
+|---|---|
+| `ice_state` | The agent's state: `"disconnected"`, `"gathering"`, `"connecting"`, `"connected"`, `"completed"` or `"failed"`.  Empty before the engine has a transport.  The same vocabulary as `ice_state_string()`. |
+| `ice_restart_count` | The ICE restarts performed so far (RFC 8445 §9.1.1.1).  0 means the session never restarted. |
+| `selected_pair` | The candidate pair the agent nominated, or empty.  Empty until the connectivity checks settle on a path, which is *after* the agent reaches Connected. |
+| `relayed` | True when the selected pair goes through a TURN relay.  *Derived* from the pair's candidate types, published separately because it is the one bit a host actually branches on. |
+| `rtt_ms` | The round-trip time in milliseconds, **instantaneous** (the latest measurement, not a running total).  0 until a Receiver Report with a usable LSR / DLSR pair has arrived. |
+| `has_rtt` | True once a round-trip time has actually been *measured*.  This is what distinguishes "the RTT is 0 because the path is fast" from "the RTT is 0 because nothing was ever measured". |
+
+**DTLS (RFC 6347)**
+
+| Field | Meaning |
+|---|---|
+| `dtls_state` | The handshake's state: `"closed"`, `"initial"`, `"hello-verify"`, `"hello-sent"`, `"hello-received"`, `"certificate-received"`, `"key-exchange"`, `"change-cipher-spec"`, `"finished"`, `"connected"` or `"failed"`. |
+| `dtls_role` | `"client"` or `"server"` — the role the negotiation resolved (RFC 5763 §5).  Empty before the negotiation has run: "the role is not negotiated yet" is a different fact from "we are the server". |
+| `dtls_fingerprint` | The local certificate's fingerprint, in the colon-separated UPPER hex form of RFC 8122 (`"AA:BB:..."`). |
+
+**SRTP (RFC 3711)**
+
+| Field | Meaning |
+|---|---|
+| `srtp_installed` | True once the DTLS-derived keying material has been installed.  This is the *authority* on "is this session encrypted". |
+| `srtp_rtp_packets_protected` / `_unprotected` | The RTP packets the SRTP layer encrypted / decrypted. |
+| `srtp_rtcp_packets_protected` / `_unprotected` | The RTCP packets the SRTP layer protected / unprotected. |
+| `srtp_auth_failures` | The packets the SRTP layer refused: an authentication-tag mismatch, a replay, or a malformed packet.  A non-zero count means the peer sent something the engine could not authenticate — the most security-relevant number on this surface. |
+| `srtp_drops` | The packets the engine had to send but could not encrypt.  The same figure the flat `Stats::srtp_drops` carries, repeated so a host that reads only the transport entry has the complete picture. |
+
+#### `IceCandidatePairInfo`
+
+```cpp
+struct IceCandidatePairInfo {
+    IceCandidateInfo local;   // our end of the pair
+    IceCandidateInfo remote;  // the peer's end of the pair
+};
+
+struct IceCandidateInfo {
+    std::string   address;   // the IP literal (no brackets, even for IPv6)
+    std::uint16_t port = 0;
+    std::string   protocol;  // "udp" / "tcp", lower-cased
+    std::string   type;      // "host" / "srflx" / "prflx" / "relay"
+};
+```
+
+Both ends are published because a diagnosis usually needs both — *"where
+does my traffic leave from, and where does it arrive?"* — and because the
+two ends can differ in **kind**: a local host candidate reaching a remote
+relay candidate is the shape of a TURN-relayed path.
+
+#### What this surface deliberately does *not* do
+
+**No new probes.**  The RTT is the one the engine already measures from
+the peer's Receiver Reports (the LSR / DLSR pair against our own Sender
+Report, RFC 3550 §6.4.1) — the *same* figure the bandwidth estimator
+consumes.  The statistics surface republishes it; it does not measure it
+a second time, because two measurements of one quantity would eventually
+disagree.
+
+**No per-candidate-pair list.**  libjuice nominates exactly one pair and
+does not expose the others it tried, so a list of candidate pairs would
+be a list of one — and would suggest the engine can enumerate paths it
+cannot actually see.  What the engine publishes is the pair that is *in
+use*, plus the counters that say whether it is working.
+
+**No copies of another owner's state.**  The ICE state and the candidate
+pair are owned by the ICE agent (read through the `plugins::IICETransport`
+seam), the DTLS state by the DTLS session, the SRTP counters by the SRTP
+context, and the round-trip time by the network-feedback collector.  The
+surface republishes each of them; it keeps no second copy that could go
+stale or disagree.
 
 ---
 

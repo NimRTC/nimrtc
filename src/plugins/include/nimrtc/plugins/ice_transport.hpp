@@ -136,6 +136,60 @@ enum class NIMRTC_API_STABLE TurnTransport : std::uint8_t {
 };
 
 // ---------------------------------------------------------------------------
+// IceCandidatePair — the candidate pair the ICE agent selected.
+//
+// Mirrors the *shape* of `nimrtc::ice::Candidate` (RFC 8445 §5.1.2), but
+// the seam does not carry the whole candidate: a host that wants the
+// full candidate line (priority, foundation, related address) can ask
+// the concrete transport for it.  What the seam carries is the three
+// facts a *connectivity diagnosis* needs — where each end is, and what
+// kind of candidate it is.
+//
+// STABLE (v1.2.0): part of the frozen `IICETransport` contract — the
+// Track S / S5 statistics surface publishes the selected pair through
+// this type, so a host reads it without reaching past the seam.
+// ---------------------------------------------------------------------------
+
+/** One end of a candidate pair. */
+struct NIMRTC_API_STABLE IceCandidate {
+    /** The candidate's transport address: the IP literal and the port.
+     *
+     *  For an IPv6 candidate the address is the literal without the
+     *  brackets, e.g. "2001:db8::1". */
+    std::string address;
+
+    /** The candidate's port. */
+    std::uint16_t port = 0;
+
+    /** The candidate's transport protocol, lower-cased: "udp" or "tcp".
+     *
+     *  ICE-over-TCP (RFC 6544) is not implemented yet (plan C2), so this
+     *  is "udp" for every pair a v1.2.0 engine can select. */
+    std::string protocol;
+
+    /** The candidate's type, lower-cased: "host", "srflx", "prflx" or
+     *  "relay" (RFC 8445 §5.1.2.1).
+     *
+     *  "relay" means the pair traverses a TURN server, which is the
+     *  single most useful thing a host can learn from this field: it
+     *  says the path is not a direct one. */
+    std::string type;
+};
+
+/** The candidate pair the agent selected (RFC 8445 §5.1.2).
+ *
+ *  A pair is only selected once the connectivity checks have nominated
+ *  it, so the *absence* of a pair is meaningful: it says "the agent has
+ *  not settled on a path yet" (or never did). */
+struct NIMRTC_API_STABLE IceCandidatePair {
+    /** The local end of the pair. */
+    IceCandidate local;
+
+    /** The remote end of the pair. */
+    IceCandidate remote;
+};
+
+// ---------------------------------------------------------------------------
 // IICETransport
 // ---------------------------------------------------------------------------
 
@@ -184,6 +238,30 @@ public:
     /** Add a single remote ICE candidate (accepts "a=candidate:..." or
      *  "candidate:..." prefixes). */
     virtual Status add_remote_candidate(std::string_view candidate_sdp) noexcept = 0;
+
+    // ---- The selected candidate pair --------------------------------------
+
+    /** The candidate pair the agent selected, if it has selected one.
+     *
+     *  A pair is selected once the connectivity checks have nominated it
+     *  (RFC 8445 §5.1.2), which is *after* the agent reaches Connected
+     *  and usually at the transition to Completed.  Before that the
+     *  optional is empty — and so is the pair's RTT, which the engine
+     *  takes from the feedback path rather than from the ICE agent.
+     *
+     *  The default implementation returns `std::nullopt`: an
+     *  implementation that has no ICE agent (or a shell transport that
+     *  never nominates a pair) simply has nothing to report.  This is a
+     *  defaulted virtual rather than a pure one so that a third-party
+     *  `IICETransport` written against the older contract keeps
+     *  compiling — the same additive-seam rule the rest of the ICE
+     *  surface follows.
+     *
+     *  @note Thread-safety: safe to call concurrently with the transport's
+     *        own callbacks; the implementation takes its own lock. */
+    virtual std::optional<IceCandidatePair> selected_pair() const noexcept {
+        return std::nullopt;
+    }
 
     // ---- ICE restart (RFC 8445 §9.1.1.1) -----------------------------------
 

@@ -3458,6 +3458,16 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         }
     }
 
+    // ---- The transport plane (plan Track S / S5) -------------------------
+    //
+    // The ICE / DTLS / SRTP path the session runs over.  The projection
+    // reads each plane from its owner — the ICE transport through the
+    // plugin seam, the DTLS session through the weak handle, the SRTP
+    // context through its own counters, and the round-trip time from the
+    // feedback collector — so every number here is the number its owner
+    // reports, not a second measurement of it.
+    append_transport_stats(out.transport);
+
     // ---- The reading's identity (plan Track S / S1) ---------------------
     //
     // The two fields say *when* the counters above were measured.  The

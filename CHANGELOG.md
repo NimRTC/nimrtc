@@ -9,6 +9,54 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The transport plane has statistics (v1.2 plan item `S5`).**
+  `NimRTCEngine::Stats` carries a new `TransportStats transport` entry --
+  the ICE -> DTLS -> SRTP path the session's packets actually travel over.
+  Before this the transport had no statistics of its own:
+  `Stats::srtp_drops` counted the packets the outbound path could not
+  encrypt, `dtls_state()` exposed the DTLS state, and **ICE -- the plane
+  that decides *where the packets go* -- had nothing at all**: no
+  candidate pair, no round-trip time, no restart count.
+
+  The entry carries the three planes:
+
+  - **ICE** -- `ice_state` (the same vocabulary as `ice_state_string()`),
+    `ice_restart_count`, `selected_pair` (an `IceCandidatePairInfo` with
+    *both* ends' address / port / protocol / candidate type), the derived
+    `relayed` bit, and `rtt_ms` + `has_rtt`.
+  - **DTLS** -- `dtls_state` in the lower-cased, hyphen-separated spelling,
+    `dtls_role`, and `dtls_fingerprint` in the RFC 8122 UPPER-hex form.
+  - **SRTP** -- `srtp_installed`, the protected / unprotected RTP and RTCP
+    counters, `srtp_auth_failures`, and `srtp_drops`.
+
+  **The RTT is not measured twice.**  The engine already derives the
+  round-trip time from the peer's Receiver Reports (the LSR / DLSR pair
+  against our own Sender Report, RFC 3550 section 6.4.1) and feeds it to
+  the bandwidth estimator; the statistics surface republishes *that*
+  figure, so there is no second probe and no second answer to the same
+  question.  `has_rtt` is what distinguishes "the path is fast" from
+  "nothing was ever measured" -- a distinction a host cannot make from
+  the number alone.
+
+  The ICE pair is read through a new **additive** seam method,
+  `plugins::IICETransport::selected_pair()`.  It is a defaulted virtual
+  rather than a pure one, so a third-party transport written against the
+  older contract keeps compiling; `nimrtc::ice::IceTransport` implements
+  it by projecting the pair libjuice reports.
+
+  The projection lives in the private collaborator
+  `src/engine/src/engine_transport_stats.{hpp,cpp}` and holds **no
+  state**: every number is read from its owner -- the ICE transport
+  through the seam, the DTLS session through the weak handle, the SRTP
+  context through its own counters, the RTT from the feedback collector.
+  The DTLS state names are *derived* from the DTLS module's own spelling
+  rather than copied into a second table, so a state the module adds
+  later shows up here without anyone editing the projection.
+
+  The surface is documented in `docs/api/engine_api.md` section 13.5 and
+  pinned by `tests/test_engine_transport_stats.cpp` (12 cases) plus the
+  ICE module's own loopback assertions on the new seam.
+
 - **The data-channel plane has statistics (v1.2 plan item `S6`).**
   `NimRTCEngine::Stats` carries a new `std::vector<DataChannelStats>
   data_channels` -- **one entry per channel the host opened** with

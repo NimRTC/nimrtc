@@ -122,6 +122,53 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Wayland support in the video sink had never been compiled on any
+  build host.**  `wayland-protocols` ships the protocol **XML**, not the C
+  headers — `xdg-shell-client-protocol.h` and
+  `linux-dmabuf-v1-client-protocol.h` are *generated* by `wayland-scanner`.
+  The CMake lookup searched for the generated header with `find_path`, so
+  it never succeeded: `NIMRTC_VIDEO_SINK_HAS_XDG_SHELL` and
+  `NIMRTC_VIDEO_SINK_HAS_DMABUF` stayed undefined and roughly twenty
+  branches of `egl_renderer.cpp` were dead code.  The XML is now located
+  (via the `pkg-config` `pkgdatadir` first) and both the client header and
+  the marshalling code are generated from it.
+
+  Forcing the macros on exposed four real defects behind them:
+
+  * `wl_shm_pool_create_buffer()` was called with three arguments instead
+    of six (`pool, offset, width, height, stride, format`), and its
+    result — a `struct wl_buffer*` — was then used as the raw pixel
+    buffer, i.e. an invalid memory write into a protocol object.  The
+    `wl_shm` CPU path now backs the pool with an anonymous file
+    (`memfd_create`, with a `mkstemp` + `unlink` fallback), maps it with
+    `mmap(MAP_SHARED)`, and copies the picture into the mapping — which is
+    what the protocol actually requires, since the compositor maps *the
+    same file* on its side.  The mapping is released with `munmap()` on a
+    geometry change and on teardown.
+  * The DMA-BUF import called an API that does not exist in the protocol
+    (`zwp_linux_dmabuf_v1_params_add_fd`, `..._set_offset`,
+    `..._add_plane`, `..._create_buffer`).  It now uses
+    `zwp_linux_buffer_params_v1_add()` plus `..._create_immed()`, attaches
+    the resulting `wl_buffer` to the surface, and releases the previous
+    buffer only after the new one has been committed.
+  * `xdg_surface_commit()` and `wl_display_commit()` are not Wayland
+    requests.  The xdg state is committed through `wl_surface_commit()` on
+    the `wl_surface` it wraps; the display through `wl_display_flush()`.
+  * The registry listener was missing the `global_remove` member, and the
+    DMA-BUF interface was bound at a hard-coded version instead of the
+    advertised one.
+
+  The generated marshalling code is plain C, while the library's warning
+  set is C++-oriented (`-Wnon-virtual-dtor`, `-Wold-style-cast`,
+  `-Woverloaded-virtual`) — and GCC *rejects* those options for a C
+  translation unit, fatally under `-Werror`.  The generated code
+  therefore lives in its own `OBJECT` library, which keeps it out of the
+  C++ warning set.
+
+  Verified: builds clean with warnings-as-errors on Linux (g++-13, all six
+  optional paths enabled) and on Windows (MSVC 2022, Debug), and the
+  protocol interface symbols are now defined in the archive.
+
 - **The DTLS-over-UDP loopback test failed on a coin flip.**  Its PASS
   criterion was `client_master_key[0] != 0`, and any single byte of a
   freshly-derived SRTP master key is `0x00` about 1/256 of the time —

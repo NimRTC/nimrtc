@@ -48,8 +48,10 @@ from __future__ import annotations
 import argparse
 import heapq
 import json
+import os
 import random
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -83,7 +85,17 @@ TIERS = (
     {"id": "loss-5pct", "loss": 0.05, "base_ms": 5.0, "jitter_ms": 0.0, "cap_mbps": 0.0},
     {"id": "jitter-100ms", "loss": 0.0, "base_ms": 20.0, "jitter_ms": 100.0, "cap_mbps": 0.0},
     {"id": "cap-1mbps", "loss": 0.0, "base_ms": 5.0, "jitter_ms": 0.0, "cap_mbps": 1.0},
+    # The "恶劣模式" (harsh-mode) tier: the 100 ms jitter tier with 5%
+    # loss on top — the plan §7.2 weak-network demo shape (5% 丢包 +
+    # 100ms 抖动).  It is *opt-in*: a default run does not measure it.
+    {"id": "harsh-5pct-100ms", "loss": 0.05, "base_ms": 20.0, "jitter_ms": 100.0, "cap_mbps": 0.0},
 )
+
+#: The tiers a default run measures.  The harsh tier is excluded: it only
+#: runs when ``--tier`` names it, so existing default runs are unchanged
+#: (spec requirement 3: the harsh mode is off unless selected).
+HARSH_TIER_ID = "harsh-5pct-100ms"
+DEFAULT_TIERS = tuple(t for t in TIERS if t["id"] != HARSH_TIER_ID)
 
 # ---------------------------------------------------------------------------
 # Wire accounting for the capped tier.
@@ -561,7 +573,26 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    tiers = TIERS
+    if args.mode == "netem":
+        # The kernel-side impairments come from a 'tc qdisc netem' qdisc
+        # that tools/benchmark_weaknet_netem.sh attaches to the sending
+        # interface — which needs Linux and root.  When the mode cannot
+        # run here, say so loudly instead of silently producing a bogus
+        # baseline (spec risk 1: an unavailable tier reports the
+        # permission requirement rather than skipping it).
+        if not sys.platform.startswith("linux"):
+            print("error: --mode netem needs Linux ('tc qdisc netem'); on "
+                  "this platform use --mode shaper (the in-process shaper, "
+                  "no privileges)", file=sys.stderr)
+            return 2
+        euid = getattr(os, "geteuid", None)
+        if euid is not None and euid() != 0:
+            print("error: --mode netem needs root to attach the netem qdisc; "
+                  "run tools/benchmark_weaknet_netem.sh as root, or use "
+                  "--mode shaper (no privileges)", file=sys.stderr)
+            return 2
+
+    tiers = DEFAULT_TIERS
     if args.tier:
         wanted = set(args.tier)
         tiers = tuple(t for t in TIERS if t["id"] in wanted)

@@ -286,10 +286,12 @@ contributors (Secret Rabbit Code).
 SCTP (P2)
 ============================================================
 
-This product includes software developed by the usrsctp contributors.
-  - Source:   https://github.com/sctplab/usrsctp
-  - License:  BSD-3-Clause
-  - Location: third_party/usrsctp/   (P2)
+The vendored `usrsctp` SCTP stack was removed in v1.2.0 (plan E7).  NimRTC
+no longer includes any usrsctp source or binary; the SCTP seam ships the
+`"stub"` factory only, and the production data plane is WebTransport over
+QUIC (msquic).  If a downstream consumer previously received a bundle
+containing `third_party/usrsctp/`, that archive is simply absent from the
+newer bundle.
 
 ============================================================
 Audio processing (P2)

@@ -153,7 +153,7 @@ NimRTC 既可用来构建 **RTC 服务端应用**（in-process SFU、转发网�
 | srtp | nimrtc_srtp | SRTP/SRTCP 封装，**后端可插拔**（libsrtp / 国密 SM4） | ✅ P1 |
 | rtp | nimrtc_rtp | RTP/RTCP 编解码、媒体 payload 打包/解析、标准反馈（transport-cc / NACK / REMB） | ✅ P1 |
 | sched | nimrtc_sched | **传输层（L1）**发送调度：同一 Scheduler 实例内 RTP × 数据严格优先级 + pacing（DC-2；见 §8.3 术语澄清——P 族逐包五级 / S 族逐流三档，两族互不比较） | ⏸ 接口 P1 / 实现 P2 |
-| sctp | nimrtc_sctp | DataChannel（usrsctp）：可靠 / 不可靠 / 有序 / 无序 + 部分可靠 | ✅ P2 |
+| sctp | nimrtc_sctp | DataChannel 的 SCTP seam（`"stub"` factory；usrsctp 后端已在 v1.2.0 删除，生产数据面为 WebTransport over QUIC） | ✅ P2 |
 | timeline | nimrtc_timeline | 统一时间线：RTCP-SR NTP↔RTP ts 映射、帧 capture ts、渲染 age | ⏸ 接口 P2 / 完整 P3 |
 | codec | nimrtc_codec | 编解码**注入接口**（encoder/decoder 由宿主或插件提供）+ 统一封装；不捆绑解码器（payload 打包归 rtp 模块） | ✅ 接口 P1 最小 / 完整 P3 |
 | jitter | nimrtc_jitter | 音/视频 JitterBuffer 抽象 + 固定窗口默认实现（自适应版 P3） | ✅ P1 最小可用 |
@@ -181,7 +181,7 @@ nimrtc/
 │  ├─ sfu-relay/                  # 转发压测工具
 │  └─ (后期) demo-teleop/         # 遥操作 / Agent 接入示例
 ├─ interop/                       # 浏览器互通测试套件（一等公民，见 §4.2）
-├─ third_party/                   # mbedTLS/BoringSSL · libsrtp · usrsctp(P2)
+├─ third_party/                   # mbedTLS/BoringSSL · libsrtp（usrsctp 已在 v1.2.0 删除）
 ├─ LICENSE / NOTICE / CONTRIBUTING.md
 ```
 
@@ -616,7 +616,7 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 |---|---|---|
 | **密码件**（DTLS、SRTP） | **必借** | 自研密码件 = 必有漏洞，且违反 §11.1 安全声明（"不自研关键密码件" D1） |
 | **编解码**（Opus/VP8/AV1） | **必借** | 工业级 codec 是 5-10 人年优化，自写出来的就是"能响" |
-| **SCTP** | **必借**（usrsctp） | SCTP 协议栈是 OS 内核级复杂度，自己实现不现实 |
+| **SCTP** | **必借**（usrsctp，v1.2.0 已移除该 vendor） | SCTP 协议栈是 OS 内核级复杂度，自己实现不现实；生产数据面最终走 WebTransport over QUIC，不经 SCTP |
 | **3A（AEC/ANS/AGC）** | **必借**（WebRTC APM） | WebRTC APM 是 15 年 Google Audio 团队心血，业界唯一能拿到的工业级 3A；且 pre-3a/post-3a PCM tap 差异化直接建立在此之上 |
 | **网络原语** | **借用标准库**（std::net / Asio） | 工业标准，无差异化价值 |
 | **协议层**（RTP/RTCP/SDP 解析） | **必写** | Chrome 严格字段顺序要求完全控制，是核心价值 |
@@ -649,7 +649,6 @@ third_party/
 │   └── REUSE.toml           # reuse lint 配置
 ├── libopus/
 ├── mbedtls/
-├── usrsctp/
 └── webrtc_audio_processing/
 ```
 
@@ -691,7 +690,7 @@ third_party/
 
 #### 11.5.5 可选预编译模式：`NIMRTC_VENDORED_WEBRTC_APM`
 
-> **本节是 §11.5.2 "vendor 源码"形式的唯一例外**。所有其他 vendored 模块（libsrtp / libopus / libvpx / usrsctp / mbedtls / nlohmann_json / googletest）一律按 §11.5.2 的"vendor 源码 = 默认"走；只有 WebRTC APM 单独开了 ON/OFF guard。理由如下。
+> **本节是 §11.5.2 "vendor 源码"形式的唯一例外**。所有其他 vendored 模块（libsrtp / libopus / libvpx / mbedtls / nlohmann_json / googletest）一律按 §11.5.2 的"vendor 源码 = 默认"走；只有 WebRTC APM 单独开了 ON/OFF guard。理由如下。
 
 **问题**：WebRTC APM 上游使用 **meson**（非 CMake）构建，且依赖 `abseil-cpp` C++ 子项目，构建一次需要 10–20 分钟 × 4 平台。NimRTC 的 CMake 模块只负责 link 一份**预先构建好的静态库**（`.a` / `.lib`），由 `tools/fetch_webrtc_apm.py` + `tools/build_webrtc_apm.{sh,cmd}` 一次性生成：
 

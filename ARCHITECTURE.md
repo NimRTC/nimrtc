@@ -210,7 +210,7 @@ engine.
 | **ICE** | 1 consent thread per transport | `src/modules/ice/src/ice.cpp` (`consent_thread_`) | Periodically checks consent freshness and, when consent lapses, tears the selected pair down.  It touches only the ICE transport's own state, which it guards with its own mutex. |
 | **video_source** | 1 cadence thread per source | `src/modules/video_source/src/video_source.cpp` (`thread_`) | Generates frames at the configured cadence when the source is a synthetic/test pattern.  The engine deliberately does **not** wire this thread into the encoder (the video codec is not thread-safe) — the host pulls frames from the source and pushes them via `send_video()`. |
 | **raw_udp (ARQ transport)** | 2 — a recv thread and a retransmit thread | `src/modules/raw_udp/include/nimrtc/raw_udp/arq_raw_udp.hpp` | Only the ARQ raw-UDP transport has these; the plain UDP socket path does not.  The recv thread fills a queue; the retransmit thread re-sends unacknowledged frames. |
-| **usrsctp / SCTP** | 0 | `src/modules/sctp/src/usrsctp_socket.cpp` | The `g_shared_udp_thread` global is **declared but never started** — usrsctp runs its own internal UDP listener.  Do not read that symbol as "a thread NimRTC starts". |
+| ~~**usrsctp / SCTP**~~ | 0 | *(removed in v1.2.0 — plan E7)* | The `usrsctp` backend and its vendored tree were deleted.  The `ISctpSocket` seam now has only the `"stub"` factory, which spawns no threads; the production data plane is WebTransport over QUIC. |
 
 The WebTransport data plane is different again: it is handed to **msquic**,
 which runs its own thread pool.  NimRTC does not own or schedule those threads;

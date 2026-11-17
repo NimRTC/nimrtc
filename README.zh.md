@@ -612,10 +612,10 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | 五种命名传输栈（PAL Slice 7 / 7.6 / 8）+ Profile schema v1.1 + engine 集成 | ✅ | v0.12.0 |
 | P1 UAF-DTLS 类型系统加固 + API 稳定性框架（ADR-015 冻结起点）+ PAL Slice 1.5 | ✅ | v1.0.0-alpha.1 |
 | WebTransport / QUIC 选型（ADR-014）+ `IWebTransportSession` seam + registry 槽位 | ✅ | v0.14.0 |
-| DC-1（WebTransport / msquic 数据面）—— msquic 集成、`WebTransportMsQuicSession`、`WebTransportDataChannel`、`test_web_transport_msquic` 12/12、`test_web_transport_data_channel` 17/17、`test_datachannel_engine` 5/5、`test_sctp_usrsctp` 4/4 | ✅ | v0.14.0-beta.1 |
+| DC-1（WebTransport / msquic 数据面）—— msquic 集成、`WebTransportMsQuicSession`、`WebTransportDataChannel`、`test_web_transport_msquic` 12/12、`test_web_transport_data_channel` 17/17、`test_datachannel_engine` 5/5 | ✅ | v0.14.0-beta.1 |
 | Chrome e2e Case E（走 WebTransport JS API 的数据交换，不是 `createDataChannel()`） | ✅ **PASS E1–E6**（datagram + bidi-stream 回显，经 `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html`，对端 `examples/demo-wtserver`） | v0.15.0（v1.0.0 冻结） |
 | 调度器内排序（DC-2）：`src/modules/sched/tests/test_sched_priority_dc.cpp` RTP × DC 交叉用例 | ✅ 17/17 | v1.0.0 |
-| TPAL-5 —— SCTP usrsctp 生产后端（`UsrsctpSocketFactory` id=`"usrsctp"`） | ⏸️ **顺延到 v1.x** | 该类标了 `@deprecated` 且仍可编译供 opt-in 调用方使用；`sctp::register_default_plugins()` 已不再自动注册 id=`"usrsctp"`。前进方向：WebTransport over QUIC。见 `docs/plan/v0.11-plan.md` §2.2 / §10。 |
+| TPAL-5 —— SCTP usrsctp 生产后端（`UsrsctpSocketFactory` id=`"usrsctp"`） | ❌ **已关闭 — 已删除** | `usrsctp` 后端及其 vendor 树已在 v1.2.0 **删除**（计划 E7），该类已不复存在。现在 `"stub"` 是唯一注册的 SCTP id，生产数据面是 WebTransport over QUIC。见 `docs/plan/v1.2-next-plan.md` §3 Track E（E7）。 |
 | SFU-1 —— 进程内 SFU relay（`nimrtc_sfu` 模块，BUNDLE/rtcp-mux） | ❌ **已关闭 — NO** | 2026-10-19 关闭（BDFL：SFU 不是项目核心目标）；不在关键路径上。见 `docs/plan/v1.0-plan.md` §7 + §12.5。 |
 | DC-3 —— SFU relay 场景下的 DC 转发策略 | ❌ **已关闭 — NO** | 继承自 SFU-1（2026-10-19 关闭）。 |
 | BENCH-1 —— `sfu-relay` 基准 pps/Mbps | ❌ **已关闭 — NO** | 继承自 SFU-1（2026-10-19 关闭）。 |
@@ -745,7 +745,7 @@ nimrtc/
 │   ├── log/                   # Logger 实现
 │   ├── engine/                # NimRTCEngine 外观层（顶层入口）
 │   ├── dtls/                  # DTLS seam —— wolfSSL + GMSSL 后端
-│   ├── sctp/                  # SCTP seam —— stub + usrsctp
+│   ├── sctp/                  # SCTP seam —— 只有 stub（usrsctp 已在 v1.2.0 删除）
 │   ├── transport/             # 传输栈 + 策略（webrtc-classic、raw-udp-arq、sfu-relay）
 │   ├── raw_udp/               # Raw UDP 传输
 │   ├── web_transport/         # WebTransport / QUIC 会话（msquic）
@@ -795,7 +795,8 @@ nimrtc/
 | `portaudio` | master | `src/third_party/portaudio/src` | ✅ 是（MIT；音频设备后端） |
 | `libsamplerate` | master（0.2.2-20） | `src/third_party/libsamplerate/src` | ✅ 是（BSD-2-Clause；采样率转换器） |
 
-> `usrsctp` 也 vendor 在 `src/third_party/usrsctp` 下，供 SCTP seam 使用。
+> `usrsctp` 曾 vendor 在 `src/third_party/usrsctp` 下，直到 v1.2.0 该后端及其
+> 目录树被删除（计划 E7）。SCTP seam 现在只提供 `"stub"` factory。
 >
 > `openh264` 与 `dav1d` 是**可选**的（`NIMRTC_PLUGINS_OPENH264` /
 > `NIMRTC_PLUGINS_DAV1D`，默认都是 **OFF**）；`libyuv`、`portaudio`、`libsamplerate`

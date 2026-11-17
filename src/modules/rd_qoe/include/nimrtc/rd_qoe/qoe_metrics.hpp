@@ -140,7 +140,12 @@ struct NIMRTC_API_STABLE QoeConfig {
 struct NIMRTC_API_STABLE FrameObservation {
     /** The capture timestamp, on the host's monotonic clock, in
      *  microseconds.  The **end-to-end latency** is measured against
-     *  this: `render_ts_us - capture_ts_us`. */
+     *  this: `render_ts_us - capture_ts_us`.
+     *
+     *  0 (the default) is the "no capture timestamp" sentinel: a frame
+     *  whose capture instant the pipeline could not attach has no honest
+     *  latency, so the collector does **not** feed a sample for it (see
+     *  `on_frame_presented()`). */
     std::int64_t capture_ts_us = 0;
 
     /** The timestamp at which the frame was displayed, on the same
@@ -438,6 +443,12 @@ public:
      * The frame's end-to-end latency (`render_ts_us - capture_ts_us`) is
      * fed to the latency percentile estimator, and the render timestamp
      * feeds the sliding window the presented frame rate is measured over.
+     *
+     * A frame whose `capture_ts_us` is 0 (the missing-timestamp
+     * sentinel) is still counted as presented, but it contributes **no**
+     * latency sample — a frame without a capture instant has no honest
+     * latency, and feeding a fake 0 timestamp would corrupt the
+     * distribution.
      */
     void on_frame_presented(const FrameObservation& observation);
 

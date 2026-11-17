@@ -115,3 +115,14 @@ rules:
 
 anchors:
   policy: "sha256:init"
+
+arch:
+  - kind: missing_dependency
+    action: ask
+    basis: "policy.yaml#prototype-phase"
+    guidance: "原型期：设计先声明依赖、实现按切片推进，未落地的依赖只提示不拦；交付前收紧为 deny"
+
+  - kind: undeclared_dependency
+    action: ask
+    basis: "policy.yaml#prototype-phase"
+    guidance: "原型期：C++ include 跨模块耦合先暴露不拦，交付前收紧为 deny"

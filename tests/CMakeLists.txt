@@ -2411,6 +2411,14 @@ nimrtc_add_engine_test(test_engine_stats_snapshot test_engine_stats_snapshot.cpp
 nimrtc_add_engine_test(test_engine_inbound_rtp_stats test_engine_inbound_rtp_stats.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.2.0 (plan Track S / S4) — the per-stream audio statistics entries:
+# the audio counterpart of `VideoStreamStats`.
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_audio_stream_stats test_engine_audio_stream_stats.cpp)
+
+# ---------------------------------------------------------------------------
 # v1.2.0 audio pipeline WP-9 — the cross-end capture timestamp of an
 # inbound audio frame (spec B-17).
 #

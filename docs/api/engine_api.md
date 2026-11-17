@@ -1157,6 +1157,67 @@ The outbound side keeps its existing `Stats::video_streams`
 (`VideoStreamStats`: `ssrc` / `packets_sent` / `bytes_sent` /
 `keyframes_sent`); this row adds the missing inbound counterpart.
 
+### 13.3 The per-stream entries (v1.2.0, plan Track S / S2 and S4)
+
+The flat counters above are **engine-wide**.  Two lists add the missing
+*per-stream* dimension, and both are **additive** — the flat fields stay,
+and they describe the same stream the list's first entry carries.
+
+```cpp
+// The video side (remote-desktop plan H4): one entry per active video
+// stream, the default one included.
+std::vector<VideoStreamStats> video_streams;
+
+// The audio side (plan Track S / S4): one entry per active audio track.
+std::vector<AudioStreamStats> audio_streams;
+```
+
+#### `VideoStreamStats`
+
+| Field | Meaning |
+|---|---|
+| `stream_id` | The stable stream id (`"default"`, `"screen"`, `"camera"`, …). |
+| `ssrc`, `payload_type`, `mid` | The stream's identity on the wire. |
+| `codec_name`, `backend_id` | The encoding and the backend it runs on. |
+| `bitrate_bps`, `keyframe_rate_hz` | The stream's current rates. |
+| `ladder_level`, `bandwidth_share_bps`, `bandwidth_weight` | The rate controller's rung and the stream's share of the session budget. |
+| `frames_sent`, `frames_received`, `frames_encoded` | The frame counts. |
+| `packets_sent`, `bytes_sent`, `keyframes_sent` | The outbound RTP counts. |
+
+#### `AudioStreamStats`
+
+One **audio track** — the session's audio m-line — in *both* directions.
+
+| Field | Meaning |
+|---|---|
+| `stream_id` | The stable track id (`"default"` for the engine's own track). |
+| `ssrc` | The SSRC of the **outbound** encoding. |
+| `inbound_ssrc` | The SSRC of the **inbound** source (0 when nothing arrived). The peer picks its own SSRC, so the two ends of the track differ. |
+| `payload_type`, `codec_name` | The negotiated payload type and the encoding name. |
+| `clock_rate_hz`, `channels`, `frame_duration_ms` | The stream's format. |
+| `bitrate_bps`, `encoder_bitrate_bps` | The current outbound rate, and the encoder's current rate (the BWE-linked adaptation lowers it). |
+| `packets_sent`, `bytes_sent` | The outbound RTP counts. |
+| `encode_errors`, `samples_in` | The PCM the host handed over, and the frames that could not be encoded. |
+| `packets_received`, `bytes_received` | The inbound RTP counts (the whole packet on the wire). |
+| `frames_received`, `samples_received` | What the engine handed to the host. |
+| `frames_concealed`, `frames_fec_recovered` | The frames produced by concealment and by in-band FEC. |
+| `packets_lost`, `decode_errors` | The pipeline's own figures — it is the only party that sees the source's sequence space. |
+| `jitter_ms`, `playout_delay_ms` | The pipeline's instantaneous measurements. |
+
+**The audio list is not a second per-SSRC table.**  The per-SSRC inbound
+breakdown lives in `Stats::inbound_rtp_streams` (plan Track S / **S2**),
+which carries every inbound source — audio included — keyed by SSRC.  The
+audio list adds the part S2 cannot know: the **outbound** half of the
+track, and the *pipeline's* figures for the source the receive side is
+actually working on.  A host that summed both lists would otherwise count
+every inbound packet twice.
+
+**The audio plane is single-stream today**, so the list normally holds
+exactly one entry.  It is a **list** anyway: a second audio source (a
+second microphone, a programme bus) would make the flat counters
+unattributable, and a list grows where a single struct would have to be
+redrawn — redrawing it would break every caller at once.
+
 ---
 
 ## 14. Lifecycle diagram

@@ -36,6 +36,37 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that pins every classification, and the self-test runs both in CI and
   as a ctest case (`test_ci_retry_runner`).
 
+  The scope covers `ci`, `ci-e2e`, `ci-fast` and `release`.  `release`
+  needed three properties to be verified experimentally before it
+  could be included, because a release cut is the most expensive
+  thing the repository does and a partial one is worse than a red
+  one:
+
+  * a job-level re-run revives a dependent job that was **skipped**
+    because its dependency failed — `publish-release` has `needs:` on
+    all four build jobs, so a starved build job skips the publish job
+    (verified: a dependent went from `skipped` back to `success`);
+  * an artefact uploaded in attempt 1 is still downloadable in attempt
+    2, so the publish job finds the three bundles the other build
+    jobs uploaded (verified: a payload uploaded in attempt 1 was read
+    back in attempt 2);
+  * a job-level re-run starts immediately even under the
+    `cancel-in-progress: false` concurrency group that `release.yml`
+    uses to keep a superseded re-run idempotent (verified under the
+    exact release shape).
+
+  The `upload-artifact` 409 hazard cannot occur: a job is only
+  retried when **no step of it ever ran**, so it never uploaded
+  anything in the first place.
+
+  `soak` is the one workflow left out.  Both of its jobs carry
+  `continue-on-error: true` (the verdict lives in the evidence record,
+  not the job status), so a job that ran and failed still reports
+  `success`; and a starved soak job would not be helped by a retry,
+  because the window is a statement about *calendar* days and a
+  retry landing on the next UTC day produces a second data point
+  rather than a replacement.
+
 - **The remote-desktop session guard** (`src/modules/rd_session/`).  A
   locked Windows workstation breaks the screen capture in two different,
   both expensive ways: DXGI Desktop Duplication is refused outright

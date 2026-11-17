@@ -242,6 +242,35 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   optional paths enabled) and on Windows (MSVC 2022, Debug), and the
   protocol interface symbols are now defined in the archive.
 
+- **The Wayland sink compiled but could not present.**  E2 proved the
+  Wayland leaves *compile*; running the sink under a headless Weston
+  showed that neither presentation path reached the display, and that
+  the EGL path tore the client connection down.
+
+  * **`EGL_BAD_ACCESS` (0x3002) on every frame.**  `init_egl()` bound the
+    context on the thread that called `open()` and left it bound there.
+    EGL binds a context to the **calling thread** and refuses to bind one
+    already current elsewhere, so the presenter thread's `eglMakeCurrent()`
+    failed on every frame.  `init_egl()` now releases its binding and
+    calls `eglReleaseThread()` when it is done querying the surface,
+    leaving the context free for the presenter thread.
+  * **`xdg_surface has never been configured`.**  `init_wayland()`
+    committed the initial xdg state and moved on; the first frame was
+    then committed before the compositor's configure had arrived, which
+    is a protocol error — Weston kills the client.  The surface now waits
+    (bounded round trips, so a compositor that never configures cannot
+    hang `open()`) for the first configure and its acknowledgement
+    before `open()` returns.
+  * **A failed swap was counted as a presented frame.**
+    `draw_with_egl()` ignored the result of `eglSwapBuffers()` and
+    returned `true` unconditionally, so `presented` could report frames
+    that never reached the compositor.  The swap result is now the
+    return value.
+
+  Verified under headless Weston on Ubuntu 22.04: the EGL path and the
+  `wl_shm` CPU path each present a full 1280x720 and a letterboxed
+  320x180 stream with no protocol errors.
+
 - **The X11 input-injection path had never been compiled.—**  The Linux
   injector has two backends: XTest (via `libXtst`) and uinput (via the
   kernel's `linux/uinput.h`).  `libxtst-dev` was not among the CI

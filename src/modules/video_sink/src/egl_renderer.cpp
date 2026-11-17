@@ -186,6 +186,10 @@ struct WaylandState {
     struct xdg_wm_base*  wm_base  = nullptr;
     struct xdg_surface*  xdg_surface = nullptr;
     struct xdg_toplevel* xdg_toplevel = nullptr;
+
+    /** True once the compositor has sent the first `configure`.  An
+     *  `xdg_surface` may not be given a buffer before that. */
+    bool configured = false;
     #endif
 
     #if defined(NIMRTC_VIDEO_SINK_HAS_DMABUF)
@@ -262,10 +266,13 @@ const struct wl_shm_listener kWlShmListener = {
 };
 
     #if defined(NIMRTC_VIDEO_SINK_HAS_XDG_SHELL)
-void handle_xdg_surface_configure(void* /*data*/, struct xdg_surface* surface,
+void handle_xdg_surface_configure(void* data, struct xdg_surface* surface,
                                   uint32_t serial) {
     // The compositor asks for a configure acknowledgement before the
-    // surface may be drawn into.
+    // surface may be drawn into.  Recording it lets `init_wayland` wait
+    // for the first one without guessing.
+    auto* wl = static_cast<WaylandState*>(data);
+    if (wl != nullptr) wl->configured = true;
     xdg_surface_ack_configure(surface, serial);
 }
 
@@ -644,10 +651,32 @@ bool EglRenderer::Impl::init_wayland() {
             wl_->xdg_toplevel =
                 xdg_surface_get_toplevel(wl_->xdg_surface);
             xdg_toplevel_set_title(wl_->xdg_toplevel, "NimRTC");
+            xdg_toplevel_set_app_id(wl_->xdg_toplevel, "nimrtc");
             // `xdg_surface` has no commit request of its own: the
             // accumulated xdg state is committed through the
             // `wl_surface` it wraps.
+            //
+            // This commit only *asks* the compositor for a configure; it
+            // must not carry a buffer.  The first commit that carries one
+            // has to come **after** the configure has been acknowledged
+            // (`xdg_surface_ack_configure`), or the compositor raises
+            // "xdg_surface has never been configured" and tears the
+            // connection down on the first present.
             wl_surface_commit(wl_->surface);
+
+            // Dispatch until the configure arrives, so the surface is
+            // ready for its first frame by the time `open()` returns.
+            // The loop is bounded: a compositor that never configures
+            // must not hang `open()`; the surface then simply presents
+            // nothing.
+            for (int attempt = 0; attempt < 8 && !wl_->configured;
+                 ++attempt) {
+                if (wl_display_roundtrip(wl_->display) < 0) break;
+            }
+            if (!wl_->configured) {
+                NIMRTC_LOG_DEBUG(
+                    "egl renderer: the compositor sent no xdg configure");
+            }
         }
         #endif
     }
@@ -1029,6 +1058,22 @@ bool EglRenderer::Impl::init_egl() {
     egl_->target_w = static_cast<std::uint32_t>(std::max<EGLint>(surface_w, 1));
     egl_->target_h = static_cast<std::uint32_t>(std::max<EGLint>(surface_h, 1));
 
+    // ---- The EGL state is per-thread ---------------------------------------
+    //
+    // `eglMakeCurrent` binds the context to the **calling thread**, and
+    // EGL refuses to bind a context that is still current on another
+    // thread (`EGL_BAD_ACCESS`).  The presenter presents on its own
+    // thread, so the binding made above -- on the thread that called
+    // `open()` -- is released here; the presenter thread re-establishes
+    // it on every frame.
+    //
+    // `eglReleaseThread` also frees this thread's thread-local EGL
+    // state, which is what makes the context bindable from the presenter
+    // thread.
+    eglMakeCurrent(egl_->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   EGL_NO_CONTEXT);
+    eglReleaseThread();
+
     NIMRTC_LOG_INFO("egl renderer: EGL surface created ("
                     << egl_->target_w << "x" << egl_->target_h << ")");
     return true;
@@ -1233,8 +1278,10 @@ bool EglRenderer::Impl::draw_with_egl(const PresentedFrame& frame) {
     // `eglSwapBuffers` is the present: it hands the back buffer to the
     // compositor.  The *pacing* is the presentation clock, not the
     // compositor's readiness — the swap itself never blocks.
-    eglSwapBuffers(egl_->display, egl_->surface);
-    return true;
+    //
+    // Its result is the honest answer to "did this frame reach the
+    // display": a failed swap must not be counted as a presented frame.
+    return eglSwapBuffers(egl_->display, egl_->surface) == EGL_TRUE;
 }
 
     #endif  // EGL

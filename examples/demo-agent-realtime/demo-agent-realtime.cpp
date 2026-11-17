@@ -1,8 +1,9 @@
 /**
  * @file examples/demo-agent-realtime/demo-agent-realtime.cpp
- * @brief Real-time AI game decision processing demo (slice v2-ai-decision).
+ * @brief Real-time AI game decision processing demo (slice v2-ai-decision)
+ *        + voice-agent chain (slice v4-voice-agent).
  *
- * ## What this validates (the four acceptance criteria of the spec)
+ * ## What this validates (the four acceptance criteria of v2-ai-decision)
  *
  *   1. AI decision response time <= 50 ms — the self-test records the
  *      wall time of 100 consecutive decisions with a per-decision latency
@@ -16,28 +17,41 @@
  *      process (observed state, candidates, picked action, reason,
  *      latency); the self-test proves a full trace of all 100 decisions.
  *
+ * ## What this validates (the seven acceptance criteria of v4-voice-agent)
+ *
+ *   `--voice-self-test` runs the voice-agent chain (voice_agent.hpp):
+ *   pluggable ASR backends (mock default / whisper / vosk), post-3A int16
+ *   PCM consumption, streaming LLM consumption, 100 ms tap batching,
+ *   Opus-encoded TTS return, barge-in → stop-playback latency recording,
+ *   and the missing-model error policy.
+ *
  * ## Usage
  *
  *   demo-agent-realtime --self-test [--decisions N] [--debug]
  *   demo-agent-realtime [--run SECONDS] [--strategy NAME] [--debug]
  *   demo-agent-realtime --strategies
+ *   demo-agent-realtime --voice-self-test [--asr mock|whisper|vosk] ...
  *
- * The self-test mode is the ctest entry point: deterministic, headless,
- * exits 0 only when every criterion holds.
+ * The self-test modes are the ctest entry points: deterministic, headless,
+ * exit 0 only when every criterion holds.
  */
 
 #include "ai_decision.hpp"
+#include "voice_agent.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <random>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -47,6 +61,18 @@ constexpr std::int64_t kLatencyBudgetUs = 50000;  // 50 ms (criterion 1)
 constexpr double kAccuracyThreshold = 90.0;       // % (criterion 2)
 constexpr int kDefaultDecisionCount = 100;        // 100 consecutive decisions
 constexpr std::uint64_t kScenarioSeed = 0x5EED2026ULL;
+
+// Voice-agent self-test constants (slice v4-voice-agent).
+constexpr std::uint32_t kVoiceSampleRate = 48000;
+constexpr std::uint8_t  kVoiceChannels   = 1;
+// The tap fires every 10 ms; audio is batched to 100 ms before the model
+// call (spec requirement 4) — see TapBatchAccumulator.
+constexpr std::int64_t kVoiceFrameMs     = kTapFrameMs;  // 10
+constexpr std::int64_t kVoiceBatchMs     = kTapBatchMs;  // 100
+constexpr std::size_t  kVoiceSamplesPerFrame =
+    static_cast<std::size_t>(kVoiceSampleRate) * static_cast<std::size_t>(kVoiceFrameMs) / 1000;  // 480
+constexpr int kDefaultVoiceFrames   = 300;  // 3 s of 10 ms tap frames
+constexpr int kDefaultBargeInAt     = 150;  // barge-in at the 150th frame
 
 // ---------------------------------------------------------------------------
 // Deterministic whack-a-mole scenario
@@ -96,6 +122,24 @@ std::int64_t now_unix_us() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+// Generate one 10 ms post-3A int16 PCM frame: a 440 Hz tone for speech,
+// digital silence otherwise.  This is the same synthetic source the gateway
+// demo drives through WebRTC APM, here already in the int16 shape the
+// post-3A tap delivers to the ASR (spec requirement 2).
+static std::vector<std::int16_t> gen_int16_frame(bool speech, std::size_t n) {
+    std::vector<std::int16_t> pcm(n);
+    if (speech) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const double x = static_cast<double>(i) / static_cast<double>(kVoiceSampleRate);
+            pcm[i] = static_cast<std::int16_t>(
+                16000.0 * std::sin(2.0 * 3.141592653589793 * 440.0 * x));
+        }
+    } else {
+        std::fill(pcm.begin(), pcm.end(), 0);
+    }
+    return pcm;
 }
 
 // Minimal JSON string escape for the ai_decision records (plan §5.2).
@@ -284,20 +328,185 @@ int run_realtime(std::string_view strategy_name, double seconds, bool debug) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Voice-agent self-test (slice v4-voice-agent) — the seven acceptance
+// criteria in one deterministic, headless run:
+//
+//   1. ASR backend selection (mock default; whisper/vosk runtime-pluggable)
+//   2. ASR consumes post-3A int16 PCM
+//   3. LLM is consumed as an incremental token stream
+//   4. TTS is Opus-encoded; tap audio is batched to 100 ms
+//   5. barge-in → stop-playback latency is recorded
+//   6. missing model is a loud error, not a silent mock fallback
+//   7. the missing-model branch emits a clear error message
+//
+// With --asr whisper/vosk and no runtime model the run FAILS loudly (exit
+// non-zero) unless --allow-mock-fallback opts into the mock — the exact
+// policy requirement 6 spells out.  The ctest entry point uses the mock
+// backend (default) so the chain itself is asserted deterministically.
+// ---------------------------------------------------------------------------
+int run_voice_self_test(std::string_view asr_name, std::string_view llm_name,
+                        std::string_view tts_name, bool allow_mock_fallback,
+                        int total_frames, int barge_in_at_frame) {
+    bool pass = true;
+
+    std::fprintf(stdout,
+        "[voice-agent] self-test: asr=%.*s llm=%.*s tts=%.*s "
+        "allow_mock_fallback=%d\n",
+        static_cast<int>(asr_name.size()), asr_name.data(),
+        static_cast<int>(llm_name.size()), llm_name.data(),
+        static_cast<int>(tts_name.size()), tts_name.data(),
+        allow_mock_fallback ? 1 : 0);
+
+    // ---- Criterion 1: backend selection ----------------------------------
+    std::string asr_err;
+    std::unique_ptr<IASR> asr = make_asr(asr_name, {allow_mock_fallback}, &asr_err);
+    if (!asr) {
+        // Criteria 6 & 7: a missing model is a loud error — the chain
+        // refuses to run on a silent mock fallback unless the caller
+        // explicitly opted in.
+        std::fprintf(stdout, "[voice-agent] FAIL: %s\n", asr_err.c_str());
+        std::fprintf(stdout, "[voice-agent] no_silent_fallback=%d\n", 1);
+        return 1;
+    }
+    const std::string resolved_asr = asr->name();
+    std::fprintf(stdout, "[voice-agent] asr_resolved=%s\n", resolved_asr.c_str());
+    if (allow_mock_fallback && resolved_asr == "mock" &&
+        (asr_name == "whisper" || asr_name == "vosk")) {
+        std::fprintf(stdout, "[voice-agent] mock_fallback_optin=1\n");
+    }
+
+    std::unique_ptr<ILLM> llm = make_llm(llm_name);
+    std::unique_ptr<ITts> tts = make_tts(tts_name);
+    if (!llm || !tts) {
+        std::fprintf(stdout, "[voice-agent] FAIL: llm/tts backend unavailable\n");
+        return 1;
+    }
+
+    nimrtc::opus::EncoderConfig opus_cfg;
+    opus_cfg.sample_rate_hz = kVoiceSampleRate;
+    opus_cfg.channels       = kVoiceChannels;
+    opus_cfg.bitrate_bps    = 32000;
+
+    VoiceAgentPipeline pipeline(std::move(asr), std::move(llm), std::move(tts),
+                                opus_cfg);
+
+    // ---- Criterion 4: 100 ms tap batching; criterion 2: post-3A int16 ----
+    const std::int64_t expected_batches =
+        static_cast<std::int64_t>(total_frames) /
+        (kVoiceBatchMs / kVoiceFrameMs);
+    for (int i = 0; i < total_frames; ++i) {
+        const bool speech = (i % 20) < 5;  // 5 speech frames / 20-frame cycle
+        const std::vector<std::int16_t> pcm16 =
+            gen_int16_frame(speech, kVoiceSamplesPerFrame);
+        PcmFormat fmt;
+        fmt.sample_rate_hz = kVoiceSampleRate;
+        fmt.channels       = kVoiceChannels;
+        pipeline.on_post_3a_int16(pcm16.data(), pcm16.size(), fmt);
+        if (i + 1 == barge_in_at_frame) {
+            pipeline.on_barge_in(1710000000000000LL +
+                                 static_cast<std::int64_t>(i) * 10000);
+        }
+    }
+
+    const std::uint64_t asr_samples =
+        static_cast<std::uint64_t>(total_frames) * kVoiceSamplesPerFrame;
+    std::fprintf(stdout,
+        "[voice-agent] tap_batches=%llu asr_samples_fed=%llu "
+        "(frames=%d samples_per_frame=%zu batch_ms=%lld)\n",
+        static_cast<unsigned long long>(pipeline.batches_flushed()),
+        static_cast<unsigned long long>(pipeline.asr_frames_fed()),
+        total_frames, kVoiceSamplesPerFrame,
+        static_cast<long long>(kVoiceBatchMs));
+    if (pipeline.batches_flushed() !=
+        static_cast<std::uint64_t>(expected_batches)) {
+        std::fprintf(stdout,
+            "[voice-agent] FAIL: expected %lld batches of %lld ms "
+            "(model must not be called per 10 ms frame)\n",
+            static_cast<long long>(expected_batches),
+            static_cast<long long>(kVoiceBatchMs));
+        pass = false;
+    }
+    if (pipeline.asr_frames_fed() != asr_samples) {
+        std::fprintf(stdout,
+            "[voice-agent] FAIL: ASR must consume every post-3A int16 sample\n");
+        pass = false;
+    }
+
+    // ---- Criteria 3 & 4: streaming LLM + Opus-encoded TTS ---------------
+    std::fprintf(stdout,
+        "[voice-agent] llm_tokens=%llu opus_packets=%llu transcript=\"%s\"\n",
+        static_cast<unsigned long long>(pipeline.llm_tokens()),
+        static_cast<unsigned long long>(pipeline.opus_packets()),
+        pipeline.last_transcript().c_str());
+    // The transcript-dependent assertions are deterministic on the mock
+    // backend; a runtime model is judged by the live model, not by the demo.
+    if (resolved_asr == "mock") {
+        if (pipeline.llm_tokens() < 1) {
+            std::fprintf(stdout,
+                "[voice-agent] FAIL: LLM must stream tokens incrementally\n");
+            pass = false;
+        }
+        if (pipeline.opus_packets() < 1) {
+            std::fprintf(stdout,
+                "[voice-agent] FAIL: TTS must return Opus-encoded packets\n");
+            pass = false;
+        }
+        if (pipeline.last_transcript().empty()) {
+            std::fprintf(stdout,
+                "[voice-agent] FAIL: no streamed transcript produced\n");
+            pass = false;
+        }
+    }
+
+    // ---- Criterion 5: barge-in → stop-playback delta recorded ------------
+    const BargeInMeter& meter = pipeline.barge_in_meter();
+    std::fprintf(stdout,
+        "[voice-agent] barge_in_events=%llu barge_in_to_stop_us=%lld\n",
+        static_cast<unsigned long long>(meter.events()),
+        static_cast<long long>(meter.last_delta_us()));
+    if (meter.events() != 1) {
+        std::fprintf(stdout,
+            "[voice-agent] FAIL: exactly one barge-in event expected\n");
+        pass = false;
+    }
+    if (meter.last_delta_us() != kVoiceFrameMs * 1000) {
+        std::fprintf(stdout,
+            "[voice-agent] FAIL: 打断->停播 delta must be recorded "
+            "(expected %lld us of in-flight frame drain, got %lld us)\n",
+            static_cast<long long>(kVoiceFrameMs * 1000),
+            static_cast<long long>(meter.last_delta_us()));
+        pass = false;
+    }
+
+    std::fprintf(stdout, "[voice-agent] self-test %s\n",
+                 pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
+
 void print_usage() {
     std::fprintf(stdout,
-        "demo-agent-realtime — real-time AI game decision processing demo\n"
+        "demo-agent-realtime — real-time AI game decision + voice-agent demo\n"
         "usage:\n"
         "  demo-agent-realtime --self-test [--decisions N] [--debug]\n"
         "  demo-agent-realtime [--run SECONDS] [--strategy NAME] [--debug]\n"
         "  demo-agent-realtime --strategies\n"
+        "  demo-agent-realtime --voice-self-test [--asr NAME] [--llm NAME] [--tts NAME]\n"
+        "                     [--allow-mock-fallback] [--frames N] [--barge-in-at N]\n"
         "options:\n"
-        "  --self-test       run the four acceptance criteria, exit 0 iff they hold\n"
+        "  --self-test       run the four decision acceptance criteria, exit 0 iff they hold\n"
         "  --decisions N     decision count for --self-test (default 100)\n"
         "  --strategy NAME   heuristic | reactive | predictive (default heuristic)\n"
         "  --run SECONDS     run the real-time loop for SECONDS (default 3)\n"
         "  --debug           emit the complete decision-process trace\n"
-        "  --strategies      list the available decision strategies\n");
+        "  --strategies      list the available decision strategies\n"
+        "  --voice-self-test run the voice-agent chain acceptance criteria (slice v4-voice-agent)\n"
+        "  --asr NAME        mock | whisper | vosk (default mock; whisper/vosk are runtime-pluggable)\n"
+        "  --llm NAME        mock (default) — streaming LLM backend\n"
+        "  --tts NAME        mock (default) — Opus-encoded TTS backend\n"
+        "  --allow-mock-fallback  when a real ASR model is missing, fall back to mock (opt-in)\n"
+        "  --frames N        number of 10 ms tap frames for --voice-self-test (default 300)\n"
+        "  --barge-in-at N   frame index that triggers the barge-in (default 150)\n");
 }
 
 }  // namespace
@@ -308,6 +517,14 @@ int main(int argc, char** argv) {
     bool self_test = false;
     bool debug = false;
     double run_seconds = 3.0;
+
+    bool voice_self_test = false;
+    std::string_view asr_name = "mock";
+    std::string_view llm_name = "mock";
+    std::string_view tts_name = "mock";
+    bool allow_mock_fallback = false;
+    int voice_frames = kDefaultVoiceFrames;
+    int barge_in_at = kDefaultBargeInAt;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg(argv[i]);
@@ -326,6 +543,22 @@ int main(int argc, char** argv) {
         } else if (arg == "--run" && i + 1 < argc) {
             const double parsed = std::atof(argv[++i]);
             run_seconds = parsed > 0.0 ? parsed : 3.0;
+        } else if (arg == "--voice-self-test") {
+            voice_self_test = true;
+        } else if (arg == "--asr" && i + 1 < argc) {
+            asr_name = std::string_view(argv[++i]);
+        } else if (arg == "--llm" && i + 1 < argc) {
+            llm_name = std::string_view(argv[++i]);
+        } else if (arg == "--tts" && i + 1 < argc) {
+            tts_name = std::string_view(argv[++i]);
+        } else if (arg == "--allow-mock-fallback") {
+            allow_mock_fallback = true;
+        } else if (arg == "--frames" && i + 1 < argc) {
+            const int parsed = std::atoi(argv[++i]);
+            voice_frames = parsed > 0 ? parsed : kDefaultVoiceFrames;
+        } else if (arg == "--barge-in-at" && i + 1 < argc) {
+            const int parsed = std::atoi(argv[++i]);
+            barge_in_at = parsed > 0 ? parsed : kDefaultBargeInAt;
         } else {
             print_usage();
             return 2;
@@ -334,6 +567,11 @@ int main(int argc, char** argv) {
 
     if (self_test) {
         return run_self_test(strategy, n, debug);
+    }
+    if (voice_self_test) {
+        return run_voice_self_test(asr_name, llm_name, tts_name,
+                                   allow_mock_fallback, voice_frames,
+                                   barge_in_at);
     }
     return run_realtime(strategy, run_seconds, debug);
 }

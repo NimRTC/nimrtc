@@ -134,15 +134,33 @@ fi
 
 # ----------------------------------------------------------------------------
 # Step 3: meson setup
+#
+# The setup is SKIPPED when the build tree is already configured.  That is
+# what makes a CI cache of `build_meson/` worth anything: `meson setup
+# --wipe` deletes every file in the build directory — including all the
+# compiled object files — so a wipe on every run turns the cache into
+# dead weight (the objects are gone, so ninja recompiles ~440 translation
+# units from scratch every time).
+#
+# A reconfigure is still possible: ninja regenerates `build.ninja` itself
+# when a `meson.build` changes (meson installs a REGENERATE_BUILD rule),
+# so the patch series applied above is picked up without an explicit
+# setup.  Only a tree that was never configured (or one whose
+# `build.ninja` is missing) needs a setup.
 # ----------------------------------------------------------------------------
 mkdir -p "${BUILD_DIR}"
 echo "[STEP 3] meson setup..."
-if ! meson setup "${BUILD_DIR}" "${SRC_DIR}" \
-        --buildtype="${BUILD_TYPE}" \
-        --default-library=static \
-        --wipe 2>&1 | tail -20; then
-    echo "[ERROR] meson setup failed"
-    exit 2
+if [[ ! -f "${BUILD_DIR}/build.ninja" ]]; then
+    if ! meson setup "${BUILD_DIR}" "${SRC_DIR}" \
+            --buildtype="${BUILD_TYPE}" \
+            --default-library=static \
+            --wipe 2>&1 | tail -20; then
+        echo "[ERROR] meson setup failed"
+        exit 2
+    fi
+else
+    echo "       build.ninja already exists - reusing the configured tree."
+    echo "       (ninja regenerates it when a meson.build changes)"
 fi
 
 # ----------------------------------------------------------------------------

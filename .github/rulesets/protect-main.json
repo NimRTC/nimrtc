@@ -136,11 +136,14 @@
             "context": "gmssl-vendored / msvc"
           },
           {
+            "context": "linux-apm / real 3A"
+          },
+          {
             "context": "docs / markdown links"
           }
         ],
         "_comment": [
-          "The eleven checks the CI matrix produces on `main` and on",
+          "The twelve checks the CI matrix produces on `main` and on",
           "every pull request into `main`.",
           "",
           "Strict mode is on: the pull request head has to be up to date",
@@ -150,7 +153,14 @@
           "`windows / fast` is deliberately absent.  It comes from",
           "`ci-fast.yml`, which does not run on `main`",
           "(`branches-ignore: [main, 'release/**']`), so requiring it",
-          "would block every merge forever."
+          "would block every merge forever.",
+          "",
+          "`linux-apm / real 3A` is the one leg that builds the real",
+          "WebRTC APM.  Every other leg configures with",
+          "`NIMRTC_VENDORED_WEBRTC_APM=OFF`, so without this leg the",
+          "option's *default* (ON) would be asserted nowhere: flipping",
+          "the default to OFF in cmake/NimRTCVendored.cmake would leave",
+          "the whole matrix green while shipping the stub 3A."
         ]
       }
     }

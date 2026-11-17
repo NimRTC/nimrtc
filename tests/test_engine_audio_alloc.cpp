@@ -39,6 +39,20 @@
  * `ITransport::send()` synchronously — the measurement then covers the
  * whole send path, and the fake transport copies the bytes out (the
  * seam's `send()` contract says the `BufferView` is borrowed).
+ *
+ * ## The probe counts one thread, not the whole process
+ *
+ * The probe replaces the *global* `operator new`, so every thread in
+ * the process passes through it.  The counter therefore records the
+ * allocating thread's id and only counts allocations made by the thread
+ * that armed the scope — the thread running the measured region.
+ *
+ * Without that filter the gate is not reproducible: on macOS the engine
+ * selects the VideoToolbox H.264 encoder, whose own threads allocate
+ * behind the engine's back, and the audio-only test failed with "2
+ * allocations over 100 packets" for reasons that had nothing to do with
+ * the audio send path.  A background thread's allocation is not the send
+ * path's allocation.
  */
 
 #include <gtest/gtest.h>
@@ -53,6 +67,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <nimrtc/core/engine_errors.hpp>
@@ -97,6 +112,21 @@ using nimrtc::engine::NimRTCEngine;
 
 namespace alloc_probe {
 
+/// The thread that armed the current `Scope`.
+///
+/// The probe is a *process-wide* `operator new` replacement, so without
+/// this filter every background thread in the process would contribute
+/// to the measurement.  That is not hypothetical: on macOS the engine
+/// selects the VideoToolbox H.264 encoder, which runs its own threads
+/// and allocates behind the engine's back — the audio-only test then
+/// failed with "2 allocations over 100 packets" for reasons that had
+/// nothing to do with the audio send path.
+///
+/// The gate is about *the engine's* send path, so the probe counts only
+/// the allocations made by the thread that is running the measured
+/// region.  A background thread's allocation is not the send path's
+/// allocation, and mixing the two makes the gate untestable.
+std::atomic<std::thread::id> g_thread{};
 std::atomic<bool>          g_armed{false};
 std::atomic<std::uint64_t> g_alloc_count{0};
 
@@ -109,6 +139,9 @@ std::atomic<std::size_t>  g_size_count{0};
 
 inline void note(std::size_t n) noexcept {
     if (!g_armed.load(std::memory_order_relaxed)) return;
+    if (std::this_thread::get_id() != g_thread.load(std::memory_order_relaxed)) {
+        return;   // not the measured thread
+    }
     g_alloc_count.fetch_add(1, std::memory_order_relaxed);
     const std::size_t i = g_size_count.fetch_add(1, std::memory_order_relaxed);
     if (i < kMaxSizes) g_sizes[i] = n;
@@ -154,6 +187,10 @@ struct Scope {
     Scope() noexcept {
         g_alloc_count.store(0, std::memory_order_relaxed);
         g_size_count.store(0, std::memory_order_relaxed);
+        // Publish the measuring thread *before* arming the probe, so a
+        // concurrent allocation on another thread is filtered out rather
+        // than counted against this scope.
+        g_thread.store(std::this_thread::get_id(), std::memory_order_relaxed);
         g_armed.store(true, std::memory_order_relaxed);
     }
     ~Scope() { g_armed.store(false, std::memory_order_relaxed); }
@@ -458,12 +495,19 @@ TEST_F(EngineAudioAlloc, TheAudioSendPathAllocatesNothingPerPacket) {
     const auto before = engine.stats().audio_frames_sent;
 
     std::uint64_t allocations = 0;
+    // The sizes are read out into a caller-owned buffer so the failure
+    // message can say *what* was allocated, not only *how many times*.
+    // Rendering them with `std::string` would allocate and pollute the
+    // very measurement being reported.
+    std::size_t     sizes[16] = {};
+    std::size_t     size_count = 0;
     {
         alloc_probe::Scope scope;   // armed for exactly the measured region
         for (int i = 0; i < 100; ++i) {
             ASSERT_EQ(engine.send_audio(pcm.data(), pcm.size()), 0u);
         }
         allocations = alloc_probe::count();
+        size_count  = alloc_probe::copy_sizes(sizes, 16);
     }
 
     const auto after = engine.stats().audio_frames_sent;
@@ -475,7 +519,15 @@ TEST_F(EngineAudioAlloc, TheAudioSendPathAllocatesNothingPerPacket) {
     EXPECT_EQ(allocations, 0u)
         << "the audio send path allocated " << allocations
         << " times over " << packets
-        << " packets — the §3.5 budget is zero allocations per packet";
+        << " packets — the §3.5 budget is zero allocations per packet. "
+        << "The allocation sizes were:";
+    if (allocations != 0) {
+        for (std::size_t i = 0; i < size_count; ++i) {
+            SCOPED_TRACE(i);
+            ADD_FAILURE() << "  allocation[" << i << "] = " << sizes[i]
+                          << " bytes";
+        }
+    }
 
     engine.close();
 #endif

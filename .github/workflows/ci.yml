@@ -524,6 +524,8 @@ jobs:
           for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 \
             libx11-dev libxfixes-dev libpipewire-0.3-dev libspa-0.2-dev \
             libegl1-mesa-dev libgles2-mesa-dev \
+            libwayland-dev libwayland-bin libwayland-egl-backend-dev \
+            wayland-protocols \
             pkg-config && break || { sudo apt-get update; sleep 15; }; done
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
@@ -647,7 +649,10 @@ jobs:
             "the X11 capture backend is enabled" \
             "the X11 cursor source is enabled" \
             "the PipeWire capture backend is enabled" \
-            "NIMRTC_VIDEO_SINK_HAS_EGL=1"; do
+            "NIMRTC_VIDEO_SINK_HAS_EGL=1" \
+            "NIMRTC_VIDEO_SINK_HAS_WAYLAND=1" \
+            "NIMRTC_VIDEO_SINK_HAS_XDG_SHELL=1" \
+            "NIMRTC_VIDEO_SINK_HAS_DMABUF=1"; do
             grep -qF "$needle" "$log" || {
               echo "::error::leaf compile proof: '$needle' missing from $log"
               exit 1

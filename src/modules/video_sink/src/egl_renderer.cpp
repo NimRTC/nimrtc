@@ -44,6 +44,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -66,6 +67,12 @@
     #if defined(NIMRTC_VIDEO_SINK_HAS_WAYLAND)
         #include <wayland-client.h>
         #include <wayland-egl.h>
+        // The `wl_shm` CPU path needs a file-backed mapping: the
+        // compositor maps the same file on its side, and `wl_shm`
+        // only ever speaks in file descriptors.
+        #include <fcntl.h>
+        #include <sys/mman.h>
+        #include <unistd.h>
     #endif
 
     #if defined(NIMRTC_VIDEO_SINK_HAS_X11)
@@ -160,8 +167,14 @@ struct WaylandState {
     struct wl_buffer*   buffer    = nullptr;
     struct wl_shm_pool* shm_pool  = nullptr;
     void*               shm_data  = nullptr;
+    std::size_t         shm_size  = 0;
     std::uint32_t       shm_w     = 0;
     std::uint32_t       shm_h     = 0;
+
+    // The `linux-dmabuf` zero-copy path.  The buffer is created per
+    // frame (the descriptor is borrowed from the caller), so it is
+    // replaced rather than reused.
+    struct wl_buffer*   dmabuf_buffer = nullptr;
 
     /** True when the compositor advertises the zero-copy route. */
     bool has_dmabuf = false;
@@ -179,6 +192,53 @@ struct WaylandState {
     struct zwp_linux_dmabuf_v1* dmabuf = nullptr;
     #endif
 };
+
+/**
+ * @brief Backs `size` bytes with an anonymous file and maps it.
+ *
+ * `wl_shm` speaks in file descriptors: the compositor maps the same
+ * file on its side, so the pixels have to live in shared memory.
+ * `memfd_create` (Linux 3.17+) is the cheap path -- the file has no
+ * name and disappears with the descriptor.  The fallback writes a
+ * `mkstemp` file and unlinks it immediately, so only the descriptor
+ * keeps it alive.
+ *
+ * @param size  The number of bytes to back.
+ * @param out_fd  Receives a descriptor the caller must `close`; set
+ *                to `-1` when the function fails.
+ *
+ * @return The mapping, or `nullptr` on failure.  The caller releases it
+ *         with `munmap`.
+ */
+void* map_anonymous(std::size_t size, int* out_fd) {
+    *out_fd = -1;
+    if (size == 0) return nullptr;
+
+    int fd = static_cast<int>(::memfd_create("nimrtc-wl-shm", MFD_CLOEXEC));
+    if (fd < 0) {
+        // The portable fallback.  `mkstemp` needs a writable template.
+        char path[] = "/tmp/nimrtc-wl-shm-XXXXXX";
+        fd = ::mkstemp(path);
+        if (fd < 0) return nullptr;
+        ::unlink(path);
+        ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+    }
+
+    if (::ftruncate(fd, static_cast<off_t>(size)) != 0) {
+        ::close(fd);
+        return nullptr;
+    }
+
+    void* mapping =
+        ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapping == MAP_FAILED) {
+        ::close(fd);
+        return nullptr;
+    }
+
+    *out_fd = fd;
+    return mapping;
+}
 
     #if defined(NIMRTC_VIDEO_SINK_HAS_XDG_SHELL)
 void handle_xdg_wm_base_ping(void* /*data*/, struct xdg_wm_base* wm_base,
@@ -239,12 +299,18 @@ void handle_wl_registry(void* data, struct wl_registry* registry,
         wl_shm_add_listener(wl->shm, &kWlShmListener, wl);
     }
     #if defined(NIMRTC_VIDEO_SINK_HAS_DMABUF)
-    else if (std::strcmp(zwp_linux_dmabuf_v1_interface.name) == 0) {
+    else if (std::strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
         // The compositor advertises the zero-copy route: a DMA-BUF file
         // descriptor can be handed over directly.
+        //
+        // Version 3 is the highest this implementation uses: it is old
+        // enough to be universally available and new enough to carry
+        // `create_immed` (version 2), which returns the `wl_buffer`
+        // synchronously instead of through an event.
         wl->dmabuf = static_cast<struct zwp_linux_dmabuf_v1*>(
             wl_registry_bind(registry, name,
-                             &zwp_linux_dmabuf_v1_interface, 3));
+                             &zwp_linux_dmabuf_v1_interface,
+                             std::min<uint32_t>(version, 3u)));
         wl->has_dmabuf = (wl->dmabuf != nullptr);
     }
     #endif
@@ -252,6 +318,7 @@ void handle_wl_registry(void* data, struct wl_registry* registry,
 
 const struct wl_registry_listener kWlRegistryListener = {
     handle_wl_registry,
+    nullptr,
 };
 
 #endif  // WAYLAND
@@ -577,7 +644,10 @@ bool EglRenderer::Impl::init_wayland() {
             wl_->xdg_toplevel =
                 xdg_surface_get_toplevel(wl_->xdg_surface);
             xdg_toplevel_set_title(wl_->xdg_toplevel, "NimRTC");
-            xdg_surface_commit(wl_->xdg_surface);
+            // `xdg_surface` has no commit request of its own: the
+            // accumulated xdg state is committed through the
+            // `wl_surface` it wraps.
+            wl_surface_commit(wl_->surface);
         }
         #endif
     }
@@ -586,7 +656,7 @@ bool EglRenderer::Impl::init_wayland() {
         return false;
     }
 
-    wl_display_commit(wl_->display);
+    wl_display_flush(wl_->display);
     NIMRTC_LOG_INFO("egl renderer: connected to the Wayland display");
     return true;
 }
@@ -604,9 +674,18 @@ void EglRenderer::Impl::destroy_wayland() {
         wl_buffer_destroy(wl_->buffer);
         wl_->buffer = nullptr;
     }
+    if (wl_->dmabuf_buffer != nullptr) {
+        wl_buffer_destroy(wl_->dmabuf_buffer);
+        wl_->dmabuf_buffer = nullptr;
+    }
     if (wl_->shm_pool != nullptr) {
         wl_shm_pool_destroy(wl_->shm_pool);
         wl_->shm_pool = nullptr;
+    }
+    if (wl_->shm_data != nullptr) {
+        ::munmap(wl_->shm_data, wl_->shm_size);
+        wl_->shm_data = nullptr;
+        wl_->shm_size = 0;
     }
     #if defined(NIMRTC_VIDEO_SINK_HAS_XDG_SHELL)
     if (wl_->xdg_toplevel != nullptr) {
@@ -665,24 +744,46 @@ bool EglRenderer::Impl::present_via_wl_shm(const PresentedFrame& frame) {
             wl_shm_pool_destroy(wl_->shm_pool);
             wl_->shm_pool = nullptr;
         }
-        const std::int32_t pool_size = static_cast<std::int32_t>(size);
-        wl_->shm_pool = wl_shm_create_pool(wl_->shm, pool_size);
+        if (wl_->shm_data != nullptr) {
+            ::munmap(wl_->shm_data, wl_->shm_size);
+            wl_->shm_data = nullptr;
+            wl_->shm_size = 0;
+        }
+        // The pixels need CPU access, so the pool is backed by an
+        // anonymous file that is `mmap`ed here.  (`wl_shm_pool_create_buffer`
+        // only creates the protocol object -- it does not hand back memory.)
+        int     fd      = -1;
+        void*   mapping = map_anonymous(size, &fd);
+        if (mapping == nullptr) return false;
+        wl_->shm_data = mapping;
+        wl_->shm_size = size;
+        wl_->shm_pool = wl_shm_create_pool(
+            wl_->shm, fd, static_cast<std::int32_t>(size));
+        ::close(fd);
         if (wl_->shm_pool == nullptr) return false;
-        wl_->shm_data = wl_shm_pool_create_buffer(wl_->shm_pool, 0, pool_size);
-        if (wl_->shm_data == nullptr) return false;
-        wl_->buffer = wl_shm_pool_create_buffer(wl_->shm_pool, 0, pool_size);
+        wl_->buffer = wl_shm_pool_create_buffer(
+            wl_->shm_pool, 0, static_cast<std::int32_t>(w),
+            static_cast<std::int32_t>(h), stride, WL_SHM_FORMAT_XRGB8888);
         if (wl_->buffer == nullptr) return false;
         wl_->shm_w = w;
         wl_->shm_h = h;
     }
 
     // Copy the picture into the shared-memory buffer.
-    auto* dst = static_cast<std::uint8_t*>(wl_->shm_data);
+    //
+    // The source stride and the destination stride can differ: the
+    // decoder may hand over a padded picture while the shared-memory
+    // buffer is packed.  So the two are tracked separately.
+    const std::size_t dst_row_bytes = static_cast<std::size_t>(stride);
+    const std::size_t src_row_bytes =
+        (frame.stride > 0) ? static_cast<std::size_t>(frame.stride)
+                           : dst_row_bytes;
+    auto*       dst = static_cast<std::uint8_t*>(wl_->shm_data);
+    const auto* src = frame.pixels.data();
     for (std::uint32_t row = 0; row < h; ++row) {
-        std::memcpy(dst + static_cast<std::size_t>(row) * stride,
-                    frame.pixels.data() +
-                        static_cast<std::ptrdiff_t>(row) * stride,
-                    static_cast<std::size_t>(stride));
+        std::memcpy(dst + static_cast<std::size_t>(row) * dst_row_bytes,
+                    src + static_cast<std::size_t>(row) * src_row_bytes,
+                    dst_row_bytes);
     }
 
     wl_surface_attach(wl_->surface, wl_->buffer, 0, 0);
@@ -1289,31 +1390,77 @@ plugins::Status EglRenderer::render(
         // The compositor does not advertise the zero-copy route.
         return plugins::kErrUnsupported;
     }
+    if (impl_->wl_->surface == nullptr) return plugins::kErrInvalidParam;
 
     // The import: the DMA-BUF descriptor is handed to the compositor's
     // `linux-dmabuf` implementation, which binds the fd into its own
     // GPU memory.
+    //
+    // The protocol's own names:
+    //   - `zwp_linux_dmabuf_v1_create_params` opens a parameter object;
+    //   - `zwp_linux_buffer_params_v1_add` describes one plane (the fd,
+    //     its stride and its DRM layout modifier);
+    //   - `zwp_linux_buffer_params_v1_create_immed` hands the whole
+    //     set to the compositor and returns the `wl_buffer` right away.
+    //
+    // `create_immed` (rather than `create`) is used because it returns
+    // the buffer synchronously: the `create` variant delivers it
+    // through a `created` event, which would need a listener and a
+    // round-trip.
+    const std::uint32_t width  = surface.width();
+    const std::uint32_t height = surface.height();
+    if (width == 0 || height == 0) return plugins::kErrInvalidParam;
+
+    // The row stride of the picture.  `native_pitch_bytes` is the
+    // authoritative source; a missing value means a packed picture.
+    const std::uint32_t pitch = surface.handle().native_pitch_bytes != 0
+        ? surface.handle().native_pitch_bytes
+        : width * 4u;
+
+    // The DRM layout modifier.  A DRM-BUF that carries no modifier is
+    // "linear" (`DRM_FORMAT_MOD_LINEAR`), which is the modifier every
+    // plain VA-API / V4L2 buffer has.
+    constexpr std::uint32_t kDrmModifierLinear = 0;
+
+    // The DRM fourcc of the picture.  `ARGB8888` is the little-endian
+    // A:R:G:B byte order, which is what the sink's BGRA picture is
+    // once the channels are renamed.
+    constexpr std::uint32_t kDrmFormatArgb8888 = 0x34325241u;  // 'A','R','2','4'
+
     auto* dmabuf = impl_->wl_->dmabuf;
-    struct zwp_linux_dmabuf_v1_params* params =
-        zwp_linux_dmabuf_v1_create_params(dmabuf);
-    zwp_linux_dmabuf_v1_params_add_fd(params, fd, 0);
-    zwp_linux_dmabuf_v1_params_set_offset(params, 0);
-    zwp_linux_dmabuf_v1_params_set_stride(params,
-                                          static_cast<std::int32_t>(
-                                              surface.handle().native_pitch_bytes));
-    zwp_linux_dmabuf_v1_params_set_height(params, surface.height());
-    zwp_linux_dmabuf_v1_params_set_format(params,
-                                           ZWP_LINUX_DMABUF_V1_FORMAT_ARGB8888);
-    zwp_linux_dmabuf_v1_params_add_plane(params, 0, fd, 0,
-                                          static_cast<std::int32_t>(
-                                              surface.handle().native_pitch_bytes),
-                                          surface.height(),
-                                          ZWP_LINUX_DMABUF_V1_FORMAT_ARGB8888);
-    zwp_linux_dmabuf_v1_create_buffer(dmabuf, params);
-    zwp_linux_dmabuf_v1_params_destroy(params);
+    auto* params = zwp_linux_dmabuf_v1_create_params(dmabuf);
+    if (params == nullptr) return plugins::kErrInvalidParam;
+
+    zwp_linux_buffer_params_v1_add(
+        params, fd, 0u, 0u, pitch,
+        0u,  // modifier_hi -- the linear modifier has no high bits
+        kDrmModifierLinear);
+
+    struct wl_buffer* buffer = zwp_linux_buffer_params_v1_create_immed(
+        params, static_cast<std::int32_t>(width),
+        static_cast<std::int32_t>(height), kDrmFormatArgb8888, 0u);
+    zwp_linux_buffer_params_v1_destroy(params);
+
+    if (buffer == nullptr) {
+        NIMRTC_LOG_ERROR("egl renderer: the compositor rejected the "
+                         "DMA-BUF import");
+        return plugins::kErrInvalidParam;
+    }
+
+    // The previous buffer is released only now: the compositor may
+    // still be reading it until the new one is committed.
+    if (impl_->wl_->dmabuf_buffer != nullptr) {
+        wl_buffer_destroy(impl_->wl_->dmabuf_buffer);
+    }
+    impl_->wl_->dmabuf_buffer = buffer;
+
+    wl_surface_attach(impl_->wl_->surface, buffer, 0, 0);
+    wl_surface_damage(impl_->wl_->surface, 0, 0,
+                      static_cast<std::int32_t>(width),
+                      static_cast<std::int32_t>(height));
+    wl_surface_commit(impl_->wl_->surface);
 
     impl_->frames_rendered_.fetch_add(1, std::memory_order_relaxed);
-    impl_->frames_presented_.fetch_add(1, std::memory_order_relaxed);
     return plugins::kOk;
     #else
     (void)fd;

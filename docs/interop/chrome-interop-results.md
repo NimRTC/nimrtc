@@ -33,7 +33,7 @@ cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_BUILD_TESTS=ON `
       -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 cmake --build build --config Debug -j
 
-# 2. 生成 WebTransport 的 TLS 材料（并把证书装进受信任根）
+# 2. 生成 WebTransport 的 TLS 材料（并写出 SPKI 哈希）
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File ./scripts/generate_wtserver_cert.ps1 -BuildDir "$PWD/build"
 
@@ -128,8 +128,8 @@ NimRTC 侧（`demo-wtserver`）：
 **服务端永远是好的**。
 
 但客户端校验的是**证书链**。自签证书自己就是自己的签发者（`CN=localhost`
-既是 subject 也是 issuer），除非这张具体的证书出现在某个**受信任存储**
-里，否则它就是一个"未知根"，握手必然以 alert 46 告终。
+既是 subject 也是 issuer），除非这张具体的证书被信任，它就是一个"未知根"，
+握手必然以 alert 46 告终。
 
 而 harness 里的 `--ignore-certificate-errors` **救不了 WebTransport**：
 Chromium 的 QUIC 证明校验器
@@ -138,17 +138,50 @@ Chromium 的 QUIC 证明校验器
 `--webtransport-developer-mode`，但即使叠加这两个开关，**已知根的判定
 本身**仍然不成立。
 
-### 修复
+### 修复：SPKI 白名单
 
-证书必须同时装进 `Cert:\CurrentUser\Root`（受信任根存储）。`CurrentUser\Root`
-不需要管理员权限，所以在 CI runner 和开发机上都能用。
+修复走的是**同一个 case 的 DTLS 平面已经在用**的机制：公布证书的
+**SPKI SHA-256**，通过 `--ignore-certificate-errors-spki-list` 交给
+Chrome，把信任判定精确地钉在这张证书的公钥上。
 
-修复落在 `scripts/generate_wtserver_cert.ps1`：生成证书之后，额外把它
-`Add` 到 `Cert:\CurrentUser\Root`。导入失败时脚本**不中断**（证书仍在
-个人存储里，demo-wtserver 照样能起来；受影响的只是浏览器的信任判定），
-而是打印一条明确的告警，说明 Chrome 会以 alert 46 拒绝握手。
+- `scripts/generate_wtserver_cert.ps1` 现在把哈希写到
+  `build/wtserver_spki.b64`；
+- `tests/chrome_interop_harness/run_webtransport_harness.py` 读取它并传给
+  Chrome。
 
-修复后本机复跑，两个平面均 PASS。
+SPKI（SubjectPublicKeyInfo）的结构是：
+
+```
+SubjectPublicKeyInfo ::= SEQUENCE {
+    algorithm         AlgorithmIdentifier,   -- rsaEncryption
+    subjectPublicKey  BIT STRING }           -- DER RSAPublicKey
+```
+
+脚本从证书存储的 `PublicKey.EncodedParameters` 与
+`PublicKey.EncodedKeyValue` 两个属性拼出它。SPKI 的哈希结果**逐字节**与
+一份独立的纯 Python DER 遍历实现交叉验证过（两者必须完全相等）。
+
+### 被否掉的替代方案
+
+**装进 `Cert:\CurrentUser\Root`。** 这是最直观的做法，而且**最先试的就是
+它**——但它在**非交互的 runner 上会挂死**：受保护的根存储会弹出一个确认
+对话框，而 GitHub Actions runner 上没有人能回答它，于是脚本永远不返回，
+job 一直跑到超时被杀。
+
+> 这一点特别值得记下来：**它在交互式桌面上是能用的**。也就是说这个缺陷
+> 在本地测试时完全看不出来，只有上了 CI 才暴露成"任务超时"。第一次 CI
+> 运行（`windows / fast`）就是这样失败的：日志里有 `Certificate created`，
+> 但没有随后的 `Trusted root installed`，然后 job 挂了 30 分钟。
+
+它还有第二个问题：为了一个**测试**证书去改动整台机器的信任判定，会在证书
+的有效期内改变机器上**每一个**其他程序对所有 TLS 连接的信任结论。
+
+**只靠 `--ignore-certificate-errors`。** 如上所述，不够。
+
+### 修复后
+
+本机复跑（且受信任根存储里**没有** `CN=localhost` 证书，纯净起点），
+WebTransport 平面的 E1~E6 全部 PASS。
 
 ## 6. CI 接入
 
@@ -157,8 +190,8 @@ Chromium 的 QUIC 证明校验器
 
 - 在既有的 `Provision WebTransport TLS material` 之后执行；
 - 依次跑 `--case=e` 与 `--case=e_webtransport`，**任一失败即让 job 失败**；
-- 与其余 e2e 用例分开成独立步骤，因为 Case E 需要浏览器的机器信任那份
-  证书，而且 orchestrator 的 `--case=all` 有意不包含 Case E（`all` 指的是
+- 与其余 e2e 用例分开成独立步骤，因为 Case E 需要 WebTransport 的 TLS
+  材料，而且 orchestrator 的 `--case=all` 有意不包含 Case E（`all` 指的是
   A/B/C/D 四个平面，Case E 是显式请求的互操作对）。
 
 此前 Case E 是"准备了材料却从不执行"，所以一个坏掉的 Chrome 互操作

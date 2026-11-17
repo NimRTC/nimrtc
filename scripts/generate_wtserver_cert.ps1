@@ -34,6 +34,23 @@
 
 $ErrorActionPreference = "Stop"
 
+# --- DER length encoder ----------------------------------------------------
+#
+# Used by the SPKI computation below.  DER encodes a length either as a
+# single byte (< 0x80) or as 0x80 | <byte count> followed by the big-endian
+# length bytes.
+function Write-DerLength([System.IO.Stream]$s, [int]$len) {
+    if ($len -lt 0x80) {
+        $s.WriteByte([byte]$len)
+        return
+    }
+    $bytes = @()
+    $v = $len
+    while ($v -gt 0) { $bytes = @($v -band 0xFF) + $bytes; $v = $v -shr 8 }
+    $s.WriteByte([byte](0x80 -bor $bytes.Count))
+    foreach ($b in $bytes) { $s.WriteByte([byte]$b) }
+}
+
 # --- Parse args (manual so we don't need [CmdletBinding()]) ---
 $Days     = if ($args.Count -ge 1 -and $args[0] -match '^\d+$') { [int]$args[0] } else { 365 }
 $KeyLength = if ($args.Count -ge 2 -and $args[1] -match '^\d+$') { [int]$args[1] } else { 2048 }
@@ -88,7 +105,7 @@ $hashHex = -join ($hashBytes | ForEach-Object { $_.ToString("x2") })
 Set-Content -Path (Join-Path $BuildDir "wtserver_hash.txt") `
             -NoNewline -Value $hashHex -Encoding ASCII
 
-# --- Install the certificate in the TRUSTED ROOT store ---
+# --- Write the SPKI SHA-256 hash for Chrome's certificate allowlist ---
 #
 # This is what makes Chrome accept the server, and it was the reason the
 # WebTransport half of the Chrome interop case (Case E) had been failing
@@ -109,31 +126,79 @@ Set-Content -Path (Join-Path $BuildDir "wtserver_hash.txt") `
 #      successful verification whose issuer is not a known root into
 #      ERR_QUIC_CERT_ROOT_NOT_KNOWN anyway.
 #
-# So the certificate has to be in Cert:\CurrentUser\Root (the *trusted
-# root* store), not just in Cert:\CurrentUser\My.  Importing it there
-# makes Chrome trust it and the handshake completes.
+# There are two ways to fix that, and this script takes the second one:
 #
-# `CurrentUser\Root` needs no administrator rights, so this stays
-# usable on a CI runner and on a developer machine.
+#   (a) install the certificate into Cert:\CurrentUser\Root -- the machine's
+#       *trusted* store, so the chain validates for real;
+#   (b) publish the certificate's SPKI SHA-256 so the harness can hand it
+#       to Chrome via --ignore-certificate-errors-spki-list.
 #
-# The import is idempotent: re-importing the same certificate is a
-# no-op, and the script regenerates the certificate on every run anyway
-# (a fresh self-signed certificate means a fresh import).
+# (b) is what this script does, because (a) is not viable in CI:
+#
+#   * Writing to Cert:\CurrentUser\Root from a *non-interactive* session
+#     HANGS.  The protected-root store raises a confirmation dialog that
+#     nobody can answer on a GitHub Actions runner, so the certificate
+#     script never returns and the job dies at its 30-minute timeout.
+#     (The same call from an interactive desktop works, which is exactly
+#     what makes this so easy to get wrong: it passes locally and hangs on
+#     the runner.)
+#   * Mutating the machine's trust store to make a *test* pass is the wrong
+#     shape anyway: it changes the trust decisions of every other program
+#     on the machine for the lifetime of the certificate.
+#
+# (b) touches no machine state at all: the SPKI hash is a file next to the
+# certificate hash, and only the harness's own Chrome instance is told to
+# trust it.  This is the same mechanism the DTLS plane of Case E already
+# uses (demo-p2p writes its SPKI; the harness passes it to Chrome).
+#
+# The SPKI is the SubjectPublicKeyInfo -- the DER block holding the
+# algorithm identifier and the public key -- and Chrome hashes it with
+# SHA-256 and base64-encodes the result.  The certificate's public key is
+# reached through two store properties:
+#
+#   PublicKey.EncodedParameters -- the AlgorithmIdentifier's *parameters*
+#   PublicKey.EncodedKeyValue  -- the DER RSAPublicKey SEQUENCE
+#
+# and the SPKI is
+#
+#   SEQUENCE { SEQUENCE { OID rsaEncryption, NULL }, BIT STRING <RSAPublicKey> }
+#
+# `EncodedParameters` is only the OID/NULL pair, so the AlgorithmIdentifier
+# SEQUENCE is rebuilt here; its DER is fixed by RFC 3279 for rsaEncryption.
 try {
-    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
-    $store.Open("ReadWrite")
-    try {
-        $store.Add($cert)
-    } finally {
-        $store.Close()
-    }
-    Write-Host "Trusted root installed: $($thumbprint)"
+    $rsaEncryption = [byte[]] @(
+        0x30,0x0d, 0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x01, 0x05,0x00)
+
+    $pkDer = $cert.PublicKey.EncodedKeyValue.RawData
+
+    # BIT STRING: tag 0x03, length, then the unused-bits byte and the key.
+    $bitString = New-Object byte[] ($pkDer.Length + 1)
+    $bitString[0] = 0x00
+    [Array]::Copy($pkDer, 0, $bitString, 1, $pkDer.Length)
+
+    $body = New-Object System.IO.MemoryStream
+    $body.Write($rsaEncryption, 0, $rsaEncryption.Length)
+    $body.WriteByte(0x03)               # BIT STRING
+    Write-DerLength $body $bitString.Length
+    $body.Write($bitString, 0, $bitString.Length)
+    $bodyBytes = $body.ToArray()
+
+    $spki = New-Object System.IO.MemoryStream
+    $spki.WriteByte(0x30)
+    Write-DerLength $spki $bodyBytes.Length
+    $spki.Write($bodyBytes, 0, $bodyBytes.Length)
+    $spkiBytes = $spki.ToArray()
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { $spkiDigest = $sha256.ComputeHash($spkiBytes) }
+    finally { $sha256.Dispose() }
+    $spkiB64 = [Convert]::ToBase64String($spkiDigest)
+
+    Set-Content -Path (Join-Path $BuildDir "wtserver_spki.b64") `
+                -NoNewline -Value $spkiB64 -Encoding ASCII
+    Write-Host "SPKI SHA-256 (base64): $spkiB64"
 } catch {
-    # A non-interactive session or a locked-down store must not fail the
-    # whole script: the certificate is still in the personal store, so
-    # demo-wtserver still starts; only Chrome's trust decision is
-    # affected.  Report it and let the caller decide.
-    Write-Host "WARN: could not install the certificate into Cert:\CurrentUser\Root: $($_.Exception.Message)"
+    Write-Host "WARN: could not compute the certificate SPKI: $($_.Exception.Message)"
     Write-Host "WARN: Chrome will reject the WebTransport handshake (alert 46) unless the"
     Write-Host "WARN: certificate is trusted by the machine running the browser."
 }

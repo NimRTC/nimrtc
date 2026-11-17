@@ -257,21 +257,34 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`), so the **server side** was
   always fine.  But the client validates the **chain**, and a self-signed
   certificate is its own issuer (`CN=localhost` is both subject and issuer):
-  unless that exact certificate sits in a *trust* store it is an unknown root
-  and the handshake dies with `QUIC_TLS_CERTIFICATE_UNKNOWN` (alert 46).
+  unless that exact certificate is trusted, it is an unknown root and the
+  handshake dies with `QUIC_TLS_CERTIFICATE_UNKNOWN` (alert 46).
 
   The harness's `--ignore-certificate-errors` does not rescue it: Chromium's
   QUIC proof verifier (`net/quic/crypto/proof_verifier_chromium.cc`) turns a
   successful verification whose issuer is not a known root into
   `ERR_QUIC_CERT_ROOT_NOT_KNOWN` regardless.
 
-  The fix installs the certificate into `Cert:\CurrentUser\Root` as well.
-  `CurrentUser\Root` needs no administrator rights, so it works on a hosted
-  CI runner.  The import is wrapped so a locked-down store cannot break the
-  script: the certificate is still in the personal store, so `demo-wtserver`
-  still starts, and the script prints an explicit warning that Chrome will
-  reject the handshake (alert 46) unless the certificate is trusted by the
-  machine running the browser.
+  The fix follows the mechanism the DTLS plane of the same case already
+  uses: publish the certificate's **SPKI SHA-256** and hand it to Chrome via
+  `--ignore-certificate-errors-spki-list`, which pins the trust decision to
+  exactly this certificate's public key.
+  `scripts/generate_wtserver_cert.ps1` now writes the hash to
+  `build/wtserver_spki.b64`, and the WebTransport harness passes it to
+  Chrome.
+
+  Two alternatives were considered and rejected:
+
+  - *Installing the certificate into `Cert:\CurrentUser\Root`.*  It works
+    from an interactive desktop, but it **hangs on a non-interactive
+    runner**: the protected-root store raises a confirmation dialog that
+    nobody can answer on a GitHub Actions runner, so the script never
+    returns and the job dies at its timeout.  (It passed locally and hung
+    on CI — which is exactly what makes it easy to get wrong.)  It would
+    also change the trust decisions of every other program on the machine
+    for the lifetime of a test certificate.
+  - *Relying on `--ignore-certificate-errors` alone.*  Insufficient, as
+    above.
 
   The WebTransport half of the Chrome interop case had been failing on every
   attempt since 2026-10-24 for this reason alone; NimRTC's QUIC and

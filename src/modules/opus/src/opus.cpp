@@ -272,6 +272,33 @@ std::size_t Encoder::encode_frame(const float* pcm,
     return encode(pcm, num_samples, output, output_capacity);
 }
 
+std::size_t Encoder::encode_int16(const std::int16_t* pcm,
+                                  std::size_t num_samples,
+                                  std::uint8_t* output,
+                                  std::size_t output_capacity) noexcept {
+    if (!pcm || !output) return 0;
+    if (num_samples == 0 || output_capacity == 0) return 0;
+    if (!impl_ || !impl_->enc) return 0;
+    if (!is_valid_frame_size(num_samples)) return 0;
+
+    const opus_int32 frame_size = static_cast<opus_int32>(num_samples
+        / (impl_->config.channels == 0 ? 1 : impl_->config.channels));
+    // opus_int16 is guaranteed to be int16_t on every platform libopus
+    // supports; the reinterpret cast avoids copying the caller's buffer.
+    const opus_int32 n = opus_encode(impl_->enc,
+                                     reinterpret_cast<const opus_int16*>(pcm),
+                                     frame_size,
+                                     output,
+                                     static_cast<opus_int32>(output_capacity));
+    if (n < 0) {
+        opus_debug("opus::Encoder::encode_int16 failed: %s", opus_strerror(n));
+        return 0;
+    }
+    impl_->stats.frames_encoded++;
+    impl_->stats.bytes_encoded += static_cast<std::uint64_t>(n);
+    return static_cast<std::size_t>(n);
+}
+
 std::size_t Encoder::encode_plc(std::uint8_t* output,
                                  std::size_t output_capacity) noexcept {
     // libopus has no PLC encoder — the codec *decodes* concealment on packet

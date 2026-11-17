@@ -1090,12 +1090,16 @@ engines in one process get two registries.
 engine-wide: there is no per-stream breakdown and no ICE
 candidate-pair / RTT dimension. The snapshot lifecycle adds the
 *time* and the *semantics*, not the missing dimensions. The
-`src/modules/video_stats/` module provides freeze counts, keyframe
-intervals, QP and drop-cause breakdown, but it is **not wired into the
-engine** yet, so those fields are not reachable through this accessor.
-For the full picture — the planned stream-level shape and the missing
-dimensions — see `docs/plan/stats-surface-plan.md` (landed later in the
-v1.2 stack, so referenced here by path, not by link).
+`src/modules/video_stats/` module **is** wired into the engine (the
+private bridge `src/engine/src/video_stats_bridge.hpp`), so its freeze
+counts, keyframe intervals, QP samples and drop-cause breakdown are
+reachable through this accessor as `video_freeze_count` /
+`video_freeze_total_ms` / `video_keyframe_interval_avg_ms` /
+`video_qp_sum` / `video_qp_count` / `video_frames_dropped_jb` /
+`video_frames_dropped_decoder`. For the full picture — the planned
+stream-level shape and the missing dimensions — see
+`docs/plan/stats-surface-plan.md` (landed later in the v1.2 stack, so
+referenced here by path, not by link).
 
 ---
 

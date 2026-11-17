@@ -154,6 +154,51 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   This adds one public header (`core/stats_registry.hpp`), so D-N6 applies:
   an explicit, reviewed manifest bump (189 → 190), not a silent drift.
 
+- **The inbound RTP per-source statistics (Track S / `S2`).**
+  `Stats::video_frames_received` and `Stats::video_bytes_received` counted
+  *every* inbound stream mixed together, so a host could not tell which
+  source they came from.  That is fine for a session with one peer
+  stream and useless for anything else: a peer sending **simulcast**
+  (RFC 5956 — several encodings of the same picture on different SSRCs)
+  puts three different qualities into one counter, a session receiving
+  from more than one source has the same problem, and there was no way
+  to ask *"how many packets arrived on SSRC X?"* — which is the question
+  a loss investigation actually asks.
+
+  `Stats::inbound_rtp_streams` is the receive-side counterpart of the
+  existing `Stats::video_streams`: one `InboundRtpStats` entry per
+  inbound RTP source, keyed by **SSRC** (the only thing on the wire that
+  identifies a source — the payload type says how to *decode* a packet,
+  not who sent it):
+
+  - `packets_received` / `bytes_received` — what arrived.
+  - `packets_lost` — the gaps in the sequence space, counted by the
+    receive pipeline, the only party that sees it.  This is the loss
+    figure a host actually wants.
+  - `nacks_sent` — the retransmission requests this engine emitted.
+  - `frames_received` / `frames_incomplete` — the access units that were
+    assembled, and the ones that arrived but could not be.
+  - `jitter_ms` / `playout_delay_ms` — the receiver's own measurements
+    for this source.
+  - `payload_type` — **observed**, not negotiated: a peer that changes
+    its payload type mid-stream (RFC 3264 §5.1 allows a PT change after
+    a re-INVITE) shows up here as a changed value.
+
+  The entry accumulates over the life of the source: a source that
+  restarts (a new SSRC) gets a new entry, and a source that disappears
+  keeps its entry — so a host reading the list after the peer stopped
+  still sees the totals it produced.
+
+  The engine-side state lives in the private collaborator
+  `src/engine/src/engine_inbound_state.hpp`; the public shape is
+  `NIMRTC_API_STABLE InboundRtpStats` in `engine.hpp`, and
+  `docs/api/engine_api.md` §13.2 documents the contract.
+
+  Tested in `tests/test_engine_inbound_rtp_stats.cpp` (a fresh engine
+  reports no sources; a packet creates the entry for its SSRC; a
+  decoded frame is counted against its source; an unknown payload type
+  is still counted; the entry keeps its totals after the source stops).
+
 - **RTCP feedback is now broken down by type (Track S / `DS-4`).**
   `Stats::video_feedback_applied` was a single number, so a host watching it
   climb could not tell *what the peer was asking for* — a peer sending PLIs

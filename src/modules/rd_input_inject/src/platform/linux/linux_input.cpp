@@ -270,8 +270,13 @@ bool LinuxInjector::do_inject_mouse_move(std::int32_t dx, std::int32_t dy) {
         // X11's relative motion uses the *screen* convention (y grows
         // downwards), which is the same convention the operator's mouse
         // uses -- so no sign flip is needed here.
+        //
+        // The fourth argument is the event *delay* (an `unsigned long`
+        // timestamp), not a pointer: `CurrentTime` means "apply it
+        // immediately", which is what the rest of this file passes to
+        // the other XTest calls.
         XTestFakeRelativeMotionEvent(dpy, static_cast<int>(dx),
-                                     static_cast<int>(dy), nullptr);
+                                     static_cast<int>(dy), CurrentTime);
         XFlush(dpy);
         XCloseDisplay(dpy);
         return true;

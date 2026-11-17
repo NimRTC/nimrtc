@@ -103,7 +103,15 @@ if(UNIX AND NOT APPLE)
     if(X11_FOUND)
         find_library(XTST_LIBRARY NAMES Xtst)
         if(XTST_LIBRARY)
-            target_link_libraries(nimrtc_rd_input_inject PRIVATE ${XTST_LIBRARY})
+            # The XTest *extension* lives in `libXtst`, but the calls it
+            # is made through -- `XOpenDisplay`, `XFlush`,
+            # `XCloseDisplay` -- live in `libX11` itself.  Linking only
+            # `libXtst` therefore leaves those undefined at link time:
+            # `libXtst` records a dependency on `libX11`, but it does not
+            # carry it into the link line.
+            target_link_libraries(nimrtc_rd_input_inject PRIVATE
+                ${X11_LIBRARIES}
+                ${XTST_LIBRARY})
             target_compile_definitions(nimrtc_rd_input_inject
                 PRIVATE NIMRTC_HAS_XTEST=1)
             message(STATUS

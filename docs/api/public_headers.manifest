@@ -9,7 +9,7 @@
 #
 # Regenerate with: python scripts/check_api_manifest.py --write
 #
-# count: 189
+# count: 190
 
 src/core/include/nimrtc/core/api_version.hpp
 src/core/include/nimrtc/core/bytes.hpp
@@ -19,6 +19,7 @@ src/core/include/nimrtc/core/gpu_device_registry.hpp
 src/core/include/nimrtc/core/log.hpp
 src/core/include/nimrtc/core/plugin_id.hpp
 src/core/include/nimrtc/core/registry.hpp
+src/core/include/nimrtc/core/stats_registry.hpp
 src/core/include/nimrtc/core/time.hpp
 src/engine/include/nimrtc/engine/engine.hpp
 src/engine/include/nimrtc/engine/pal/engine_plugin_resolver.hpp

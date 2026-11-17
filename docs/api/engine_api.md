@@ -941,6 +941,15 @@ of the new one. Pass `nullptr` to detach.
 uint32_t last_open_rc() const noexcept;
 
 struct Stats {
+    // ---- The reading's identity (v1.2.0, plan Track S / S1) ------------
+    // When the rest of this struct was measured.  `snapshot_time_us`
+    // is on the engine's monotonic clock (the same origin `tick()`'s
+    // `now_us` uses); `snapshot_seq` increases by one per reading and
+    // therefore orders two readings even when their timestamps are
+    // identical.
+    int64_t  snapshot_time_us = 0;
+    uint64_t snapshot_seq     = 0;
+
     int srtp_drops = 0;
 
     // Video counters (v1.1 Track V) — cumulative since open().
@@ -987,6 +996,18 @@ struct Stats {
     uint64_t xr_report_blocks      = 0;  // XR blocks routed to the consumer
 };
 Stats stats() const noexcept;
+
+// ---- The named, snapshot-able view (v1.2.0, plan Track S / S1) --------
+//
+// `stats_snapshot()` returns the same numbers as `stats()`, but keyed
+// by name, stamped with the reading's instant and sequence number.
+// `stats_delta_since()` diffs the current reading against an earlier
+// one and answers with the *increment* over the interval.
+//
+// The types live in `nimrtc/core/stats_registry.hpp`
+// (`core::StatSnapshot`, `core::StatsDelta`).
+core::StatSnapshot stats_snapshot() const noexcept;
+core::StatsDelta   stats_delta_since(const core::StatSnapshot& previous) const noexcept;
 ```
 
 `last_open_rc()` returns the last error code from `open()` /
@@ -1011,15 +1032,74 @@ the bandwidth estimator's current target respectively). `audio_jitter_ms`
 and `audio_playout_delay_ms` are likewise instantaneous measurements
 rather than running totals.
 
+### 13.1 The snapshot lifecycle (v1.2.0, plan Track S / S1)
+
+The flat struct answers *"how much has happened since `open()`"* and
+nothing else.  A host that wants a **rate** — bytes per second, packets
+per second — has to take two readings and work out how far apart they
+were, and it has to know which fields are counters and which are gauges.
+The snapshot lifecycle gives it both.
+
+```cpp
+auto base = engine.stats_snapshot();       // the baseline reading
+// ... the session runs ...
+auto d = engine.stats_delta_since(base);    // the increment over the interval
+
+if (d.valid()) {
+    std::int64_t frames = 0;
+    if (d.counter_delta("", "video_frames_sent", frames)) {
+        // `frames` is the increment that actually happened between the
+        // two readings -- not the absolute value.
+        const auto seconds = d.duration_us() / 1e6;
+        const auto fps = seconds > 0.0 ? frames / seconds : 0.0;
+    }
+
+    std::int64_t bitrate = 0;
+    if (d.gauge_value("", "video_tx_bitrate_bps", bitrate)) {
+        // A gauge has no increment: the difference of two instantaneous
+        // bitrates is not a bitrate.  The value at the end of the
+        // interval is the answer.
+    }
+}
+```
+
+The contract:
+
+- **`counter_delta()` refuses to answer for a gauge** and
+  **`gauge_value()` refuses to answer for a counter.**  Getting the
+  classification wrong is the classic statistics bug (subtracting two
+  EMA bitrates and reporting a negative rate), so the semantics travel
+  with the number and the API refuses to mix them up.
+- **`duration_us()`** is the length of the interval, so a host can turn
+  an increment into a rate without keeping its own clock.
+- **A default-constructed snapshot has no usable baseline.**  The delta
+  would be measured against a made-up zero, so `valid()` is false.
+- **The sequence number orders two readings even when their timestamps
+  are identical** (a coarse clock, or two readings inside the same
+  microsecond), so "the interval between these two readings" is always
+  well-defined.
+- **A snapshot outlives the engine.**  It owns its data, so a host may
+  keep it as a baseline after the engine is destroyed.
+
+The registry is a **projection** of the flat struct, taken at reading
+time: the flat struct stays the single authority, so the two views can
+never drift apart.  The registry is an *instance*, not a singleton — two
+engines in one process get two registries.
+
 **This is not a standard `RTCStatsReport`.** The struct is flat and
-engine-wide: there is no per-stream breakdown, no snapshot timestamp, and
-no ICE candidate-pair / RTT dimension. The `src/modules/video_stats/`
-module provides freeze counts, keyframe intervals, QP and drop-cause
-breakdown, but it is **not wired into the engine** yet, so those fields
-are not reachable through this accessor. For the full picture — the
-planned stream-level shape and the missing dimensions — see
-`docs/plan/stats-surface-plan.md` (landed later in the v1.2 stack,
-so referenced here by path, not by link).
+engine-wide: there is no per-stream breakdown and no ICE
+candidate-pair / RTT dimension. The snapshot lifecycle adds the
+*time* and the *semantics*, not the missing dimensions. The
+`src/modules/video_stats/` module **is** wired into the engine (the
+private bridge `src/engine/src/video_stats_bridge.hpp`), so its freeze
+counts, keyframe intervals, QP samples and drop-cause breakdown are
+reachable through this accessor as `video_freeze_count` /
+`video_freeze_total_ms` / `video_keyframe_interval_avg_ms` /
+`video_qp_sum` / `video_qp_count` / `video_frames_dropped_jb` /
+`video_frames_dropped_decoder`. For the full picture — the planned
+stream-level shape and the missing dimensions — see
+`docs/plan/stats-surface-plan.md` (landed later in the v1.2 stack, so
+referenced here by path, not by link).
 
 ---
 

@@ -84,6 +84,8 @@
 #include <memory>
 #include <nimrtc/core/api_version.hpp>
 #include <nimrtc/core/bytes.hpp>          // core::ByteSpan (the DTMF receive seam)
+#include <nimrtc/core/stats_registry.hpp>  // core::StatSnapshot / StatsDelta
+                                           // (plan Track S / S1)
 #include <optional>
 #include <string>
 #include <string_view>
@@ -3384,6 +3386,34 @@ public:
 
     // Engine stats for debugging
     struct NIMRTC_API_STABLE Stats {
+        // ---- The reading's identity (plan Track S / S1, additive) --------
+        //
+        // The two fields below say *when* the rest of this struct was
+        // measured.  Without them a host can read the counters but
+        // cannot turn them into a rate: it does not know how far
+        // apart two readings were.
+        //
+        // `snapshot_time_us` is on the **engine's monotonic clock**
+        // (the same origin `tick()`'s `now_us` uses), so it is
+        // directly comparable with the engine's other timing surfaces
+        // — the audio playout timestamps, the render clock's instants
+        // — and it never jumps the way a wall clock does.
+        //
+        // `snapshot_seq` increases by one per reading.  It orders two
+        // readings even when their timestamps are identical (a coarse
+        // clock, or two readings inside the same microsecond), which
+        // is what makes "the interval between these two readings" a
+        // well-defined thing.
+        //
+        // Both are zero on a default-constructed struct, so a host
+        // that never called `stats()` can tell "no reading" from
+        // "a reading of zero".
+        /** The reading's timestamp, in microseconds on the engine's
+         *  monotonic clock (the `tick()` timebase). */
+        std::int64_t snapshot_time_us = 0;
+        /** The reading's sequence number; increases by one per reading. */
+        std::uint64_t snapshot_seq = 0;
+
         int srtp_drops = 0;
         // ---- Video counters (v1.1 V1, additive) -------------------------
         // All cumulative since open().  Wired to the already-existing
@@ -3920,6 +3950,76 @@ public:
      *
      *  UNSTABLE: the Stats struct fields may change before v1.0.0. */
     NIMRTC_API_UNSTABLE Stats stats() const noexcept;
+
+    /**
+     * @brief A named, timestamped reading of the session's statistics.
+     *
+     * This is the **registry** view of the same numbers `stats()`
+     * returns (plan Track S / S1, design plan DS-1).  Where `stats()`
+     * is a flat struct of named fields, the snapshot is a list of
+     * entries, each with:
+     *
+     *   * a **name** (the same name as the flat field);
+     *   * a **group** ("" for the engine-global scope; a future
+     *     per-object surface uses a group such as "inbound-rtp");
+     *   * a **value**;
+     *   * a **semantics** — `kCumulative` for a counter that only
+     *     grows, `kGauge` for an instantaneous value (a bitrate, a
+     *     jitter, a queue depth).
+     *
+     * The semantics are the point: they tell a host whether the
+     * difference between two readings is meaningful.  Subtracting two
+     * `kGauge` readings produces a number that looks like a rate and
+     * is not one.
+     *
+     * The snapshot also carries the reading's **timestamp**
+     * (`time_us()`, the engine's monotonic clock — the `tick()`
+     * timebase) and its **sequence number** (`seq()`, +1 per
+     * reading).  The sequence number orders two readings even when
+     * their timestamps are identical, which is what makes "the
+     * interval between these two readings" well-defined.
+     *
+     * The snapshot owns its data: it stays valid after the engine is
+     * destroyed, so a host may keep it as a baseline.
+     *
+     * @see stats_delta_since() — the interval between two readings.
+     */
+    NIMRTC_API_UNSTABLE core::StatSnapshot stats_snapshot() const noexcept;
+
+    /**
+     * @brief The increment over the interval since @p previous.
+     *
+     * The "interval semantics" the statistics surface needs: a host
+     * keeps the previous reading and asks for the increment, instead
+     * of keeping its own copy of every counter.
+     *
+     * For a `kCumulative` entry the delta is `to - from` — exactly
+     * what happened between the two readings.  For a `kGauge` entry
+     * there is no increment; `StatsDelta::gauge_value()` returns the
+     * value at the end of the interval instead, and
+     * `StatsDelta::counter_delta()` refuses to answer.
+     *
+     * The delta also carries the interval's **duration**
+     * (`duration_us()`), so a host can turn an increment into a rate
+     * without keeping its own clock:
+     *
+     * @code
+     * const auto prev = engine.stats_snapshot();
+     * // ... a second passes ...
+     * const auto d = engine.stats_delta_since(prev);
+     * std::int64_t frames = 0;
+     * if (d.counter_delta("", "video_frames_sent", frames) && d.duration_us() > 0) {
+     *     const double fps = static_cast<double>(frames) * 1e6 /
+     *                         static_cast<double>(d.duration_us());
+     * }
+     * @endcode
+     *
+     * @param previous  The earlier reading.  A default-constructed
+     *                  snapshot means "no baseline": the returned
+     *                  delta is then invalid (`valid()` is false).
+     */
+    NIMRTC_API_UNSTABLE core::StatsDelta stats_delta_since(
+        const core::StatSnapshot& previous) const noexcept;
 
     /** The negotiated remote audio format, once the remote SDP has been
      *  processed.

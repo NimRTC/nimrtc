@@ -32,6 +32,67 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The statistics snapshot lifecycle (Track S / `S1`, design plan `DS-1`).**
+  `Engine::Stats` was a flat struct of ~125 cumulative counters, and that
+  shape answers *"how much has happened since `open()`"* and nothing else.
+  A host that wanted a **rate** — bytes per second, packets per second —
+  had to take two readings and guess how far apart they were, and it had to
+  know from the documentation which fields were counters and which were
+  instantaneous gauges.  Guessing wrong is the classic statistics bug: you
+  subtract two EMA bitrates and report a negative rate.
+
+  The lifecycle gives the host both, explicitly:
+
+  - **`Engine::Stats::snapshot_time_us`** — when the rest of the struct was
+    measured, in microseconds on the **engine's monotonic clock** (the same
+    origin `tick()`'s `now_us` uses, so it is directly comparable with the
+    engine's other timing surfaces and never jumps the way a wall clock
+    does).
+  - **`Engine::Stats::snapshot_seq`** — a monotonically increasing sequence
+    number, one per reading.  It orders two readings even when their
+    timestamps are identical (a coarse clock, or two readings inside the
+    same microsecond), which is what makes *"the interval between these two
+    readings"* a well-defined thing.
+  - **`Engine::stats_snapshot()`** — the named, snapshot-able view of the
+    same numbers (`core::StatSnapshot`).  A snapshot owns its data, so a
+    host may keep it as a baseline after the engine is destroyed.
+  - **`Engine::stats_delta_since(previous)`** — the **increment** over the
+    interval (`core::StatsDelta`), plus the interval's duration.
+
+  The semantics travel with the number, and the API refuses to mix them up:
+  `counter_delta()` answers for a cumulative counter and **refuses** for a
+  gauge (the difference of two instantaneous values is not a rate);
+  `gauge_value()` answers for a gauge and **refuses** for a counter.  A
+  default-constructed snapshot has no usable baseline — the delta would be
+  measured against a made-up zero — so `valid()` is false rather than the
+  answer being a plausible-looking lie.
+
+  The new types live in **`src/core/include/nimrtc/core/stats_registry.hpp`**
+  (`core::StatsRegistry`, `core::StatSnapshot`, `core::StatsDelta`,
+  `core::StatSemantics`) — a `src/core/` type, because every layer has to
+  speak it: the engine publishes into it, and a future module (ICE,
+  DataChannel) can publish into it through a plugin seam.  It is
+  header-only and STABLE, like the rest of `src/core/`.
+
+  The registry is a **projection** of the flat struct, taken at reading
+  time: the flat struct stays the single authority, so the two views can
+  never drift apart.  The projection lives in the private engine
+  collaborator `src/engine/src/engine_stats_state.hpp`, where the
+  counter-vs-gauge classification sits *next to the field it describes* —
+  a rename breaks the build rather than silently dropping the field from
+  the registry.  The registry is an **instance**, not a singleton (Layout
+  Invariant 6 forbids a module from exporting global mutable state), so
+  two engines in one process get two registries.
+
+  Tested in `tests/test_core_stats_registry.cpp` (the type's contract:
+  declaration, semantics, sequencing, ownership, isolation) and
+  `tests/test_engine_stats_snapshot.cpp` (the behaviour: the delta *is*
+  the increment, the timestamp distinguishes two instants, the registry and
+  the flat struct agree).
+
+  This adds one public header (`core/stats_registry.hpp`), so D-N6 applies:
+  an explicit, reviewed manifest bump (189 → 190), not a silent drift.
+
 - **RTCP feedback is now broken down by type (Track S / `DS-4`).**
   `Stats::video_feedback_applied` was a single number, so a host watching it
   climb could not tell *what the peer was asking for* — a peer sending PLIs

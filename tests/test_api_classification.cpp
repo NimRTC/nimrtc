@@ -644,11 +644,20 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - sctp/usrsctp_factory.hpp (the opt-in factory)
     //     - sctp/usrsctp_socket.hpp  (the opt-in socket)
     //
+    // v1.2.0 (plan Track S / S1, design plan DS-1) bump: +1 public
+    //   header (189 -> 190) for the statistics registry -- the named,
+    //   snapshot-able view of a session's counters, with the timestamp
+    //   and the interval semantics the flat `Engine::Stats` struct
+    //   could not express:
+    //     - core/stats_registry.hpp (the registry, the snapshot and
+    //       the delta -- a `src/core/` type, because every layer has
+    //       to speak it: Layout Invariant 1)
+    //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 189;
+    constexpr std::size_t kBaselineHeaderCount = 190;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -326,6 +326,13 @@ void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame
     // from, so a host can tell one inbound source from another.
     impl_->inbound_state.note_frame(impl_->audio_state.audio_rx.ssrc);
 
+    // The per-stream entry (plan Track S / S4): the engine counts what
+    // it handed to the host, which is the engine's own half of the
+    // receive picture (the pipeline owns the other half).
+    ++impl_->audio_state.audio_streams.def.frames_received;
+    impl_->audio_state.audio_streams.def.samples_received += samples_per_ch;
+    if (frame.concealed)     ++impl_->audio_state.audio_streams.def.frames_concealed;
+    if (frame.fec_recovered) ++impl_->audio_state.audio_streams.def.frames_fec_recovered;
     // AEC reference path.
     //
     // The remote audio we are about to hand to the host for loudspeaker
@@ -434,6 +441,11 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // the session, so the per-stream rates (H4) are measured against a
     // well-defined origin from the first frame on.
     impl_->video_state.video_streams.mark_started(detail::steady_now_us());
+
+    // Plan Track S / S4: the audio stream's clock starts with the
+    // session too, so the per-stream bitrate is measured against a
+    // well-defined origin from the first frame on.
+    impl_->audio_state.audio_streams.mark_started(detail::steady_now_us());
 
     // Remote-desktop plan D5: the profile may declare the *default*
     // stream's share.  The declaration is applied here — at open(), when
@@ -1582,6 +1594,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // wire has to be able to see *why*.
     auto report_error = [&](std::uint32_t code, const char* msg) {
         ++impl_->audio_state.audio_encode_errors;
+        ++impl_->audio_state.audio_streams.def.encode_errors;
         const auto now = std::chrono::steady_clock::now();
         if (impl_->audio_state.audio_last_error_report ==
                 std::chrono::steady_clock::time_point{} ||
@@ -1668,6 +1681,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // calls; a partial frame is never encoded.
     impl_->audio_state.audio_accum.insert(impl_->audio_state.audio_accum.end(), pcm, pcm + total_floats);
     impl_->audio_state.audio_samples_in += num_samples;
+    impl_->audio_state.audio_streams.def.samples_in += num_samples;
 
     // ---- Emit one RTP packet per frame --------------------------------
     auto emit_frame = [&](const float* frame_pcm) -> std::uint32_t {
@@ -1804,6 +1818,11 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         impl_->audio_state.audio_rtp_timestamp = cur_ts;
         ++impl_->audio_state.audio_frames_sent;
         impl_->audio_state.audio_bytes_sent += pkt_span.size();
+
+        // The per-stream entry (plan Track S / S4) gets the same numbers:
+        // the engine is the only party that knows what it put on the wire.
+        ++impl_->audio_state.audio_streams.def.packets_sent;
+        impl_->audio_state.audio_streams.def.bytes_sent += pkt_span.size();
 
         // The media clock advances by the frame duration whether or not the
         // packet reaches the wire (A-7): a dropped frame leaves a gap in
@@ -3214,6 +3233,13 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
                                        ? audio_bitrate_current_bps_
                                        : 0);
 
+    // ---- The per-stream audio entries (plan Track S / S4) -------------
+    //
+    // The audio plane's counterpart of the per-stream video list.  The
+    // flat `audio_*` fields above describe the same (single) stream, so
+    // the existing call sites keep working — the list is additive.
+    append_audio_stream_stats(out.audio_streams);
+
     // ---- Capture statistics (remote-desktop plan A11) --------------------
     //
     // The capture device's own counters, reported verbatim.  The device
@@ -3611,6 +3637,107 @@ void NimRTCEngine::wire_default_sender() noexcept {
                 ice_t_->send(bv, {});
             }
         });
+}
+
+// ---------------------------------------------------------------------------
+// The per-stream audio entries (plan Track S / S4)
+// ---------------------------------------------------------------------------
+//
+// The audio plane's counterpart of the per-stream video list.
+//
+// The audio plane is single-stream today, so the list normally holds
+// exactly one entry ("default") — the engine's own stream.  The
+// *shape* is a list anyway: the moment a second source appears the list
+// grows, and no caller has to be redrawn then.
+//
+// The send side is the engine's own counters; the receive side comes
+// from the receive pipeline, which is the only party that sees the
+// source's sequence space (spec B-13).  The pipeline publishes a single
+// aggregate — there is one audio receiver — so the figure is attributed
+// to the source the pipeline is actually working on.
+
+namespace {
+
+/** The average bitrate of a byte counter over a time window. */
+std::uint32_t average_audio_bitrate_bps(std::uint64_t bytes,
+                                         std::int64_t elapsed_us) noexcept {
+    if (elapsed_us <= 0) return 0;
+    const std::uint64_t bits = bytes * 8ull;
+    const std::uint64_t bps = bits / static_cast<std::uint64_t>(elapsed_us);
+    return bps > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<std::uint32_t>(bps);
+}
+
+}  // namespace
+
+void NimRTCEngine::append_audio_stream_stats(
+        std::vector<AudioStreamStats>& out) const noexcept {
+    if (impl_ == nullptr) return;
+
+    const auto& state = impl_->audio_state.audio_streams;
+    const std::int64_t now_us = detail::steady_now_us();
+    const std::int64_t started_us =
+        state.started_us != 0 ? state.started_us : now_us;
+    const std::int64_t elapsed_us = now_us - started_us;
+
+    // ---- The engine's own stream ("default") ----------------------------
+    //
+    // The flat `Stats::audio_*` fields describe this same track, so the
+    // entry carries the same numbers.  A host that never touches the
+    // list sees exactly what it saw before.
+    {
+        AudioStreamStats s;
+        s.stream_id   = std::string(detail::kDefaultAudioStreamId);
+        s.ssrc        = impl_->audio_state.audio_ssrc;
+        s.payload_type = impl_->audio_state.negotiated_audio_pt != 0
+                             ? impl_->audio_state.negotiated_audio_pt
+                             : config_.audio_codec.payload_type;
+        s.codec_name  = config_.audio_codec.encoding;
+        s.clock_rate_hz = config_.audio_codec.clock_rate;
+        s.channels    = config_.audio_codec.channels;
+        s.frame_duration_ms = config_.audio_ptime_ms;
+
+        s.bitrate_bps = average_audio_bitrate_bps(
+            impl_->audio_state.audio_bytes_sent, elapsed_us);
+        s.encoder_bitrate_bps =
+            static_cast<std::uint32_t>(audio_bitrate_current_bps_ > 0
+                                           ? audio_bitrate_current_bps_
+                                           : 0);
+
+        s.packets_sent  = impl_->audio_state.audio_frames_sent;
+        s.bytes_sent    = impl_->audio_state.audio_bytes_sent;
+        s.encode_errors = impl_->audio_state.audio_encode_errors;
+        s.samples_in    = impl_->audio_state.audio_samples_in;
+
+        s.frames_received      = impl_->audio_state.audio_frames_received;
+        s.samples_received     = impl_->audio_state.audio_samples_received;
+        s.frames_concealed     = impl_->audio_state.audio_frames_concealed;
+        s.frames_fec_recovered = impl_->audio_state.audio_frames_fec_recovered;
+
+        // The inbound half: the source the receive pipeline is working
+        // on.  The pipeline publishes one aggregate (there is one audio
+        // receiver), so the aggregate is attributed to the source the
+        // pipeline is actually handling.
+        const std::uint32_t inbound_ssrc = impl_->audio_state.audio_rx.ssrc;
+        s.inbound_ssrc = inbound_ssrc;
+        if (inbound_ssrc != 0) {
+            const auto it = state.inbound.find(inbound_ssrc);
+            if (it != state.inbound.end()) {
+                s.packets_received = it->second.packets_received;
+                s.bytes_received   = it->second.bytes_received;
+            }
+        }
+
+        // The wire-side receive figures come from the pipeline.
+        if (audio_receiver_) {
+            const auto rx = audio_receiver_->stats();
+            s.packets_lost     = rx.packets_lost;
+            s.decode_errors    = rx.decode_errors;
+            s.jitter_ms        = rx.jitter_ms;
+            s.playout_delay_ms = rx.current_delay_ms;
+        }
+
+        out.push_back(std::move(s));
+    }
 }
 
 }  // namespace nimrtc::engine

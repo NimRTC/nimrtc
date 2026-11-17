@@ -1732,6 +1732,160 @@ struct NIMRTC_API_STABLE InboundRtpStats {
 };
 
 // ---------------------------------------------------------------------------
+// Per-stream audio statistics (v1.2 plan Track S / S4)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief One audio stream's entry in the statistics snapshot.
+ *
+ * The audio plane's counterpart of `VideoStreamStats`.  The v1.2 plan's
+ * **S4** row asks for "a per-audio-stream entry and an aggregation
+ * surface", because the audio side had no counterpart to
+ * `VideoStreamStats`: every audio number was a flat `audio_*` counter
+ * with no stream identity attached to it.
+ *
+ * ## What this entry describes
+ *
+ * One **audio track** — the session's audio m-line — in *both*
+ * directions: what the engine sent on it, and what it received on it.
+ *
+ * It is deliberately **not** a second per-SSRC inbound table: Track S's
+ * **S2** row already published `Stats::inbound_rtp_streams`, which
+ * carries every inbound source — audio included — keyed by SSRC.  A
+ * per-SSRC audio list here would publish the same packets twice, and a
+ * host that summed both lists would count every packet twice.  What
+ * this entry adds is the part S2 cannot know: the **outbound** half of
+ * the track, and the *pipeline's* figures for the source the receive
+ * side is actually working on.
+ *
+ * ## Why the audio side needs this
+ *
+ * The video plane is **multi-stream** (the screen, the camera, a
+ * thumbnail — remote-desktop plan H1), so a flat video counter is
+ * ambiguous the moment a second stream exists.  The audio plane is
+ * **single-stream today**, and that is exactly why the flat counters
+ * are still unambiguous — but only *by accident of the current
+ * topology*.  The moment a second audio source appears (a second
+ * microphone, a mixed programme bus), the flat counters become
+ * unattributable, and every caller that wants "how is the microphone
+ * doing" has to guess.
+ *
+ * The entry therefore names the track it describes, so the shape
+ * survives the topology change instead of having to be redrawn then.
+ * That is also why the published field is a **list**: today it holds
+ * one entry, and it grows rather than being reshaped.
+ *
+ * ## What the counters mean
+ *
+ * The **send** side is the engine's own: it counts the frames it
+ * encoded, the RTP packets it emitted and the bytes it put on the
+ * wire.  The **receive** side is split the way the audio pipeline
+ * splits it (spec B-13): the engine counts what it handed to the host
+ * (frames, samples, concealed frames, FEC recoveries), and the
+ * *receive pipeline* counts what happened on the wire (packets lost,
+ * decode errors, jitter, playout delay) — it is the only party that
+ * sees the source's sequence space.
+ *
+ * The flat `Stats::audio_*` fields still exist and describe the same
+ * track, so the existing call sites and their tests keep working
+ * unchanged.  The list is **additive**.
+ *
+ * @see Stats::audio_streams
+ * @see Stats::inbound_rtp_streams — the per-SSRC inbound breakdown (S2)
+ */
+struct NIMRTC_API_STABLE AudioStreamStats {
+    /** The stable stream id ("default" for the engine's own track). */
+    std::string stream_id;
+
+    /** The RTP SSRC of the stream's outbound encoding. */
+    std::uint32_t ssrc = 0;
+
+    /** The RTP SSRC of the *inbound* source the engine is receiving.
+     *
+     *  0 when nothing has arrived yet.  It is a different number from
+     *  `ssrc` because the peer picks its own SSRC — the two are the
+     *  two ends of the same track. */
+    std::uint32_t inbound_ssrc = 0;
+
+    /** The RTP payload type of the stream's encoding.
+
+     *  The *negotiated* one when a negotiation has happened, the
+     *  configured one otherwise. */
+    std::uint8_t payload_type = 0;
+
+    /** The encoding name ("opus", "PCMU", "PCMA", ...). */
+    std::string codec_name;
+
+    /** The RTP clock of the stream, in Hz (48000 for Opus). */
+    std::uint32_t clock_rate_hz = 0;
+
+    /** The channel count of the stream. */
+    std::uint8_t channels = 0;
+
+    /** The negotiated frame duration, in milliseconds (10 / 20 / 40 / 60). */
+    std::uint16_t frame_duration_ms = 0;
+
+    /** The stream's current outbound bitrate, in bits per second. */
+    std::uint32_t bitrate_bps = 0;
+
+    /** The bitrate the encoder currently runs at, in bits per second.
+
+     *  It equals the configured ceiling until the BWE-linked adaptation
+     *  lowers it (or raises it back towards that ceiling). */
+    std::uint32_t encoder_bitrate_bps = 0;
+
+    // ---- The send side ------------------------------------------------
+
+    /** The RTP packets this stream emitted. */
+    std::uint64_t packets_sent = 0;
+
+    /** The RTP bytes this stream emitted (header + payload). */
+    std::uint64_t bytes_sent = 0;
+
+    /** The frames that could not be encoded.
+
+     *  An encode failure is never silent: it is counted here and
+     *  reported through the engine's error callback, so a host that
+     *  feeds PCM at the wrong rate sees an error instead of silence. */
+    std::uint64_t encode_errors = 0;
+
+    /** The PCM samples the host handed to the engine. */
+    std::uint64_t samples_in = 0;
+
+    // ---- The receive side ----------------------------------------------
+
+    /** The RTP packets received from this stream. */
+    std::uint64_t packets_received = 0;
+
+    /** The RTP bytes received from this stream (header + payload). */
+    std::uint64_t bytes_received = 0;
+
+    /** The decoded frames the engine handed to the host. */
+    std::uint64_t frames_received = 0;
+
+    /** The PCM samples the engine handed to the host. */
+    std::uint64_t samples_received = 0;
+
+    /** The frames that were produced by packet-loss concealment. */
+    std::uint64_t frames_concealed = 0;
+
+    /** The frames that were reconstructed from in-band FEC. */
+    std::uint64_t frames_fec_recovered = 0;
+
+    /** The packets inferred lost on this stream's sequence space. */
+    std::uint64_t packets_lost = 0;
+
+    /** The decode failures on this stream. */
+    std::uint64_t decode_errors = 0;
+
+    /** The stream's current interarrival jitter, in milliseconds. */
+    std::uint32_t jitter_ms = 0;
+
+    /** The stream's current playout delay, in milliseconds. */
+    std::uint32_t playout_delay_ms = 0;
+};
+
+// ---------------------------------------------------------------------------
 // The render / presentation plane (remote-desktop plan E5 / E6 / E7 / E9)
 // ---------------------------------------------------------------------------
 
@@ -3962,6 +4116,20 @@ public:
         // totals that source produced.
         std::vector<InboundRtpStats> inbound_rtp_streams;
 
+        // ---- The per-stream audio entries (v1.2 plan Track S / S4) -------
+        //
+        // One entry per **active** audio stream, each with its own
+        // identity (SSRC, payload type, codec) and its own send / receive
+        // counters.  The flat `audio_*` fields above describe the same
+        // (single) stream, so the existing call sites and their tests
+        // keep working unchanged — the list is **additive**.
+        //
+        // The audio plane is single-stream today, so the list normally
+        // holds exactly one entry ("default").  It is a list rather than
+        // a single struct so that the *shape* survives the arrival of a
+        // second audio source: the alternative is to redraw the whole
+        // surface then, and every caller with it.
+        std::vector<AudioStreamStats> audio_streams;
         // ---- The per-stage CPU-time instrumentation (plan J1) ------------
         //
         // The plan's exit measurement is written in terms of time, so the
@@ -4679,6 +4847,8 @@ private:
      *  `append_video_stream_stats()`. */
     void append_inbound_rtp_stats(std::vector<InboundRtpStats>& out) const noexcept;
 
+    /** Fill the per-stream audio statistics entries (plan Track S / S4). */
+    void append_audio_stream_stats(std::vector<AudioStreamStats>& out) const noexcept;
     /** Close and release every extra stream's plugins. */
     void shutdown_extra_video_streams() noexcept;
 

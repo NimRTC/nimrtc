@@ -418,6 +418,32 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     // sequence numbers, so the engine does that here (spec B-12).
     note_inbound_audio_packet(pv.ssrc, pv.seq, pv.timestamp, recv_ts_us);
 
+    // The per-stream entry (plan Track S / S4): the engine sees every
+    // inbound packet on the audio path, so it counts them where it
+    // routes them.  The encoding name comes from the negotiated routing
+    // table, so the entry names the encoding the payload type maps to.
+    {
+        std::string encoding = config_.audio_codec.encoding;
+        std::uint32_t clock_rate = config_.audio_codec.clock_rate;
+        std::uint8_t channels = config_.audio_codec.channels;
+        const auto route = impl_->audio_state.audio_pt_routes.find(pv.payload_type);
+        if (route != impl_->audio_state.audio_pt_routes.end()) {
+            encoding   = route->second.encoding;
+            clock_rate = route->second.clock_rate != 0
+                             ? route->second.clock_rate : clock_rate;
+            channels   = route->second.channels != 0
+                             ? route->second.channels : channels;
+        }
+        // The byte figure is the *whole* packet on the wire (header +
+        // payload), because that is what the host's bandwidth arithmetic
+        // needs.
+        impl_->audio_streams.note_inbound_packet(
+            pv.ssrc, pv.payload_type, pv.raw.size(), encoding);
+        auto& src = impl_->audio_streams.source_for(pv.ssrc);
+        src.clock_rate_hz = clock_rate;
+        src.channels = channels;
+    }
+
     audio_receiver_->push(pv.payload.data(), pv.payload.size(),
                           pv.timestamp, pv.seq, pv.ssrc, recv_ts_us);
     // The pipeline is clock-driven (spec A-1): pushing the packet only

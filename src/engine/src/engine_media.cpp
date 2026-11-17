@@ -3412,8 +3412,11 @@ core::StatSnapshot NimRTCEngine::stats_snapshot() const noexcept {
     // The flat struct is the authority; the registry is its
     // projection.  `stats()` publishes the flat struct into the
     // registry and advances the sequence number, so the reading taken
-    // here carries the *same* number — the flat struct and the
-    // snapshot describe one instant, not two.
+    // here carries *that* number — the flat struct and the snapshot
+    // describe one instant, not two.
+    //
+    // The publication is not repeated: taking a reading does not
+    // advance the sequence a second time.
     const Stats flat = stats();
     return impl_->stats_state.snapshot_at(flat.snapshot_seq,
                                           flat.snapshot_time_us);

@@ -155,6 +155,36 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The audio allocation gate counted allocations made by *other* threads, so
+  it failed on macOS for reasons that had nothing to do with the audio send
+  path.**  `tests/test_engine_audio_alloc.cpp` replaces the global
+  `operator new` to measure the §3.5 budget ("zero heap allocations per
+  emitted audio packet").  The replacement is process-wide, so **every**
+  thread in the process passed through it — including the VideoToolbox
+  H.264 encoder's own threads, which the engine selects on macOS and which
+  allocate behind the engine's back.  The `macos-clang / arm64` leg
+  therefore failed with "the audio send path allocated 2 times over 100
+  packets", and the count varied run to run.
+
+  The probe now records the **allocating thread's id** and counts only the
+  allocations made by the thread that armed the measuring scope — the
+  thread running the send path.  A background thread's allocation is not
+  the send path's allocation, and mixing the two makes the gate
+  untestable rather than strict.
+
+  The failure message now also reports **what** was allocated (the size of
+  each allocation, read out into a caller-owned buffer so that rendering
+  the diagnostic does not pollute the very measurement being reported).
+  The probe was verified to still catch real drift: injecting one
+  per-packet allocation into the send path fails the gate with "100 times
+  over 100 packets", and reverting it turns the gate green again.
+
+  Note that the sibling test
+  (`TheAllocationCountDoesNotGrowWithThePacketCount`) already encoded the
+  honest form of the criterion — the count must not *grow* with the packet
+  count — which is what the remediation plan's §3.5 acceptance line
+  actually says ("分配次数不随包数增长").
+
 - **The Wayland support in the video sink had never been compiled on any
   build host.**  `wayland-protocols` ships the protocol **XML**, not the C
   headers — `xdg-shell-client-protocol.h` and

@@ -9,6 +9,14 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Planning: `docs/plan/v1.2-next-plan.md`.**  Records the v1.2 planning
+  decisions (D-N1..D-N5) and sequences the next three releases as four
+  tracks: **E** convergence work that gates the v1.2.0 tag, **S** the
+  complete `getStats` surface, **Q** the v1.3.0 resilience line (R2/R4,
+  RTX, PLI/FIR rate limiting, soak), and **C** the v1.4.0 connectivity
+  line (TURN/TLS, ICE-over-TCP).  The document also states the explicit
+  non-goals and the owner-gated items, so that "what is not planned" is
+  as visible as "what is".
 - **CI auto-retry for jobs that were starved of a runner.**  A
   GitHub-hosted runner is not guaranteed: a job asking for a saturated
   pool — the `macos-15` arm64 image is the chronic case in this

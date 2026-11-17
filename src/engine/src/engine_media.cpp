@@ -3378,7 +3378,58 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.qoe = impl_->qoe.snapshot();
     }
 
+    // ---- The reading's identity (plan Track S / S1) ---------------------
+    //
+    // The two fields say *when* the counters above were measured.  The
+    // timestamp is on the engine's monotonic clock — the same origin
+    // `tick()`'s `now_us` uses — so it is directly comparable with the
+    // engine's other timing surfaces and it never jumps the way a wall
+    // clock does.
+    //
+    // The sequence number increases by one per reading.  It orders two
+    // readings even when their timestamps are identical, which is what
+    // makes "the interval between these two readings" a well-defined
+    // thing.
+    //
+    // The registry is published here, at the *end* of the projection,
+    // so the snapshot the registry holds is exactly this struct's
+    // values — there is no second copy of the bookkeeping that could
+    // drift.  The publication is what advances the sequence number,
+    // so `stats_snapshot()` (which publishes its own copy of the flat
+    // struct) continues the same sequence.
+    if (impl_ != nullptr) {
+        const std::int64_t now_us = detail::steady_now_us();
+        out.snapshot_time_us = now_us;
+        out.snapshot_seq     = impl_->stats_state.publish(out, now_us);
+    }
+
     return out;
+}
+
+core::StatSnapshot NimRTCEngine::stats_snapshot() const noexcept {
+    if (impl_ == nullptr) return core::StatSnapshot{};
+
+    // The flat struct is the authority; the registry is its
+    // projection.  `stats()` publishes the flat struct into the
+    // registry and advances the sequence number, so the reading taken
+    // here carries the *same* number — the flat struct and the
+    // snapshot describe one instant, not two.
+    const Stats flat = stats();
+    return impl_->stats_state.snapshot_at(flat.snapshot_seq,
+                                          flat.snapshot_time_us);
+}
+
+core::StatsDelta NimRTCEngine::stats_delta_since(
+    const core::StatSnapshot& previous) const noexcept {
+    if (impl_ == nullptr) return core::StatsDelta{};
+
+    const Stats flat = stats();
+    core::StatLookup from = [&previous](std::string_view group,
+                                        std::string_view name,
+                                        std::int64_t& out) {
+        return previous.value_of(group, name, out);
+    };
+    return impl_->stats_state.diff_since(flat, previous, from);
 }
 
 // ---------------------------------------------------------------------------

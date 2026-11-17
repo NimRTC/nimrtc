@@ -50,6 +50,19 @@ nimrtc_add_core_api_test(test_api_version        test_api_version.cpp
 nimrtc_add_core_api_test(test_api_classification test_api_classification.cpp)
 
 # ----------------------------------------------------------------------------
+# v1.2.0 (plan Track S / S1, design plan DS-1) — the core statistics
+# registry.
+#
+# The registry is a `src/core/` type (Layout Invariant 1: core is the
+# only INTERFACE library and only exposes stable types), so it is
+# tested here, against `nimrtc::core` alone.  The engine-side
+# behaviour (the delta being the increment, the timestamp ordering the
+# readings) is pinned by `test_engine_stats_snapshot.cpp`, which needs
+# the engine.
+# ----------------------------------------------------------------------------
+nimrtc_add_core_api_test(test_core_stats_registry test_core_stats_registry.cpp)
+
+# ----------------------------------------------------------------------------
 # Architecture-remediation Phase 0.2 — registry consistency guard.
 #
 # Pins the contract that the `StackConfig` defaults match the ids the
@@ -2372,6 +2385,15 @@ nimrtc_add_engine_test(test_engine_audio_state test_engine_audio_state.cpp)
 # Shell transport strategy, no ICE/DTLS handshake involved.
 # ---------------------------------------------------------------------------
 nimrtc_add_engine_test(test_engine_audio_stats test_engine_audio_stats.cpp)
+
+# ---------------------------------------------------------------------------
+# v1.2.0 (plan Track S / S1, design plan DS-1) — the statistics snapshot
+# lifecycle: the reading's identity (`snapshot_time_us` / `snapshot_seq`)
+# and the interval semantics (`stats_delta_since`).
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_stats_snapshot test_engine_stats_snapshot.cpp)
 
 # ---------------------------------------------------------------------------
 # v1.2.0 audio pipeline WP-9 — the cross-end capture timestamp of an

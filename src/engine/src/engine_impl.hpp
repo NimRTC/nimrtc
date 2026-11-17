@@ -104,6 +104,7 @@
 #include "engine_sdp_helpers.hpp"
 #include "engine_security_state.hpp"
 #include "engine_session_state.hpp"
+#include "engine_stats_state.hpp"
 #include "engine_timeline_state.hpp"
 #include "engine_video_state.hpp"
 #include "engine_xr_state.hpp"
@@ -364,6 +365,14 @@ struct NimRTCEngine::Impl {
     // `plugins::IQoeCollector` seam; the engine pushes the events it
     // knows about into it.  See `engine_qoe_seam.hpp`.
     detail::QoeSeam qoe;
+
+    // ---- The statistics registry (plan Track S / S1) --------------------
+    //
+    // The flat `Engine::Stats` struct is the authority for the
+    // counters; the registry is the named, timestamped *projection* of
+    // it, which is what lets a host compute an interval rate and
+    // diff two readings.  See `engine_stats_state.hpp`.
+    detail::StatsState stats_state;
 
     // ---- Cross-end timeline (ADR-017) ---------------------------------
     //

@@ -90,3 +90,31 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 60)
 endif()
+
+# -----------------------------------------------------------------------------
+# ERLE measurement rig (E3).
+#
+# Separate binary: the rig drives the real APM through a *synthetic* echo
+# path and measures the ERLE, which takes several seconds of audio per test
+# case.  It needs the same vendored APM headers as test_webrtc_audio3a, and
+# it skips itself when the APM is not compiled in.
+# -----------------------------------------------------------------------------
+add_executable(test_audio3a_erle test_audio3a_erle.cpp)
+
+set_target_properties(test_audio3a_erle PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_audio3a_erle LENIENT)
+
+target_link_libraries(test_audio3a_erle PRIVATE
+    nimrtc::audio3a
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_audio3a_erle
+        PROPERTIES TIMEOUT 120
+        DISCOVERY_TIMEOUT 60)
+endif()

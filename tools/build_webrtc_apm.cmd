@@ -146,13 +146,24 @@ if not exist "%BUILD_DIR%\build.ninja" (
     REM On MSVC, ensure C++20 designated initializers are recognized even
     REM when meson's cpp_std=c++20 mapping falls back to /permissive- mode
     REM (where designated initializers require the explicit MSVC toggle
-    REM /Zc:designated-initializers).  This must come from vcvars to make
-    REM `%VSCMD_ARG_TGT_ARCH%` available, hence the check.
-    set "MSVC_EXTRA_ARGS="
-    if defined VSCMD_ARG_TGT_ARCH (
-        set "MSVC_EXTRA_ARGS=--cpp-args=/Zc:designated-initializers"
-    )
-    meson setup "%BUILD_DIR%" "%SRC_DIR%" --buildtype=%BUILD_TYPE% --default-library=static %MSVC_EXTRA_ARGS%
+    REM /Zc:designated-initializers).
+    REM
+    REM NOTE: this has to travel in a *native file*, not as a `--cpp-args=...`
+    REM command-line option.  Meson only accepts `--cpp-args` as a built-in
+    REM option of a subproject; as a top-level argument it is rejected with
+    REM "unrecognized arguments", which is exactly what happened here.
+    REM The native file is written next to the build tree so it can be
+    REM inspected and re-used by a reconfigure.
+    set "NATIVE_FILE=%BUILD_DIR%\nimrtc-native.ini"
+    if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+    (
+        echo [built-in options]
+        echo cpp_std = 'c++20'
+        echo.
+        echo [cpp]
+        echo args = ['/Zc:designated-initializers']
+    ) > "%NATIVE_FILE%"
+    meson setup "%BUILD_DIR%" "%SRC_DIR%" --buildtype=%BUILD_TYPE% --default-library=static --native-file "%NATIVE_FILE%"
     if errorlevel 1 (
         echo [ERROR] meson setup failed
         exit /b 2

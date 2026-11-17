@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "benchmark": "saturation",
-  "generated_at": "2026-11-17T18:07:52Z",
+  "generated_at": "2026-11-17T19:35:53Z",
   "plan": "docs/plan/v1.2-next-plan.md",
   "plan_item": "E6",
   "evidence_row": "Adaptive bitrate survives congestion",
@@ -64,25 +64,25 @@
       "summary": {
         "initial_level": 0,
         "level_after_saturation": 1,
-        "target_after_saturation_bps": 817419,
-        "estimate_after_saturation_bps": 817419,
+        "target_after_saturation_bps": 759801,
+        "estimate_after_saturation_bps": 800000,
         "final_level": 0,
         "final_height": 1080,
         "final_target_bps": 1600000,
-        "final_estimate_bps": 3882443,
-        "saturated_delivered_bps": 582432,
+        "final_estimate_bps": 3738833,
+        "saturated_delivered_bps": 580784,
         "recovered_delivered_bps": 1546744,
-        "saturated_sent_bps": 775640,
+        "saturated_sent_bps": 758216,
         "recovered_sent_bps": 1546744,
         "level_changes": 2,
         "level_drops": 1,
         "level_rises": 1,
-        "floor_blocks": 780,
-        "keyframe_cost_blocks": 372,
-        "level_changes_suppressed": 6,
-        "packets_sent": 8666,
-        "packets_received": 8666,
-        "packets_dropped": 309,
+        "floor_blocks": 597,
+        "keyframe_cost_blocks": 374,
+        "level_changes_suppressed": 15,
+        "packets_sent": 8645,
+        "packets_received": 8645,
+        "packets_dropped": 579,
         "final_loss_rate": 0.0,
         "measured_rtt_ms": 40.0
       },
@@ -90,14 +90,14 @@
         {
           "invariant": "saturation_was_real",
           "ok": true,
-          "measured": 309,
+          "measured": 579,
           "limit": "> 0",
           "detail": "the link dropped packets, so it was genuinely at capacity"
         },
         {
           "invariant": "stream_survived",
           "ok": true,
-          "measured": 582432,
+          "measured": 580784,
           "limit": "> 0",
           "detail": "the receiver kept receiving data throughout the saturation phase"
         },
@@ -109,25 +109,25 @@
           "detail": "the ladder stepped down when the link saturated"
         },
         {
-          "invariant": "estimate_stayed_bounded",
+          "invariant": "estimate_did_not_climb_while_congested",
           "ok": true,
-          "measured": 1600000,
-          "limit": "<= 1760000",
-          "detail": "the bandwidth estimate did not climb while the link was congested"
-        },
-        {
-          "invariant": "estimate_did_not_rise_at_the_end",
-          "ok": true,
-          "measured": 817419,
-          "limit": "<= 1760000",
-          "detail": "the estimate at the end of the saturation phase was still bounded"
+          "measured": 0,
+          "limit": "<= 0",
+          "detail": "the estimator never raised its target on a report that said the link was congested (the AIMD regression guard)"
         },
         {
           "invariant": "delivered_stayed_within_capacity",
           "ok": true,
-          "measured": 582432,
+          "measured": 580784,
           "limit": "<= 780000",
           "detail": "the ladder converged onto the link's capacity instead of overshooting it"
+        },
+        {
+          "invariant": "offered_load_tracked_the_capacity",
+          "ok": true,
+          "measured": 1.264,
+          "limit": "0.5 .. 2.5 x capacity",
+          "detail": "the offered load converged onto the link's capacity"
         },
         {
           "invariant": "ladder_recovered",
@@ -140,7 +140,7 @@
           "invariant": "throughput_recovered",
           "ok": true,
           "measured": 1546744,
-          "limit": "> 582432",
+          "limit": "> 580784",
           "detail": "the stream carried more data after the recovery than during the saturation"
         },
         {
@@ -151,9 +151,10 @@
           "detail": "the ladder moved a bounded number of times"
         }
       ],
+      "estimator_raises_on_congested_reports": [],
       "curve": [
         {
-          "t_s": 2e-06,
+          "t_s": 1e-06,
           "level": 0,
           "target_bps": 1600000,
           "estimate_bps": 1600000,
@@ -162,1164 +163,1164 @@
           "loss_rate": 0.0
         },
         {
-          "t_s": 0.559384,
+          "t_s": 0.509075,
           "level": 1,
-          "target_bps": 1383200,
+          "target_bps": 1324880,
           "estimate_bps": 1324880,
-          "delivered_bps": 826893,
-          "sent_bps": 583808,
-          "loss_rate": 0.333333
+          "delivered_bps": 601112,
+          "sent_bps": 1382808,
+          "loss_rate": 0.347826
         },
         {
-          "t_s": 1.020662,
+          "t_s": 1.015012,
           "level": 1,
           "target_bps": 896000,
           "estimate_bps": 1144372,
-          "delivered_bps": 810694,
-          "sent_bps": 840870,
-          "loss_rate": 0.2
+          "delivered_bps": 636605,
+          "sent_bps": 636605,
+          "loss_rate": 0.272727
         },
         {
-          "t_s": 1.521141,
+          "t_s": 1.507171,
           "level": 1,
           "target_bps": 896000,
           "estimate_bps": 1025941,
-          "delivered_bps": 907249,
-          "sent_bps": 907249,
-          "loss_rate": 0.294118
+          "delivered_bps": 962491,
+          "sent_bps": 929147,
+          "loss_rate": 0.210526
         },
         {
-          "t_s": 2.010821,
+          "t_s": 2.004771,
           "level": 1,
           "target_bps": 896000,
           "estimate_bps": 948238,
-          "delivered_bps": 339384,
-          "sent_bps": 949970,
-          "loss_rate": 0.181818
+          "delivered_bps": 631908,
+          "sent_bps": 931154,
+          "loss_rate": 0.142857
         },
         {
-          "t_s": 2.510992,
+          "t_s": 2.507991,
           "level": 1,
-          "target_bps": 873476,
-          "estimate_bps": 897257,
-          "delivered_bps": 642986,
-          "sent_bps": 923626,
-          "loss_rate": 0.2
+          "target_bps": 896000,
+          "estimate_bps": 887531,
+          "delivered_bps": 634644,
+          "sent_bps": 935186,
+          "loss_rate": 0.227273
         },
         {
-          "t_s": 3.008671,
+          "t_s": 3.014282,
           "level": 1,
           "target_bps": 863809,
-          "estimate_bps": 863809,
-          "delivered_bps": 1071948,
-          "sent_bps": 1607923,
-          "loss_rate": 0.2
-        },
-        {
-          "t_s": 3.552764,
-          "level": 1,
-          "target_bps": 841864,
-          "estimate_bps": 841864,
-          "delivered_bps": 671308,
-          "sent_bps": 452005,
-          "loss_rate": 0.1
-        },
-        {
-          "t_s": 4.016596,
-          "level": 1,
-          "target_bps": 827466,
-          "estimate_bps": 827466,
-          "delivered_bps": 876328,
-          "sent_bps": 839327,
+          "estimate_bps": 857428,
+          "delivered_bps": 0,
+          "sent_bps": 899763,
           "loss_rate": 0.181818
         },
         {
-          "t_s": 4.503922,
+          "t_s": 3.511928,
           "level": 1,
-          "target_bps": 818019,
-          "estimate_bps": 818019,
-          "delivered_bps": 898476,
-          "sent_bps": 3035585,
-          "loss_rate": 0.1875
+          "target_bps": 791459,
+          "estimate_bps": 837677,
+          "delivered_bps": 1298112,
+          "sent_bps": 1298112,
+          "loss_rate": 0.2
         },
         {
-          "t_s": 5.023142,
+          "t_s": 4.011527,
           "level": 1,
-          "target_bps": 689941,
-          "estimate_bps": 811821,
-          "delivered_bps": 510176,
-          "sent_bps": 611149,
-          "loss_rate": 0.142857
+          "target_bps": 622663,
+          "estimate_bps": 824719,
+          "delivered_bps": 0,
+          "sent_bps": 472621,
+          "loss_rate": 0.166667
         },
         {
-          "t_s": 5.522819,
+          "t_s": 4.50098,
           "level": 1,
-          "target_bps": 716327,
+          "target_bps": 758978,
+          "estimate_bps": 816217,
+          "delivered_bps": 599533,
+          "sent_bps": 790135,
+          "loss_rate": 0.25
+        },
+        {
+          "t_s": 5.006954,
+          "level": 1,
+          "target_bps": 811821,
+          "estimate_bps": 810638,
+          "delivered_bps": 602075,
+          "sent_bps": 848675,
+          "loss_rate": 0.25
+        },
+        {
+          "t_s": 5.508928,
+          "level": 1,
+          "target_bps": 806978,
           "estimate_bps": 806978,
-          "delivered_bps": 874983,
-          "sent_bps": 624091,
-          "loss_rate": 0.125
-        },
-        {
-          "t_s": 6.011833,
-          "level": 1,
-          "target_bps": 804577,
-          "estimate_bps": 804577,
-          "delivered_bps": 605059,
-          "sent_bps": 845318,
-          "loss_rate": 0.1
-        },
-        {
-          "t_s": 6.511216,
-          "level": 1,
-          "target_bps": 803336,
-          "estimate_bps": 803002,
-          "delivered_bps": 713655,
-          "sent_bps": 191990,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 7.04145,
-          "level": 1,
-          "target_bps": 693787,
-          "estimate_bps": 664408,
-          "delivered_bps": 582309,
-          "sent_bps": 291154,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 7.622832,
-          "level": 1,
-          "target_bps": 643919,
-          "estimate_bps": 654983,
-          "delivered_bps": 342999,
-          "sent_bps": 140156,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 8.014744,
-          "level": 1,
-          "target_bps": 685790,
-          "estimate_bps": 700417,
-          "delivered_bps": 886904,
-          "sent_bps": 482079,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 8.510641,
-          "level": 1,
-          "target_bps": 750607,
-          "estimate_bps": 750607,
-          "delivered_bps": 726321,
-          "sent_bps": 788318,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 9.008207,
-          "level": 1,
-          "target_bps": 648959,
-          "estimate_bps": 648959,
-          "delivered_bps": 692390,
-          "sent_bps": 692390,
-          "loss_rate": 0.083333
-        },
-        {
-          "t_s": 9.505877,
-          "level": 1,
-          "target_bps": 562859,
-          "estimate_bps": 562859,
-          "delivered_bps": 617614,
-          "sent_bps": 617614,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 10.00449,
-          "level": 1,
-          "target_bps": 519504,
-          "estimate_bps": 524379,
-          "delivered_bps": 824867,
-          "sent_bps": 570555,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 10.514458,
-          "level": 1,
-          "target_bps": 544234,
-          "estimate_bps": 544234,
-          "delivered_bps": 570972,
-          "sent_bps": 576822,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 11.009331,
-          "level": 1,
-          "target_bps": 566657,
-          "estimate_bps": 566657,
-          "delivered_bps": 876020,
-          "sent_bps": 612280,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 11.51133,
-          "level": 1,
-          "target_bps": 590398,
-          "estimate_bps": 590398,
-          "delivered_bps": 2277346,
-          "sent_bps": 1152731,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 12.006403,
-          "level": 1,
-          "target_bps": 622358,
-          "estimate_bps": 622358,
-          "delivered_bps": 891967,
-          "sent_bps": 622816,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 12.506935,
-          "level": 1,
-          "target_bps": 638762,
-          "estimate_bps": 652698,
-          "delivered_bps": 634826,
-          "sent_bps": 634826,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 13.026176,
-          "level": 1,
-          "target_bps": 586745,
-          "estimate_bps": 676042,
-          "delivered_bps": 356455,
-          "sent_bps": 356455,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 13.517991,
-          "level": 1,
-          "target_bps": 643068,
-          "estimate_bps": 719094,
-          "delivered_bps": 589213,
-          "sent_bps": 589213,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 14.024701,
-          "level": 1,
-          "target_bps": 735514,
-          "estimate_bps": 744405,
-          "delivered_bps": 66525,
-          "sent_bps": 169917,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 14.567353,
-          "level": 1,
-          "target_bps": 754646,
-          "estimate_bps": 761163,
-          "delivered_bps": 222476,
-          "sent_bps": 104166,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 15.01162,
-          "level": 1,
-          "target_bps": 815432,
-          "estimate_bps": 815432,
-          "delivered_bps": 263311,
-          "sent_bps": 896525,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 15.506821,
-          "level": 1,
-          "target_bps": 893697,
-          "estimate_bps": 910572,
-          "delivered_bps": 984083,
-          "sent_bps": 952371,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 16.009927,
-          "level": 1,
-          "target_bps": 797859,
-          "estimate_bps": 780112,
-          "delivered_bps": 1230244,
-          "sent_bps": 852200,
-          "loss_rate": 0.111111
-        },
-        {
-          "t_s": 16.510538,
-          "level": 1,
-          "target_bps": 603962,
-          "estimate_bps": 750007,
-          "delivered_bps": 691617,
-          "sent_bps": 725334,
-          "loss_rate": 0.2
-        },
-        {
-          "t_s": 17.001664,
-          "level": 1,
-          "target_bps": 735772,
-          "estimate_bps": 775200,
-          "delivered_bps": 956998,
-          "sent_bps": 815043,
-          "loss_rate": 0.285714
-        },
-        {
-          "t_s": 17.510294,
-          "level": 1,
-          "target_bps": 788225,
-          "estimate_bps": 791729,
-          "delivered_bps": 602375,
-          "sent_bps": 824501,
-          "loss_rate": 0.125
-        },
-        {
-          "t_s": 18.014126,
-          "level": 1,
-          "target_bps": 802573,
-          "estimate_bps": 802573,
-          "delivered_bps": 600848,
-          "sent_bps": 837182,
+          "delivered_bps": 644812,
+          "sent_bps": 903543,
           "loss_rate": 0.181818
         },
         {
-          "t_s": 18.507262,
+          "t_s": 6.002207,
           "level": 1,
-          "target_bps": 809688,
-          "estimate_bps": 809688,
-          "delivered_bps": 587727,
-          "sent_bps": 826246,
-          "loss_rate": 0.142857
+          "target_bps": 772129,
+          "estimate_bps": 804577,
+          "delivered_bps": 597195,
+          "sent_bps": 800739,
+          "loss_rate": 0.25
         },
         {
-          "t_s": 19.014307,
+          "t_s": 6.508896,
           "level": 1,
-          "target_bps": 807615,
-          "estimate_bps": 814357,
-          "delivered_bps": 600251,
-          "sent_bps": 841602,
+          "target_bps": 770286,
+          "estimate_bps": 803002,
+          "delivered_bps": 602558,
+          "sent_bps": 805922,
           "loss_rate": 0.214286
         },
         {
-          "t_s": 19.508107,
+          "t_s": 7.001966,
           "level": 1,
-          "target_bps": 817419,
-          "estimate_bps": 817419,
-          "delivered_bps": 889185,
-          "sent_bps": 841268,
-          "loss_rate": 0.153846
+          "target_bps": 801968,
+          "estimate_bps": 801968,
+          "delivered_bps": 601464,
+          "sent_bps": 837538,
+          "loss_rate": 0.25
         },
         {
-          "t_s": 20.011276,
+          "t_s": 7.507965,
           "level": 1,
-          "target_bps": 819428,
-          "estimate_bps": 819811,
+          "target_bps": 762290,
+          "estimate_bps": 801289,
           "delivered_bps": 0,
-          "sent_bps": 892238,
+          "sent_bps": 792397,
+          "loss_rate": 0.214286
+        },
+        {
+          "t_s": 8.012102,
+          "level": 1,
+          "target_bps": 800845,
+          "estimate_bps": 800845,
+          "delivered_bps": 1458080,
+          "sent_bps": 872130,
+          "loss_rate": 0.25
+        },
+        {
+          "t_s": 8.515653,
+          "level": 1,
+          "target_bps": 749071,
+          "estimate_bps": 800553,
+          "delivered_bps": 613847,
+          "sent_bps": 532342,
+          "loss_rate": 0.25
+        },
+        {
+          "t_s": 9.007962,
+          "level": 1,
+          "target_bps": 800402,
+          "estimate_bps": 800361,
+          "delivered_bps": 619005,
+          "sent_bps": 860159,
+          "loss_rate": 0.2
+        },
+        {
+          "t_s": 9.514091,
+          "level": 1,
+          "target_bps": 800234,
+          "estimate_bps": 800234,
+          "delivered_bps": 600844,
+          "sent_bps": 834924,
+          "loss_rate": 0.25
+        },
+        {
+          "t_s": 10.006611,
+          "level": 1,
+          "target_bps": 761231,
+          "estimate_bps": 800153,
+          "delivered_bps": 599202,
+          "sent_bps": 791945,
+          "loss_rate": 0.277778
+        },
+        {
+          "t_s": 10.512174,
+          "level": 1,
+          "target_bps": 800099,
+          "estimate_bps": 800099,
+          "delivered_bps": 0,
+          "sent_bps": 835714,
+          "loss_rate": 0.25
+        },
+        {
+          "t_s": 11.001797,
+          "level": 1,
+          "target_bps": 764651,
+          "estimate_bps": 800064,
+          "delivered_bps": 619910,
+          "sent_bps": 822931,
+          "loss_rate": 0.235294
+        },
+        {
+          "t_s": 11.5066,
+          "level": 1,
+          "target_bps": 767795,
+          "estimate_bps": 800040,
+          "delivered_bps": 621357,
+          "sent_bps": 828476,
+          "loss_rate": 0.25
+        },
+        {
+          "t_s": 12.014441,
+          "level": 1,
+          "target_bps": 800025,
+          "estimate_bps": 800025,
+          "delivered_bps": 794097,
+          "sent_bps": 833864,
           "loss_rate": 0.266667
         },
         {
-          "t_s": 20.504513,
+          "t_s": 12.503235,
           "level": 1,
-          "target_bps": 846002,
-          "estimate_bps": 866421,
+          "target_bps": 749702,
+          "estimate_bps": 800015,
+          "delivered_bps": 600125,
+          "sent_bps": 781163,
+          "loss_rate": 0.214286
+        },
+        {
+          "t_s": 13.011079,
+          "level": 1,
+          "target_bps": 800008,
+          "estimate_bps": 800008,
+          "delivered_bps": 902541,
+          "sent_bps": 835853,
+          "loss_rate": 0.1
+        },
+        {
+          "t_s": 13.504325,
+          "level": 1,
+          "target_bps": 761808,
+          "estimate_bps": 800004,
+          "delivered_bps": 603344,
+          "sent_bps": 798174,
+          "loss_rate": 0.222222
+        },
+        {
+          "t_s": 14.014527,
+          "level": 1,
+          "target_bps": 798644,
+          "estimate_bps": 800000,
+          "delivered_bps": 822627,
+          "sent_bps": 822627,
+          "loss_rate": 0.214286
+        },
+        {
+          "t_s": 14.507319,
+          "level": 1,
+          "target_bps": 767863,
+          "estimate_bps": 800000,
+          "delivered_bps": 597401,
+          "sent_bps": 796535,
+          "loss_rate": 0.230769
+        },
+        {
+          "t_s": 15.013201,
+          "level": 1,
+          "target_bps": 800000,
+          "estimate_bps": 800000,
+          "delivered_bps": 599687,
+          "sent_bps": 833065,
+          "loss_rate": 0.230769
+        },
+        {
+          "t_s": 15.505546,
+          "level": 1,
+          "target_bps": 760901,
+          "estimate_bps": 800000,
+          "delivered_bps": 608978,
+          "sent_bps": 804613,
+          "loss_rate": 0.214286
+        },
+        {
+          "t_s": 16.013225,
+          "level": 1,
+          "target_bps": 800000,
+          "estimate_bps": 800000,
+          "delivered_bps": 587678,
+          "sent_bps": 816383,
+          "loss_rate": 0.111111
+        },
+        {
+          "t_s": 16.513226,
+          "level": 1,
+          "target_bps": 748185,
+          "estimate_bps": 800000,
+          "delivered_bps": 543168,
+          "sent_bps": 543168,
+          "loss_rate": 0.214286
+        },
+        {
+          "t_s": 17.01343,
+          "level": 1,
+          "target_bps": 800000,
+          "estimate_bps": 800000,
+          "delivered_bps": 620291,
+          "sent_bps": 861687,
+          "loss_rate": 0.272727
+        },
+        {
+          "t_s": 17.508827,
+          "level": 1,
+          "target_bps": 766481,
+          "estimate_bps": 800000,
+          "delivered_bps": 1199051,
+          "sent_bps": 797869,
+          "loss_rate": 0.181818
+        },
+        {
+          "t_s": 18.001233,
+          "level": 1,
+          "target_bps": 800000,
+          "estimate_bps": 800000,
+          "delivered_bps": 598291,
+          "sent_bps": 831126,
+          "loss_rate": 0.235294
+        },
+        {
+          "t_s": 18.506343,
+          "level": 1,
+          "target_bps": 761875,
+          "estimate_bps": 800000,
+          "delivered_bps": 599129,
+          "sent_bps": 792598,
+          "loss_rate": 0.214286
+        },
+        {
+          "t_s": 19.01097,
+          "level": 1,
+          "target_bps": 800000,
+          "estimate_bps": 800000,
+          "delivered_bps": 616922,
+          "sent_bps": 857008,
+          "loss_rate": 0.230769
+        },
+        {
+          "t_s": 19.502354,
+          "level": 1,
+          "target_bps": 759801,
+          "estimate_bps": 800000,
+          "delivered_bps": 599812,
+          "sent_bps": 791252,
+          "loss_rate": 0.214286
+        },
+        {
+          "t_s": 20.009327,
+          "level": 1,
+          "target_bps": 800000,
+          "estimate_bps": 800000,
           "delivered_bps": 0,
-          "sent_bps": 906530,
+          "sent_bps": 863277,
+          "loss_rate": 0.235294
+        },
+        {
+          "t_s": 20.514962,
+          "level": 1,
+          "target_bps": 797841,
+          "estimate_bps": 801430,
+          "delivered_bps": 574252,
+          "sent_bps": 574252,
           "loss_rate": 0.0
         },
         {
-          "t_s": 21.013823,
+          "t_s": 21.001419,
+          "level": 1,
+          "target_bps": 768023,
+          "estimate_bps": 810799,
+          "delivered_bps": 1657397,
+          "sent_bps": 828698,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 21.50835,
+          "level": 1,
+          "target_bps": 826630,
+          "estimate_bps": 826630,
+          "delivered_bps": 867760,
+          "sent_bps": 867760,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 22.015208,
+          "level": 1,
+          "target_bps": 847005,
+          "estimate_bps": 847005,
+          "delivered_bps": 1023752,
+          "sent_bps": 616697,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 22.503146,
+          "level": 1,
+          "target_bps": 831317,
+          "estimate_bps": 870014,
+          "delivered_bps": 866381,
+          "sent_bps": 866381,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 23.011292,
+          "level": 1,
+          "target_bps": 894942,
+          "estimate_bps": 894942,
+          "delivered_bps": 941568,
+          "sent_bps": 941568,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 23.502502,
           "level": 1,
           "target_bps": 896000,
-          "estimate_bps": 922200,
-          "delivered_bps": 32511,
-          "sent_bps": 905942,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 21.507013,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 934165,
-          "delivered_bps": 890240,
-          "sent_bps": 923377,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 22.012603,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 951985,
-          "delivered_bps": 935118,
-          "sent_bps": 935118,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 22.517001,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 973456,
-          "delivered_bps": 627244,
-          "sent_bps": 627244,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 23.00156,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 997480,
-          "delivered_bps": 344175,
-          "sent_bps": 963382,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 23.536078,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1023707,
-          "delivered_bps": 1232904,
-          "sent_bps": 531110,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 24.006087,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1050861,
-          "delivered_bps": 928356,
-          "sent_bps": 928356,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 24.514146,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1078716,
-          "delivered_bps": 1566544,
-          "sent_bps": 933228,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 25.006739,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1107058,
-          "delivered_bps": 960625,
-          "sent_bps": 960625,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 25.512877,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1135894,
-          "delivered_bps": 960279,
-          "sent_bps": 960279,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 26.003718,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1164796,
-          "delivered_bps": 965956,
-          "sent_bps": 965956,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 26.505426,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1193922,
-          "delivered_bps": 929679,
-          "sent_bps": 929679,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 27.005853,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1223291,
-          "delivered_bps": 1875001,
-          "sent_bps": 954630,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 27.509171,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1252870,
-          "delivered_bps": 1863994,
-          "sent_bps": 931997,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 28.015225,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1282886,
-          "delivered_bps": 634013,
-          "sent_bps": 634013,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 28.517381,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1313239,
-          "delivered_bps": 701385,
-          "sent_bps": 701385,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 29.010091,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1343641,
-          "delivered_bps": 1569152,
-          "sent_bps": 934782,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 29.502665,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1373848,
-          "delivered_bps": 953956,
-          "sent_bps": 953956,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 30.008822,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1404146,
-          "delivered_bps": 933424,
-          "sent_bps": 933424,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 30.514851,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1434747,
-          "delivered_bps": 638582,
-          "sent_bps": 638582,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 31.008415,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1465649,
-          "delivered_bps": 933856,
-          "sent_bps": 933856,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 31.558549,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1496320,
-          "delivered_bps": 438328,
-          "sent_bps": 438328,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 32.005576,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1526924,
-          "delivered_bps": 965026,
-          "sent_bps": 965026,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 32.51444,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1557826,
-          "delivered_bps": 924572,
-          "sent_bps": 924572,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 33.005377,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1588835,
-          "delivered_bps": 933987,
-          "sent_bps": 933987,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 33.511967,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1619675,
-          "delivered_bps": 895539,
-          "sent_bps": 928873,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 34.003839,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1650617,
-          "delivered_bps": 934349,
-          "sent_bps": 934349,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 34.509667,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1688620,
-          "delivered_bps": 927292,
-          "sent_bps": 927292,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 35.003296,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1719233,
-          "delivered_bps": 953977,
-          "sent_bps": 953977,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 35.51076,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1750100,
-          "delivered_bps": 1273414,
-          "sent_bps": 938226,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 36.002556,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1781163,
-          "delivered_bps": 997608,
-          "sent_bps": 997608,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 36.506487,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1812162,
-          "delivered_bps": 931912,
-          "sent_bps": 931912,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 37.012876,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1843504,
-          "delivered_bps": 1571173,
-          "sent_bps": 935986,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 37.507195,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1874998,
-          "delivered_bps": 1206364,
-          "sent_bps": 912964,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 38.009604,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1906740,
-          "delivered_bps": 1878576,
-          "sent_bps": 939288,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 38.501956,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1938862,
-          "delivered_bps": 966806,
-          "sent_bps": 933313,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 39.007956,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1971568,
-          "delivered_bps": 942123,
-          "sent_bps": 942123,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 39.503343,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2004117,
-          "delivered_bps": 1660569,
-          "sent_bps": 1494437,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 40.012559,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2045404,
-          "delivered_bps": 1670132,
-          "sent_bps": 1670132,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 40.515053,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2077880,
-          "delivered_bps": 1666630,
-          "sent_bps": 1666630,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 41.005872,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2110494,
-          "delivered_bps": 1652543,
-          "sent_bps": 1652543,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 41.514175,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2143271,
-          "delivered_bps": 1664612,
-          "sent_bps": 1664612,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 42.00548,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2176605,
-          "delivered_bps": 1806949,
-          "sent_bps": 1642613,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 42.514375,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2210225,
-          "delivered_bps": 1498356,
-          "sent_bps": 1664923,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 43.005859,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2243939,
-          "delivered_bps": 893949,
-          "sent_bps": 1655544,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 43.510288,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2278033,
-          "delivered_bps": 466293,
-          "sent_bps": 1665121,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 44.00112,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2312368,
-          "delivered_bps": 2140590,
-          "sent_bps": 1672289,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 44.525411,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2346563,
-          "delivered_bps": 841329,
-          "sent_bps": 1314539,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 45.007898,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2380455,
-          "delivered_bps": 1634534,
-          "sent_bps": 1634534,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 45.528212,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2413899,
-          "delivered_bps": 1638717,
-          "sent_bps": 1638717,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 46.01414,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2448051,
-          "delivered_bps": 1970182,
-          "sent_bps": 1970182,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 46.533993,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2490077,
-          "delivered_bps": 1168478,
-          "sent_bps": 1168478,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 47.012843,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2523861,
-          "delivered_bps": 1854126,
-          "sent_bps": 1854126,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 47.520644,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2566096,
-          "delivered_bps": 2351022,
-          "sent_bps": 2351022,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 48.024212,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2599855,
-          "delivered_bps": 1658014,
-          "sent_bps": 1658014,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 48.529614,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2634408,
-          "delivered_bps": 1066869,
-          "sent_bps": 1066869,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 49.01775,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2668827,
-          "delivered_bps": 1432996,
-          "sent_bps": 1432996,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 49.512301,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2704083,
-          "delivered_bps": 2032327,
-          "sent_bps": 2032327,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 50.024758,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2739447,
-          "delivered_bps": 1673155,
-          "sent_bps": 1673155,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 50.519328,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2765992,
-          "delivered_bps": 2289324,
-          "sent_bps": 2289324,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 51.015899,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2811492,
-          "delivered_bps": 1647095,
-          "sent_bps": 823547,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 51.557428,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2847987,
-          "delivered_bps": 1597840,
-          "sent_bps": 798920,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 52.025796,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2875034,
-          "delivered_bps": 1933374,
-          "sent_bps": 1933374,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 52.516855,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2912109,
-          "delivered_bps": 1743849,
-          "sent_bps": 1743849,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 53.014708,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2948995,
+          "estimate_bps": 921119,
           "delivered_bps": 0,
-          "sent_bps": 1613060,
+          "sent_bps": 935306,
           "loss_rate": 0.0
         },
         {
-          "t_s": 53.503192,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2985423,
-          "delivered_bps": 1234595,
-          "sent_bps": 1714801,
+          "t_s": 24.009367,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 948287,
+          "delivered_bps": 969083,
+          "sent_bps": 969083,
           "loss_rate": 0.0
         },
         {
-          "t_s": 54.012949,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3031569,
-          "delivered_bps": 1664212,
-          "sent_bps": 1664212,
+          "t_s": 24.514396,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 982545,
+          "delivered_bps": 932174,
+          "sent_bps": 932174,
           "loss_rate": 0.0
         },
         {
-          "t_s": 54.506754,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3068218,
-          "delivered_bps": 1658911,
-          "sent_bps": 1658911,
+          "t_s": 25.01029,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1010356,
+          "delivered_bps": 967172,
+          "sent_bps": 933666,
           "loss_rate": 0.0
         },
         {
-          "t_s": 55.014058,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3105268,
+          "t_s": 25.501447,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1038549,
+          "delivered_bps": 961831,
+          "sent_bps": 961831,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 26.01241,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1066907,
+          "delivered_bps": 933721,
+          "sent_bps": 933721,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 26.503453,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1095400,
+          "delivered_bps": 930484,
+          "sent_bps": 930484,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 27.011336,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1123977,
+          "delivered_bps": 937878,
+          "sent_bps": 937878,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 27.514386,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1152601,
+          "delivered_bps": 932640,
+          "sent_bps": 932640,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 28.004008,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1181518,
+          "delivered_bps": 967025,
+          "sent_bps": 967025,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 28.50999,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1210820,
+          "delivered_bps": 897461,
+          "sent_bps": 930867,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 29.005223,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1239950,
+          "delivered_bps": 936499,
+          "sent_bps": 936499,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 29.509822,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1269337,
+          "delivered_bps": 934861,
+          "sent_bps": 934861,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 30.01519,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1299395,
+          "delivered_bps": 651074,
+          "sent_bps": 651074,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 30.506699,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1329543,
+          "delivered_bps": 966787,
+          "sent_bps": 966787,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 31.007807,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1367305,
+          "delivered_bps": 340745,
+          "sent_bps": 953779,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 31.512619,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1396968,
+          "delivered_bps": 974953,
+          "sent_bps": 974953,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 32.003446,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1426781,
+          "delivered_bps": 1935022,
+          "sent_bps": 967511,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 32.514356,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1457205,
+          "delivered_bps": 642903,
+          "sent_bps": 642903,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 33.00833,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1488196,
+          "delivered_bps": 934270,
+          "sent_bps": 934270,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 33.501417,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1518986,
+          "delivered_bps": 931755,
+          "sent_bps": 931755,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 34.011368,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1549770,
           "delivered_bps": 0,
-          "sent_bps": 1154536,
+          "sent_bps": 935312,
           "loss_rate": 0.0
         },
         {
-          "t_s": 55.504605,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3142471,
-          "delivered_bps": 1718858,
-          "sent_bps": 1718858,
+          "t_s": 34.513651,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1580770,
+          "delivered_bps": 926309,
+          "sent_bps": 926309,
           "loss_rate": 0.0
         },
         {
-          "t_s": 56.005459,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3179617,
-          "delivered_bps": 1664482,
-          "sent_bps": 1664482,
+          "t_s": 35.002134,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1611788,
+          "delivered_bps": 939743,
+          "sent_bps": 939743,
           "loss_rate": 0.0
         },
         {
-          "t_s": 56.512796,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3216971,
-          "delivered_bps": 1709366,
-          "sent_bps": 1709366,
+          "t_s": 35.509899,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1642636,
+          "delivered_bps": 964023,
+          "sent_bps": 964023,
           "loss_rate": 0.0
         },
         {
-          "t_s": 57.021538,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3253997,
-          "delivered_bps": 2138238,
-          "sent_bps": 2138238,
+          "t_s": 36.00127,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1673903,
+          "delivered_bps": 954398,
+          "sent_bps": 954398,
           "loss_rate": 0.0
         },
         {
-          "t_s": 57.500859,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3290812,
-          "delivered_bps": 1666630,
-          "sent_bps": 1666630,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 58.022963,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3337082,
-          "delivered_bps": 2370321,
-          "sent_bps": 1302367,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 58.510638,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3374440,
-          "delivered_bps": 2410733,
-          "sent_bps": 1651156,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 59.005134,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3412151,
-          "delivered_bps": 1655801,
-          "sent_bps": 1655801,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 59.512653,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3450061,
-          "delivered_bps": 1672567,
-          "sent_bps": 1672567,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 60.0038,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3488359,
-          "delivered_bps": 1668079,
-          "sent_bps": 1668079,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 60.512943,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3526966,
-          "delivered_bps": 1491781,
-          "sent_bps": 1657617,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 61.006579,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3565597,
-          "delivered_bps": 1661951,
-          "sent_bps": 1661951,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 61.512875,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3604420,
-          "delivered_bps": 1666598,
-          "sent_bps": 1666598,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 62.003591,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3643092,
-          "delivered_bps": 1665974,
-          "sent_bps": 1665974,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 62.510809,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3682433,
-          "delivered_bps": 1835674,
-          "sent_bps": 1668726,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 63.003681,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3722031,
-          "delivered_bps": 1743941,
-          "sent_bps": 1743941,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 63.505919,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3762132,
-          "delivered_bps": 1662572,
-          "sent_bps": 1662572,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 64.012582,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3802182,
-          "delivered_bps": 2041975,
-          "sent_bps": 2041975,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 64.521055,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3842378,
+          "t_s": 36.506868,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1705403,
           "delivered_bps": 0,
-          "sent_bps": 1413364,
+          "sent_bps": 932622,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 37.014595,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1737190,
+          "delivered_bps": 932549,
+          "sent_bps": 932549,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 37.506944,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1769307,
+          "delivered_bps": 933520,
+          "sent_bps": 933520,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 38.002128,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1801249,
+          "delivered_bps": 598897,
+          "sent_bps": 931784,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 38.507732,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1833138,
+          "delivered_bps": 930542,
+          "sent_bps": 930542,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 39.015693,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1865351,
+          "delivered_bps": 621454,
+          "sent_bps": 621454,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 39.505792,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1897609,
+          "delivered_bps": 1875863,
+          "sent_bps": 937931,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 40.011614,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1929797,
+          "delivered_bps": 933721,
+          "sent_bps": 933721,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 40.512574,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1962580,
+          "delivered_bps": 934554,
+          "sent_bps": 934554,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 41.015621,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1995556,
+          "delivered_bps": 844246,
+          "sent_bps": 622023,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 41.506679,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2028469,
+          "delivered_bps": 1657354,
+          "sent_bps": 1657354,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 42.013743,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2061270,
+          "delivered_bps": 0,
+          "sent_bps": 1672845,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 42.503577,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2094476,
+          "delivered_bps": 1671796,
+          "sent_bps": 1671796,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 43.0017,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2127798,
+          "delivered_bps": 1665178,
+          "sent_bps": 1665178,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 43.51563,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2160992,
+          "delivered_bps": 1125761,
+          "sent_bps": 1125761,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 44.007016,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2194428,
+          "delivered_bps": 1641294,
+          "sent_bps": 1641294,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 44.509374,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2228015,
+          "delivered_bps": 1840101,
+          "sent_bps": 1672750,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 45.014362,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2261801,
+          "delivered_bps": 1500215,
+          "sent_bps": 1666989,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 45.505396,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2295629,
+          "delivered_bps": 1661122,
+          "sent_bps": 1661122,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 46.013442,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2337353,
+          "delivered_bps": 1675278,
+          "sent_bps": 1675278,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 46.502875,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2363263,
+          "delivered_bps": 1670545,
+          "sent_bps": 1670545,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 47.011383,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2397704,
+          "delivered_bps": 1520276,
+          "sent_bps": 1689280,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 47.502114,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2432340,
+          "delivered_bps": 1713441,
+          "sent_bps": 1713441,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 48.007839,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2467118,
+          "delivered_bps": 1658854,
+          "sent_bps": 1658854,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 48.512296,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2509963,
+          "delivered_bps": 3428303,
+          "sent_bps": 1714151,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 49.001533,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2544483,
+          "delivered_bps": 1672457,
+          "sent_bps": 1672457,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 49.506074,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2578885,
+          "delivered_bps": 1721143,
+          "sent_bps": 1721143,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 50.006304,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2614023,
+          "delivered_bps": 1698663,
+          "sent_bps": 1698663,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 50.510663,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2649801,
+          "delivered_bps": 0,
+          "sent_bps": 1676768,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 51.013193,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2685238,
+          "delivered_bps": 1720926,
+          "sent_bps": 1720926,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 51.50229,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2720368,
+          "delivered_bps": 1665604,
+          "sent_bps": 1665604,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 52.004752,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2755689,
+          "delivered_bps": 1705605,
+          "sent_bps": 1705605,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 52.507236,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2791348,
+          "delivered_bps": 1699713,
+          "sent_bps": 1699713,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 53.005747,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2827292,
+          "delivered_bps": 1692824,
+          "sent_bps": 1692824,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 53.505163,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2862892,
+          "delivered_bps": 1711588,
+          "sent_bps": 1711588,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 54.015624,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2907724,
+          "delivered_bps": 1124408,
+          "sent_bps": 1124408,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 54.505163,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2943503,
+          "delivered_bps": 1883682,
+          "sent_bps": 1712368,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 55.01229,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2979329,
+          "delivered_bps": 1659613,
+          "sent_bps": 1659613,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 55.503424,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3015415,
+          "delivered_bps": 1664528,
+          "sent_bps": 1664528,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 56.010211,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3051547,
+          "delivered_bps": 893630,
+          "sent_bps": 1654953,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 56.50118,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3087947,
+          "delivered_bps": 1666296,
+          "sent_bps": 1666296,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 57.007598,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3124384,
+          "delivered_bps": 1687463,
+          "sent_bps": 1687463,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 57.50142,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3161365,
+          "delivered_bps": 1652215,
+          "sent_bps": 1652215,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 58.005413,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3198553,
+          "delivered_bps": 1941540,
+          "sent_bps": 1764964,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 58.512191,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3244522,
+          "delivered_bps": 1669990,
+          "sent_bps": 1669990,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 59.004323,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3273118,
+          "delivered_bps": 1831891,
+          "sent_bps": 1665287,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 59.509185,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3319735,
+          "delivered_bps": 2445406,
+          "sent_bps": 1674904,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 60.015278,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3357533,
+          "delivered_bps": 1158402,
+          "sent_bps": 1158402,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 60.505128,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3395746,
+          "delivered_bps": 1712632,
+          "sent_bps": 1712632,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 61.0152,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3434475,
+          "delivered_bps": 1131868,
+          "sent_bps": 1131868,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 61.503318,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3464039,
+          "delivered_bps": 1703606,
+          "sent_bps": 1703606,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 62.006122,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3511976,
+          "delivered_bps": 0,
+          "sent_bps": 1721049,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 62.515454,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3550749,
+          "delivered_bps": 1131030,
+          "sent_bps": 1131030,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 63.002163,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3589877,
+          "delivered_bps": 0,
+          "sent_bps": 1681081,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 63.512693,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3629040,
+          "delivered_bps": 1660822,
+          "sent_bps": 1660822,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 64.015325,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3668473,
+          "delivered_bps": 1155331,
+          "sent_bps": 1155331,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 64.507695,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3708221,
+          "delivered_bps": 1691616,
+          "sent_bps": 1691616,
           "loss_rate": 0.0
         }
       ]
@@ -1351,24 +1352,24 @@
         "initial_level": 0,
         "level_after_saturation": 2,
         "target_after_saturation_bps": 400000,
-        "estimate_after_saturation_bps": 978984,
+        "estimate_after_saturation_bps": 987946,
         "final_level": 0,
         "final_height": 1080,
         "final_target_bps": 1600000,
-        "final_estimate_bps": 4137797,
-        "saturated_delivered_bps": 373408,
-        "recovered_delivered_bps": 1561680,
+        "final_estimate_bps": 3388501,
+        "saturated_delivered_bps": 386744,
+        "recovered_delivered_bps": 1546744,
         "saturated_sent_bps": 386744,
         "recovered_sent_bps": 1546744,
         "level_changes": 6,
         "level_drops": 3,
         "level_rises": 3,
         "floor_blocks": 0,
-        "keyframe_cost_blocks": 1248,
-        "level_changes_suppressed": 17,
-        "packets_sent": 8367,
-        "packets_received": 8367,
-        "packets_dropped": 166,
+        "keyframe_cost_blocks": 1382,
+        "level_changes_suppressed": 58,
+        "packets_sent": 7244,
+        "packets_received": 7244,
+        "packets_dropped": 161,
         "final_loss_rate": 0.0,
         "measured_rtt_ms": 40.0
       },
@@ -1376,14 +1377,14 @@
         {
           "invariant": "saturation_was_real",
           "ok": true,
-          "measured": 166,
+          "measured": 161,
           "limit": "> 0",
           "detail": "the link dropped packets, so it was genuinely at capacity"
         },
         {
           "invariant": "stream_survived",
           "ok": true,
-          "measured": 373408,
+          "measured": 386744,
           "limit": "> 0",
           "detail": "the receiver kept receiving data throughout the saturation phase"
         },
@@ -1395,25 +1396,25 @@
           "detail": "the ladder stepped down when the link saturated"
         },
         {
-          "invariant": "estimate_stayed_bounded",
+          "invariant": "estimate_did_not_climb_while_congested",
           "ok": true,
-          "measured": 1600000,
-          "limit": "<= 1760000",
-          "detail": "the bandwidth estimate did not climb while the link was congested"
-        },
-        {
-          "invariant": "estimate_did_not_rise_at_the_end",
-          "ok": true,
-          "measured": 978984,
-          "limit": "<= 1760000",
-          "detail": "the estimate at the end of the saturation phase was still bounded"
+          "measured": 0,
+          "limit": "<= 0",
+          "detail": "the estimator never raised its target on a report that said the link was congested (the AIMD regression guard)"
         },
         {
           "invariant": "delivered_stayed_within_capacity",
           "ok": true,
-          "measured": 373408,
+          "measured": 386744,
           "limit": "<= 780000",
           "detail": "the ladder converged onto the link's capacity instead of overshooting it"
+        },
+        {
+          "invariant": "offered_load_tracked_the_capacity",
+          "ok": true,
+          "measured": 0.645,
+          "limit": "0.5 .. 2.5 x capacity",
+          "detail": "the offered load converged onto the link's capacity"
         },
         {
           "invariant": "ladder_recovered",
@@ -1425,8 +1426,8 @@
         {
           "invariant": "throughput_recovered",
           "ok": true,
-          "measured": 1561680,
-          "limit": "> 373408",
+          "measured": 1546744,
+          "limit": "> 386744",
           "detail": "the stream carried more data after the recovery than during the saturation"
         },
         {
@@ -1437,6 +1438,7 @@
           "detail": "the ladder moved a bounded number of times"
         }
       ],
+      "estimator_raises_on_congested_reports": [],
       "curve": [
         {
           "t_s": 1e-06,
@@ -1448,1164 +1450,1164 @@
           "loss_rate": 0.0
         },
         {
-          "t_s": 0.508722,
+          "t_s": 0.50383,
           "level": 1,
-          "target_bps": 1321953,
+          "target_bps": 1187270,
           "estimate_bps": 1324880,
-          "delivered_bps": 930742,
-          "sent_bps": 2136440,
-          "loss_rate": 0.363636
+          "delivered_bps": 618275,
+          "sent_bps": 1274421,
+          "loss_rate": 0.375
         },
         {
-          "t_s": 1.022644,
+          "t_s": 1.010724,
           "level": 1,
           "target_bps": 896000,
-          "estimate_bps": 1109934,
-          "delivered_bps": 1155456,
-          "sent_bps": 874437,
-          "loss_rate": 0.217391
-        },
-        {
-          "t_s": 1.526277,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1003346,
-          "delivered_bps": 580897,
-          "sent_bps": 855987,
-          "loss_rate": 0.238095
-        },
-        {
-          "t_s": 2.026565,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 933414,
-          "delivered_bps": 667722,
-          "sent_bps": 983929,
-          "loss_rate": 0.2
-        },
-        {
-          "t_s": 2.506498,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 887531,
-          "delivered_bps": 484541,
-          "sent_bps": 484541,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 3.005252,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 863090,
-          "delivered_bps": 485952,
-          "sent_bps": 242976,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 3.536966,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 858092,
-          "delivered_bps": 219819,
-          "sent_bps": 219819,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 4.026743,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 863849,
-          "delivered_bps": 431313,
-          "sent_bps": 250784,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 4.515526,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 876595,
-          "delivered_bps": 548172,
-          "sent_bps": 548172,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 5.012446,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 894542,
-          "delivered_bps": 510215,
-          "sent_bps": 510215,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 5.526079,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 916206,
-          "delivered_bps": 350849,
-          "sent_bps": 175424,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 6.04854,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 945816,
-          "delivered_bps": 253075,
-          "sent_bps": 253075,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 6.536043,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 966408,
-          "delivered_bps": 326910,
-          "sent_bps": 326910,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 7.02284,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 994444,
-          "delivered_bps": 481583,
-          "sent_bps": 240791,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 7.50144,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1022890,
-          "delivered_bps": 418721,
-          "sent_bps": 418721,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 8.011788,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1051267,
-          "delivered_bps": 418198,
-          "sent_bps": 418198,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 8.505178,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1079821,
-          "delivered_bps": 839936,
-          "sent_bps": 419968,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 9.009233,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1108769,
-          "delivered_bps": 445745,
-          "sent_bps": 445745,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 9.514491,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1137759,
-          "delivered_bps": 300997,
-          "sent_bps": 418135,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 10.009742,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1167354,
-          "delivered_bps": 547186,
-          "sent_bps": 427441,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 10.514644,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1197228,
-          "delivered_bps": 283394,
-          "sent_bps": 283394,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 11.005963,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1227320,
-          "delivered_bps": 0,
-          "sent_bps": 427730,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 11.512816,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1257490,
-          "delivered_bps": 0,
-          "sent_bps": 432000,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 12.007091,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1287612,
-          "delivered_bps": 722250,
-          "sent_bps": 419948,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 12.510713,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1317359,
-          "delivered_bps": 1163856,
-          "sent_bps": 1163856,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 13.003596,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1346736,
-          "delivered_bps": 938883,
-          "sent_bps": 938883,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 13.512021,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1376557,
-          "delivered_bps": 936490,
-          "sent_bps": 936490,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 14.005829,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1406625,
-          "delivered_bps": 928907,
-          "sent_bps": 928907,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 14.510982,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1293322,
-          "delivered_bps": 614034,
-          "sent_bps": 955335,
-          "loss_rate": 0.166667
-        },
-        {
-          "t_s": 15.003099,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1105207,
-          "delivered_bps": 635735,
-          "sent_bps": 936793,
-          "loss_rate": 0.26087
-        },
-        {
-          "t_s": 15.509272,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 981785,
-          "delivered_bps": 640149,
-          "sent_bps": 943298,
+          "estimate_bps": 1144372,
+          "delivered_bps": 635697,
+          "sent_bps": 936737,
           "loss_rate": 0.277778
         },
         {
-          "t_s": 16.001583,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 900807,
-          "delivered_bps": 418082,
-          "sent_bps": 418082,
-          "loss_rate": 0.304348
+          "t_s": 1.501818,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1025941,
+          "delivered_bps": 600531,
+          "sent_bps": 934326,
+          "loss_rate": 0.208333
         },
         {
-          "t_s": 16.50685,
+          "t_s": 2.010446,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 948238,
+          "delivered_bps": 357461,
+          "sent_bps": 1000569,
+          "loss_rate": 0.173913
+        },
+        {
+          "t_s": 2.501663,
           "level": 2,
           "target_bps": 400000,
-          "estimate_bps": 883052,
-          "delivered_bps": 550367,
-          "sent_bps": 429925,
+          "estimate_bps": 897257,
+          "delivered_bps": 417712,
+          "sent_bps": 417712,
           "loss_rate": 0.0
         },
         {
-          "t_s": 17.014012,
+          "t_s": 3.007585,
           "level": 2,
           "target_bps": 400000,
-          "estimate_bps": 881177,
-          "delivered_bps": 415601,
-          "sent_bps": 415601,
+          "estimate_bps": 871172,
+          "delivered_bps": 428013,
+          "sent_bps": 428013,
           "loss_rate": 0.0
         },
         {
-          "t_s": 17.503114,
+          "t_s": 3.515618,
           "level": 2,
           "target_bps": 400000,
-          "estimate_bps": 889514,
-          "delivered_bps": 417374,
-          "sent_bps": 417374,
+          "estimate_bps": 863446,
+          "delivered_bps": 283386,
+          "sent_bps": 283386,
           "loss_rate": 0.0
         },
         {
-          "t_s": 18.011522,
+          "t_s": 4.007511,
           "level": 2,
           "target_bps": 400000,
-          "estimate_bps": 909565,
+          "estimate_bps": 867889,
+          "delivered_bps": 418278,
+          "sent_bps": 418278,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 4.512563,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 884643,
+          "delivered_bps": 859693,
+          "sent_bps": 429846,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 5.014501,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 903141,
+          "delivered_bps": 541186,
+          "sent_bps": 422754,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 5.503769,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 924877,
+          "delivered_bps": 415208,
+          "sent_bps": 415208,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 6.006714,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 948620,
+          "delivered_bps": 414605,
+          "sent_bps": 414605,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 6.511442,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 973861,
+          "delivered_bps": 416902,
+          "sent_bps": 416902,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 7.004773,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1000593,
+          "delivered_bps": 416414,
+          "sent_bps": 416414,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 7.512482,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1028002,
+          "delivered_bps": 536410,
+          "sent_bps": 419023,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 8.001544,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1056221,
+          "delivered_bps": 310809,
+          "sent_bps": 431766,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 8.510509,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1084473,
+          "delivered_bps": 416806,
+          "sent_bps": 416806,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 9.001448,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1112967,
+          "delivered_bps": 418089,
+          "sent_bps": 418089,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 9.509269,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1141900,
+          "delivered_bps": 406700,
+          "sent_bps": 406700,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 10.011417,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1171385,
+          "delivered_bps": 417589,
+          "sent_bps": 417589,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 10.502574,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1201547,
+          "delivered_bps": 431932,
+          "sent_bps": 431932,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 11.009451,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1231549,
+          "delivered_bps": 431897,
+          "sent_bps": 431897,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 11.502478,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1261686,
+          "delivered_bps": 419164,
+          "sent_bps": 419164,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 12.007471,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1291766,
+          "delivered_bps": 429743,
+          "sent_bps": 429743,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 12.501543,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1321581,
+          "delivered_bps": 936044,
+          "sent_bps": 936044,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 13.007485,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1351403,
           "delivered_bps": 0,
-          "sent_bps": 417963,
+          "sent_bps": 962265,
           "loss_rate": 0.0
         },
         {
-          "t_s": 18.504845,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 924400,
-          "delivered_bps": 421742,
-          "sent_bps": 421742,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 19.01423,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 953770,
-          "delivered_bps": 528020,
-          "sent_bps": 412469,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 19.517865,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 978984,
-          "delivered_bps": 354183,
-          "sent_bps": 354183,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 20.025303,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 998459,
-          "delivered_bps": 393446,
-          "sent_bps": 393446,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 20.517977,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1033693,
-          "delivered_bps": 288142,
-          "sent_bps": 288142,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 21.013626,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1061181,
-          "delivered_bps": 534569,
-          "sent_bps": 534569,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 21.518361,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1094702,
-          "delivered_bps": 635977,
-          "sent_bps": 496801,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 22.025815,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1122023,
-          "delivered_bps": 249610,
-          "sent_bps": 249610,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 22.517722,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1150174,
-          "delivered_bps": 362382,
-          "sent_bps": 362382,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 23.024175,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1178795,
-          "delivered_bps": 486198,
-          "sent_bps": 486198,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 23.503651,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1207344,
-          "delivered_bps": 209885,
-          "sent_bps": 209885,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 24.008388,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1236792,
-          "delivered_bps": 494173,
-          "sent_bps": 494173,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 24.500636,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1259728,
-          "delivered_bps": 330426,
-          "sent_bps": 330426,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 25.031454,
-          "level": 2,
-          "target_bps": 400000,
-          "estimate_bps": 1290508,
-          "delivered_bps": 275160,
-          "sent_bps": 275160,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 25.507202,
+          "t_s": 13.50461,
           "level": 1,
           "target_bps": 896000,
-          "estimate_bps": 1321140,
-          "delivered_bps": 648798,
-          "sent_bps": 648798,
+          "estimate_bps": 1388070,
+          "delivered_bps": 1308436,
+          "sent_bps": 990211,
           "loss_rate": 0.0
         },
         {
-          "t_s": 26.04618,
+          "t_s": 14.004295,
           "level": 1,
           "target_bps": 896000,
-          "estimate_bps": 1351809,
-          "delivered_bps": 1231667,
-          "sent_bps": 410555,
+          "estimate_bps": 1417536,
+          "delivered_bps": 1013524,
+          "sent_bps": 1013524,
           "loss_rate": 0.0
         },
         {
-          "t_s": 26.507933,
+          "t_s": 14.518436,
           "level": 1,
           "target_bps": 896000,
-          "estimate_bps": 1375231,
-          "delivered_bps": 621453,
-          "sent_bps": 310726,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 27.028686,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1408094,
-          "delivered_bps": 1108867,
-          "sent_bps": 554433,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 27.517783,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1440766,
-          "delivered_bps": 935564,
-          "sent_bps": 935564,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 28.006663,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1472226,
-          "delivered_bps": 611396,
-          "sent_bps": 611396,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 28.514515,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1503349,
-          "delivered_bps": 302934,
-          "sent_bps": 942631,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 29.023587,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1534357,
-          "delivered_bps": 876865,
-          "sent_bps": 876865,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 29.510224,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1565483,
-          "delivered_bps": 936487,
-          "sent_bps": 936487,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 30.001076,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1596367,
-          "delivered_bps": 1018893,
-          "sent_bps": 983595,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 30.509134,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1627763,
-          "delivered_bps": 972837,
-          "sent_bps": 939134,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 31.001976,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1659001,
-          "delivered_bps": 1868144,
-          "sent_bps": 934072,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 31.511337,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1690767,
-          "delivered_bps": 964814,
-          "sent_bps": 964814,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 32.014923,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1722858,
-          "delivered_bps": 636929,
-          "sent_bps": 636929,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 32.508301,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1754641,
-          "delivered_bps": 1265880,
-          "sent_bps": 932675,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 33.016311,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1794626,
-          "delivered_bps": 624754,
-          "sent_bps": 624754,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 33.507078,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1826305,
-          "delivered_bps": 910490,
-          "sent_bps": 910490,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 34.015823,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1858345,
-          "delivered_bps": 621927,
-          "sent_bps": 621927,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 34.504985,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1890508,
-          "delivered_bps": 982806,
-          "sent_bps": 982806,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 35.012557,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1922495,
-          "delivered_bps": 940811,
-          "sent_bps": 940811,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 35.507272,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1954646,
-          "delivered_bps": 306845,
-          "sent_bps": 954801,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 36.016398,
-          "level": 1,
-          "target_bps": 896000,
-          "estimate_bps": 1986872,
-          "delivered_bps": 624239,
-          "sent_bps": 624239,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 36.512294,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2019350,
-          "delivered_bps": 1356853,
-          "sent_bps": 1356853,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 37.01649,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2052091,
-          "delivered_bps": 1712550,
-          "sent_bps": 1712550,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 37.518549,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2092255,
-          "delivered_bps": 1158262,
-          "sent_bps": 1158262,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 38.018865,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2124286,
-          "delivered_bps": 1799017,
-          "sent_bps": 1799017,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 38.530788,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2156831,
-          "delivered_bps": 1425208,
-          "sent_bps": 1425208,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 39.009662,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2189827,
-          "delivered_bps": 2910257,
-          "sent_bps": 2910257,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 39.5152,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2222415,
-          "delivered_bps": 1883958,
-          "sent_bps": 1883958,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 40.017718,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2255341,
-          "delivered_bps": 1422111,
-          "sent_bps": 1422111,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 40.5123,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2288813,
-          "delivered_bps": 2318261,
-          "sent_bps": 2318261,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 41.000206,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2322241,
-          "delivered_bps": 1519336,
-          "sent_bps": 1519336,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 41.560569,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2356410,
-          "delivered_bps": 1437957,
-          "sent_bps": 718978,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 42.039505,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2391110,
-          "delivered_bps": 962582,
-          "sent_bps": 962582,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 42.506206,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2426086,
-          "delivered_bps": 1478832,
-          "sent_bps": 739416,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 43.029306,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2461593,
-          "delivered_bps": 1792192,
-          "sent_bps": 896096,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 43.5277,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2496854,
-          "delivered_bps": 1674230,
-          "sent_bps": 881194,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 44.019705,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2524356,
-          "delivered_bps": 1413239,
-          "sent_bps": 706619,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 44.501069,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2560158,
-          "delivered_bps": 1485471,
-          "sent_bps": 1485471,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 45.004702,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2603612,
-          "delivered_bps": 2994996,
-          "sent_bps": 998332,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 45.503529,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2638485,
-          "delivered_bps": 3355868,
-          "sent_bps": 1677934,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 46.01181,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2673684,
-          "delivered_bps": 1677369,
-          "sent_bps": 1677369,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 46.50569,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2708869,
-          "delivered_bps": 1495755,
-          "sent_bps": 1662033,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 47.009627,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2744760,
-          "delivered_bps": 1666406,
-          "sent_bps": 1666406,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 47.514393,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2780854,
-          "delivered_bps": 1674641,
-          "sent_bps": 1674641,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 48.005763,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2816568,
-          "delivered_bps": 3303377,
-          "sent_bps": 1651688,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 48.513761,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2852458,
-          "delivered_bps": 1673102,
-          "sent_bps": 1673102,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 49.004176,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2889060,
-          "delivered_bps": 6402035,
-          "sent_bps": 6402035,
-          "loss_rate": 0.0
-        },
-        {
-          "t_s": 49.509408,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2925132,
+          "estimate_bps": 1184586,
           "delivered_bps": 0,
-          "sent_bps": 1628520,
+          "sent_bps": 848879,
+          "loss_rate": 0.25
+        },
+        {
+          "t_s": 15.007947,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1031747,
+          "delivered_bps": 0,
+          "sent_bps": 1267341,
+          "loss_rate": 0.142857
+        },
+        {
+          "t_s": 15.515425,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 912338,
+          "delivered_bps": 306838,
+          "sent_bps": 306838,
+          "loss_rate": 0.166667
+        },
+        {
+          "t_s": 16.014356,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 886903,
+          "delivered_bps": 416651,
+          "sent_bps": 416651,
           "loss_rate": 0.0
         },
         {
-          "t_s": 50.018163,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2961457,
-          "delivered_bps": 718374,
-          "sent_bps": 1561591,
+          "t_s": 16.503256,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 879736,
+          "delivered_bps": 417139,
+          "sent_bps": 417139,
           "loss_rate": 0.0
         },
         {
-          "t_s": 50.502519,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 2998165,
-          "delivered_bps": 1667328,
-          "sent_bps": 1667328,
+          "t_s": 17.010212,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 884910,
+          "delivered_bps": 300166,
+          "sent_bps": 416981,
           "loss_rate": 0.0
         },
         {
-          "t_s": 51.010003,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3034971,
-          "delivered_bps": 1667229,
-          "sent_bps": 1667229,
+          "t_s": 17.501317,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 898218,
+          "delivered_bps": 431432,
+          "sent_bps": 431432,
           "loss_rate": 0.0
         },
         {
-          "t_s": 51.501784,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3072008,
-          "delivered_bps": 605357,
-          "sent_bps": 1681632,
+          "t_s": 18.007326,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 916354,
+          "delivered_bps": 116107,
+          "sent_bps": 414454,
           "loss_rate": 0.0
         },
         {
-          "t_s": 52.009055,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3109192,
-          "delivered_bps": 901061,
-          "sent_bps": 1668715,
+          "t_s": 18.51459,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 937998,
+          "delivered_bps": 413994,
+          "sent_bps": 413994,
           "loss_rate": 0.0
         },
         {
-          "t_s": 52.501927,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3146578,
-          "delivered_bps": 1670775,
-          "sent_bps": 1670775,
+          "t_s": 19.002412,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 962237,
+          "delivered_bps": 426925,
+          "sent_bps": 426925,
           "loss_rate": 0.0
         },
         {
-          "t_s": 53.00826,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3184095,
-          "delivered_bps": 1665095,
-          "sent_bps": 1665095,
+          "t_s": 19.507179,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 987946,
+          "delivered_bps": 0,
+          "sent_bps": 417064,
           "loss_rate": 0.0
         },
         {
-          "t_s": 53.515911,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3221512,
-          "delivered_bps": 1106999,
-          "sent_bps": 1106999,
+          "t_s": 20.013492,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1014905,
+          "delivered_bps": 0,
+          "sent_bps": 415977,
           "loss_rate": 0.0
         },
         {
-          "t_s": 54.003862,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3259255,
-          "delivered_bps": 1666765,
-          "sent_bps": 1666765,
+          "t_s": 20.515264,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 850299,
+          "delivered_bps": 296568,
+          "sent_bps": 296568,
           "loss_rate": 0.0
         },
         {
-          "t_s": 54.528981,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3297656,
-          "delivered_bps": 1735339,
-          "sent_bps": 1735339,
+          "t_s": 21.016252,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 738831,
+          "delivered_bps": 284718,
+          "sent_bps": 284718,
           "loss_rate": 0.0
         },
         {
-          "t_s": 55.039884,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3336036,
-          "delivered_bps": 1201786,
-          "sent_bps": 1201786,
+          "t_s": 21.507227,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 695241,
+          "delivered_bps": 535130,
+          "sent_bps": 418023,
           "loss_rate": 0.0
         },
         {
-          "t_s": 55.535428,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3374739,
-          "delivered_bps": 1614056,
-          "sent_bps": 807028,
+          "t_s": 22.015435,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 675930,
+          "delivered_bps": 282768,
+          "sent_bps": 282768,
           "loss_rate": 0.0
         },
         {
-          "t_s": 56.066231,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3413660,
-          "delivered_bps": 1252901,
-          "sent_bps": 626450,
+          "t_s": 22.507209,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 672866,
+          "delivered_bps": 416151,
+          "sent_bps": 416151,
           "loss_rate": 0.0
         },
         {
-          "t_s": 56.51547,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3452656,
-          "delivered_bps": 1894780,
-          "sent_bps": 947390,
+          "t_s": 23.014217,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 680642,
+          "delivered_bps": 834386,
+          "sent_bps": 417193,
           "loss_rate": 0.0
         },
         {
-          "t_s": 57.01083,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3483148,
-          "delivered_bps": 1924167,
-          "sent_bps": 1924167,
+          "t_s": 23.505727,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 695007,
+          "delivered_bps": 296106,
+          "sent_bps": 411340,
           "loss_rate": 0.0
         },
         {
-          "t_s": 57.516785,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3531799,
-          "delivered_bps": 2337135,
-          "sent_bps": 2337135,
+          "t_s": 24.010172,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 713705,
+          "delivered_bps": 867212,
+          "sent_bps": 433606,
           "loss_rate": 0.0
         },
         {
-          "t_s": 58.013627,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3570201,
-          "delivered_bps": 824218,
-          "sent_bps": 1791674,
+          "t_s": 24.504963,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 735323,
+          "delivered_bps": 409052,
+          "sent_bps": 409052,
           "loss_rate": 0.0
         },
         {
-          "t_s": 58.500054,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3609377,
-          "delivered_bps": 1128973,
-          "sent_bps": 1128973,
+          "t_s": 25.011219,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 759461,
+          "delivered_bps": 873432,
+          "sent_bps": 436716,
           "loss_rate": 0.0
         },
         {
-          "t_s": 59.017035,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3648639,
-          "delivered_bps": 2309188,
-          "sent_bps": 1697955,
+          "t_s": 25.514938,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 785057,
+          "delivered_bps": 575481,
+          "sent_bps": 287740,
           "loss_rate": 0.0
         },
         {
-          "t_s": 59.515693,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3687589,
-          "delivered_bps": 3123643,
-          "sent_bps": 2296827,
+          "t_s": 26.013783,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 812115,
+          "delivered_bps": 445256,
+          "sent_bps": 445256,
           "loss_rate": 0.0
         },
         {
-          "t_s": 60.020428,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3736167,
-          "delivered_bps": 1949800,
-          "sent_bps": 1949800,
+          "t_s": 26.507325,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 839360,
+          "delivered_bps": 921379,
+          "sent_bps": 460689,
           "loss_rate": 0.0
         },
         {
-          "t_s": 60.527733,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3775177,
-          "delivered_bps": 1557478,
-          "sent_bps": 1557478,
+          "t_s": 27.004257,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 866555,
+          "delivered_bps": 420919,
+          "sent_bps": 420919,
           "loss_rate": 0.0
         },
         {
-          "t_s": 61.031302,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3814399,
-          "delivered_bps": 1106930,
-          "sent_bps": 1106930,
+          "t_s": 27.508078,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 894443,
+          "delivered_bps": 416652,
+          "sent_bps": 416652,
           "loss_rate": 0.0
         },
         {
-          "t_s": 61.511092,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3853857,
-          "delivered_bps": 1879742,
-          "sent_bps": 1879742,
+          "t_s": 28.0151,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 922303,
+          "delivered_bps": 362815,
+          "sent_bps": 283417,
           "loss_rate": 0.0
         },
         {
-          "t_s": 62.02362,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3893230,
-          "delivered_bps": 1730968,
-          "sent_bps": 1730968,
+          "t_s": 28.506985,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 950262,
+          "delivered_bps": 301189,
+          "sent_bps": 418402,
           "loss_rate": 0.0
         },
         {
-          "t_s": 62.502439,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3933241,
-          "delivered_bps": 1108948,
-          "sent_bps": 1108948,
+          "t_s": 29.013235,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 978258,
+          "delivered_bps": 432954,
+          "sent_bps": 432954,
           "loss_rate": 0.0
         },
         {
-          "t_s": 63.035246,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 3973608,
-          "delivered_bps": 1921467,
-          "sent_bps": 960733,
+          "t_s": 29.500594,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1006143,
+          "delivered_bps": 425981,
+          "sent_bps": 425981,
           "loss_rate": 0.0
         },
         {
-          "t_s": 63.515697,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 4014260,
-          "delivered_bps": 1264866,
-          "sent_bps": 1264866,
+          "t_s": 30.006281,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1034717,
+          "delivered_bps": 415410,
+          "sent_bps": 415410,
           "loss_rate": 0.0
         },
         {
-          "t_s": 64.006461,
-          "level": 0,
-          "target_bps": 1600000,
-          "estimate_bps": 4055113,
-          "delivered_bps": 2859378,
-          "sent_bps": 1662463,
+          "t_s": 30.515107,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1063551,
+          "delivered_bps": 417019,
+          "sent_bps": 417019,
           "loss_rate": 0.0
         },
         {
-          "t_s": 64.511807,
+          "t_s": 31.003239,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1092412,
+          "delivered_bps": 417717,
+          "sent_bps": 417717,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 31.511286,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1121347,
+          "delivered_bps": 299792,
+          "sent_bps": 416462,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 32.001723,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1150704,
+          "delivered_bps": 441419,
+          "sent_bps": 441419,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 32.506448,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1180458,
+          "delivered_bps": 430009,
+          "sent_bps": 430009,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 33.016415,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1217680,
+          "delivered_bps": 279701,
+          "sent_bps": 279701,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 33.505445,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1239516,
+          "delivered_bps": 416761,
+          "sent_bps": 416761,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 34.021602,
+          "level": 2,
+          "target_bps": 400000,
+          "estimate_bps": 1277184,
+          "delivered_bps": 274630,
+          "sent_bps": 274630,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 34.518946,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1307195,
+          "delivered_bps": 631273,
+          "sent_bps": 631273,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 35.002713,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1336975,
+          "delivered_bps": 933027,
+          "sent_bps": 933027,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 35.51056,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1366757,
+          "delivered_bps": 942572,
+          "sent_bps": 942572,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 36.015603,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1397015,
+          "delivered_bps": 624452,
+          "sent_bps": 624452,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 36.508541,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1427743,
+          "delivered_bps": 937213,
+          "sent_bps": 937213,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 37.001383,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1458281,
+          "delivered_bps": 925015,
+          "sent_bps": 925015,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 37.503943,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1488708,
+          "delivered_bps": 932052,
+          "sent_bps": 932052,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 38.013197,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1519381,
+          "delivered_bps": 931834,
+          "sent_bps": 931834,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 38.506177,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1550226,
+          "delivered_bps": 933406,
+          "sent_bps": 933406,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 39.013777,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1581345,
+          "delivered_bps": 936957,
+          "sent_bps": 936957,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 39.509414,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1612555,
+          "delivered_bps": 1901131,
+          "sent_bps": 950565,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 40.014937,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1643653,
+          "delivered_bps": 635417,
+          "sent_bps": 635417,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 40.507478,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1674913,
+          "delivered_bps": 900782,
+          "sent_bps": 934311,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 41.013207,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1706537,
+          "delivered_bps": 971093,
+          "sent_bps": 971093,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 41.501167,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1738455,
+          "delivered_bps": 963659,
+          "sent_bps": 963659,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 42.005311,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1770010,
+          "delivered_bps": 936485,
+          "sent_bps": 936485,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 42.512372,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1801350,
+          "delivered_bps": 914478,
+          "sent_bps": 914478,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 43.015816,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1840358,
+          "delivered_bps": 0,
+          "sent_bps": 708291,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 43.503318,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1871889,
+          "delivered_bps": 358174,
+          "sent_bps": 358174,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 44.01472,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1903705,
+          "delivered_bps": 836932,
+          "sent_bps": 633381,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 44.502568,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1935347,
+          "delivered_bps": 1870776,
+          "sent_bps": 935388,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 45.01046,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1967112,
+          "delivered_bps": 943832,
+          "sent_bps": 943832,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 45.517078,
+          "level": 1,
+          "target_bps": 896000,
+          "estimate_bps": 1999062,
+          "delivered_bps": 900379,
+          "sent_bps": 663381,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 46.007543,
           "level": 0,
           "target_bps": 1600000,
-          "estimate_bps": 4096533,
-          "delivered_bps": 1672499,
-          "sent_bps": 1672499,
+          "estimate_bps": 2031713,
+          "delivered_bps": 2537199,
+          "sent_bps": 1268599,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 46.515566,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2064594,
+          "delivered_bps": 1022100,
+          "sent_bps": 1135724,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 47.009444,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2097665,
+          "delivered_bps": 1833666,
+          "sent_bps": 1666901,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 47.514608,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2130937,
+          "delivered_bps": 1665526,
+          "sent_bps": 1665526,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 48.007523,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2164721,
+          "delivered_bps": 0,
+          "sent_bps": 1662873,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 48.510494,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2198407,
+          "delivered_bps": 2210250,
+          "sent_bps": 1726710,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 49.015562,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2232018,
+          "delivered_bps": 1135908,
+          "sent_bps": 1135908,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 49.505467,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2265592,
+          "delivered_bps": 1670733,
+          "sent_bps": 1670733,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 50.010501,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2299269,
+          "delivered_bps": 1831102,
+          "sent_bps": 1664570,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 50.503613,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2332738,
+          "delivered_bps": 1683240,
+          "sent_bps": 1683240,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 51.006643,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2366463,
+          "delivered_bps": 1717187,
+          "sent_bps": 1717187,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 51.513669,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2409518,
+          "delivered_bps": 1677707,
+          "sent_bps": 1677707,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 52.005562,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2443694,
+          "delivered_bps": 1660916,
+          "sent_bps": 1660916,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 52.512452,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2477741,
+          "delivered_bps": 1847646,
+          "sent_bps": 1679609,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 53.003728,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2511980,
+          "delivered_bps": 1660533,
+          "sent_bps": 1660533,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 53.512034,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2546659,
+          "delivered_bps": 1652584,
+          "sent_bps": 1652584,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 54.002079,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2581345,
+          "delivered_bps": 1640612,
+          "sent_bps": 1640612,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 54.510525,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2616125,
+          "delivered_bps": 1672808,
+          "sent_bps": 1672808,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 55.015499,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2650874,
+          "delivered_bps": 803426,
+          "sent_bps": 1115925,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 55.507486,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2685761,
+          "delivered_bps": 1664160,
+          "sent_bps": 1664160,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 56.01062,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2728809,
+          "delivered_bps": 903929,
+          "sent_bps": 1674026,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 56.504791,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2763953,
+          "delivered_bps": 2429885,
+          "sent_bps": 1664274,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 57.011874,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2799803,
+          "delivered_bps": 1664674,
+          "sent_bps": 1664674,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 57.502713,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2835528,
+          "delivered_bps": 1662417,
+          "sent_bps": 1662417,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 58.011611,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2871330,
+          "delivered_bps": 1209986,
+          "sent_bps": 1680620,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 58.505921,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2907192,
+          "delivered_bps": 3105777,
+          "sent_bps": 1706462,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 59.013686,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2943706,
+          "delivered_bps": 1505802,
+          "sent_bps": 1673197,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 59.507627,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 2980136,
+          "delivered_bps": 1740918,
+          "sent_bps": 1740918,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 60.011642,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3016704,
+          "delivered_bps": 1670770,
+          "sent_bps": 1670770,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 60.503698,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3053062,
+          "delivered_bps": 1669368,
+          "sent_bps": 1669368,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 61.010677,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3089675,
+          "delivered_bps": 1727548,
+          "sent_bps": 1727548,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 61.503722,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3126190,
+          "delivered_bps": 1666239,
+          "sent_bps": 1666239,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 62.011622,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3172365,
+          "delivered_bps": 1719401,
+          "sent_bps": 1719401,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 62.502855,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3208806,
+          "delivered_bps": 1659747,
+          "sent_bps": 1659747,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 63.008618,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3246434,
+          "delivered_bps": 3501092,
+          "sent_bps": 1750546,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 63.513648,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3284503,
+          "delivered_bps": 901106,
+          "sent_bps": 1668799,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 64.001856,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3322415,
+          "delivered_bps": 1720604,
+          "sent_bps": 1720604,
+          "loss_rate": 0.0
+        },
+        {
+          "t_s": 64.51161,
+          "level": 0,
+          "target_bps": 1600000,
+          "estimate_bps": 3360341,
+          "delivered_bps": 1672368,
+          "sent_bps": 1672368,
           "loss_rate": 0.0
         }
       ]
@@ -2621,6 +2623,7 @@
     "What is modelled is the link itself (a fixed-capacity, loss-on-overflow bottleneck) and the peer (a receiver that reports loss, RTT and optionally REMB once per reporting interval). There is no ICE, DTLS, SRTP or codec in the path: the benchmark measures the rate-control closed loop, not the transport stack.",
     "The 'floor' scenario is the product's case: the resolution floor makes the lowest allowed rung twice the link's capacity, so the ladder holds the floor and the bitrate is throttled instead. The 'unfloored' scenario lets the ladder descend to a rung that fits.",
     "The numbers are machine-dependent (the loopback's real RTT and the host's real scheduling jitter), so the committed artifact is one local sample, not a pass/fail threshold. What must hold on every machine are the invariants, and they are asserted by tools/benchmark_saturation.py and recorded in the artifact.",
-    "The estimate's bound during the saturation phase is the regression guard for an AIMD defect this benchmark uncovered: the estimator used to resume its additive increase once the cooldown expired even while the link was still lossy, so the estimate walked back up to the rate that had just been throttled. The Goog-CC front-end already carried that guard; the AIMD one did not."
+    "The regression guard for an AIMD defect this benchmark uncovered: the estimator used to resume its additive increase once the cooldown expired even while the link was still lossy, so the estimate walked back up to the rate that had just been throttled. The Goog-CC front-end already carried that guard; the AIMD one did not.",
+    "The guard is decided on the estimator's own per-report reason ('aimd_increase' / 'remb_override' on a report whose loss rate is at or above the estimator's 2% congestion threshold), not on the before/after estimate pair: the reported estimate is an exponentially smoothed value, so it can drift upwards by a few bits after a decrease without the estimator having raised anything. The artifact's 'reports' array carries the raw evidence."
   ]
 }

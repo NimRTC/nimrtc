@@ -112,9 +112,16 @@ rules:
     action: deny
     basis: "policy.yaml#protect-agents"
     reason: "Project instructions are read-only"
+  - id: allow-write-demo-agent
+    match: { path: "demo-agent-realtime/**", operation: "write" }
+    action: allow
+    basis: "policy.yaml#allow-write-demo-agent"
+    description: "AI决策模块目录 — agents may write"
 
-anchors:
-  policy: "sha256:init"
+
+# 策略哈希锚点不在这里 —— 它独立存放在 policy/lock.json（C5）。
+# 锚点写在策略文件里是自证：改策略的人顺手把哈希也改掉，事后就看不出
+# 「当时按什么标准拦的」被换过。改策略不改锚点 = 可检出的失配。
 
 arch:
   - kind: missing_dependency

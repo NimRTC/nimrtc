@@ -37,7 +37,7 @@
  *   rd_viewer --codec av1           # pick the codec
  *   rd_viewer --duration 120        # stop after two minutes
  *   rd_viewer --no-input            # watch only; do not send any input
- *   rd_viewer --ref-frame           # bind the events to the displayed frame
+ *   rd_viewer --bind-ref-frame      # bind the events to the displayed frame
  * ```
  *
  * ## Threading
@@ -51,6 +51,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <span>
@@ -70,6 +71,7 @@
 #include <nimrtc/rd_input/input_event.hpp>
 #include <nimrtc/rd_input/ref_frame_binder.hpp>
 #include <nimrtc/rd_input/safety_filter.hpp>
+#include <nimrtc/rd_qoe/qoe_metrics.hpp>
 
 #include "rd_local_input.hpp"
 #include "rd_signalling.hpp"
@@ -80,6 +82,7 @@ using nimrtc::engine::EngineConfig;
 using nimrtc::engine::NimRTCEngine;
 namespace np = nimrtc::plugins;
 namespace rdi = nimrtc::rd_input;
+namespace rq = nimrtc::rd_qoe;
 
 // ---------------------------------------------------------------------------
 // The configuration
@@ -122,7 +125,7 @@ void print_usage(const char* prog) {
         "  --backend <class>     Codec backend: auto | hardware | software\n"
         "  --duration <sec>      Stop after N seconds (0 = forever)\n"
         "  --display-hz <hz>     The display rate the pointer is coalesced to\n"
-        "  --ref-frame           Bind the input events to the displayed frame\n"
+        "  --bind-ref-frame      Bind the input events to the displayed frame\n"
         "  --no-qoe              Do not collect the QoE metrics\n"
         "  --stun <host[:port]>  STUN server (default: stun.l.google.com:19302)\n"
         "  --no-stun             Disable STUN gathering\n"
@@ -172,6 +175,9 @@ private:
     /** Send the events the coalescer produced. */
     void flush_input(std::uint64_t now_us_value);
 
+    /** Feed one displayed frame to the QoE collector (plan J3 / J6). */
+    void feed_presented_frame(const nimrtc::engine::DisplayedFrameInfo& info);
+
     Options opts_;
     std::unique_ptr<NimRTCEngine> engine_;
     std::unique_ptr<rd_local::LocalInputCapture> capture_;
@@ -179,6 +185,26 @@ private:
     std::unique_ptr<rdi::RefFrameBinder> binder_;
     std::unique_ptr<rdi::HeartbeatEmitter> heartbeat_;
     std::unique_ptr<rdi::SafetyFilter> filter_;
+
+    // ---- The QoE feed (plan J3 / J6) ----------------------------------------
+    //
+    // The collector is fed, never pulls: the demo owns one and pushes the
+    // observations itself (the engine is not wired to a collector name).
+    // The pending deque mirrors the engine QoeSeam's bookkeeping — an
+    // input event waits until the frame that reflects it is presented.
+    std::unique_ptr<rq::QoeCollector> qoe_;
+
+    /** One input event the control plane accepted, still waiting for the
+     *  frame that reflects it. */
+    struct PendingInput {
+        std::int64_t  sent_ts_us;
+        std::uint64_t event_id;
+    };
+    std::deque<PendingInput> pending_inputs_;
+
+    /** The `frame_seq` of the last presented frame the QoE feed saw. */
+    std::uint64_t last_frame_seq_ = 0;
+    bool          have_frame_seq_ = false;
 
     bool offered_ = false;
     bool candidates_sent_ = false;
@@ -215,11 +241,14 @@ bool ViewerSession::start() {
 
     // ---- The QoE metrics (plan J3 / J6) ------------------------------------
     //
-    // The collector is what makes the input-to-photon latency measurable:
-    // the engine pairs every outgoing input event with the frame that
-    // reflects it.
-    if (opts_.qoe && !cfg.control_channel_name.empty()) {
-        cfg.qoe_collector_name = "rd-qoe";
+    // The collector is **fed** — it never pulls from the engine.  This
+    // program owns one and pushes the observations itself (see `run()`);
+    // the engine is deliberately left without a collector name, so the
+    // two paths cannot double-count.  The engine is only there for the
+    // raw events (`last_displayed_frame()`, the control-channel
+    // acceptance).
+    if (opts_.qoe) {
+        qoe_ = std::make_unique<rd_qoe::QoeCollector>();
     }
 
     // ---- The transport -----------------------------------------------------
@@ -461,6 +490,58 @@ void ViewerSession::flush_input(std::uint64_t now_us_value) {
         return;
     }
     events_sent_ += bound.size();
+
+    // ---- The QoE feed (plan J6) --------------------------------------------
+    //
+    // The event was **accepted by the control plane** — not merely
+    // constructed — so this is the honest instant the input-to-photon
+    // latency is measured from (spec requirement 2: the queueing and the
+    // wire delay are included in the number).  The event is remembered
+    // until the frame that reflects it is presented (see `run()`).
+    // `event_id` is 0 for an event that was not bound to a frame.
+    if (qoe_) {
+        const auto sent_ts_us = static_cast<std::int64_t>(now_us_value);
+        qoe_->on_input_event_sent(sent_ts_us, event_id);
+        pending_inputs_.push_back(PendingInput{sent_ts_us, event_id});
+    }
+}
+
+void ViewerSession::feed_presented_frame(
+    const nimrtc::engine::DisplayedFrameInfo& info) {
+    // ---- The end-to-end latency and the presented frame rate --------------
+    //
+    // The capture timestamp is the ADR-017 value the engine resolved for
+    // this frame (spec requirement 1: real capture and render instants,
+    // never a fake 0).  When the pipeline did not carry one the engine
+    // reports `capture_ts_us == 0`, and the collector counts the frame as
+    // presented but feeds **no** latency sample for it (spec requirement
+    // 6) — a frame without a capture instant has no honest latency.
+    rq::FrameObservation observation;
+    observation.capture_ts_us = info.capture_ts_us;
+    observation.render_ts_us  = info.rendered_at_us;
+    observation.frame_id      = info.ref_frame_id;
+    qoe_->on_frame_presented(observation);
+
+    // ---- The input-to-photon pairing (plan item J6) -----------------------
+    //
+    // This mirrors the engine QoeSeam's rule, so the demo's numbers agree
+    // with the engine's own: an input event is reflected by the first
+    // presented frame whose ref-frame id is **strictly greater** than the
+    // event's (the operator acted on the frame they were looking at, so
+    // the frame that reflects the action is a later one).  An event that
+    // was not bound to a frame (id 0) pairs with the next presented frame,
+    // whatever its id.  The pairings resolve in send order.
+    const std::int64_t render_ts_us = info.rendered_at_us;
+    for (auto it = pending_inputs_.begin(); it != pending_inputs_.end();) {
+        const bool reflects =
+            it->event_id == 0 || info.ref_frame_id > it->event_id;
+        if (!reflects) {
+            ++it;
+            continue;
+        }
+        qoe_->on_frame_presented_for_input(render_ts_us, it->event_id);
+        it = pending_inputs_.erase(it);
+    }
 }
 
 int ViewerSession::run() {
@@ -509,6 +590,28 @@ int ViewerSession::run() {
     while (running_ && (std::chrono::steady_clock::now() < deadline)) {
         // ---- The engine ---------------------------------------------------
         engine_->tick();
+
+        // ---- The QoE feed (plan J3 / J6) ------------------------------------
+        //
+        // The frame-presented events are **polled**, not pushed: the
+        // engine records the last displayed frame (plan E9), and this loop
+        // reads it once per tick.  The `frame_seq` gate feeds each
+        // presented frame exactly once — the collector sees every frame the
+        // viewer saw, with the real capture and render instants (spec
+        // requirement 1), and the frames that reflect a pending input event
+        // are paired (spec requirement 3).  The feed runs *before* the
+        // local input flush, so an event sent in this tick pairs with a
+        // frame presented in a later tick, never with a frame that was
+        // already on the screen when the event went out.
+        if (qoe_) {
+            const auto displayed = engine_->last_displayed_frame();
+            if (displayed.has_value() &&
+                (!have_frame_seq_ || displayed->frame_seq != last_frame_seq_)) {
+                have_frame_seq_ = true;
+                last_frame_seq_ = displayed->frame_seq;
+                feed_presented_frame(*displayed);
+            }
+        }
 
         // ---- The local input ------------------------------------------------
         const std::uint64_t t = now_us();
@@ -596,7 +699,7 @@ int main(int argc, char** argv) {
             opts.duration_sec = std::atoi(argv[++i]);
         } else if (arg == "--display-hz" && has_next) {
             opts.display_hz = static_cast<std::uint32_t>(std::atoi(argv[++i]));
-        } else if (arg == "--ref-frame") {
+        } else if (arg == "--bind-ref-frame") {
             opts.bind_ref_frame = true;
         } else if (arg == "--no-qoe") {
             opts.qoe = false;

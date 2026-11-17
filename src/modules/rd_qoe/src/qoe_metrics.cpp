@@ -152,8 +152,15 @@ void QoeCollector::on_frame_presented(const FrameObservation& observation) {
     ++frames_presented_;
 
     // ---- the end-to-end latency ------------------------------------------
+    //
+    // `capture_ts_us <= 0` is the "no capture timestamp" sentinel (the
+    // observation's default).  A frame the pipeline did not attach a
+    // capture instant to has no honest latency to report — feeding a
+    // fake 0 timestamp would produce a sample of `render_ts_us`, which
+    // is not a latency.  The frame is still counted as presented: the
+    // viewer did see it.
     const std::int64_t latency = observation.render_ts_us - observation.capture_ts_us;
-    if (latency >= 0) {
+    if (observation.capture_ts_us > 0 && latency >= 0) {
         latency_.add(latency);
     }
 

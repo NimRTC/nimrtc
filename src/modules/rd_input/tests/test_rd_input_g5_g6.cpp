@@ -79,6 +79,27 @@ TEST(RdInputG5, RefFrameCostsNothingWhenThereIsNoId) {
     EXPECT_EQ(a.value().size(), b.value().size());
 }
 
+TEST(RdInputG5, RefFrameOffLeavesTheWireUnchanged) {
+    // An event that *carries* a ref_frame id, encoded with the switch
+    // off, must produce exactly the pre-change baseline bytes — the id
+    // in memory costs nothing on the wire when the sender does not ask
+    // for it (spec req 5).  The baseline is the same event with its id
+    // cleared, encoded under the same default options.
+    InputEvent with_id =
+        make_mouse_button(MouseButton::kLeft, ButtonAction::kDown, 100, 200);
+    with_id.ref_frame = 4242u;
+    InputEvent baseline = with_id;
+    baseline.ref_frame.reset();
+
+    EncodeOptions options;  // include_ref_frame stays off
+    const auto a = encode_event(with_id, options);
+    const auto b = encode_event(baseline, options);
+    ASSERT_TRUE(a.ok());
+    ASSERT_TRUE(b.ok());
+    EXPECT_EQ(a.value().size(), b.value().size());
+    EXPECT_EQ(a.value(), b.value());
+}
+
 TEST(RdInputG5, RefFrameAndTimestampCoexist) {
     InputEvent event = make_key(keys::kA, KeyAction::kDown);
     event.timestamp_us = 123456789u;
@@ -185,6 +206,23 @@ TEST(RdInputG5, ANewerVersionIsRejectedUnlessTheDecoderOptsIn) {
     const auto lenient = decode_event(span_of(encoded.value()), permissive);
     ASSERT_TRUE(lenient.ok()) << lenient.error().message();
     EXPECT_EQ(lenient.value().dx, 1);
+}
+
+TEST(RdInputG5, ATruncatedRefFrameIdIsRejected) {
+    // The header for a mouse-move with the ref-frame flag set, followed
+    // by a varint that never terminates.  The decoder must report a
+    // protocol error rather than guess at the id — the flags byte says
+    // the field is there, so its truncation is malformed input.
+    const std::vector<std::uint8_t> bytes{
+        1,                                                // version
+        static_cast<std::uint8_t>(InputEventType::kMouseMove),  // type
+        0x02u,  // flags: a ref-frame id follows
+        0x80u, 0x80u, 0x80u,  // a ref-frame varint with no terminator
+    };
+
+    const auto decoded = decode_event(span_of(bytes));
+    EXPECT_FALSE(decoded.ok());
+    EXPECT_EQ(decoded.error().code(), nimrtc::core::ErrorCode::ProtocolError);
 }
 
 // ---------------------------------------------------------------------------

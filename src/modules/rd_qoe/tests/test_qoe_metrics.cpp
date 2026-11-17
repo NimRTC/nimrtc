@@ -199,6 +199,16 @@ TEST(qoe_presented_fps, is_zero_before_two_frames) {
     EXPECT_GT(collector.snapshot().presented_fps, 0.0);
 }
 
+TEST(qoe_presented_fps, one_feed_counts_once) {
+    QoeCollector collector;
+
+    collector.on_frame_presented(make_frame(1000, 11000));
+
+    const QoeSnapshot s = collector.snapshot();
+    EXPECT_EQ(s.frames_presented, 1u);
+    EXPECT_DOUBLE_EQ(s.presented_fps, 0.0);
+}
+
 // ---------------------------------------------------------------------------
 // J3 -- the end-to-end latency percentiles
 // ---------------------------------------------------------------------------
@@ -206,12 +216,14 @@ TEST(qoe_presented_fps, is_zero_before_two_frames) {
 TEST(qoe_latency_percentiles, p50_and_p95_track_the_distribution) {
     QoeCollector collector;
 
-    // 90 samples at 10 ms, 10 at 100 ms.
+    // 90 samples at 10 ms, 10 at 100 ms.  The capture timestamps are
+    // non-zero: 0 is the "missing capture timestamp" sentinel, and a
+    // missing timestamp is not a latency sample (acceptance criterion 6).
     for (int i = 0; i < 90; ++i) {
-        collector.on_frame_presented(make_frame(0, 10000));
+        collector.on_frame_presented(make_frame(1000, 11000));
     }
     for (int i = 0; i < 10; ++i) {
-        collector.on_frame_presented(make_frame(0, 100000));
+        collector.on_frame_presented(make_frame(1000, 101000));
     }
 
     const QoeSnapshot s = collector.snapshot();
@@ -252,7 +264,10 @@ TEST(qoe_latency_percentiles, the_collectors_reservoir_is_bounded) {
     QoeCollector collector(config);
 
     for (int i = 0; i < 20000; ++i) {
-        collector.on_frame_presented(make_frame(0, 5000 + (i % 11)));
+        // A non-zero capture timestamp: 0 is the "missing capture
+        // timestamp" sentinel, and a missing timestamp is not a latency
+        // sample (acceptance criterion 6).
+        collector.on_frame_presented(make_frame(1000, 6000 + (i % 11)));
     }
 
     const QoeSnapshot s = collector.snapshot();
@@ -270,6 +285,28 @@ TEST(qoe_latency_percentiles, an_empty_estimator_reports_zero) {
     EXPECT_DOUBLE_EQ(estimator.mean(), 0.0);
 }
 
+TEST(qoe_latency_percentiles,
+     a_missing_capture_timestamp_is_not_a_latency_sample) {
+    QoeCollector collector;
+
+    // A frame with `capture_ts_us == 0` (the sentinel) is still counted
+    // as presented, but feeds no latency sample (acceptance criterion 6).
+    collector.on_frame_presented(make_frame(0, 500000));
+
+    QoeSnapshot s = collector.snapshot();
+    EXPECT_EQ(s.frames_presented, 1u);
+    EXPECT_EQ(s.latency_p50_us, 0);
+    EXPECT_EQ(s.latency_max_us, 0);
+
+    // A frame with a real capture timestamp does feed a sample.
+    collector.on_frame_presented(make_frame(1000, 11000));
+
+    s = collector.snapshot();
+    EXPECT_EQ(s.frames_presented, 2u);
+    EXPECT_EQ(s.latency_p50_us, 10000);
+    EXPECT_EQ(s.latency_max_us, 10000);
+}
+
 // ---------------------------------------------------------------------------
 // J6 -- the input-to-photon measurement
 // ---------------------------------------------------------------------------
@@ -283,6 +320,20 @@ TEST(qoe_input_to_photon, pairs_an_input_event_with_the_frame_it_reflects) {
     const QoeSnapshot s = collector.snapshot();
     EXPECT_EQ(s.input_to_photon_p50_us, 45000);
     EXPECT_EQ(s.input_to_photon_max_us, 45000);
+}
+
+TEST(qoe_input_to_photon, pair_with_a_30000us_gap) {
+    QoeCollector collector;
+
+    // The event is sent at t=0; the frame that reflects it is presented
+    // 30 000 us later (the viewer pairing rule pairs the pending event
+    // with the first frame whose ref-frame id is strictly greater).
+    collector.on_input_event_sent(0, 42);
+    collector.on_frame_presented_for_input(30000, 42);
+
+    const QoeSnapshot s = collector.snapshot();
+    EXPECT_EQ(s.input_to_photon_p50_us, 30000);
+    EXPECT_EQ(s.input_to_photon_max_us, 30000);
 }
 
 TEST(qoe_input_to_photon, several_events_produce_a_distribution) {

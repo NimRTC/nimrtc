@@ -288,6 +288,32 @@ struct WinsockScope {
 #endif
 };
 
+/**
+ * @brief The byte-order conversions, spelled so that they compile
+ *        everywhere.
+ *
+ * On Windows these are **functions**, so the global-scope qualifier
+ * (`::htonl`) is valid.  On macOS and the BSDs they are **macros**
+ * (`#define htonl(x) __DARWIN_OSSwapInt32(x)`), and a macro cannot be
+ * named with a `::` in front of it -- the compiler rejects it with
+ * "expected unqualified-id".
+ *
+ * So the calls go through these wrappers, which call the unqualified
+ * name: a macro expands there, and on Windows the function is found in
+ * the global namespace as it is.
+ */
+inline std::uint32_t host_to_network32(std::uint32_t v) noexcept {
+    return htonl(v);
+}
+
+inline std::uint16_t host_to_network16(std::uint16_t v) noexcept {
+    return htons(v);
+}
+
+inline std::uint16_t network_to_host16(std::uint16_t v) noexcept {
+    return ntohs(v);
+}
+
 void close_socket(socket_t s) noexcept {
     if (s == kInvalidSocket) return;
 #if defined(_WIN32)
@@ -327,10 +353,10 @@ public:
         ::setsockopt(sock_, SOL_SOCKET, SO_RCVBUF,
                      reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
 
-        sockaddr_in addr{};
+        struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = 0;
-        addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+        addr.sin_addr.s_addr = host_to_network32(INADDR_LOOPBACK);
         if (::bind(sock_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
             close_socket(sock_);
             sock_ = kInvalidSocket;
@@ -352,25 +378,25 @@ public:
     /** The port the OS assigned. */
     std::uint16_t port() const noexcept {
         if (sock_ == kInvalidSocket) return 0;
-        sockaddr_in addr{};
+        struct sockaddr_in addr{};
         socklen_t len = sizeof(addr);
         if (::getsockname(sock_, reinterpret_cast<struct sockaddr*>(&addr), &len) != 0) {
             return 0;
         }
-        return ::ntohs(addr.sin_port);
+        return network_to_host16(addr.sin_port);
     }
 
     /** The address to send to. */
-    static bool peer(std::uint16_t peer_port, sockaddr_in& out) noexcept {
+    static bool peer(std::uint16_t peer_port, struct sockaddr_in& out) noexcept {
         if (peer_port == 0) return false;
         out.sin_family = AF_INET;
-        out.sin_port = ::htons(peer_port);
-        out.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+        out.sin_port = host_to_network16(peer_port);
+        out.sin_addr.s_addr = host_to_network32(INADDR_LOOPBACK);
         return true;
     }
 
     /** Send a datagram.  Returns false on error. */
-    bool send_to(const sockaddr_in& dst, const void* data, std::size_t len) noexcept {
+    bool send_to(const struct sockaddr_in& dst, const void* data, std::size_t len) noexcept {
         if (sock_ == kInvalidSocket) return false;
         // The length argument is an `int` on Windows and a `size_t` on
         // the BSDs, so the cast is spelled per platform -- otherwise
@@ -957,7 +983,7 @@ RunResult run_scenario(const Options& opt) {
             // at the target over time.
             if (!pacer.try_consume(chunk, Clock::now())) continue;
 
-            sockaddr_in dst{};
+            struct sockaddr_in dst{};
             if (!LoopbackSocket::peer(rx.port(), dst)) break;
             if (!tx.send_to(dst, datagram.data(), chunk)) break;
             ++result.packets_sent;

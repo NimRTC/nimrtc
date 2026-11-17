@@ -98,6 +98,16 @@ jobs:
         # C2079 ("uses undefined struct") instead of a clean error.
         run: python scripts/check_api_marker_includes.py
 
+      - name: API freeze — public header manifest
+        # The checked-in manifest lists every public header.  The
+        # per-symbol scan above checks the *markers*; this checks the
+        # *set*.  A count cannot tell a swap from a change: deleting
+        # `a.hpp` and adding `b.hpp` in the same PR leaves the count
+        # untouched, so CI would stay green while the public surface
+        # moved.  ADR-015 calls the surface a contract, and a contract
+        # needs the actual list, not its cardinality.
+        run: python scripts/check_api_manifest.py
+
       # Fail fast: detect missing tools before wasting minutes on configure.
       - name: Pre-flight tool check
         shell: pwsh
@@ -509,6 +519,16 @@ jobs:
         # first consumer to include that header standalone hits MSVC
         # C2079 ("uses undefined struct") instead of a clean error.
         run: python3 scripts/check_api_marker_includes.py
+
+      - name: API freeze — public header manifest
+        # The checked-in manifest lists every public header.  The
+        # per-symbol scan above checks the *markers*; this checks the
+        # *set*.  A count cannot tell a swap from a change: deleting
+        # `a.hpp` and adding `b.hpp` in the same PR leaves the count
+        # untouched, so CI would stay green while the public surface
+        # moved.  ADR-015 calls the surface a contract, and a contract
+        # needs the actual list, not its cardinality.
+        run: python3 scripts/check_api_manifest.py
 
       # Ubuntu 22.04 ships CMake 3.22.3; CMakePresets.json uses preset
       # schema v6 which requires CMake ≥ 3.25. Pin a recent cmake via pip.
@@ -974,6 +994,16 @@ jobs:
         # C2079 ("uses undefined struct") instead of a clean error.
         run: python3 scripts/check_api_marker_includes.py
 
+      - name: API freeze — public header manifest
+        # The checked-in manifest lists every public header.  The
+        # per-symbol scan above checks the *markers*; this checks the
+        # *set*.  A count cannot tell a swap from a change: deleting
+        # `a.hpp` and adding `b.hpp` in the same PR leaves the count
+        # untouched, so CI would stay green while the public surface
+        # moved.  ADR-015 calls the surface a contract, and a contract
+        # needs the actual list, not its cardinality.
+        run: python3 scripts/check_api_manifest.py
+
       - name: Install ninja + g++ + Python
         # The runner is a *native* arm64 host, so the cross toolchain is
         # not needed: `cmake/toolchains/aarch64-linux-gnu.cmake` detects
@@ -1081,6 +1111,16 @@ jobs:
         # first consumer to include that header standalone hits MSVC
         # C2079 ("uses undefined struct") instead of a clean error.
         run: python3 scripts/check_api_marker_includes.py
+
+      - name: API freeze — public header manifest
+        # The checked-in manifest lists every public header.  The
+        # per-symbol scan above checks the *markers*; this checks the
+        # *set*.  A count cannot tell a swap from a change: deleting
+        # `a.hpp` and adding `b.hpp` in the same PR leaves the count
+        # untouched, so CI would stay green while the public surface
+        # moved.  ADR-015 calls the surface a contract, and a contract
+        # needs the actual list, not its cardinality.
+        run: python3 scripts/check_api_manifest.py
 
       - name: Unused-const gate self-test
         # The gate below only reports what its scanner recognizes.  The

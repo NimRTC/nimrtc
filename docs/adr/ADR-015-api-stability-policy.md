@@ -262,15 +262,39 @@ The freeze has two layered gates: the file-level check is the
 in-CI C++ test (built from the same source tree); the per-symbol
 check is a Node scanner wired into all four platform jobs.
 
+A third gate, the header-set manifest, closes the gap the first two
+leave: a *count* cannot tell a swap from a change.  Deleting
+`a.hpp` and adding `b.hpp` in the same PR leaves the header count
+untouched, so the count check stays green while the public surface has
+moved.  ADR-015 calls the public surface a *contract*, and a contract
+needs the actual list, not its cardinality.
+
 | Check | Where | Required |
 |---|---|---|
 | `tests/test_api_version.cpp` 7/7 PASS (`NIMRTC_API_VERSION_MAJOR` / `MINOR` / `PATCH` / `PRE_RELEASE` / `STRING` + `NIMRTC_API_VERSION` + `NIMRTC_API_VERSION_CHECK` + the STABLE / UNSTABLE / DEPRECATED expansion) | Windows MSVC + Linux x86_64 | green |
 | Every public header under `src/**/include/nimrtc/**` contains at least one `NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE` marker and the public-header count equals the v1.0.0-beta.1 baseline (100) | `tests/test_api_classification.cpp::every_header_has_at_least_one_marker` + `::total_header_count_matches_baseline` (alpha.1 PR #3) | green; missing annotation → test failure with the file list printed to stdout |
 | Every *symbol* (not just every file) at namespace scope in a public header carries a stability marker, after exempting `detail::` / `Impl`-suffix / `NIMRTC_*`-prefix names per the policy above | `scripts/api_freeze_scan.js` (CI gate on all four platforms; `Missing: 0` against the current tree) | green; unclassified symbol → non-zero exit |
 | Every public header that *uses* a stability marker also `#include`s `<nimrtc/core/api_version.hpp>` so the first standalone consumer does not hit MSVC C2079 ("uses undefined struct") | `scripts/check_api_marker_includes.py` (CI gate on all four platforms) | green; missing include → non-zero exit |
+| The **set** of public headers equals the checked-in manifest (`docs/api/public_headers.manifest`), not merely its count | `scripts/check_api_manifest.py` (CI gate on all four platforms + `ci-fast`) | green; an added / removed / renamed header → non-zero exit naming both sides |
 | Every symbol marked `NIMRTC_API_DEPRECATED` has a `CHANGELOG.md` entry under `[Unreleased]` or the current dev cycle | code review | yes |
 | `NIMRTC_API_VERSION_PRE_RELEASE` is `""` (empty) for any final tag | `scripts/check-release-freeze.sh --final-tag` (`version` check) + tag-cut job | yes |
 | Public-header diff vs v0.14.0-beta.1 tag: only additive changes | `git diff v0.14.0-beta.1..HEAD -- 'src/**/include/**'` (alpha.2 seam ⇒ beta.1 freeze boundary, per `v0.14-plan.md` §2.1.2 HEADER-FREEZE-B1) | only new symbols; zero modified or removed |
+
+### The manifest
+
+`docs/api/public_headers.manifest` is a sorted, one-path-per-line list of
+every public header, relative to the repository root and `/`-separated.
+It is generated with:
+
+```
+python scripts/check_api_manifest.py --write
+```
+
+and must be regenerated **in the same PR** that adds, removes or renames
+a public header, with the reason recorded in `CHANGELOG.md`.  The
+checker names both sides of a drift — the headers that appeared and the
+ones that went away — so a reviewer sees the change without diffing the
+tree by hand.
 
 ## Out of scope (this ADR)
 

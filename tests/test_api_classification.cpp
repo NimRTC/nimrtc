@@ -31,6 +31,14 @@
  *    updating the classification sweep; bump the baseline in the
  *    same PR that adds the header.
  *
+ * 3. `header_set_matches_manifest` -- the public-header *set* equals
+ *    the checked-in `docs/api/public_headers.manifest`.  Test 2 checks
+ *    the cardinality; a count cannot tell a swap from a change
+ *    (deleting `a.hpp` and adding `b.hpp` in the same PR leaves the
+ *    count untouched, so CI would stay green while the public surface
+ *    moved).  ADR-015 calls the surface a *contract*, and a contract
+ *    needs the actual list, not its cardinality.
+ *
  * ## Why runtime (not compile-time) check
  *
  * `NIMRTC_API_STABLE` and `NIMRTC_API_UNSTABLE` are empty macros
@@ -641,4 +649,69 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
         << "of " << kBaselineHeaderCount << ".  Either new public headers "
         << "were added (update the baseline + run the classification sweep) "
         << "or a public header was removed (update the baseline + ADR-015).";
+}
+
+// -----------------------------------------------------------------------------
+// Test 3 -- the header SET matches the checked-in manifest
+// -----------------------------------------------------------------------------
+
+/**
+ * @brief Reads the checked-in public-header manifest.
+ *
+ * The manifest is `docs/api/public_headers.manifest`: one relative
+ * path per line, '/'-separated, sorted, with '#' comment lines.
+ *
+ * @param root  The repository root (the manifest is relative to it).
+ * @param out   Receives the manifest entries.
+ *
+ * @return True when the manifest was found and parsed.
+ */
+bool read_manifest(const fs::path& root, std::vector<std::string>& out) {
+    const fs::path path =
+        root / "docs" / "api" / "public_headers.manifest";
+    std::ifstream in(path);
+    if (!in) return false;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        // Strip a trailing CR (the manifest is checked out with CRLF on
+        // Windows).
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line.front() == '#') continue;
+        out.push_back(line);
+    }
+    return true;
+}
+
+TEST(public_header_classification, header_set_matches_manifest) {
+    const fs::path root = fs::path(NIMRTC_SOURCE_ROOT);
+    const auto headers = collect_public_headers(root);
+    ASSERT_FALSE(headers.empty())
+        << "No public headers found under " << root;
+
+    std::vector<std::string> expected;
+    ASSERT_TRUE(read_manifest(root, expected))
+        << "The public-header manifest is missing or unreadable: "
+        << root / "docs" / "api" / "public_headers.manifest"
+        << ".  Regenerate it with: python scripts/check_api_manifest.py --write";
+
+    // The tree's set, as manifest-form paths.
+    const std::string root_prefix = root.generic_string() + "/";
+    std::vector<std::string> actual;
+    actual.reserve(headers.size());
+    for (const auto& h : headers) {
+        std::string rel = h.generic_string();
+        if (rel.rfind(root_prefix, 0) == 0) {
+            rel = rel.substr(root_prefix.size());
+        }
+        actual.push_back(rel);
+    }
+    std::sort(actual.begin(), actual.end());
+
+    EXPECT_EQ(actual, expected)
+        << "The public-header set drifted from the checked-in manifest.  "
+        << "The count-based gate above cannot see a swap (one header "
+        << "removed, one added); this one can.  If the change is "
+        << "intentional, regenerate the manifest with: "
+        << "python scripts/check_api_manifest.py --write";
 }

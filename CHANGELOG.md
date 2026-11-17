@@ -68,7 +68,81 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The measurements are now scaled explicitly and recorded as
   `<name>_x1000`.
 
+- **The ABR behaviour on a saturated link is now measured, and the
+  measurement is asserted in CI (v1.2 plan item `E6`).**
+  The plan's evidence row said "adaptive bitrate survives congestion — ABR +
+  pacing unit-tested", and marked it *open*, because "unit-tested" is not
+  the same claim as "measured".  The eight benchmark scripts `tools/` already
+  shipped (latency, dc, weaknet, weaknet_netem, capture_encode, hotpath,
+  remote_desktop, size) all measured links with **spare capacity**:
+  `benchmark_weaknet_netem.sh` injects *loss and jitter* into a link that was
+  never filled, so the queue never overflowed and the estimator never saw the
+  "send more until it breaks" loop a saturated link produces.  Congestion and
+  injected loss are different phenomena, and only the first one tests a
+  controller.
+
+  `tests/bench/bench_saturation.cpp` closes that gap by driving the
+  **shipped** components against each other over a **real UDP socket pair**:
+  the shipped bandwidth estimator (`nimrtc::bwe`), the shipped token-bucket
+  pacer (`nimrtc::pacing`) and the shipped resolution ladder
+  (`nimrtc::video_bitrate_control`).  The receiving side enforces a
+  token-bucket *capacity* and **drops** the datagrams that arrive when the
+  bucket is empty, exactly as a bottleneck router's queue overflows — so the
+  loss the estimator reacts to is a real loss of real packets, measured by
+  the real receiver.  What is *modelled* is the link (a fixed-capacity,
+  loss-on-overflow bottleneck) and the peer (a receiver that reports loss,
+  RTT and optionally REMB); there is no ICE, DTLS, SRTP or codec in the
+  path, because the benchmark measures the **rate-control closed loop**, not
+  the transport stack.
+
+  Two scenarios are measured, differing **only** in the resolution floor:
+  `floor` (720p, the product's legibility floor) makes the lowest allowed
+  rung twice the link's capacity, so the picture cannot be made small enough
+  to fit and the ladder must hold the floor while the bitrate is throttled;
+  `unfloored` lets the ladder descend to a rung that fits, so the offered
+  load converges onto the capacity.
+
+  The binary is deliberately **not** a ctest case — every number in it is
+  machine-dependent (the loopback's real RTT, the host's real scheduling
+  jitter), so a threshold assertion would be a flaky test rather than a
+  measurement.  The properties that must hold regardless of the machine are
+  asserted by `tools/benchmark_saturation.py` instead, as *properties* and
+  not as thresholds against a reference number: the saturation was real, the
+  stream survived, the ladder reacted, the estimator never raised its target
+  on a report that said the link was congested, the delivered rate stayed
+  within the capacity, the offered load tracked the capacity, the ladder
+  recovered, the throughput recovered, and the ladder did not flap.  All
+  nine are recorded in the committed artifact
+  `docs/benchmarks/saturation_windows_x86_64.json` with their measured
+  values.
+
+  A `Benchmark saturated link (plan E6)` step now runs in both the Windows
+  and the Linux CI legs, and the artifact is uploaded with them.
+
 ### Fixed
+
+- **The AIMD bandwidth estimator no longer climbs back into a wall it is
+  still hitting.**
+  The AIMD front-end's additive increase was gated on the decrease
+  *cooldown* alone, and the cooldown expires on a **clock**, not on the
+  **state of the link**.  So while the link was *still* lossy — the loss
+  rate still above the threshold — the estimate resumed climbing and
+  walked back up to, and past, the rate that had just been throttled.  The
+  front-end behaved like a single-step correction: one halving, then a
+  slow climb back into the congestion, while a fifth of the packets were
+  still being dropped.
+
+  The Goog-CC front-end already carried the correct guard (`!is_lossy`), so
+  the two estimators disagreed under exactly the condition that matters.  The
+  fix is one clause — `&& !is_loss_now` — and
+  `src/modules/bwe/tests/test_bwe.cpp` gains the regression test.
+
+  The defect was found by *measuring* rather than by reading: the
+  saturated-link benchmark (plan item E6) drives the shipped estimator
+  against a real UDP link whose capacity is a token bucket, and the
+  estimate's climb is visible in the recorded per-report trace.  The
+  benchmark's `estimate_did_not_climb_while_congested` invariant is now the
+  regression guard for it, and it is asserted in CI.
 
 - **The WebTransport certificate script no longer hangs on a CI runner.**
   `scripts/generate_wtserver_cert.ps1` computes the certificate's SPKI

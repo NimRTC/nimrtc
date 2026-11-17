@@ -7,6 +7,29 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The WebTransport certificate script no longer hangs on a CI runner.**
+  `scripts/generate_wtserver_cert.ps1` computes the certificate's SPKI
+  SHA-256 so that Chrome can be given an `--ignore-certificate-errors-spki-list`
+  entry.  It did that by reading `$cert.PublicKey.EncodedKeyValue`, which
+  opens the key through the platform crypto provider: on a **non-interactive**
+  runner that call never returns, so the script hung until the job's
+  30-minute timeout killed it.  Every Windows leg failed this way -- the log
+  showed `Certificate created` and then nothing for 27 minutes.
+
+  The SPKI is now read straight out of the certificate's own DER encoding,
+  which touches no provider at all.
+
+  This also fixes a latent correctness bug.  The old code rebuilt the SPKI
+  by hand with a hardcoded `rsaEncryption` AlgorithmIdentifier; for an RSA
+  key the result is byte-identical to the real SPKI, but for any other key
+  type it silently produced the **wrong** SPKI -- an EC certificate would
+  get an RSA AlgorithmIdentifier glued onto an EC key.  Taking the bytes out
+  of the certificate means the AlgorithmIdentifier is whatever the
+  certificate actually used.  Verified byte-for-byte against an independent
+  DER parse for both RSA (294-byte SPKI) and EC (91-byte SPKI) certificates.
+
 ### Added
 
 - **RTCP feedback is now broken down by type (Track S / `DS-4`).**

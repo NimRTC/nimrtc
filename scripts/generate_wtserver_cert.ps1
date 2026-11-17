@@ -34,21 +34,41 @@
 
 $ErrorActionPreference = "Stop"
 
-# --- DER length encoder ----------------------------------------------------
+# --- Minimal DER readers ----------------------------------------------------
 #
-# Used by the SPKI computation below.  DER encodes a length either as a
-# single byte (< 0x80) or as 0x80 | <byte count> followed by the big-endian
-# length bytes.
-function Write-DerLength([System.IO.Stream]$s, [int]$len) {
-    if ($len -lt 0x80) {
-        $s.WriteByte([byte]$len)
-        return
+# Used by the SPKI computation below.  Only what that computation needs:
+# reading a length, and listing the children of a constructed element.
+function Read-DerLength([byte[]]$b, [int]$off) {
+    $first = $b[$off]
+    $off++
+    if ($first -lt 0x80) {
+        return @{ len = $first; off = $off }
     }
-    $bytes = @()
-    $v = $len
-    while ($v -gt 0) { $bytes = @($v -band 0xFF) + $bytes; $v = $v -shr 8 }
-    $s.WriteByte([byte](0x80 -bor $bytes.Count))
-    foreach ($b in $bytes) { $s.WriteByte([byte]$b) }
+    $n = $first -band 0x7F
+    $len = 0
+    for ($i = 0; $i -lt $n; $i++) {
+        $len = ($len -shl 8) -bor $b[$off]
+        $off++
+    }
+    return @{ len = $len; off = $off }
+}
+
+# Lists the children of the element whose TAG byte is at $start.  Each child
+# is @{ tag; start; off; len }: `start` is the offset of the tag byte, `off`
+# the offset of the payload, `len` the payload length.
+function Read-DerChildren([byte[]]$b, [int]$start) {
+    $header = Read-DerLength $b ($start + 1)
+    $p = $header.off
+    $end = $p + $header.len
+    $kids = New-Object System.Collections.ArrayList
+    while ($p -lt $end) {
+        $kidStart = $p
+        $tag = $b[$kidStart]
+        $len = Read-DerLength $b ($kidStart + 1)
+        [void]$kids.Add(@{ tag = $tag; start = $kidStart; off = $len.off; len = $len.len })
+        $p = $len.off + $len.len
+    }
+    return $kids
 }
 
 # --- Parse args (manual so we don't need [CmdletBinding()]) ---
@@ -153,41 +173,52 @@ Set-Content -Path (Join-Path $BuildDir "wtserver_hash.txt") `
 #
 # The SPKI is the SubjectPublicKeyInfo -- the DER block holding the
 # algorithm identifier and the public key -- and Chrome hashes it with
-# SHA-256 and base64-encodes the result.  The certificate's public key is
-# reached through two store properties:
+# SHA-256 and base64-encodes the result.
 #
-#   PublicKey.EncodedParameters -- the AlgorithmIdentifier's *parameters*
-#   PublicKey.EncodedKeyValue  -- the DER RSAPublicKey SEQUENCE
+# It is read straight out of the certificate's own DER encoding, rather than
+# rebuilt from the store's key properties.  Two reasons, and the second one
+# is a bug this implementation had before it was fixed:
 #
-# and the SPKI is
+#   1. `$cert.PublicKey` opens the key through the platform crypto provider.
+#      On a *non-interactive* runner that call never returns -- it blocks
+#      forever waiting on a provider that has no UI to talk to -- so the
+#      script hung until the job's 30-minute timeout killed it.  Reading
+#      `$cert.RawData` touches no provider at all.
 #
-#   SEQUENCE { SEQUENCE { OID rsaEncryption, NULL }, BIT STRING <RSAPublicKey> }
+#   2. The previous version rebuilt the SPKI by hand, hardcoding the
+#      `rsaEncryption` AlgorithmIdentifier and re-wrapping the key as a
+#      BIT STRING.  For an RSA key that is byte-identical to the real SPKI
+#      (verified), but it silently produces the *wrong* SPKI for any other
+#      key type -- an EC certificate would get an RSA AlgorithmIdentifier
+#      glued onto an EC key.  Taking the bytes out of the certificate means
+#      the AlgorithmIdentifier is whatever the certificate actually used.
 #
-# `EncodedParameters` is only the OID/NULL pair, so the AlgorithmIdentifier
-# SEQUENCE is rebuilt here; its DER is fixed by RFC 3279 for rsaEncryption.
+# The certificate's DER is
+#
+#   Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }
+#
+# and the TBSCertificate is
+#
+#   SEQUENCE { version [0] EXPLICIT OPTIONAL, serialNumber, signature,
+#              issuer, validity, subject, subjectPublicKeyInfo, ... }
+#
+# so the SPKI is the 7th element of the TBSCertificate when the optional
+# `version` field is present (always, for v3 certificates, which is what
+# New-SelfSignedCertificate produces) and the 6th when it is not.
 try {
-    $rsaEncryption = [byte[]] @(
-        0x30,0x0d, 0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x01, 0x05,0x00)
+    $der = $cert.RawData
+    $certKids = Read-DerChildren $der 0
+    $tbs = $certKids[0]
+    $tbsKids = Read-DerChildren $der $tbs.start
 
-    $pkDer = $cert.PublicKey.EncodedKeyValue.RawData
+    $offset = 0
+    if ($tbsKids[0].tag -eq 0xA0) { $offset = 1 }
+    $spkiEl = $tbsKids[$offset + 5]
 
-    # BIT STRING: tag 0x03, length, then the unused-bits byte and the key.
-    $bitString = New-Object byte[] ($pkDer.Length + 1)
-    $bitString[0] = 0x00
-    [Array]::Copy($pkDer, 0, $bitString, 1, $pkDer.Length)
-
-    $body = New-Object System.IO.MemoryStream
-    $body.Write($rsaEncryption, 0, $rsaEncryption.Length)
-    $body.WriteByte(0x03)               # BIT STRING
-    Write-DerLength $body $bitString.Length
-    $body.Write($bitString, 0, $bitString.Length)
-    $bodyBytes = $body.ToArray()
-
-    $spki = New-Object System.IO.MemoryStream
-    $spki.WriteByte(0x30)
-    Write-DerLength $spki $bodyBytes.Length
-    $spki.Write($bodyBytes, 0, $bodyBytes.Length)
-    $spkiBytes = $spki.ToArray()
+    # The element's bytes are its tag, its length header, and its payload.
+    $spkiLen = $spkiEl.off + $spkiEl.len - $spkiEl.start
+    $spkiBytes = New-Object byte[] $spkiLen
+    [Array]::Copy($der, $spkiEl.start, $spkiBytes, 0, $spkiLen)
 
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try { $spkiDigest = $sha256.ComputeHash($spkiBytes) }

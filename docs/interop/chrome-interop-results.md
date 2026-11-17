@@ -153,13 +153,28 @@ SPKI（SubjectPublicKeyInfo）的结构是：
 
 ```
 SubjectPublicKeyInfo ::= SEQUENCE {
-    algorithm         AlgorithmIdentifier,   -- rsaEncryption
-    subjectPublicKey  BIT STRING }           -- DER RSAPublicKey
+    algorithm         AlgorithmIdentifier,
+    subjectPublicKey  BIT STRING }
 ```
 
-脚本从证书存储的 `PublicKey.EncodedParameters` 与
-`PublicKey.EncodedKeyValue` 两个属性拼出它。SPKI 的哈希结果**逐字节**与
-一份独立的纯 Python DER 遍历实现交叉验证过（两者必须完全相等）。
+脚本**直接从证书自身的 DER 编码里读出**这个元素，而不是从证书存储的
+`PublicKey.EncodedParameters` / `PublicKey.EncodedKeyValue` 两个属性把它
+重新拼出来。原因有两个，第二个是修好之前真实存在的缺陷：
+
+1. `$cert.PublicKey` 会通过平台的加密提供程序打开私钥。在**非交互的
+   runner 上这个调用不会返回**——它会一直阻塞，等一个没有 UI 可对话的
+   提供程序，于是脚本挂到 job 的 30 分钟超时被杀。读 `$cert.RawData`
+   完全不碰任何提供程序。
+
+2. 之前的手工拼接方式把 `rsaEncryption` 这个 AlgorithmIdentifier **写死**
+   了，再把公钥重新包成 BIT STRING。对 RSA 密钥而言，结果与真正的 SPKI
+   **逐字节相同**；但换成别的密钥类型，它会**默默地算错**——一张 EC 证书
+   会被拼上一个 RSA 的 AlgorithmIdentifier。直接从证书里取字节，
+   AlgorithmIdentifier 就是证书实际用的那一个。
+
+SPKI 的哈希结果**逐字节**与一份独立的纯 Python DER 遍历实现交叉验证过
+（两者必须完全相等）；RSA（294 字节）与 EC（91 字节）两种证书都验证过，
+EC 那一例确认取到的是 `ecPublicKey` OID，而不是写死的 `rsaEncryption`。
 
 ### 被否掉的替代方案
 

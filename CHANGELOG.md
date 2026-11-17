@@ -9,6 +9,23 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The frozen public-header manifest (plan E1).**  `docs/api/public_headers.manifest`
+  pins the **set** of public headers — 191 paths, sorted, one per line — and
+  `scripts/check_api_manifest.py` fails CI when the tree's header set drifts
+  from it, naming both sides of the drift (the headers that appeared, the ones
+  that went away).  Wired into all four platform legs of `ci.yml` and into
+  `ci-fast`.
+
+  The count-based gate that preceded it
+  (`tests/test_api_classification.cpp::total_header_count_matches_baseline`)
+  could not tell a swap from a change: deleting `a.hpp` and adding `b.hpp`
+  in one PR leaves the count untouched, so CI stayed green while the public
+  surface had moved.  ADR-015 calls that surface a contract, and a contract
+  needs the actual list, not its cardinality.
+
+  Regenerate with `python scripts/check_api_manifest.py --write` in the same
+  PR that adds, removes or renames a public header.
+
 - **Planning: `docs/plan/v1.2-next-plan.md`.**  Records the v1.2 planning
   decisions (D-N1..D-N5) and sequences the next three releases as four
   tracks: **E** convergence work that gates the v1.2.0 tag, **S** the

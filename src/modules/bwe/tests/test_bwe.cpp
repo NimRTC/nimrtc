@@ -149,6 +149,150 @@ TEST(BweTest, DecreaseClampedToMinBitrate) {
 }
 
 // -----------------------------------------------------------------------------
+// Sustained loss must not make the estimate climb (the P1#7 latch, taken
+// to its conclusion).
+//
+// The AIMD front-end applies the multiplicative decrease **once per loss
+// event**, and a loss event is the *rising edge* of the loss rate.  That
+// is correct as long as the estimator does not treat the samples that
+// follow a decrease as evidence that the link is healthy again.
+//
+// The bug this test pins: while the link is *still* lossy (the loss rate
+// stays above the threshold), the estimator left the decrease state,
+// finished its cooldown and resumed the additive increase — so the
+// estimate **climbed back up while the link was still dropping a fifth
+// of its packets**.  A congestion signal that turns itself off after one
+// reaction is not a congestion signal; it is a single-step correction
+// that then lets the sender ramp back into the wall it just hit.
+//
+// The Goog-CC front-end already has this guard (`!is_lossy`); the AIMD
+// front-end did not, so the two estimators behaved differently under
+// exactly the condition that matters.
+// -----------------------------------------------------------------------------
+TEST(BweTest, SustainedLossDoesNotLetTheEstimateClimb) {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.max_bitrate_bps     = 5'000'000;
+    c.decrease_factor     = 0.5;
+    c.increase_bps        = 50'000;
+    c.smoothing_alpha     = 1.0;    // no smoothing lag: the raw value
+    c.change_interval     = core::Milliseconds{200};
+    Bwe bwe(c);
+
+    const auto t0 = core::SteadyClock::now();
+
+    // The link is congested and stays congested: every sample reports
+    // 20 % loss, forever.
+    const std::uint32_t after_first_decrease = [&] {
+        bwe.on_feedback(with_loss(0.20, t0));
+        return bwe.estimate().target_bitrate_bps;
+    }();
+    EXPECT_EQ(after_first_decrease, 500'000u);
+
+    // Keep the link congested.  The estimate must not climb back: the
+    // multiplicative decrease is a response to the *event*, and the
+    // additive increase must wait for the link to actually be clean.
+    auto t = t0;
+    for (int i = 0; i < 20; ++i) {
+        t += std::chrono::milliseconds(500);
+        bwe.on_feedback(with_loss(0.20, t));
+        EXPECT_LE(bwe.estimate().target_bitrate_bps, after_first_decrease)
+            << "the estimate climbed at sample " << i
+            << " while the link was still reporting 20 % loss";
+    }
+}
+
+// The counterpart: once the link *is* clean again, the probe resumes.
+// Without this the guard above would be a ratchet that never recovers.
+TEST(BweTest, ACleanSampleAfterTheLossResumesTheProbe) {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.max_bitrate_bps     = 5'000'000;
+    c.decrease_factor     = 0.5;
+    c.increase_bps        = 50'000;
+    c.smoothing_alpha     = 1.0;
+    c.change_interval     = core::Milliseconds{200};
+    Bwe bwe(c);
+
+    const auto t0 = core::SteadyClock::now();
+    bwe.on_feedback(with_loss(0.20, t0));
+    ASSERT_EQ(bwe.estimate().target_bitrate_bps, 500'000u);
+
+    // The link recovers: a clean sample, then a later clean sample.
+    bwe.on_feedback(no_loss(t0 + std::chrono::milliseconds(500)));
+    bwe.on_feedback(no_loss(t0 + std::chrono::seconds(2)));
+
+    EXPECT_GT(bwe.estimate().target_bitrate_bps, 500'000u);
+}
+
+// The same defect, one branch over: the REMB override.
+//
+// The override was gated on `loss_event_pending_`, which is edge-
+// triggered: the latch is set when the loss rate crosses the threshold
+// from below, and cleared as soon as the multiplicative decrease has
+// been applied.  So the *second* still-lossy report arrives with the
+// latch already down, and the receiver's stale (higher) estimate was
+// adopted — walking the sender back into the wall it had just been
+// throttled away from.
+//
+// This is the defect the saturated-link benchmark found: it is not
+// visible in the AIMD-only tests, because the guard the benchmark
+// exercises covers both raise paths.
+TEST(BweTest, SustainedLossDoesNotLetTheRembOverrideTheEstimate) {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.max_bitrate_bps     = 5'000'000;
+    c.decrease_factor     = 0.5;
+    c.increase_bps        = 50'000;
+    c.smoothing_alpha     = 1.0;
+    c.change_interval     = core::Milliseconds{200};
+    Bwe bwe(c);
+
+    const auto t0 = core::SteadyClock::now();
+
+    // The first lossy report: the multiplicative decrease fires.
+    bwe.on_feedback(with_loss(0.20, t0));
+    ASSERT_EQ(bwe.estimate().target_bitrate_bps, 500'000u);
+
+    // The receiver keeps reporting a *higher* bandwidth (its estimate is
+    // stale — it has not seen the congestion yet) while the link keeps
+    // reporting loss.  The override must not be adopted: the loss path
+    // owns the rate while the link is complaining.
+    auto t = t0;
+    for (int i = 0; i < 20; ++i) {
+        t += std::chrono::milliseconds(500);
+        Feedback f = with_loss(0.20, t);
+        f.remb_bps = 2'000'000;
+        bwe.on_feedback(f);
+        EXPECT_LE(bwe.estimate().target_bitrate_bps, 500'000u)
+            << "the REMB override raised the estimate at sample " << i
+            << " while the link was still reporting 20 % loss";
+    }
+}
+
+// The counterpart for the override: a REMB on a *clean* link is still
+// adopted.  Without this the guard above would be a ratchet that never
+// takes the receiver's estimate into account.
+TEST(BweTest, ACleanSampleStillTakesTheRembOverride) {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.max_bitrate_bps     = 5'000'000;
+    c.decrease_factor     = 0.5;
+    c.increase_bps        = 50'000;
+    c.smoothing_alpha     = 1.0;
+    c.change_interval     = core::Milliseconds{200};
+    Bwe bwe(c);
+
+    const auto t0 = core::SteadyClock::now();
+    Feedback f = no_loss(t0);
+    f.remb_bps = 2'000'000;
+    bwe.on_feedback(f);
+
+    // The trust factor is 0.8, so 2 Mbps becomes 1.6 Mbps.
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'600'000u);
+}
+
+// -----------------------------------------------------------------------------
 // No-loss -> additive increase (cooldown + change_interval must be satisfied)
 // -----------------------------------------------------------------------------
 TEST(BweTest, NoLossTriggersAdditiveIncrease) {

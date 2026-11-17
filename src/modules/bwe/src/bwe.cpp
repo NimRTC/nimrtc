@@ -204,8 +204,23 @@ struct Bwe::Impl {
         // REMB during an active loss event is suspect (the receiver's
         // estimate is also stale), so we ignore REMB while a decrease is
         // pending and let the loss-event path own the rate update.
+        //
+        // The `loss_event_pending_` latch is **not** enough on its own.
+        // It is edge-triggered: it is set when the loss rate crosses the
+        // threshold from below, and cleared as soon as the multiplicative
+        // decrease has been applied.  So the *second* still-lossy report
+        // arrives with the latch already down, and the REMB override
+        // would adopt the receiver's (stale, higher) estimate and walk
+        // the sender straight back into the wall it had just been
+        // throttled away from.  That is the same defect the additive
+        // increase had, in the same place in the loop -- a raise gated
+        // on a transient state rather than on the state of the link.
+        //
+        // The guard is therefore the link itself: a REMB is only adopted
+        // on a report that said there was **no** loss.  While the link is
+        // still lossy, the multiplicative decrease owns the rate.
         if (feedback.remb_bps.has_value() && !loss_event_pending_ &&
-            !delay_overuse) {
+            !delay_overuse && !is_loss_now) {
             std::uint32_t remb = *feedback.remb_bps;
             // Apply trust factor and clamp
             remb = static_cast<std::uint32_t>(remb * kRembTrustFactor);
@@ -264,6 +279,26 @@ struct Bwe::Impl {
             }
         } else {
             // ---- No loss event: cooldown check + additive increase ---------
+            //
+            // The additive increase is a **probe**, and a probe is only
+            // meaningful on a link that is actually clean.  When the
+            // link is *still* lossy — the loss rate stays above the
+            // threshold — the estimate must hold its value: the
+            // multiplicative decrease already fired for this congestion
+            // event, and raising the target again would walk the sender
+            // back into the wall it just hit.
+            //
+            // Without this guard the AIMD front-end behaved like a
+            // single-step correction: one halving, then a slow climb
+            // back to (and past) the original rate while a fifth of the
+            // packets were still being dropped.  The Goog-CC front-end
+            // already carried this guard (`!is_lossy`); the two
+            // estimators therefore disagreed under exactly the condition
+            // that matters.
+            //
+            // The **cooldown** is not the guard: it only bounds how long
+            // the decrease state lasts, and it expires on a clock, not
+            // on the state of the link.
             if (state_ == State::kDecrease) {
                 // Was decreasing, check if cooldown passed.
                 constexpr core::Milliseconds kDecreaseCooldown{500};
@@ -274,7 +309,7 @@ struct Bwe::Impl {
                 }
             }
 
-            if (state_ == State::kIncrease) {
+            if (state_ == State::kIncrease && !is_loss_now) {
                 // Additive increase: add increase_bps proportional to elapsed time.
                 if (last_change_time_.has_value()) {
                     const auto elapsed = feedback.timestamp - *last_change_time_;

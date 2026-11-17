@@ -2889,6 +2889,55 @@ if(TARGET nimrtc::video_capture)
 endif()
 
 # ---------------------------------------------------------------------------
+# The saturated-link benchmark (v1.2 plan item E6).
+#
+# The plan's evidence table says "adaptive bitrate survives congestion"
+# is unproven because there is "no measurement on a **saturated** link".
+# `bench_saturation` closes that gap: it drives the *shipped* bandwidth
+# estimator (`nimrtc::bwe`), the *shipped* token-bucket pacer
+# (`nimrtc::pacing`) and the *shipped* resolution ladder
+# (`nimrtc::video_bitrate_control`) against a real UDP socket pair whose
+# capacity is enforced by a token bucket — so the congestion is a real
+# loss of real packets, and the estimator's real loss path is what
+# reacts.
+#
+# It is deliberately NOT a ctest case: every number in it is
+# machine-dependent (the loopback's real RTT and the host's real
+# scheduling jitter), so a threshold assertion would be a flaky test
+# rather than a measurement.  `tools/benchmark_saturation.py` is the
+# wrapper that captures a run into `build/` and asserts the run's
+# *invariants* (the ladder steps down, it settles, it recovers).
+#
+# The link set is deliberately small: the benchmark drives the three
+# modules under test directly, so it does not need the engine.
+# ---------------------------------------------------------------------------
+if(TARGET nimrtc::bwe AND TARGET nimrtc::pacing AND TARGET nimrtc::video_bitrate_control)
+    add_executable(bench_saturation bench/bench_saturation.cpp)
+    if(WIN32)
+        target_link_libraries(bench_saturation PRIVATE ws2_32)
+    elseif(APPLE)
+        target_link_libraries(bench_saturation PRIVATE c++ pthread)
+    else()
+        target_link_libraries(bench_saturation PRIVATE atomic)
+    endif()
+    target_link_libraries(bench_saturation PRIVATE
+        nimrtc::core
+        nimrtc::plugins
+        nimrtc::bwe
+        nimrtc::pacing
+        nimrtc::video_bitrate_control)
+    target_include_directories(bench_saturation PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include")
+    if(WIN32)
+        target_compile_definitions(bench_saturation PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    set_target_properties(bench_saturation PROPERTIES
+        VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+    nimrtc_apply_options(bench_saturation LENIENT)
+endif()
+
+# ---------------------------------------------------------------------------
 # The zero-copy *seam* probe (remote-desktop M1).
 #
 # `bench_capture_encode` proves the *capture* side of the zero-copy claim

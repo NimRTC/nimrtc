@@ -196,6 +196,69 @@ the one that is easy to miss: `pull_request: branches: [main]` filters
 on the PR's *base* branch, so a workflow that omits it never runs for
 the merge it is supposed to be gating.
 
+## The saturated-link benchmark (plan E6)
+
+| Script | Purpose |
+|--------|---------|
+| `benchmark_saturation.py` | Drives `tests/bench/bench_saturation.cpp` — the shipped bandwidth estimator, the shipped rate controller with its resolution ladder, and the shipped pacer, over a **real UDP socket pair** whose receiving side enforces a token-bucket capacity and **drops the datagrams that overflow it**. The congestion is therefore real loss of real packets, not a simulated loss percentage. Asserts nine properties of the run (the saturation was real, the stream survived, the ladder reacted, the estimator never raised its target on a congested report, the delivered rate stayed within capacity, the offered load tracked the capacity, the ladder recovered, the throughput recovered, the ladder did not flap) and writes the artifact. Wired into CI as the `Benchmark saturated link (plan E6)` step in both the Windows and the Linux legs. |
+
+```
+python tools/benchmark_saturation.py --build-dir build/e6 \\
+    --out docs/benchmarks/saturation_windows_x86_64.json
+python tools/benchmark_saturation.py --build-dir build/e6 --dry-run
+```
+
+The binary is deliberately **not** a ctest case: every number in it is
+machine-dependent (the loopback's real RTT, the host's real scheduling
+jitter), so a threshold assertion would be a flaky test rather than a
+measurement. The properties that must hold regardless of the machine
+are asserted by the wrapper instead, and they are stated as
+*properties* rather than as *thresholds against a reference number*.
+
+Two scenarios are measured, and they differ **only** in the resolution
+floor:
+
+| Scenario | Floor | What it exercises |
+|----------|-------|-------------------|
+| `floor` | 720p | The product's legibility floor. The lowest allowed rung is twice the link's capacity, so the picture cannot be made small enough to fit — the ladder must hold the floor and let the bitrate be throttled instead. |
+| `unfloored` | none | The ladder may descend to a rung that *does* fit, so the offered load converges onto the link's capacity. |
+
+The estimator is a knob (`--bwe aimd` / `--bwe goog-cc`) rather than a
+scenario, and the artifact records which one produced the numbers.
+
+The `estimate_did_not_climb_while_congested` invariant is the
+regression guard for the AIMD defect this benchmark uncovered: the
+AIMD front-end used to resume its additive increase once the 500 ms
+cooldown expired even while the link was *still* lossy, so the estimate
+walked back up to (and past) the rate that had just been throttled. The
+Goog-CC front-end already carried that guard; the AIMD one did not.
+
+The guard is decided on the estimator's own **per-report reason**
+(`aimd_increase` / `remb_override` on a report whose loss rate is at or
+above the estimator's 2% congestion threshold), not on the before/after
+estimate pair: the reported estimate is an exponentially smoothed value,
+so it can drift upwards by a few bits after a decrease without the
+estimator having raised anything. The artifact's `reports` array
+carries the raw evidence, and a failure itemises the offending reports
+rather than only reporting a count.
+
+### The busy host
+
+The sender is a *process on the host*, and a busy host cannot fill the
+link: it delivers less than the controller asked for, so the link never
+queues, nothing is dropped, and the two invariants that only mean
+something under real saturation — *delivered stayed within the
+capacity* and *offered load tracked the capacity* — have no answer.
+
+That case is detected by comparing the delivered rate against the
+controller's own target, and it is handled as a **skip**, not as a
+failure: a measurement that did not happen is not a result, and failing
+it would report a rate-control bug that is really a busy CI runner. The
+wrapper re-runs the scenario up to `MAX_SCENARIO_ATTEMPTS` times, and
+after that the scenario is a **failure** — a gate that cannot measure is
+not a gate. The verdict's `skips` array lists every property that went
+unchecked, so a green run cannot hide one.
+
 ## Release evidence (the seven-day soak)
 
 The v1.1 release gate needs one evidence record per platform per day.

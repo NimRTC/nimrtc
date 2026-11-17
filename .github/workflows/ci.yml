@@ -216,6 +216,30 @@ jobs:
           python tools/benchmark_dc.py
           python tools/benchmark_weaknet.py --count 200 --size 1200
 
+      # The saturated-link benchmark (v1.2 plan item E6).
+      #
+      # This one is a **gate**, not just a measurement: the wrapper
+      # asserts the run's invariants (the saturation was real, the
+      # stream survived, the ladder stepped down, the estimator never
+      # raised its target on a report that said the link was
+      # congested, the offered load tracked the capacity, the ladder
+      # recovered, and it did not flap) and exits non-zero when one of
+      # them fails.  The AIMD regression guard in particular catches a
+      # defect this benchmark itself uncovered: the estimator used to
+      # resume its additive increase while the link was still lossy,
+      # so the estimate walked back into the wall it had just been
+      # throttled away from.
+      #
+      # The numbers themselves are machine-dependent (the loopback's
+      # real RTT and the host's real scheduling jitter), so the *artifact*
+      # is uploaded but is not a pass/fail threshold — the invariants
+      # are.
+      - name: Benchmark saturated link (plan E6)
+        shell: pwsh
+        run: |
+          cmake --build --preset debug.msvc --target bench_saturation -j 2
+          python tools/benchmark_saturation.py --build-dir build --out build/e2e/bench_saturation.json
+
       - name: Upload bench artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -224,6 +248,7 @@ jobs:
             build/e2e/bench_latency.json
             build/e2e/bench_dc.json
             build/e2e/bench_weaknet.json
+            build/e2e/bench_saturation.json
           retention-days: 14
 
   # ---------------------------------------------------------------------------
@@ -727,6 +752,29 @@ jobs:
         run: |
           sudo --preserve-env=PATH bash tools/benchmark_weaknet_netem.sh --count 200 --size 1200
 
+      # The saturated-link benchmark (v1.2 plan item E6).
+      #
+      # This one is a **gate**, not just a measurement: the wrapper
+      # asserts the run's invariants (the saturation was real, the
+      # stream survived, the ladder stepped down, the estimator never
+      # raised its target on a report that said the link was
+      # congested, the offered load tracked the capacity, the ladder
+      # recovered, and it did not flap) and exits non-zero when one of
+      # them fails.  The AIMD regression guard in particular catches a
+      # defect this benchmark itself uncovered: the estimator used to
+      # resume its additive increase while the link was still lossy,
+      # so the estimate walked back into the wall it had just been
+      # throttled away from.
+      #
+      # The numbers themselves are machine-dependent (the loopback's
+      # real RTT and the host's real scheduling jitter), so the *artifact*
+      # is uploaded but is not a pass/fail threshold — the invariants
+      # are.
+      - name: Benchmark saturated link (plan E6)
+        run: |
+          cmake --build --preset debug --target bench_saturation -j 2
+          python3 tools/benchmark_saturation.py --build-dir build --out build/e2e/bench_saturation.json
+
       - name: Upload bench artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -736,6 +784,7 @@ jobs:
             build/e2e/bench_dc.json
             build/e2e/bench_weaknet.json
             build/e2e/bench_weaknet_netem.json
+            build/e2e/bench_saturation.json
           retention-days: 14
 
       # E2 — leaf compile proof (docs/plan/v1.2-next-plan.md §3 Track E).

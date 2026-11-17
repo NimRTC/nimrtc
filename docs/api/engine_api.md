@@ -1087,7 +1087,8 @@ never drift apart.  The registry is an *instance*, not a singleton — two
 engines in one process get two registries.
 
 **This is not a standard `RTCStatsReport`.** The struct is flat and
-engine-wide: there is no per-stream breakdown and no ICE
+engine-wide, with one exception: `inbound_rtp_streams` carries a
+per-source breakdown (see §13.2). There is still no ICE
 candidate-pair / RTT dimension. The snapshot lifecycle adds the
 *time* and the *semantics*, not the missing dimensions. The
 `src/modules/video_stats/` module **is** wired into the engine (the
@@ -1100,6 +1101,61 @@ reachable through this accessor as `video_freeze_count` /
 stream-level shape and the missing dimensions — see
 `docs/plan/stats-surface-plan.md` (landed later in the v1.2 stack, so
 referenced here by path, not by link).
+
+### 13.2 The inbound per-source breakdown (v1.2.0, plan Track S / S2)
+
+The flat counters answer *"how much arrived"*, but not *"from
+whom"*.  A peer that sends **simulcast** (RFC 5956 — several encodings
+of the same picture on different SSRCs) puts three different
+qualities into one counter, and a host that receives from more than
+one source has the same problem.  There is no way to ask *"how many
+packets arrived on SSRC X?"* — which is the question a loss
+investigation actually asks.
+
+`Stats::inbound_rtp_streams` is the receive-side counterpart of
+`Stats::video_streams`: one entry per inbound RTP source.
+
+```cpp
+struct Stats {
+    // ---- The inbound per-source breakdown (v1.2.0, plan Track S / S2) ----
+    // One entry per inbound RTP source, keyed by SSRC.
+    std::vector<InboundRtpStats> inbound_rtp_streams;
+};
+
+struct InboundRtpStats {
+    std::uint32_t ssrc = 0;            // the RTP source identifier
+    std::uint8_t  payload_type = 0;    // observed, not negotiated
+    std::string   kind;                // "video", "audio" or "unknown"
+
+    std::uint64_t packets_received = 0;
+    std::uint64_t bytes_received = 0;
+    std::uint64_t packets_lost = 0;      // the gaps in the sequence space
+    std::uint64_t nacks_sent = 0;       // the retransmission requests sent
+    std::uint64_t frames_received = 0;   // the assembled access units
+    std::uint64_t frames_incomplete = 0; // arrived but not assemblable
+    std::uint32_t jitter_ms = 0;
+    std::uint32_t playout_delay_ms = 0;
+};
+```
+
+The contract:
+
+- **The SSRC is the key**, because the SSRC is the only thing on the
+  wire that identifies a source.  The payload type says how to
+  *decode* a packet, not who sent it.
+- **The entry accumulates over the life of the source.**  A source
+  that restarts (a new SSRC) gets a new entry; a source that
+  disappears keeps its entry, so a host reading the list after the
+  peer stopped still sees the totals it produced.
+- **`packets_lost` is the loss figure**, counted by the receive
+  pipeline — the only party that sees the sequence space.
+- **The payload type is observed, not negotiated.**  A peer that
+  changes its payload type mid-stream (RFC 3264 §5.1 allows a PT
+  change after a re-INVITE) shows up as a changed value.
+
+The outbound side keeps its existing `Stats::video_streams`
+(`VideoStreamStats`: `ssrc` / `packets_sent` / `bytes_sent` /
+`keyframes_sent`); this row adds the missing inbound counterpart.
 
 ---
 

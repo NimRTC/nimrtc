@@ -97,6 +97,7 @@
 #include "engine_control_seam.hpp"
 #include "engine_feedback_state.hpp"
 #include "engine_qoe_seam.hpp"
+#include "engine_inbound_state.hpp"
 #include "engine_rtcp_helpers.hpp"
 #include "engine_ref_frame_table.hpp"
 #include "engine_render_state.hpp"
@@ -330,6 +331,7 @@ struct NimRTCEngine::Impl {
     // matching collaborator; see the table in the file header.
     detail::AudioState   audio_state;
     detail::VideoState   video_state;
+    detail::InboundState inbound_state;
     detail::SessionState session_state;
     detail::ScratchBuffers scratch;
 

@@ -1634,6 +1634,103 @@ struct NIMRTC_API_STABLE VideoStreamStats {
     std::uint64_t keyframes_sent = 0;
 };
 
+/**
+ * @brief The receive-side counterpart of `VideoStreamStats`: one entry
+ *        per inbound RTP source (plan Track S / S2).
+ *
+ * ## Why this exists
+ *
+ * `VideoStreamStats` describes what *we* send.  It has no inbound
+ * counterpart: the engine's flat `Stats` carries a single set of
+ * `video_frames_received` / `video_bytes_received` counters that
+ * describe *every* inbound stream mixed together.  That is fine for a
+ * session with one peer stream and useless for anything else:
+ *
+ *   * a peer that sends **simulcast** (RFC 5956 — several encodings of
+ *     the same picture on different SSRCs) puts three different
+ *     qualities into one counter, so the host cannot tell which
+ *     encoding it is actually receiving;
+ *   * a session that receives from more than one source (an SFU, a
+ *     peer that sends video and audio on separate SSRCs) has the same
+ *     problem;
+ *   * a host that wants "how many packets arrived on SSRC X" — the
+ *     question a loss investigation actually asks — has no way to ask
+ *     it.
+ *
+ * libwebrtc answers this with an `inbound-rtp` entry per SSRC.  This
+ * is the same shape, reduced to what the engine actually knows.
+ *
+ * ## What one entry means
+ *
+ * An entry is keyed by the **SSRC** of the inbound source, because the
+ * SSRC is the only thing on the wire that identifies a source: the
+ * payload type says how to *decode* a packet, not who sent it, and the
+ * peer may reuse a payload type for several sources.
+ *
+ * The entry accumulates over the life of the source.  A source that
+ * restarts (a new SSRC) gets a new entry; a source that disappears
+ * keeps its entry, so a host reading the list after the peer stopped
+ * still sees the totals it produced.
+ *
+ * @see Stats::inbound_rtp_streams
+ */
+struct NIMRTC_API_STABLE InboundRtpStats {
+    /** The RTP SSRC of the inbound source. */
+    std::uint32_t ssrc = 0;
+
+    /** The RTP payload type the source's packets arrived with.
+     *
+     *  The payload type is *observed*, not negotiated: it is whatever
+     *  the peer actually put on the wire.  A peer that changes its
+     *  payload type mid-stream (RFC 3264 §5.1 allows a PT change
+     *  after a re-INVITE) shows up here as a changed value. */
+    std::uint8_t payload_type = 0;
+
+    /** What the source carries: "video", "audio" or "unknown".
+     *
+     *  The engine routes inbound RTP by payload type (the negotiated
+     *  routing table), so it knows which plane a source belongs to.
+     *  A source that arrived before the routing table was active is
+     *  "unknown". */
+    std::string kind;
+
+    /** The RTP packets received from this source. */
+    std::uint64_t packets_received = 0;
+
+    /** The RTP bytes received from this source (header + payload). */
+    std::uint64_t bytes_received = 0;
+
+    /** The packets the receiver identified as *missing* for this
+     *  source (the gaps in the sequence space).
+     *
+     *  This is the loss figure a host actually wants: the number of
+     *  packets the peer sent that never arrived.  It is counted by
+     *  the receive pipeline, which is the only party that sees the
+     *  sequence space. */
+    std::uint64_t packets_lost = 0;
+
+    /** The NACK entries this engine emitted for this source (the
+     *  retransmission requests it sent the peer). */
+    std::uint64_t nacks_sent = 0;
+
+    /** The frames assembled from this source's packets (the decoded
+     *  access units). */
+    std::uint64_t frames_received = 0;
+
+    /** The frames that arrived but could not be assembled (a
+     *  truncated access unit, an incomplete FU-A chain). */
+    std::uint64_t frames_incomplete = 0;
+
+    /** The interarrival jitter of this source, in milliseconds.
+     *
+     *  The value the receiver's jitter buffer reports for this
+     *  source. */
+    std::uint32_t jitter_ms = 0;
+
+    /** The current playout delay of this source, in milliseconds. */
+    std::uint32_t playout_delay_ms = 0;
+};
+
 // ---------------------------------------------------------------------------
 // The render / presentation plane (remote-desktop plan E5 / E6 / E7 / E9)
 // ---------------------------------------------------------------------------
@@ -3845,6 +3942,26 @@ public:
         // unchanged.
         std::vector<VideoStreamStats> video_streams;
 
+        // ---- The per-source inbound entries (plan Track S / S2) ------------
+        //
+        // One entry per **inbound RTP source** (an SSRC the peer sends
+        // on), each with its own packet / byte / frame counts and its
+        // own loss figure.
+        //
+        // The flat `video_frames_received` / `audio_frames_received`
+        // counters above describe *every* inbound stream mixed
+        // together, which is fine for a single peer stream and useless
+        // for simulcast (RFC 5956) or a multi-source session: the host
+        // cannot tell which encoding it is actually receiving.  The
+        // list is the receive-side counterpart of `video_streams`.
+        //
+        // The entries are keyed by SSRC.  An entry appears the first
+        // time a packet from that source arrives, and it keeps
+        // accumulating for the rest of the session — so a host that
+        // reads the list after the peer went away still sees the
+        // totals that source produced.
+        std::vector<InboundRtpStats> inbound_rtp_streams;
+
         // ---- The per-stage CPU-time instrumentation (plan J1) ------------
         //
         // The plan's exit measurement is written in terms of time, so the
@@ -4297,6 +4414,23 @@ private:
                                    std::uint16_t seq,
                                    std::uint32_t rtp_timestamp,
                                    std::int64_t arrival_us) noexcept;
+    /** An inbound RTP packet arrived, on any source (plan Track S / S2).
+     *
+     *  Counts the packet against the SSRC it arrived on, so the
+     *  per-source inbound entries (`Stats::inbound_rtp_streams`) can
+     *  tell one source from another — a peer that sends simulcast
+     *  (RFC 5956) puts several encodings on several SSRCs, and the flat
+     *  counters mix them together.
+     *
+     *  @param ssrc          The source the packet arrived on.
+     *  @param payload_type  The payload type it carried.
+     *  @param packet_bytes  The packet's total size on the wire (the
+     *                       RTP header included).
+     *  @param kind          What the source carries ("video" / "audio"). */
+    void note_inbound_packet(std::uint32_t ssrc,
+                              std::uint8_t payload_type,
+                              std::size_t packet_bytes,
+                              std::string_view kind) noexcept;
     /** Send the RTCP receiver report for the inbound audio stream
      *  (v1.2.0, audio pipeline WP-8, spec B-12).
      *
@@ -4536,6 +4670,14 @@ private:
 
     /** Fill the per-stream statistics entries (plan H4). */
     void append_video_stream_stats(std::vector<VideoStreamStats>& out) const noexcept;
+
+    /** Fill the per-source inbound entries (plan Track S / S2).
+     *
+     *  One entry per inbound SSRC the peer has sent on, with the
+     *  packet / byte / frame counts and the loss figure for that
+     *  source.  The list is the receive-side counterpart of
+     *  `append_video_stream_stats()`. */
+    void append_inbound_rtp_stats(std::vector<InboundRtpStats>& out) const noexcept;
 
     /** Close and release every extra stream's plugins. */
     void shutdown_extra_video_streams() noexcept;

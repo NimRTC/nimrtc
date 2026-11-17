@@ -1118,4 +1118,77 @@ void NimRTCEngine::append_video_stream_stats(
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// The per-source inbound entries (plan Track S / S2)
+// ---------------------------------------------------------------------------
+//
+// The receive-side counterpart of the per-stream list above.
+//
+// The loss and the jitter figures come from the *receive pipelines*,
+// which are the only parties that see a source's sequence space: the
+// engine does not track the video sequence numbers, and the audio
+// pipeline owns its own jitter estimate.  The pipelines publish a
+// single aggregate each (there is one video receiver and one audio
+// receiver), so the figure is attributed to the source the pipeline
+// is actually working on -- the peer's video SSRC, and the inbound
+// audio SSRC.
+
+void NimRTCEngine::append_inbound_rtp_stats(
+        std::vector<InboundRtpStats>& out) const noexcept {
+    if (impl_ == nullptr) return;
+
+    const auto& sources = impl_->inbound_state.sources();
+    if (sources.empty()) return;
+
+    // The video receiver's loss figure, and the audio receiver's.
+    std::uint64_t video_packets_lost = 0;
+    std::uint64_t video_frames_incomplete = 0;
+    if (video_receiver_) {
+        const auto rx = video_receiver_->stats();
+        video_packets_lost = rx.sequence_gaps_seen;
+        video_frames_incomplete = rx.frames_incomplete;
+    }
+
+    std::uint64_t audio_packets_lost = 0;
+    std::uint32_t audio_jitter_ms = 0;
+    std::uint32_t audio_delay_ms = 0;
+    if (audio_receiver_) {
+        const auto rx = audio_receiver_->stats();
+        audio_packets_lost = rx.packets_lost;
+        audio_jitter_ms = rx.jitter_ms;
+        audio_delay_ms = rx.current_delay_ms;
+    }
+
+    const std::uint32_t video_ssrc = impl_->video_state.remote_video_ssrc_;
+    const std::uint32_t audio_ssrc = impl_->audio_state.audio_rx.ssrc;
+
+    out.reserve(out.size() + sources.size());
+    for (const auto& [ssrc, src] : sources) {
+        InboundRtpStats entry;
+        entry.ssrc = src.ssrc;
+        entry.payload_type = src.payload_type;
+        entry.kind = src.kind;
+        entry.packets_received = src.packets_received;
+        entry.bytes_received = src.bytes_received;
+        entry.nacks_sent = src.nacks_sent;
+        entry.frames_received = src.frames_received;
+
+        // The loss and the jitter belong to the pipeline that owns the
+        // source's sequence space.  A source the pipeline is not
+        // working on reports zero rather than the other plane's
+        // figure -- a wrong number is worse than no number.
+        if (ssrc == video_ssrc) {
+            entry.packets_lost = video_packets_lost;
+            entry.frames_incomplete = video_frames_incomplete;
+        } else if (ssrc == audio_ssrc) {
+            entry.packets_lost = audio_packets_lost;
+            entry.jitter_ms = audio_jitter_ms;
+            entry.playout_delay_ms = audio_delay_ms;
+        }
+
+        out.push_back(std::move(entry));
+    }
+}
+
 }  // namespace nimrtc::engine

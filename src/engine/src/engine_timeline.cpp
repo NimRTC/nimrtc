@@ -270,6 +270,10 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
             static_cast<std::int64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     core::SteadyClock::now().time_since_epoch()).count())};
+        // Plan Track S / S2: a telephone-event packet rides on the
+        // audio source's sequence space (RFC 4733 §2.1), so it counts
+        // against that source like any other audio packet.
+        note_inbound_packet(pv.ssrc, pv.payload_type, pv.raw.size(), "audio");
         note_inbound_audio_packet(pv.ssrc, pv.seq, pv.timestamp,
                                   dtmf_recv_ts_us);
         handle_dtmf_payload(pv.ssrc, pv.payload);
@@ -347,6 +351,12 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         // picks its own SSRC, so it can only be learned from the wire.
         impl_->video_state.remote_video_ssrc_ = pv.ssrc;
 
+        // Plan Track S / S2: the per-source inbound accounting.  The
+        // packet is counted against the SSRC it arrived on, so a host
+        // can tell one source from another (simulcast, RFC 5956).
+        note_inbound_packet(pv.ssrc, pv.payload_type,
+                            pv.raw.size(), "video");
+
         plugins::VideoRtpPacket vp;
         vp.ssrc          = pv.ssrc;
         vp.seq           = pv.seq;
@@ -384,6 +394,11 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         // that was already reported through `on_error_`).  The packets
         // are counted and dropped — they are never decoded.
         ++impl_->audio_state.audio_rx_dropped_packets;
+        // Plan Track S / S2: the packet still counts against its
+        // source.  A host asking "did anything arrive on this SSRC?"
+        // deserves the truth even when the track is muted.
+        note_inbound_packet(pv.ssrc, pv.payload_type,
+                            pv.raw.size(), "audio");
         return;
     }
 
@@ -391,6 +406,10 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         static_cast<std::int64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 core::SteadyClock::now().time_since_epoch()).count())};
+
+    // Plan Track S / S2: the per-source inbound accounting, before the
+    // packet is handed to the pipeline.
+    note_inbound_packet(pv.ssrc, pv.payload_type, pv.raw.size(), "audio");
 
     // The RTCP receiver report needs the *sequence* bookkeeping of the
     // inbound audio stream (RFC 3550 §6.4.2) — the extended highest

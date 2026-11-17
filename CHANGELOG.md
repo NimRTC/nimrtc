@@ -50,6 +50,16 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   been skipped in silence.  Asserting the Wayland leaves then exposed
   that the Wayland renderer had never been compiled on any build host
   (see the corresponding entry under *Fixed*).
+
+- **The input-injection adapter leaves are now part of the compile
+  proof (plan E2).**  `libxtst-dev` joins the CI package list and the
+  `Leaf compile proof` step asserts that both the XTest and the uinput
+  injection backends were compiled in, and builds the
+  `nimrtc_rd_input_inject` target.  The same shape of gap the Wayland
+  assertion found: `libxtst-dev` was missing from the runner image, so
+  `NIMRTC_HAS_XTEST=1` was never defined and the whole X11 branch of the
+  Linux injector was dead code (see the corresponding entry under
+  *Fixed*).
 - **CI auto-retry for jobs that were starved of a runner.**  A
   GitHub-hosted runner is not guaranteed: a job asking for a saturated
   pool — the `macos-15` arm64 image is the chronic case in this
@@ -268,6 +278,62 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Verified: builds clean with warnings-as-errors on Linux (g++-13, all six
   optional paths enabled) and on Windows (MSVC 2022, Debug), and the
   protocol interface symbols are now defined in the archive.
+
+- **The Wayland sink compiled but could not present.**  E2 proved the
+  Wayland leaves *compile*; running the sink under a headless Weston
+  showed that neither presentation path reached the display, and that
+  the EGL path tore the client connection down.
+
+  * **`EGL_BAD_ACCESS` (0x3002) on every frame.**  `init_egl()` bound the
+    context on the thread that called `open()` and left it bound there.
+    EGL binds a context to the **calling thread** and refuses to bind one
+    already current elsewhere, so the presenter thread's `eglMakeCurrent()`
+    failed on every frame.  `init_egl()` now releases its binding and
+    calls `eglReleaseThread()` when it is done querying the surface,
+    leaving the context free for the presenter thread.
+  * **`xdg_surface has never been configured`.**  `init_wayland()`
+    committed the initial xdg state and moved on; the first frame was
+    then committed before the compositor's configure had arrived, which
+    is a protocol error — Weston kills the client.  The surface now waits
+    (bounded round trips, so a compositor that never configures cannot
+    hang `open()`) for the first configure and its acknowledgement
+    before `open()` returns.
+  * **A failed swap was counted as a presented frame.**
+    `draw_with_egl()` ignored the result of `eglSwapBuffers()` and
+    returned `true` unconditionally, so `presented` could report frames
+    that never reached the compositor.  The swap result is now the
+    return value.
+
+  Verified under headless Weston on Ubuntu 22.04: the EGL path and the
+  `wl_shm` CPU path each present a full 1280x720 and a letterboxed
+  320x180 stream with no protocol errors.
+
+- **The X11 input-injection path had never been compiled.—**  The Linux
+  injector has two backends: XTest (via `libXtst`) and uinput (via the
+  kernel's `linux/uinput.h`).  `libxtst-dev` was not among the CI
+  install packages, so `NIMRTC_HAS_XTEST=1` was never defined and the
+  entire X11 branch of `linux_input.cpp` — the key, button and
+  wheel injection through XTest — was dead code on every build
+  host.
+
+  Compiling it exposed two real defects.
+
+  * `XTestFakeRelativeMotionEvent()` was called with `nullptr` as its
+    fourth argument, but that parameter is the event *delay* (an
+    `unsigned long` timestamp), not a pointer — the call could
+    never have compiled, so relative mouse motion through XTest could not
+    have worked.  It now passes `CurrentTime`, matching every other
+    XTest call in the file.
+  * The module linked `libXtst` but not `libX11`.  The XTest *extension*
+    lives in `libXtst`, but the calls it is made through —
+    `XOpenDisplay`, `XFlush`, `XCloseDisplay` — live in `libX11`
+    itself, so the link failed with `undefined reference to symbol
+    'XFlush'`.  (`libXtst` records a dependency on `libX11`, but it does
+    not carry it into the link line.)  `libX11` is now linked as well.
+
+  Both the XTest and the uinput backends are now asserted by the
+  `Leaf compile proof` CI step, so a runner image that loses the package
+  fails the build instead of silently dropping the backend.
 
 - **The DTLS-over-UDP loopback test failed on a coin flip.**  Its PASS
   criterion was `client_master_key[0] != 0`, and any single byte of a

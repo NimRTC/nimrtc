@@ -17,6 +17,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line (TURN/TLS, ICE-over-TCP).  The document also states the explicit
   non-goals and the owner-gated items, so that "what is not planned" is
   as visible as "what is".
+
+- **The cross-platform adapter compile proof (plan E2).**  The Linux CI
+  leg now installs the leaf-adapter dev packages and *asserts* that every
+  adapter leaf was compiled in, instead of letting a missing package
+  silently skip a source file.  Covered leaves: X11, XFixes, PipeWire,
+  EGL/GLESv2, Wayland, xdg-shell and linux-dmabuf for `video_sink`; X11,
+  XFixes and PipeWire for `video_capture`.  macOS is covered by the
+  existing `macos-clang / arm64` leg, which compiles the whole tree
+  including the Objective-C++ Metal renderer.
+
+  The first run of the proof failed on the `NIMRTC_VIDEO_SINK_HAS_EGL=1`
+  assertion, because the runner image ships no EGL dev package — which
+  was the point: the assertion caught a path that would otherwise have
+  been skipped in silence.  Asserting the Wayland leaves then exposed
+  that the Wayland renderer had never been compiled on any build host
+  (see the corresponding entry under *Fixed*).
 - **CI auto-retry for jobs that were starved of a runner.**  A
   GitHub-hosted runner is not guaranteed: a job asking for a saturated
   pool — the `macos-15` arm64 image is the chronic case in this

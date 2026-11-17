@@ -87,6 +87,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `NIMRTC_HAS_XTEST=1` was never defined and the whole X11 branch of the
   Linux injector was dead code (see the corresponding entry under
   *Fixed*).
+
+- **The Chrome interop results (plan E4).**  `docs/interop/chrome-interop-results.md`
+  records the re-run of the Chrome ↔ NimRTC interop matrix after the
+  DataChannel and video Part B merges, with the reproduction commands, the
+  per-assertion evidence and the root-cause write-up.  **Both** Case E planes
+  pass on Windows with Chrome 157:
+
+  - *DTLS-only* — Chrome's `dtlsState` reaches `connected`, the SRTP cipher
+    is negotiated, and NimRTC's own log line plus a `CLIENT_RANDOM` in the
+    wolfSSL keylog confirm the handshake from the server side.  Three
+    consecutive runs, no flake.
+  - *WebTransport* — the session reaches `ready`, a datagram is echoed
+    (`NIMRTC-WT-DGRAM-ECHO-01`) and a bidirectional stream is echoed.
+
+  `.github/workflows/interop.yml` now runs both planes as **assertions**: a
+  failure in either fails the job.  Previously the workflow generated the
+  WebTransport certificate and stopped there — `tools/run_e2e_acceptance.py`
+  has implemented both Case E runners all along, but nothing in CI ever
+  invoked them, so a broken Chrome interop could not turn CI red.
+
 - **CI auto-retry for jobs that were starved of a runner.**  A
   GitHub-hosted runner is not guaranteed: a job asking for a saturated
   pool — the `macos-15` arm64 image is the chronic case in this
@@ -228,6 +248,35 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `cmake/NimRTCConfig.cmake.in` no longer looks for `usrsctp`).
 
 ### Fixed
+
+- **The Chrome WebTransport interop handshake could never succeed, because the
+  server's certificate was never trusted by the browser.**
+  `scripts/generate_wtserver_cert.ps1` created the self-signed certificate
+  with `New-SelfSignedCertificate -CertStoreLocation Cert:\CurrentUser\My` —
+  the *personal* store, which is where msquic loads it from
+  (`QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`), so the **server side** was
+  always fine.  But the client validates the **chain**, and a self-signed
+  certificate is its own issuer (`CN=localhost` is both subject and issuer):
+  unless that exact certificate sits in a *trust* store it is an unknown root
+  and the handshake dies with `QUIC_TLS_CERTIFICATE_UNKNOWN` (alert 46).
+
+  The harness's `--ignore-certificate-errors` does not rescue it: Chromium's
+  QUIC proof verifier (`net/quic/crypto/proof_verifier_chromium.cc`) turns a
+  successful verification whose issuer is not a known root into
+  `ERR_QUIC_CERT_ROOT_NOT_KNOWN` regardless.
+
+  The fix installs the certificate into `Cert:\CurrentUser\Root` as well.
+  `CurrentUser\Root` needs no administrator rights, so it works on a hosted
+  CI runner.  The import is wrapped so a locked-down store cannot break the
+  script: the certificate is still in the personal store, so `demo-wtserver`
+  still starts, and the script prints an explicit warning that Chrome will
+  reject the handshake (alert 46) unless the certificate is trusted by the
+  machine running the browser.
+
+  The WebTransport half of the Chrome interop case had been failing on every
+  attempt since 2026-10-24 for this reason alone; NimRTC's QUIC and
+  WebTransport code was never at fault.  The full write-up, including the
+  before/after evidence, is in `docs/interop/chrome-interop-results.md`.
 
 - **The audio allocation gate counted allocations made by *other* threads, so
   it failed on macOS for reasons that had nothing to do with the audio send

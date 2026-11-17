@@ -88,6 +88,56 @@ $hashHex = -join ($hashBytes | ForEach-Object { $_.ToString("x2") })
 Set-Content -Path (Join-Path $BuildDir "wtserver_hash.txt") `
             -NoNewline -Value $hashHex -Encoding ASCII
 
+# --- Install the certificate in the TRUSTED ROOT store ---
+#
+# This is what makes Chrome accept the server, and it was the reason the
+# WebTransport half of the Chrome interop case (Case E) had been failing
+# since 2026-10-24.
+#
+# The chain of causes:
+#
+#   1. `New-SelfSignedCertificate -CertStoreLocation Cert:\CurrentUser\My`
+#      puts the certificate in the *personal* store, which is where msquic
+#      loads it from (QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE) -- so
+#      the server side always worked.
+#   2. But Chrome, like every other client, validates the *chain*: a
+#      self-signed certificate is its own issuer, so unless the exact
+#      certificate is in a TRUST store it is an "unknown root" and the
+#      handshake dies with QUIC_TLS_CERTIFICATE_UNKNOWN (alert 46).
+#   3. The harness passes `--ignore-certificate-errors`, which is NOT
+#      enough for WebTransport: Chromium's QUIC proof verifier turns a
+#      successful verification whose issuer is not a known root into
+#      ERR_QUIC_CERT_ROOT_NOT_KNOWN anyway.
+#
+# So the certificate has to be in Cert:\CurrentUser\Root (the *trusted
+# root* store), not just in Cert:\CurrentUser\My.  Importing it there
+# makes Chrome trust it and the handshake completes.
+#
+# `CurrentUser\Root` needs no administrator rights, so this stays
+# usable on a CI runner and on a developer machine.
+#
+# The import is idempotent: re-importing the same certificate is a
+# no-op, and the script regenerates the certificate on every run anyway
+# (a fresh self-signed certificate means a fresh import).
+try {
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
+    $store.Open("ReadWrite")
+    try {
+        $store.Add($cert)
+    } finally {
+        $store.Close()
+    }
+    Write-Host "Trusted root installed: $($thumbprint)"
+} catch {
+    # A non-interactive session or a locked-down store must not fail the
+    # whole script: the certificate is still in the personal store, so
+    # demo-wtserver still starts; only Chrome's trust decision is
+    # affected.  Report it and let the caller decide.
+    Write-Host "WARN: could not install the certificate into Cert:\CurrentUser\Root: $($_.Exception.Message)"
+    Write-Host "WARN: Chrome will reject the WebTransport handshake (alert 46) unless the"
+    Write-Host "WARN: certificate is trusted by the machine running the browser."
+}
+
 Write-Host "SHA1 hash: $hashHex"
 Write-Host "Files written to $BuildDir"
 Write-Host "Certificate stays in $CertStoreLocation until logout."

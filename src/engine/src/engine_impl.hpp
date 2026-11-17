@@ -93,7 +93,6 @@
 #include "audio_routing.hpp"
 #include "bandwidth_allocation.hpp"
 #include "engine_audio_state.hpp"
-#include "engine_audio_stream_state.hpp"
 #include "engine_control_inbox.hpp"
 #include "engine_control_seam.hpp"
 #include "engine_feedback_state.hpp"
@@ -335,16 +334,6 @@ struct NimRTCEngine::Impl {
     detail::InboundState inbound_state;
     detail::SessionState session_state;
     detail::ScratchBuffers scratch;
-
-    // ---- The per-stream audio bookkeeping (plan Track S / S4) ---------
-    //
-    // The audio stream's identity and its per-stream counters live in
-    // their own collaborator: they are the *published* shape of the
-    // audio plane (the counterpart of the video plane's stream set),
-    // and they have to stay together — a counter with no identity, or
-    // an identity with no counter, is neither useful nor testable.
-    // See `engine_audio_stream_state.hpp`.
-    detail::AudioStreamState audio_streams;
 
     // ---- The receive-side render state (remote-desktop plan E5 / E6 / E7
     // / E9) -------------------------------------------------------

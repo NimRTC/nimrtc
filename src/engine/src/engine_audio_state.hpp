@@ -46,6 +46,7 @@
 #include <nimrtc/core/time.hpp>
 
 #include "audio_routing.hpp"
+#include "engine_audio_stream_state.hpp"
 
 namespace nimrtc::engine::detail {
 
@@ -344,6 +345,23 @@ struct AudioState {
      *  Zero means "no packet sent yet"; the SR path already refuses to
      *  emit a report before the first packet. */
     std::int64_t audio_last_send_unix_us = 0;
+
+    // ---- The per-stream audio bookkeeping (plan Track S / S4) ---------
+    //
+    // The audio stream's identity and its per-stream counters are the
+    // *published* shape of the audio plane (the counterpart of the
+    // video plane's stream set), and they have to stay together — a
+    // counter with no identity, or an identity with no counter, is
+    // neither useful nor testable.
+    //
+    // They live **here** rather than as a member of `Impl`, because they
+    // belong to the audio plane: `AudioState` is the audio plane's
+    // collaborator, and a per-stream audio entry that sat beside it in
+    // `Impl` would be one more top-level member for one feature — the
+    // shape the §4.3 split exists to remove.
+    //
+    // See `engine_audio_stream_state.hpp`.
+    AudioStreamState audio_streams;
 };
 
 }  // namespace nimrtc::engine::detail

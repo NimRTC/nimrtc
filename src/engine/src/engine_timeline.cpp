@@ -437,9 +437,9 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         // The byte figure is the *whole* packet on the wire (header +
         // payload), because that is what the host's bandwidth arithmetic
         // needs.
-        impl_->audio_streams.note_inbound_packet(
+        impl_->audio_state.audio_streams.note_inbound_packet(
             pv.ssrc, pv.payload_type, pv.raw.size(), encoding);
-        auto& src = impl_->audio_streams.source_for(pv.ssrc);
+        auto& src = impl_->audio_state.audio_streams.source_for(pv.ssrc);
         src.clock_rate_hz = clock_rate;
         src.channels = channels;
     }

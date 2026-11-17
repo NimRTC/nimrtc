@@ -9,6 +9,33 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RTCP feedback is now broken down by type (Track S / `DS-4`).**
+  `Stats::video_feedback_applied` was a single number, so a host watching it
+  climb could not tell *what the peer was asking for* — a peer sending PLIs
+  and no NACKs has a different problem from one sending NACKs and no PLIs,
+  and the two call for different fixes.  The breakdown now separates the two
+  directions, because they describe opposite things:
+
+  - `video_feedback_rx_pli` / `_rx_fir` / `_rx_nack` / `_rx_remb` /
+    `_rx_transport_cc` — feedback the **peer sent us**, about *our outbound*
+    stream.  A PLI here means "I could not decode what you sent".
+  - `video_feedback_tx_pli` / `_tx_nack` — feedback **we sent the peer**,
+    about *its inbound* stream.  A NACK here means "your packets are arriving
+    damaged".  The `_tx_` set is deliberately shorter: the engine's outbound
+    video feedback can only ever carry a NACK or a PLI, so counters for FIR
+    and REMB would never move.
+
+  Counted in `handle_rtcp()` (`engine_media.cpp`), held in `VideoState`
+  (`engine_video_state.hpp`), asserted in
+  `tests/test_engine_video_feedback.cpp` — including that a NACK does not
+  count as a PLI, that an unrelated Receiver Report moves no counter, and
+  that a transport-cc message is counted on its own.  The aggregate
+  `video_feedback_applied` keeps counting what it always counted.
+
+  These are the **first public fields added after the E1 manifest freeze**, so
+  D-N6 applies: they are an explicit, reviewed manifest bump, not a silent
+  drift.
+
 - **The frozen public-header manifest (plan E1).**  `docs/api/public_headers.manifest`
   pins the **set** of public headers — 191 paths, sorted, one per line — and
   `scripts/check_api_manifest.py` fails CI when the tree's header set drifts

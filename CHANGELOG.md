@@ -7,6 +7,67 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The acoustic echo canceller is now measured, and its "on by default" claim
+  is asserted in CI (v1.2 plan item `E3`).**
+  `audio3a::Config::enable_aec` has always defaulted to `true` and
+  `webrtc_audio3a.cpp` has always forwarded it to
+  `apm_config.echo_canceller.enabled` — but **nothing measured whether that
+  path actually removes echo**, and every CI leg configured with
+  `-DNIMRTC_VENDORED_WEBRTC_APM=OFF`, so the option's *default* was asserted
+  nowhere.  Flipping the default to OFF in `cmake/NimRTCVendored.cmake` would
+  have left the whole matrix green while shipping the stub 3A.
+
+  The ERLE rig (`src/modules/audio3a/tests/test_audio3a_erle.cpp`) synthesises
+  a **known** echo path — a 20 ms delay, which is the same quantity a host
+  measures on a real device and passes as `Config::aec_delay_headroom_ms` —
+  so the measurement needs no audio hardware and is reproducible anywhere.
+  The render signal is speech-like broadband noise, not a tone: the
+  canceller's delay estimator rejects periodic signals, so a tone would report
+  an ERLE no real session reaches.  The capture leg carries echo only, so
+  `ERLE = 10·log10(P_uncancelled / P_cancelled)` needs no near-end / echo
+  separation.
+
+  **The result is 30.35 dB**, identical on Windows / MSVC 19.43 and on
+  Linux / GCC 11 — against the 15 dB floor ITU-T P.807 sets for a converged
+  canceller in a stationary synthetic path.  A near-end check pins down that
+  the canceller is not simply muting the microphone (the near-end tone keeps
+  80% of its amplitude), and a control run with the canceller off reports
+  0.0 dB, which is what proves the number comes from the canceller rather
+  than from an artefact of the rig.
+
+  The measurement, the method and the known limits are recorded in
+  `docs/interop/aec-erle-results.md`.
+
+  A dedicated CI leg, `linux-apm / real 3A`, now re-measures it on every PR.
+  It configures with the option **left at its default** — no `-D` flag at
+  all, because the default is the thing under test — and runs the rig under
+  `NIMRTC_REQUIRE_WEBRTC_APM=1`.  That last part matters: **a skipped gtest
+  case is a passing case to CTest**, so a build where the APM silently
+  degraded to the stub would skip all three cases and the leg would report
+  green while measuring nothing.  The switch turns that skip into a failure.
+
+  Three defects were exposed along the way, all fixed:
+
+  - `tools/build_webrtc_apm.cmd` passed `--cpp-args=/Zc:designated-initializers`
+    to `meson setup`, which meson 1.11 rejects outright — the flag has to
+    travel in a native file instead.
+  - The same script put the PATH override on the same command line as
+    `call vcvars64.bat`.  cmd expands the whole line *before* executing it,
+    so `%PATH%` was substituted with the pre-vcvars value and the MSVC
+    toolchain was dropped from the environment altogether.
+  - `tools/build_webrtc_apm.sh` ran `meson setup --wipe` unconditionally.
+    `--wipe` deletes every file in the build directory, **including the
+    compiled objects**, so the leg's prebuild cache was worth nothing:
+    ninja recompiled ~440 translation units on every run.
+
+  And one portability defect in the rig itself, found by compiling it on
+  Linux: `RecordProperty` takes an `int`, and passing a `double` to it is
+  rejected by GCC's `-Werror=float-conversion` (MSVC does not complain).
+  The measurements are now scaled explicitly and recorded as
+  `<name>_x1000`.
+
 ### Fixed
 
 - **The WebTransport certificate script no longer hangs on a CI runner.**

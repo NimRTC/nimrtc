@@ -14,7 +14,8 @@
 
 这份文档记录的是 E3 的测量证据。
 
-**状态**：**达成**（Windows / MSVC / x64 上，默认开启 APM，ERLE = **30.3 dB**）。
+**状态**：**达成**（Windows / MSVC / x64 与 Linux / GCC 11 / x86_64 上，默认开启
+APM，ERLE = **30.35 dB**，两平台读数一致；CI 有一条专门分支断言「默认开启」）。
 
 ---
 
@@ -28,6 +29,23 @@
 | 采样率 / 声道 | 48 kHz / 单声道 |
 | 构建配置 | `-DNIMRTC_VENDORED_WEBRTC_APM=ON`（该选项的**默认值就是 ON**） |
 | 日期 | 2026-11-18 |
+
+### 1.1 第二个平台：Linux / GCC
+
+同一台架在 Linux（Ubuntu 22.04，GCC 11，x86_64，Meson 构建的 vendored APM）上
+重跑，**读数逐位一致**：
+
+| 指标 | Windows / MSVC | Linux / GCC 11 |
+|---|---|---|
+| echo_in_power | 0.0184795 | 0.0184795 |
+| echo_out_power | 1.70533e-05 | 1.70533e-05 |
+| **ERLE (dB)** | **30.3488** | **30.3488** |
+| 近端幅度（AEC 关 → 开） | 0.201102 → 0.161987 | 0.201102 → 0.161987 |
+| 对照组 ERLE (dB) | 0 | 0 |
+
+两平台的数字一致不是巧合：台架的输入是**确定性**的（xorshift32 伪随机源），
+而消除器在同样的输入上收敛到同样的残差。这也让「换个平台数字会不会变」这
+个问题有了答案。
 
 ## 2. 复现方法
 
@@ -43,6 +61,15 @@ cmake --build build/erle --target test_audio3a_erle
 
 # 3. 跑测量
 build\erle\src\modules\audio3a\tests\test_audio3a_erle.exe
+```
+
+Linux 上（与 CI 的 `linux-apm / real 3A` 分支一致）：
+
+```bash
+python3 tools/fetch_webrtc_apm.py          # clone + meson build
+cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=OFF -DNIMRTC_BUILD_TESTS=ON
+cmake --build --preset debug --target test_audio3a_erle -j 12
+NIMRTC_REQUIRE_WEBRTC_APM=1 ctest --preset tests --output-on-failure -R Audio3AErle
 ```
 
 台架源码：`src/modules/audio3a/tests/test_audio3a_erle.cpp`。
@@ -128,18 +155,40 @@ ERLE = 10 * log10( P(y_A) / P(y_B) )
   构建上跑出来的；
 - APM 缺席时插件工厂会显式把实例标记为 `DEGRADED`（`test_webrtc_audio3a.cpp`
   里的 `Audio3ADegradation.*` 覆盖了这条），所以「默认启用」失败时是**可观测
-  的**，不是静默降级。
+  的**，不是静默降级；
+- **CI 断言**：CI 分支 `linux-apm / real 3A` 在**不传**该选项的前提下配置（即
+  使用默认值），并以 `NIMRTC_REQUIRE_WEBRTC_APM=1` 跑台架——默认值被改成 OFF
+  时这条分支会红，而不是静默降级。详见 §6.1。
 
 ## 6. 已知限制
 
-- 测量在 **Windows / MSVC / x64** 上完成。Linux 与 macOS 上 vendored APM 的
-  构建路径不同（`tools/build_webrtc_apm.sh`），CI 仍然用
-  `-DNIMRTC_VENDORED_WEBRTC_APM=OFF`——**CI 尚未断言 APM 默认启用**，这一半
-  留作后续。
+- 测量在 **Windows / MSVC / x64** 与 **Linux / GCC 11 / x86_64** 上完成，两者
+  读数**完全一致**（30.3488 dB，近端 80.5%，对照组 0 dB）——见 §1.1。
+  macOS 尚未测量（vendored APM 的 Apple-Clang 构建路径未验证）。
 - 合成路径是**纯延时、无多径**。真实房间的混响会让 ERLE 低于 30 dB。
 - 近端保护只验证了**音调**。宽带近端会被上游的残余回声抑制器压掉（见
   §3.2），这是上游行为，但**值得记录**：如果宿主依赖宽带领近端，NimRTC 需要
   提供一个关闭残余回声抑制的开关——目前 `Config` 没有这个旋钮。
+
+### 6.1 「CI 尚未断言 APM 默认启用」这一条已经关闭
+
+原文档记录的限制是：*全部 CI 分支都用 `-DNIMRTC_VENDORED_WEBRTC_APM=OFF`
+配置，所以「默认启用」在 CI 里无从证明*。
+
+现在有一条例外的 CI 分支 `linux-apm / real 3A`（`.github/workflows/ci.yml`）：
+
+- 它**不传** `-DNIMRTC_VENDORED_WEBRTC_APM`，即让选项保持**默认值**——默认
+  值本身就是要被断言的东西；
+- 它跑台架时设 `NIMRTC_REQUIRE_WEBRTC_APM=1`，把「这个构建里没有真实 APM」
+  从**跳过**变成**失败**。
+
+第二点是关键：**跳过的 gtest 用例在 CTest 里退出码是 0**。如果 APM 静默降级
+成 stub，三个用例全部 skip，CI 会报绿，而实际上什么也没测。
+
+另外，Linux 编译这个台架时暴露了一个真实的可移植性缺陷：
+`RecordProperty` 只接受 `int`，把 `double` 直接传进去在 GCC 的
+`-Werror=float-conversion` 下**编译失败**（Windows/MSVC 不报这个错）。台架
+现在把测量值显式缩放并写成 `<name>_x1000` 属性。
 
 ## 7. 相关文件
 
@@ -148,4 +197,6 @@ ERLE = 10 * log10( P(y_A) / P(y_B) )
 | `src/modules/audio3a/tests/test_audio3a_erle.cpp` | ERLE 台架与三个断言 |
 | `src/modules/audio3a/tests/CMakeLists.txt` | 台架的构建接线 |
 | `tools/build_webrtc_apm.cmd` | Windows 下的 vendored APM 构建入口 |
+| `tools/build_webrtc_apm.sh` | Linux / macOS 下的 vendored APM 构建入口 |
 | `tools/apm_link_order.py` | 记录 Meson 验证过的静态库链接顺序 |
+| `.github/workflows/ci.yml` | `linux-apm / real 3A` 分支（断言默认启用） |

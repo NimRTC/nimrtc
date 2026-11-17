@@ -135,6 +135,18 @@ if errorlevel 1 (
 REM ---------------------------------------------------------------------------
 REM Step 1: meson setup
 REM ---------------------------------------------------------------------------
+REM NOTE: the native file's path is computed BEFORE the `if` block, and the
+REM block writes to it through a *delayed* variable reference.  cmd.exe
+REM expands a parenthesised block in full before it executes any of it, so
+REM a `set "NATIVE_FILE=..."` INSIDE the block left `%NATIVE_FILE%` empty
+REM for the `> "%NATIVE_FILE%"` redirection and the `--native-file` argument
+REM — meson then failed with "Cannot find specified native file: " (an
+REM empty path).  The same block also ran `mkdir` after the redirection
+REM target was already resolved, so the directory did not exist either.
+REM ---------------------------------------------------------------------------
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+set "NATIVE_FILE=%BUILD_DIR%\nimrtc-native.ini"
+
 if not exist "%BUILD_DIR%\build.ninja" (
     echo.
     echo [STEP 1] meson setup...
@@ -154,16 +166,14 @@ if not exist "%BUILD_DIR%\build.ninja" (
     REM "unrecognized arguments", which is exactly what happened here.
     REM The native file is written next to the build tree so it can be
     REM inspected and re-used by a reconfigure.
-    set "NATIVE_FILE=%BUILD_DIR%\nimrtc-native.ini"
-    if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
     (
         echo [built-in options]
         echo cpp_std = 'c++20'
         echo.
         echo [cpp]
         echo args = ['/Zc:designated-initializers']
-    ) > "%NATIVE_FILE%"
-    meson setup "%BUILD_DIR%" "%SRC_DIR%" --buildtype=%BUILD_TYPE% --default-library=static --native-file "%NATIVE_FILE%"
+    ) > "!NATIVE_FILE!"
+    meson setup "%BUILD_DIR%" "%SRC_DIR%" --buildtype=%BUILD_TYPE% --default-library=static --native-file "!NATIVE_FILE!"
     if errorlevel 1 (
         echo [ERROR] meson setup failed
         exit /b 2

@@ -94,6 +94,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -199,6 +200,31 @@ void report(const char* label, double value) {
 }
 
 /**
+ * @brief A recorder for floating-point measurements in the gtest XML report.
+ *
+ * `RecordProperty` takes an `int`, so a `double` has to be scaled down by
+ * hand.  The scale factor is part of the key (`_x1000`), because a property
+ * whose name does not say how it was scaled is a trap for whoever reads the
+ * XML report later.
+ *
+ * The explicit cast is also what keeps this file compiling under GCC's
+ * `-Werror=float-conversion`, which rejects an implicit double -> int
+ * narrowing.  (The measurement is printed in full by `report()`; these
+ * properties exist so the numbers also reach the XML report.)
+ *
+ * `RecordProperty` is a *protected static member* of `testing::Test`, so it
+ * is only reachable from inside a test body — hence the fixture below,
+ * which derives from `testing::Test` and can therefore use it.
+ */
+class Audio3AErle : public ::testing::Test {
+protected:
+    void record_double(const char* key, double value) const {
+        RecordProperty((std::string(key) + "_x1000").c_str(),
+                       static_cast<int>(value * 1000.0));
+    }
+};
+
+/**
  * @brief True when the caller insists that the real APM is present.
  *
  * `NIMRTC_REQUIRE_WEBRTC_APM=1` turns the "APM not compiled in" skip into a
@@ -272,8 +298,13 @@ std::vector<float> run_and_measure(bool enable_aec,
     cfg.aec_delay_headroom_ms = static_cast<std::int32_t>(kEchoDelayMs);
 
     auto impl = nimrtc::audio3a::create_webrtc_audio3a();
+    // NOTE: a plain check rather than ASSERT_*, because this function returns
+    // a vector and gtest's ASSERT_ macros require a void return type.
+    if (!impl) {
+        ADD_FAILURE() << "the WebRTC APM factory returned nothing";
+        return {};
+    }
     EXPECT_TRUE(impl->init(cfg)) << "the WebRTC APM must initialise";
-    if (!impl) return {};
 
     const std::size_t capture_frames  = capture.size() / kApmFrame;
     const std::size_t reference_frames = reference.size() / kApmFrame;
@@ -345,7 +376,7 @@ std::vector<float> make_nearend_tone(std::size_t n, double freq_hz, float amp) {
 // 15 dB is the floor that ITU-T P.807 requires of a converged echo canceller
 // in a *stationary* synthetic path; a broadband, delay-aligned synthetic path
 // is easier than a real room, so the rig holds a higher bar than that.
-TEST(Audio3AErle, CancellerSuppressesTheSyntheticEcho) {
+TEST_F(Audio3AErle, CancellerSuppressesTheSyntheticEcho) {
     require_real_apm();
     if (!webrtc_apm_compiled_in()) return;
 
@@ -363,9 +394,9 @@ TEST(Audio3AErle, CancellerSuppressesTheSyntheticEcho) {
     ASSERT_GT(echo_out, 0.0) << "the cancelled run produced no output at all";
 
     const double erle = erle_db(echo_in, echo_out);
-    RecordProperty("erle_db", erle);
-    RecordProperty("echo_in_power", echo_in);
-    RecordProperty("echo_out_power", echo_out);
+    record_double("erle_db", erle);
+    record_double("echo_in_power", echo_in);
+    record_double("echo_out_power", echo_out);
 
     report("echo_in_power", echo_in);
     report("echo_out_power", echo_out);
@@ -379,7 +410,7 @@ TEST(Audio3AErle, CancellerSuppressesTheSyntheticEcho) {
 // The measurement above would also pass if the canceller simply muted the
 // whole capture path.  This test pins down that the *near-end* talker — a
 // microphone signal with no echo in it — survives the canceller.
-TEST(Audio3AErle, NearEndTalkerSurvivesTheCanceller) {
+TEST_F(Audio3AErle, NearEndTalkerSurvivesTheCanceller) {
     require_real_apm();
     if (!webrtc_apm_compiled_in()) return;
 
@@ -402,8 +433,8 @@ TEST(Audio3AErle, NearEndTalkerSurvivesTheCanceller) {
 
     ASSERT_GT(baseline_amp, 1e-6)
         << "the near-end tone did not reach the pipeline at all";
-    RecordProperty("nearend_baseline_amplitude", baseline_amp);
-    RecordProperty("nearend_processed_amplitude", processed_amp);
+    record_double("nearend_baseline_amplitude", baseline_amp);
+    record_double("nearend_processed_amplitude", processed_amp);
 
     report("nearend baseline amp", baseline_amp);
     report("nearend processed amp", processed_amp);
@@ -422,7 +453,7 @@ TEST(Audio3AErle, NearEndTalkerSurvivesTheCanceller) {
 // With the canceller disabled the rig must report a flat ~0 dB: this is the
 // control that proves the ERLE number above comes from the canceller and
 // not from an artefact of the rig.
-TEST(Audio3AErle, ControlRunWithoutTheCancellerReportsNoSuppression) {
+TEST_F(Audio3AErle, ControlRunWithoutTheCancellerReportsNoSuppression) {
     require_real_apm();
     if (!webrtc_apm_compiled_in()) return;
 
@@ -435,7 +466,7 @@ TEST(Audio3AErle, ControlRunWithoutTheCancellerReportsNoSuppression) {
 
     ASSERT_GT(echo_in, 1e-12);
     const double erle = erle_db(echo_in, echo_out);
-    RecordProperty("control_erle_db", erle);
+    record_double("control_erle_db", erle);
     report("control ERLE (dB)", erle);
 
     // Two identical runs differ only by floating-point noise; the "ERLE" of

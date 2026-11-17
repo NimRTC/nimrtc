@@ -125,7 +125,10 @@ def read_viewer_stats(log_path: str):
 
     The viewer's periodic report is the only place the media plane's
     outcome is visible, so the harness parses it instead of guessing from
-    the exit codes.
+    the exit codes.  The report's columns after ``dropped`` (``beats``,
+    ``ctrl_out``, …) are optional in the sense that a viewer that has not
+    learned them yet simply omits them — the parse survives, and the
+    verdict reports the absent ones honestly as "n/a".
     """
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -134,17 +137,119 @@ def read_viewer_stats(log_path: str):
         return None
 
     pattern = re.compile(
-        r"frames=(\d+)\s+decoded=(\d+)\s+rendered=(\d+)\s+dropped=(\d+)")
+        r"frames=(\d+)\s+decoded=(\d+)\s+rendered=(\d+)\s+dropped=(\d+)"
+        r"(?:\s+events_sent=(\d+))?"
+        r"(?:\s+denied=(\d+))?"
+        r"(?:\s+beats=(\d+))?"
+        r"(?:\s+ctrl_out=(\d+))?")
     matches = pattern.findall(text)
     if not matches:
         return None
     last = matches[-1]
+
+    def _int(value: str):
+        return int(value) if value else None
+
     return {
         "frames": int(last[0]),
         "decoded": int(last[1]),
         "rendered": int(last[2]),
         "dropped": int(last[3]),
+        "events_sent": _int(last[4]),
+        "denied": _int(last[5]),
+        "beats": _int(last[6]),
+        "ctrl_out": _int(last[7]),
     }
+
+
+def read_device_stats(log_path: str):
+    """Extract the last ``[rd_device] … ref_frame=… age_us=…`` statistics line.
+
+    The device's periodic report carries the AI decision frame age: the
+    ``age_us`` column is how long ago (microseconds) the frame the most
+    recent input event referenced was captured — the plan's
+    "AI决策帧age".  The report prints ``none`` / ``n/a`` when the device
+    has not resolved a frame, which the parser reports as ``None`` rather
+    than inventing a 0.
+    """
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+
+    pattern = re.compile(
+        r"capture=(\d+)\s+pumped=(\d+)\s+ctrl_in=(\d+)\s+ctrl_sent=(\d+)"
+        r"\s+injected=(\d+)\s+denied=(\d+)\s+refused=(\d+)"
+        r"\s+ref_frame=(\S+)\s+capture_ts_us=(\S+)\s+age_us=(\S+)")
+    matches = pattern.findall(text)
+    if not matches:
+        return None
+    last = matches[-1]
+
+    def _int(value: str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    return {
+        "capture": int(last[0]),
+        "pumped": int(last[1]),
+        "ctrl_in": int(last[2]),
+        "ctrl_sent": int(last[3]),
+        "injected": int(last[4]),
+        "denied": int(last[5]),
+        "refused": int(last[6]),
+        "ref_frame": _int(last[7]),
+        "capture_ts_us": _int(last[8]),
+        "age_us": _int(last[9]),
+    }
+
+
+def read_input_to_photon(log_path: str):
+    """Extract the last ``input_to_photon_p50_us`` / ``p95_us`` from a log.
+
+    The input-to-photon latency (plan J6) is the verdict's second number
+    group.  The viewer's periodic report carries the two percentiles as
+    ``input_to_photon_p50_us=`` / ``input_to_photon_p95_us=`` columns once
+    the binaries measure them (plan §6: the demo adds ``input_to_photon``
+    to the report); until then the columns are absent and the verdict
+    reports them honestly as "n/a" (spec requirement 6).
+    """
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+
+    def _last_value(key: str):
+        matches = re.findall(re.escape(key) + r"=(\d+)", text)
+        return int(matches[-1]) if matches else None
+
+    return {
+        "p50_us": _last_value("input_to_photon_p50_us"),
+        "p95_us": _last_value("input_to_photon_p95_us"),
+    }
+
+
+def fmt_value(value) -> str:
+    """Format a verdict number, honestly reporting a missing field.
+
+    A field the log never reported is "n/a", never 0: a fake 0 is
+    indistinguishable from a genuinely-zero latency and would make the
+    verdict lie (spec requirement 6).
+    """
+    if value is None:
+        return "n/a"
+    return str(value)
+
+
+def fmt_ms(us) -> str:
+    """Format a microseconds value as milliseconds, or "n/a" when absent."""
+    if us is None:
+        return "n/a"
+    return f"{us / 1000.0:.1f}"
 
 
 # ---------------------------------------------------------------------------
@@ -437,8 +542,13 @@ def main() -> int:
     # The exit codes alone are not a verdict: the device and the viewer
     # both exit cleanly even when the media plane never produced a
     # picture.  What the run is *for* is the media plane, so the harness
-    # asserts on the decoded-frame counters.
+    # asserts on the decoded-frame counters.  The verdict then reports the
+    # plan's four number groups (ai-game-demo-plan §6 看板字段): the
+    # media/control plane's `decoded / rendered / beats`, the
+    # `input-to-photon` p50/p95, and the AI decision frame `age`.
     stats = read_viewer_stats(viewer_log)
+    device_stats = read_device_stats(device_log)
+    i2p = read_input_to_photon(viewer_log)
 
     print("=" * 70)
     print("--- device log ---")
@@ -450,6 +560,21 @@ def main() -> int:
     print("=" * 70)
     print(f"rc device={device_rc} viewer={viewer_rc}")
 
+    # ---- The four number groups -------------------------------------------
+    # A field the logs never reported is shown as "n/a", never a fake 0
+    # (spec requirement 6: 0 and "genuinely fast" are indistinguishable).
+    media = stats if stats is not None else {}
+    device = device_stats if device_stats is not None else {}
+    print("media plane:   decoded=%s rendered=%s dropped=%s" % (
+        fmt_value(media.get("decoded")),
+        fmt_value(media.get("rendered")),
+        fmt_value(media.get("dropped"))))
+    print("control plane: beats=%s" % fmt_value(media.get("beats")))
+    print("input-to-photon: p50=%s ms  p95=%s ms" % (
+        fmt_ms(i2p.get("p50_us")),
+        fmt_ms(i2p.get("p95_us"))))
+    print("AI decision frame age: %s us" % fmt_value(device.get("age_us")))
+
     ok = device_rc == 0 and viewer_rc == 0
     if stats is None:
         print("FAIL: the viewer never reported a frame statistics line")
@@ -458,9 +583,14 @@ def main() -> int:
         decoded = stats.get("decoded", 0)
         rendered = stats.get("rendered", 0)
         dropped = stats.get("dropped", 0)
-        print(f"media plane: decoded={decoded} rendered={rendered} dropped={dropped}")
         if decoded <= 0:
             print("FAIL: no frame was decoded — the media plane did not come up")
+            # A session that never comes up in a cross-machine run is usually
+            # the firewall: the signalling service needs TCP <port> and the
+            # media plane needs inbound UDP (the runbook's rule).  Say so
+            # instead of leaving the operator staring at a bare FAIL.
+            print("      (check the firewall: allow TCP %d for the signalling "
+                  "service and inbound UDP for the media plane)" % args.port)
             ok = False
         elif rendered <= 0:
             print("FAIL: frames were decoded but none were rendered")
@@ -479,6 +609,13 @@ def main() -> int:
                 "rendered": stats.get("rendered") if stats is not None else None,
                 "dropped": stats.get("dropped") if stats is not None else None,
                 "frames": stats.get("frames") if stats is not None else None,
+                "beats": stats.get("beats") if stats is not None else None,
+                "input_to_photon": {
+                    "p50_ms": fmt_ms(i2p.get("p50_us")),
+                    "p95_ms": fmt_ms(i2p.get("p95_us")),
+                },
+                "ai_decision_frame_age_us":
+                    device_stats.get("age_us") if device_stats is not None else None,
             }
             deliver_verdict_to_viewer(viewer_page, verdict_obj)
             verdict_delivered = True

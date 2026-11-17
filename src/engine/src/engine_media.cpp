@@ -322,6 +322,10 @@ void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame
     if (frame.concealed)     ++impl_->audio_state.audio_frames_concealed;
     if (frame.fec_recovered) ++impl_->audio_state.audio_frames_fec_recovered;
 
+    // Plan Track S / S2: the frame counts against the source it came
+    // from, so a host can tell one inbound source from another.
+    impl_->inbound_state.note_frame(impl_->audio_state.audio_rx.ssrc);
+
     // AEC reference path.
     //
     // The remote audio we are about to hand to the host for loudspeaker
@@ -1175,6 +1179,12 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                    plugins::TimestampUs /*now_us*/) {
                 // v1.1 V1: one assembled receiver frame (pre-decode).
                 ++impl_->video_state.video_frames_received;
+                // Plan Track S / S2: the frame counts against the source
+                // it came from.  The receiver plugin does not carry the
+                // SSRC on the assembled frame (the engine tracks the
+                // peer's video SSRC), so the attribution is made here.
+                impl_->inbound_state.note_frame(
+                    impl_->video_state.remote_video_ssrc_);
                 // Phase 4.2 / D2: the video-quality statistics sink.  The
                 // frame has arrived but not been decoded yet, so this is
                 // the "received" event: it carries the frame's size (for
@@ -2716,6 +2726,11 @@ void NimRTCEngine::queue_video_feedback(
     impl_->video_state.video_nack_seqs_queued += report.missing_seqs.size();
     if (report.want_keyframe) ++impl_->video_state.video_keyframes_q;
 
+    // Plan Track S / S2: the retransmission requests count against the
+    // source they are about — the peer's video stream.
+    impl_->inbound_state.note_nacks(
+        impl_->video_state.remote_video_ssrc_, report.missing_seqs.size());
+
     // Phase 4.2 / D2: record the feedback we are about to send.  A NACK
     // means the *peer* lost picture data on the **inbound** stream (the
     // one it receives from us) — so it is recorded on the inbound sink,
@@ -3045,6 +3060,9 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // each with its own bitrate, ladder level, keyframe rate and backend
     // id.
     append_video_stream_stats(out.video_streams);
+    // Plan Track S / S2: the per-source inbound entries — the
+    // receive-side counterpart of the list above.
+    append_inbound_rtp_stats(out.inbound_rtp_streams);
     // Phase 3 / C3: the zero-copy path counters.
     out.video_zero_copy_frames    = impl_->video_state.video_zero_copy_frames;
     out.video_zero_copy_fallbacks = impl_->video_state.video_zero_copy_fallbacks;

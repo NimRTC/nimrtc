@@ -2396,6 +2396,21 @@ nimrtc_add_engine_test(test_engine_audio_stats test_engine_audio_stats.cpp)
 nimrtc_add_engine_test(test_engine_stats_snapshot test_engine_stats_snapshot.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.2.0 (plan Track S / S2) — the per-source inbound RTP statistics
+# entries: one entry per inbound SSRC, the receive-side counterpart of
+# `VideoStreamStats`.
+#
+# The flat inbound counters mix every source together, which is wrong
+# for simulcast (RFC 5956) and for any multi-source session.  This
+# test pins the per-SSRC accounting: the packet / byte / frame counts,
+# the ordering of the published list, and the rule that a dropped
+# packet is still counted.
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_inbound_rtp_stats test_engine_inbound_rtp_stats.cpp)
+
+# ---------------------------------------------------------------------------
 # v1.2.0 audio pipeline WP-9 — the cross-end capture timestamp of an
 # inbound audio frame (spec B-17).
 #

@@ -154,6 +154,36 @@ void NimRTCEngine::note_inbound_audio_packet(std::uint32_t ssrc,
 
 
 // ---------------------------------------------------------------------------
+// The per-source inbound accounting (plan Track S / S2)
+// ---------------------------------------------------------------------------
+//
+// The flat `Stats` counters mix every inbound stream into one set of
+// numbers.  That is the right shape for a single peer stream and the
+// wrong one for anything else: a peer that sends **simulcast**
+// (RFC 5956 — several encodings of the same picture on different
+// SSRCs) puts three different qualities into one counter, and a host
+// that wants "how many packets arrived on SSRC X" — the question a
+// loss investigation actually asks — has no way to ask it.
+//
+// The SSRC is the only thing on the wire that identifies a *source*.
+// The payload type says how to *decode* a packet, not who sent it.
+//
+// This function is the single place that counts an inbound packet
+// against its source.  The packet is counted here rather than in the
+// pipelines because the engine sees every inbound packet on the RTP
+// path, whatever the plane it is routed to.
+
+void NimRTCEngine::note_inbound_packet(std::uint32_t ssrc,
+                                       std::uint8_t payload_type,
+                                       std::size_t packet_bytes,
+                                       std::string_view kind) noexcept {
+    if (impl_ == nullptr || ssrc == 0) return;
+
+    impl_->inbound_state.note_packet(ssrc, payload_type, packet_bytes, kind);
+}
+
+
+// ---------------------------------------------------------------------------
 // The receiver report (RFC 3550 §6.4.2)
 // ---------------------------------------------------------------------------
 

@@ -192,7 +192,7 @@ if(UNIX AND NOT APPLE)
     # Generates one protocol: the XML in, the client header *and* the
     # marshalling code out.
     #
-    #   _nimrtc_generate_wayland_protocol(<xml> <header-name>)
+    #   _nimrtc_generate_wayland_protocol(<xml> <header-name> <code-name>)
     #
     # The scanner produces **two** artefacts per protocol:
     #
@@ -205,13 +205,19 @@ if(UNIX AND NOT APPLE)
     # friends are declared in the header but defined in the code file,
     # so a build that only generates the header fails at link time with
     # "undefined reference to `xdg_surface_interface`".
-    function(_nimrtc_generate_wayland_protocol xml_file header_name)
+    #
+    # The output file names are chosen here rather than derived from the
+    # protocol's own name, because the protocol name changed across
+    # `wayland-protocols` releases (`linux_dmabuf_unstable_v1` became
+    # `linux_dmabuf_v1`).  The *interface* names stayed the same, so
+    # the C code that includes the header is unaffected.
+    function(_nimrtc_generate_wayland_protocol xml_file header_name code_name)
         if(NOT NIMRTC_WAYLAND_SCANNER OR NOT EXISTS "${xml_file}")
             return()
         endif()
 
         set(_out_h "${_nimrtc_wayland_gen_dir}/${header_name}")
-        set(_out_c "${_nimrtc_wayland_gen_dir}/${header_name%.h}-protocol.c")
+        set(_out_c "${_nimrtc_wayland_gen_dir}/${code_name}")
         file(MAKE_DIRECTORY "${_nimrtc_wayland_gen_dir}")
 
         add_custom_command(
@@ -227,7 +233,7 @@ if(UNIX AND NOT APPLE)
             COMMAND "${NIMRTC_WAYLAND_SCANNER}" private-code
                     "${xml_file}" "${_out_c}"
             DEPENDS "${xml_file}"
-            COMMENT "Generating ${header_name%.h}-protocol.c"
+            COMMENT "Generating ${code_name}"
             VERBATIM)
 
         set(_nimrtc_wayland_generated
@@ -261,8 +267,10 @@ if(UNIX AND NOT APPLE)
         endif()
     endif()
     if(_nimrtc_xdg_shell_xml)
-        _nimrtc_generate_wayland_protocol("${_nimrtc_xdg_shell_xml}"
-            "xdg-shell-client-protocol.h")
+        _nimrtc_generate_wayland_protocol(
+            "${_nimrtc_xdg_shell_xml}"
+            "xdg-shell-client-protocol.h"
+            "xdg-shell-protocol.c")
         list(APPEND _nimrtc_video_sink_egl_defs
             NIMRTC_VIDEO_SINK_HAS_XDG_SHELL=1)
         list(APPEND _nimrtc_video_sink_egl_include_dirs
@@ -295,8 +303,10 @@ if(UNIX AND NOT APPLE)
         endif()
     endif()
     if(_nimrtc_linux_dmabuf_xml)
-        _nimrtc_generate_wayland_header("${_nimrtc_linux_dmabuf_xml}"
-            "linux-dmabuf-v1-client-protocol.h")
+        _nimrtc_generate_wayland_protocol(
+            "${_nimrtc_linux_dmabuf_xml}"
+            "linux-dmabuf-v1-client-protocol.h"
+            "linux-dmabuf-v1-protocol.c")
         list(APPEND _nimrtc_video_sink_egl_defs
             NIMRTC_VIDEO_SINK_HAS_DMABUF=1)
         list(APPEND _nimrtc_video_sink_egl_include_dirs
@@ -308,6 +318,32 @@ if(UNIX AND NOT APPLE)
         # translation unit that includes them must wait for it.
         set_source_files_properties(src/egl_renderer.cpp
             PROPERTIES OBJECT_DEPENDS "${_nimrtc_wayland_generated}")
+    endif()
+
+    if(_nimrtc_wayland_sources)
+        # The marshalling code the scanner generates for each protocol.
+        #
+        # It is plain C, so it goes into its own OBJECT library instead
+        # of straight into `nimrtc_video_sink`: the library's warning
+        # set is C++-oriented (`-Wnon-virtual-dtor`, `-Wold-style-cast`,
+        # `-Woverloaded-virtual`), and GCC *rejects* those options for a
+        # C translation unit -- with `-Werror` that rejection is fatal.
+        # A separate target keeps the generated code out of the C++
+        # warning set entirely.
+        add_library(nimrtc_video_sink_wayland_protocols OBJECT
+            ${_nimrtc_wayland_sources})
+        target_include_directories(nimrtc_video_sink_wayland_protocols
+            PRIVATE "${_nimrtc_wayland_gen_dir}")
+        if(PC_WAYLAND_INCLUDE_DIRS)
+            target_include_directories(nimrtc_video_sink_wayland_protocols
+                PRIVATE ${PC_WAYLAND_INCLUDE_DIRS})
+        endif()
+
+        # The objects are folded into the sink's archive.
+        target_sources(nimrtc_video_sink PRIVATE
+            $<TARGET_OBJECTS:nimrtc_video_sink_wayland_protocols>)
+        add_dependencies(nimrtc_video_sink
+            nimrtc_video_sink_wayland_protocols)
     endif()
 
     if(_nimrtc_video_sink_egl_defs)

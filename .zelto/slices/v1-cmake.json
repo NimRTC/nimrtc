@@ -36,10 +36,11 @@
   ],
   "runs": [],
   "stall": {
-    "class": "gate_retry",
+    "class": null,
     "autoResolved": 0,
     "gateRetries": 2
   },
   "createdAt": "2026-10-28T09:07:26.565Z",
-  "updatedAt": "2026-10-29T01:05:33.110Z"
+  "updatedAt": "2026-11-17T05:23:01.562Z",
+  "clarifyRounds": 0
 }

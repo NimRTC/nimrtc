@@ -143,7 +143,7 @@ public:
 
     const char* name() const noexcept override { return "whisper"; }
 
-    void feed(const std::int16_t* pcm,
+    void feed([[maybe_unused]] const std::int16_t* pcm,
               std::size_t num_samples,
               const PcmFormat&) noexcept override {
         // Runtime seam: forward `pcm` to the configured whisper model here.
@@ -168,7 +168,7 @@ public:
 
     const char* name() const noexcept override { return "vosk"; }
 
-    void feed(const std::int16_t* pcm,
+    void feed([[maybe_unused]] const std::int16_t* pcm,
               std::size_t num_samples,
               const PcmFormat&) noexcept override {
         // Runtime seam: forward `pcm` to the configured vosk model here.
@@ -273,7 +273,7 @@ public:
 
     const char* name() const noexcept override { return "mock"; }
 
-    void stream(const std::string& prompt, const TokenSink& on_token) override {
+    void stream([[maybe_unused]] const std::string& prompt, const TokenSink& on_token) override {
         std::istringstream iss(reply_);
         std::string word;
         while (iss >> word) {
@@ -478,7 +478,7 @@ public:
      *  microphone data never enters this entry point. */
     void on_post_3a_int16(const std::int16_t* pcm,
                           std::size_t num_samples,
-                          const PcmFormat& fmt) {
+                          [[maybe_unused]] const PcmFormat& fmt) {
         batch_->add(pcm, num_samples);
     }
 

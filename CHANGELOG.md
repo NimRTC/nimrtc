@@ -114,6 +114,30 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The DTLS-over-UDP loopback test failed on a coin flip.**  Its PASS
+  criterion was `client_master_key[0] != 0`, and any single byte of a
+  freshly-derived SRTP master key is `0x00` about 1/256 of the time —
+  so the test went red roughly once every 256 runs, for no reason at
+  all.  It fired for real on 2026-11-17 in the CI run of PR #69
+  (run 44009282768, job `windows / msvc`): both ends had derived the
+  *same* key (`client_key[0..3]=00246f7a` on A and on B), so the ECDH
+  was real and the export had succeeded — the key was entirely
+  non-zero apart from its first byte.
+
+  The check now requires at least one non-zero byte in the 16-byte
+  master key on each side, and additionally requires the two ends to
+  agree on the key — which a real handshake produces and a
+  zero-filled buffer cannot fake.  The same defect had already been
+  fixed in the sibling test `tests/test_dtls_over_arq_udp.cpp`; this
+  one had been left behind.
+
+  Worth noting: the CI auto-retry workflow classified this as a
+  **genuine** failure (`steps=20`, runner assigned) and deliberately
+  left it alone, because a job that ran and failed belongs to the
+  tree and must not be re-run.  That was the right call — but it also
+  meant the flake could not be papered over and had to be fixed at the
+  source.
+
 - **The VideoToolbox encoder emits its parameter sets in band.**  A
   `VTCompressionSession` keeps the SPS / PPS / VPS out of band, in the
   sample buffer's `CMFormatDescriptionRef`, and returns length-prefixed

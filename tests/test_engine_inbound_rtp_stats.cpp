@@ -430,7 +430,37 @@ TEST_F(EngineInboundRtpStats, APacketOnAnUnknownPayloadTypeIsStillCounted) {
 }
 
 // ============================================================================
-// 7. The list survives the source going away
+// 7. A video source is told apart from an audio source
+// ============================================================================
+
+TEST_F(EngineInboundRtpStats, AVideoSourceIsReportedAsVideo) {
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    // The engine's default inbound video payload type.  A packet on
+    // it is routed to the *video* pipeline, so the entry must say so:
+    // the kind is what lets a host tell the two media planes apart
+    // without consulting the SSRC table itself.
+    const auto pkt = make_rtp(kPeerVideoSsrc, 1, 0, kVideoPt, 40);
+    feed(engine, pkt);
+
+    const auto s = engine.stats();
+    ASSERT_EQ(s.inbound_rtp_streams.size(), 1u);
+
+    const InboundRtpStats& e = s.inbound_rtp_streams.front();
+    EXPECT_EQ(e.ssrc, kPeerVideoSsrc);
+    EXPECT_EQ(e.payload_type, kVideoPt);
+    EXPECT_EQ(e.kind, "video")
+        << "the engine routes by payload type, so it knows which plane the "
+           "source belongs to";
+    EXPECT_EQ(e.packets_received, 1u);
+
+    engine.close();
+}
+
+// ============================================================================
+// 8. The list survives the source going away
 // ============================================================================
 
 TEST_F(EngineInboundRtpStats, TheEntryKeepsItsTotalsAfterTheSourceStops) {

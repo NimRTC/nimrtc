@@ -23,3 +23,21 @@ add_test(NAME demo-agent-realtime_self_test
          COMMAND $<TARGET_FILE:demo-agent-realtime>
                  --self-test --decisions 100 --debug)
 set_tests_properties(demo-agent-realtime_self_test PROPERTIES TIMEOUT 60)
+
+# demo-agent-teammate — the v4-ai-teammate demo: the M1 mock-rule AI decision
+# path is replaced by a genuinely local small model (a tiny policy network)
+# confined to the narrow action set move_left / move_right / stop.  Also
+# self-contained (no NimRTC linkage); registers its own self-test ctest case.
+add_executable(demo-agent-teammate
+    demo-agent-teammate.cpp
+    ai_teammate.hpp)
+nimrtc_apply_options(demo-agent-teammate)
+
+# The self-test is the acceptance entry point for slice v4-ai-teammate: it
+# runs the local-model inference point, the narrow-role whitelist rejection,
+# the frame-anchor provenance check, the "时光作证" old-frame citation, and the
+# model-unavailable error+count path — the five acceptance criteria.
+# Deterministic and headless; exits non-zero if any criterion fails.
+add_test(NAME demo-agent-teammate_self_test
+         COMMAND $<TARGET_FILE:demo-agent-teammate> --self-test)
+set_tests_properties(demo-agent-teammate_self_test PROPERTIES TIMEOUT 60)

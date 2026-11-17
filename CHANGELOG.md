@@ -116,13 +116,24 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/benchmarks/saturation_windows_x86_64.json` with their measured
   values.
 
+  Two of the nine — *the delivered rate stayed within the capacity* and
+  *the offered load tracked the capacity* — only mean something when the
+  link was genuinely saturated, and the sender is a *process on the host*:
+  a busy host cannot fill the link, so the link never queues, nothing is
+  dropped, and those two properties have no answer.  Failing them would
+  report a rate-control bug that is really a busy CI runner.  The wrapper
+  therefore detects that case, **skips** the two properties, and re-runs
+  the scenario; after three attempts the scenario is a failure, because a
+  gate that cannot measure is not a gate.  The verdict lists every skipped
+  property, so a green run cannot hide an unchecked one.
+
   A `Benchmark saturated link (plan E6)` step now runs in both the Windows
   and the Linux CI legs, and the artifact is uploaded with them.
 
 ### Fixed
 
-- **The AIMD bandwidth estimator no longer climbs back into a wall it is
-  still hitting.**
+- **The bandwidth estimator no longer climbs back into a wall it is still
+  hitting — through either of its two raise paths.**
   The AIMD front-end's additive increase was gated on the decrease
   *cooldown* alone, and the cooldown expires on a **clock**, not on the
   **state of the link**.  So while the link was *still* lossy — the loss
@@ -133,16 +144,29 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still being dropped.
 
   The Goog-CC front-end already carried the correct guard (`!is_lossy`), so
-  the two estimators disagreed under exactly the condition that matters.  The
-  fix is one clause — `&& !is_loss_now` — and
-  `src/modules/bwe/tests/test_bwe.cpp` gains the regression test.
+  the two estimators disagreed under exactly the condition that matters.
 
-  The defect was found by *measuring* rather than by reading: the
+  The **REMB override** had the same defect in the same loop, one branch
+  over.  It was gated on `loss_event_pending_`, which is *edge-triggered*:
+  the latch is set when the loss rate crosses the threshold from below, and
+  cleared as soon as the multiplicative decrease has been applied.  So the
+  *second* still-lossy report arrived with the latch already down, and the
+  receiver's stale (higher) estimate was adopted — walking the sender back
+  into the wall it had just been throttled away from.  The latch is the
+  wrong guard for the same reason the cooldown was: it describes a
+  transient state, not the state of the link.
+
+  Both fixes are the same clause — `&& !is_loss_now` — and both gain a
+  regression test in `src/modules/bwe/tests/test_bwe.cpp`, each with the
+  counterpart that the raise still happens once the link *is* clean (so
+  neither guard becomes a ratchet that never recovers).
+
+  The defects were found by *measuring* rather than by reading: the
   saturated-link benchmark (plan item E6) drives the shipped estimator
   against a real UDP link whose capacity is a token bucket, and the
   estimate's climb is visible in the recorded per-report trace.  The
   benchmark's `estimate_did_not_climb_while_congested` invariant is now the
-  regression guard for it, and it is asserted in CI.
+  regression guard for both, and it is asserted in CI.
 
 - **The WebTransport certificate script no longer hangs on a CI runner.**
   `scripts/generate_wtserver_cert.ps1` computes the certificate's SPKI

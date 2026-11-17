@@ -523,6 +523,7 @@ jobs:
           for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
           for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 \
             libx11-dev libxfixes-dev libpipewire-0.3-dev libspa-0.2-dev \
+            libegl1-mesa-dev libgles2-mesa-dev \
             pkg-config && break || { sudo apt-get update; sleep 15; }; done
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"

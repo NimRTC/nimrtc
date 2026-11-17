@@ -71,6 +71,11 @@ nimrtc_stage_runtime(loopback-p2p)
 # demo-agent-gateway: PCM tap → streaming ASR → LLM mock flow demo.
 add_subdirectory(demo-agent-gateway)
 
+# demo-agent-realtime: real-time AI game decision processing demo
+# (slice v2-ai-decision) — >=3 strategies, <=50ms decisions, >=90% accuracy,
+# debug decision trace.  Self-contained; registers a self-test ctest case.
+add_subdirectory(demo-agent-realtime)
+
 # demo-wtserver: WebTransport echo server for Case E (Chrome ↔ NimRTC interop).
 # Uses the msquic-backed IWebTransportServer to accept Chrome WebTransport
 # connections over QUIC + HTTP/3 + WebTransport (RFC 9298).

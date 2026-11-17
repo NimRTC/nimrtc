@@ -73,23 +73,29 @@ plan asks for, and a failure is a real defect, not a slow machine:
   2. **The stream survived.**  The receiver kept getting data
      throughout the saturation phase — no black hole, no deadlock.
   3. **The ladder reacted.**  It dropped at least one rung.
-  4. **The estimate stayed bounded.**  The bandwidth estimate did not
-     climb while the link was congested.  This is the regression guard
-     for the AIMD defect the benchmark itself uncovered: the estimator
-     used to resume its additive increase after the cooldown expired
-     even though the link was *still* lossy, so the estimate walked
-     back up to (and past) the rate that had just been throttled.
-  5. **The offered load stayed sane.**  The delivered rate did not
-     exceed the link's capacity by a wide margin — the ladder
-     converged, it did not oscillate into a runaway.
-  6. **The ladder recovered.**  Once the link freed up, the ladder
+  4. **The estimator never raised its target while the link complained.**
+     On a report that *said* the link was congested, the estimator must
+     not raise its target.  This is the regression guard for the AIMD
+     defect the benchmark itself uncovered: the estimator used to
+     resume its additive increase once the cooldown expired even
+     though the link was *still* lossy, so the estimate walked back up
+     to (and past) the rate that had just been throttled.  The correct
+     behaviour is exact — zero such raises — and the artifact itemises
+     every one it finds, so a failure names the offending reports.
+  5. **The delivered rate stayed within the capacity.**  The ladder
+     converged onto the link's capacity instead of overshooting it.
+  6. **The offered load tracked the capacity.**  The load the sender
+     put on the wire was in the same ballpark as what the link could
+     carry — the ladder and the link agreed.
+  7. **The ladder recovered.**  Once the link freed up, the ladder
      climbed back and the stream got faster.
-  7. **The ladder did not flap.**  The number of level changes is
+  8. **The ladder did not flap.**  The number of level changes is
      bounded — a ladder that oscillates every second is not "surviving
      congestion", it is thrashing.
 
-Every invariant is reported in the artifact with its measured value,
-so a failure is diagnosable from the committed file alone.
+The invariants are stated as *properties*, not as *thresholds against a
+reference number*: they must hold on any machine, however fast or slow.
+The committed artifact is one local sample, not a pass/fail threshold.
 
 ## Usage
 
@@ -157,11 +163,31 @@ SCENARIOS = (
 #: capacity; the slack covers that and nothing more.
 DELIVERED_OVER_CAPACITY_TOLERANCE = 1.30
 
-#: How much the bandwidth estimate may exceed its starting value while
-#: the link is congested, as a multiple.  A congestion-control estimate
-#: that climbs while the link is congested is the AIMD defect this
-#: benchmark was written to catch, so the bound is tight.
-ESTIMATE_DRIFT_TOLERANCE = 1.10
+#: The loss rate at which the link counts as congested.  This is the
+#: estimator's own threshold (RFC 8698 §5.1's 2%), so a report above it
+#: is a report that *said* the link was congested.
+CONGESTION_LOSS_THRESHOLD = 0.02
+
+#: The estimator's reasons that mean "the estimator raised its
+#: target".  On a report that said the link was congested, neither is
+#: allowed: the multiplicative decrease has already fired for that
+#: congestion event, and raising the target again walks the sender
+#: back into the wall it just hit.
+RAISING_REASONS = ("aimd_increase", "remb_override")
+
+#: The largest number of times the estimator may raise its target on a
+#: report that said the link was congested.  The correct answer is
+#: **zero** — with the guard in place, the estimate can only rise on a
+#: report that said there was *no* loss.
+#:
+#: This is the regression guard for the AIMD defect the benchmark
+#: itself uncovered.  The AIMD front-end used to resume its additive
+#: increase once the 500 ms cooldown expired, even though the link was
+#: *still* lossy, so the estimate climbed back to (and past) the rate
+#: that had just been throttled.  The Goog-CC front-end already carried
+#: the `!is_lossy` guard; the AIMD one did not, so the two estimators
+#: disagreed under exactly the condition that matters.
+MAX_RAISES_ON_A_CONGESTED_REPORT = 0
 
 #: The largest number of ladder moves a run may make.  A ladder that
 #: oscillates on the 500 ms reporting interval is thrashing, not
@@ -284,6 +310,55 @@ def run_benchmark(binary: Path, args: argparse.Namespace,
 # The invariants
 # ---------------------------------------------------------------------------
 
+def raises_on_congested_reports(doc: dict, saturation_s: float) -> list[dict]:
+    """The reports where the estimator raised its target while congested.
+
+    A report whose loss rate is at or above the estimator's own
+    congestion threshold is a report that **said the link was
+    congested**.  The estimator must not raise its target on such a
+    report: the multiplicative decrease has already fired for that
+    congestion event, and raising the target again walks the sender
+    back into the wall it just hit.
+
+    The decision is made on the **report** granularity — the estimator's
+    own input and output for one feedback sample — and on the
+    estimator's own **reason**, not on the before/after estimate pair.
+    Two things force that choice:
+
+      - the 500 ms curve is too coarse: two reports can hide inside
+        one curve sample, and the curve's loss figure is the *last*
+        report's, not the one that produced the estimate's change;
+
+      - the reported estimate is an **exponentially smoothed** value,
+        so it can drift upwards by a few bits after a decrease without
+        the estimator having raised anything.  The reason is the
+        authoritative signal: it says whether the estimator raised
+        its target, and why.
+
+    The reasons that count as "the estimator raised its target" are
+    `aimd_increase` (the additive increase — the very thing that must
+    not fire on a congested report) and `remb_override` (the peer's
+    estimate being adopted; also a raise, and also not allowed to
+    happen while the link is complaining).
+    """
+    out: list[dict] = []
+    for rep in doc.get("reports", []):
+        t_s = float(rep.get("t_s", 0.0))
+        if t_s > saturation_s:
+            continue
+        loss = float(rep.get("loss_rate", 0.0))
+        reason = str(rep.get("reason", ""))
+        if loss >= CONGESTION_LOSS_THRESHOLD and reason in RAISING_REASONS:
+            out.append({
+                "t_s": round(t_s, 3),
+                "loss_rate": round(loss, 4),
+                "reason": reason,
+                "estimate_before_bps": int(rep.get("estimate_before_bps", 0)),
+                "estimate_after_bps": int(rep.get("estimate_after_bps", 0)),
+            })
+    return out
+
+
 def check_invariants(doc: dict) -> list[dict]:
     """Check every invariant the run must satisfy.
 
@@ -293,24 +368,13 @@ def check_invariants(doc: dict) -> list[dict]:
     """
     summary = doc.get("summary", {})
     benchmark = doc.get("benchmark", {})
-    curve = doc.get("curve", [])
 
     capacity = float(benchmark.get("capacity_bps", 0) or 0)
     saturation_s = float(benchmark.get("saturation_s", 0) or 0)
 
-    # The estimate the run started from: the first sample's estimate.
-    initial_estimate = float(curve[0].get("estimate_bps", 0)) if curve else 0.0
-
-    # The highest estimate seen while the link was congested.
-    peak_estimate = 0.0
-    for s in curve:
-        if float(s.get("t_s", 0.0)) <= saturation_s:
-            peak_estimate = max(peak_estimate, float(s.get("estimate_bps", 0)))
-
     saturated_delivered = float(summary.get("saturated_delivered_bps", 0))
     saturated_sent = float(summary.get("saturated_sent_bps", 0))
     recovered_delivered = float(summary.get("recovered_delivered_bps", 0))
-    estimate_after = float(summary.get("estimate_after_saturation_bps", 0))
 
     checks: list[dict] = []
 
@@ -338,15 +402,14 @@ def check_invariants(doc: dict) -> list[dict]:
     add("ladder_reacted", drops >= 1, drops, ">= 1",
         "the ladder stepped down when the link saturated")
 
-    # 4. The estimate stayed bounded while the link was congested.
-    #    This is the regression guard for the AIMD defect.
-    drift_limit = initial_estimate * ESTIMATE_DRIFT_TOLERANCE
-    add("estimate_stayed_bounded", peak_estimate <= drift_limit,
-        int(peak_estimate), f"<= {int(drift_limit)}",
-        "the bandwidth estimate did not climb while the link was congested")
-    add("estimate_did_not_rise_at_the_end", estimate_after <= drift_limit,
-        int(estimate_after), f"<= {int(drift_limit)}",
-        "the estimate at the end of the saturation phase was still bounded")
+    # 4. The estimator never raised its target while the link was
+    #    complaining.  This is the regression guard for the AIMD defect.
+    raises = raises_on_congested_reports(doc, saturation_s)
+    add("estimate_did_not_climb_while_congested",
+        len(raises) <= MAX_RAISES_ON_A_CONGESTED_REPORT,
+        len(raises), f"<= {MAX_RAISES_ON_A_CONGESTED_REPORT}",
+        "the estimator never raised its target on a report that said the "
+        "link was congested (the AIMD regression guard)")
 
     # 5. The delivered rate did not exceed the link's capacity.
     delivered_limit = capacity * DELIVERED_OVER_CAPACITY_TOLERANCE
@@ -356,16 +419,25 @@ def check_invariants(doc: dict) -> list[dict]:
         "the ladder converged onto the link's capacity instead of "
         "overshooting it")
 
-    # 6. The ladder recovered and the stream got faster.
-    rises = int(summary.get("level_rises", 0))
-    add("ladder_recovered", rises >= 1, rises, ">= 1",
+    # 6. The offered load stayed near the capacity.  A converged ladder
+    #    offers roughly what the link can carry; a wildly different
+    #    number means the ladder and the link disagree.
+    if capacity > 0:
+        offer_ratio = saturated_sent / capacity
+        add("offered_load_tracked_the_capacity", 0.5 <= offer_ratio <= 2.5,
+            round(offer_ratio, 3), "0.5 .. 2.5 x capacity",
+            "the offered load converged onto the link's capacity")
+
+    # 7. The ladder recovered and the stream got faster.
+    rises_up = int(summary.get("level_rises", 0))
+    add("ladder_recovered", rises_up >= 1, rises_up, ">= 1",
         "the ladder climbed back once the link freed up")
     add("throughput_recovered", recovered_delivered > saturated_delivered,
         int(recovered_delivered), f"> {int(saturated_delivered)}",
         "the stream carried more data after the recovery than during the "
         "saturation")
 
-    # 7. The ladder did not flap.
+    # 8. The ladder did not flap.
     changes = int(summary.get("level_changes", 0))
     add("ladder_did_not_flap", changes <= MAX_LEVEL_CHANGES,
         changes, f"<= {MAX_LEVEL_CHANGES}",
@@ -510,6 +582,12 @@ def main() -> int:
             "config": raw.get("benchmark", {}),
             "summary": raw.get("summary", {}),
             "invariants": checks,
+            # The evidence for the AIMD regression guard: every report
+            # where the estimator raised its target on a report that said
+            # the link was congested.  An empty list is the correct
+            # result; a non-empty one is the defect, itemised.
+            "estimator_raises_on_congested_reports": raises_on_congested_reports(
+                raw, float(raw.get("benchmark", {}).get("saturation_s", 0) or 0)),
             "curve": raw.get("curve", []),
         })
         print(f"ran scenario '{spec['name']}' "
@@ -555,13 +633,20 @@ def main() -> int:
             "is one local sample, not a pass/fail threshold. What must hold "
             "on every machine are the invariants, and they are asserted by "
             "tools/benchmark_saturation.py and recorded in the artifact.",
-            "The estimate's bound during the saturation phase is the "
-            "regression guard for an AIMD defect this benchmark uncovered: "
-            "the estimator used to resume its additive increase once the "
-            "cooldown expired even while the link was still lossy, so the "
-            "estimate walked back up to the rate that had just been "
-            "throttled. The Goog-CC front-end already carried that guard; "
-            "the AIMD one did not.",
+            "The regression guard for an AIMD defect this benchmark "
+            "uncovered: the estimator used to resume its additive "
+            "increase once the cooldown expired even while the link was "
+            "still lossy, so the estimate walked back up to the rate that "
+            "had just been throttled. The Goog-CC front-end already "
+            "carried that guard; the AIMD one did not.",
+            "The guard is decided on the estimator's own per-report "
+            "reason ('aimd_increase' / 'remb_override' on a report whose "
+            "loss rate is at or above the estimator's 2% congestion "
+            "threshold), not on the before/after estimate pair: the "
+            "reported estimate is an exponentially smoothed value, so it "
+            "can drift upwards by a few bits after a decrease without the "
+            "estimator having raised anything. The artifact's "
+            "'reports' array carries the raw evidence.",
         ],
     }
 

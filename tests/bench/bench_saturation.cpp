@@ -233,6 +233,28 @@ private:
     bool expect_value_ = false;
 };
 
+/**
+ * @brief The estimator's own verdict, as a stable string.
+ *
+ * The reason is the *authoritative* signal for "did the estimator raise
+ * its target, and why".  The before/after estimate pair cannot answer
+ * it on its own: the reported estimate is an exponentially smoothed
+ * value, so it can drift upwards by a few bits after a decrease
+ * without the estimator having raised anything at all.
+ */
+std::string reason_to_string(nimrtc::plugins::BweEstimate::Reason reason) {
+    using R = nimrtc::plugins::BweEstimate::Reason;
+    switch (reason) {
+        case R::Initial:        return "initial";
+        case R::AIMDIncrease:   return "aimd_increase";
+        case R::AIMDDecrease:   return "aimd_decrease";
+        case R::REMBOverride:   return "remb_override";
+        case R::RttIncrease:    return "rtt_increase";
+        case R::TransportCcDelay: return "transport_cc_delay";
+    }
+    return "unknown";
+}
+
 // ---------------------------------------------------------------------------
 // The socket layer — a real UDP socket pair on the loopback interface.
 //
@@ -510,9 +532,46 @@ struct Sample {
     std::uint64_t sent_bytes = 0;
 };
 
+/**
+ * @brief One **feedback report**'s worth of evidence.
+ *
+ * The curve is sampled every 500 ms, but the estimator is fed a
+ * feedback sample every `report_interval_ms` (100 ms by default).  A
+ * property about "the estimate rose while the link was complaining"
+ * has to be decided on the *report* granularity, not the curve's:
+ * two reports can hide inside one curve sample, and the curve's loss
+ * figure is the *last* report's, not the one that produced the
+ * estimate change.
+ *
+ * This record is therefore the estimator's own input and output for one
+ * report: the loss rate the peer reported, and the estimate before
+ * and after the estimator processed it.  It is what makes the
+ * regression guard exact rather than approximate.
+ */
+struct ReportSample {
+    double t_s = 0.0;
+    /** The loss rate the peer reported in this feedback sample. */
+    double loss_rate = 0.0;
+    /** The estimate before this report was processed. */
+    std::uint32_t estimate_before_bps = 0;
+    /** The estimate after this report was processed. */
+    std::uint32_t estimate_after_bps = 0;
+    /** The estimator's own verdict on why the estimate is what it is.
+     *  This is the *authoritative* signal: it says whether the
+     *  estimator raised its target, and it distinguishes an additive
+     *  increase from a REMB override.  The before/after pair alone
+     *  cannot, because the estimate is an exponentially smoothed
+     *  value — it can drift upwards a few bits after a decrease
+     *  without the estimator having raised anything. */
+    std::string reason;
+};
+
 /** The result of one run. */
 struct RunResult {
     std::vector<Sample> samples;
+
+    /** One entry per feedback report — the estimator's own granularity. */
+    std::vector<ReportSample> reports;
 
     // ---- The summary numbers ------------------------------------------
     std::uint32_t initial_level = 0;
@@ -928,7 +987,24 @@ RunResult run_scenario(const Options& opt) {
                 fb.remb_bps = static_cast<std::uint32_t>(remb_bps);
             }
 
+            // The estimate the estimator held *before* it processed
+            // this report, so the report-level record can say whether
+            // the estimate rose *because of* this (congested) sample.
+            const std::uint32_t estimate_before =
+                estimator->estimate().target_bitrate_bps;
+
             estimator->on_feedback(fb);
+
+            {
+                ReportSample rs;
+                rs.t_s = std::chrono::duration<double>(now - start).count();
+                rs.loss_rate = loss_rate;
+                rs.estimate_before_bps = estimate_before;
+                const auto after = estimator->estimate();
+                rs.estimate_after_bps = after.target_bitrate_bps;
+                rs.reason = reason_to_string(after.reason);
+                result.reports.push_back(rs);
+            }
 
             last_report_at = now;
             last_report_sent = sent;
@@ -1218,6 +1294,23 @@ int main(int argc, char** argv) {
         j.field("delivered_bps", static_cast<long long>(s.delivered_bps));
         j.field("sent_bps", static_cast<long long>(s.sent_bps));
         j.field("loss_rate", s.loss_rate);
+        j.end_object();
+    }
+    j.end_array();
+
+    // The reports: the estimator's own granularity.  The curve is
+    // sampled every 500 ms, but the estimator sees a feedback sample
+    // every reporting interval, so this is the record the saturation
+    // regression guard is decided on.
+    j.key("reports");
+    j.begin_array();
+    for (const auto& rep : r.reports) {
+        j.begin_object();
+        j.field("t_s", rep.t_s);
+        j.field("loss_rate", rep.loss_rate);
+        j.field("estimate_before_bps", static_cast<long long>(rep.estimate_before_bps));
+        j.field("estimate_after_bps", static_cast<long long>(rep.estimate_after_bps));
+        j.field("reason", rep.reason);
         j.end_object();
     }
     j.end_array();

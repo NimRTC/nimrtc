@@ -1,9 +1,16 @@
-# demo-agent-realtime — 实时 AI 游戏决策处理
+# demo-agent-realtime — 实时 AI 游戏决策处理 + 语音 Agent 链路
 
-切片 `v2-ai-decision` 的落地 demo。实现 AI 在毫秒级时间内做出游戏行为决策的
-决策处理链路：多策略、可切换、可度量（延迟 / 准确率）、可追踪（debug 日志）。
+切片 `v2-ai-decision` 的落地 demo（决策处理链路）与切片 `v4-voice-agent`
+的落地 demo（语音 Agent 链路）共用这一个可执行文件。
 
-对应 `docs/plan/ai-game-demo-plan.md` M1 第一条的决策处理部分：
+决策部分：实现 AI 在毫秒级时间内做出游戏行为决策的决策处理链路：
+多策略、可切换、可度量（延迟 / 准确率）、可追踪（debug 日志）。
+
+语音部分：post-3A int16 PCM 直喂 ASR（mock/Whisper/vosk 可插拔），
+LLM 流式消费，TTS 用 Opus 编码回传，Tap 音频 100ms 攒批，且
+「打断 → 停播」耗时被逐次记录。
+
+对应 `docs/plan/ai-game-demo-plan.md` M1 第一条的决策处理部分 + M3 语音支路：
 游戏画面采用 M1 已定的打地鼠（3 洞棋盘），决策记录携带 `frame_seq + capture_ts_us`
 帧锚定字段（plan §5.2 的 `ai_decision` JSON）。
 
@@ -22,6 +29,10 @@
 # 验收入口：四条标准一次跑完，0 = 全部通过（ctest 用例 demo-agent-realtime_self_test）
 demo-agent-realtime --self-test --decisions 100 --debug
 
+# 语音链路验收入口：七条标准一次跑完，0 = 全部通过
+# （ctest 用例 demo-agent-realtime_voice_self_test）
+demo-agent-realtime --voice-self-test --frames 300 --barge-in-at 150
+
 # 实时循环：60fps 打地鼠棋盘，逐帧决策并输出 ai_decision JSON
 demo-agent-realtime --run 3 --strategy predictive --debug
 
@@ -29,10 +40,47 @@ demo-agent-realtime --run 3 --strategy predictive --debug
 demo-agent-realtime --strategies
 ```
 
+## 语音链路（slice v4-voice-agent）
+
+```text
+post-3A int16 PCM（IAudio3A 的 int16 tap，10ms 一帧）
+  -> TapBatchAccumulator（100ms 攒批，不逐 10ms 帧调模型）
+  -> ASR（mock 缺省 / whisper / vosk，运行时选择）
+  -> LLM（流式：token 到达即增量产出）
+  -> TTS（int16 PCM -> nimrtc::opus::Encoder::encode_int16 -> Opus 回传）
+  -> 播放队列；barge-in 到达立即清队，打断时刻与停播时刻的差值被记录
+```
+
+实现全部在 `voice_agent.hpp`，决策 demo 侧只加了一组命令行开关：
+
+```bash
+# 缺省 mock 后端：全链路确定性自检（ctest 入口）
+demo-agent-realtime --voice-self-test
+
+# 选择 whisper/vosk 后端（运行时可插拔，不引入编译期模型 SDK 依赖）：
+# 模型目录分别从 NIMRTC_WHISPER_MODEL_DIR / NIMRTC_VOSK_MODEL_DIR 解析。
+# 模型缺失时是明确报错（exit!=0），绝不静默退回 mock——
+# 除非调用方显式 --allow-mock-fallback。
+NIMRTC_WHISPER_MODEL_DIR=/models/whisper demo-agent-realtime --voice-self-test --asr whisper
+demo-agent-realtime --voice-self-test --asr vosk --allow-mock-fallback
+```
+
+| 验收标准 | 实现位置 | 验证 |
+|---|---|---|
+| 1. ASR 后端可配置（Whisper/vosk 接入点 + 选择逻辑） | `make_asr()` / `WhisperAsr` / `VoskAsr`（`voice_agent.hpp`） | `--asr mock\|whisper\|vosk` |
+| 2. ASR 消费 post-3A int16 PCM | `IASR::feed(const std::int16_t*…)` + `on_post_3a_int16`（`voice_agent.hpp`） | 自检断言 `asr_samples_fed` |
+| 3. LLM 流式消费（增量回调） | `ILLM::stream(prompt, on_token)`（`voice_agent.hpp`） | 自检断言 `llm_tokens >= 1` |
+| 4. TTS Opus 编码 + Tap 100ms 攒批 | `OpusTts::encode → Encoder::encode_int16` + `kTapBatchMs=100`（`voice_agent.hpp`、`opus.{hpp,cpp}`） | 自检断言 `opus_packets >= 1` 与 `tap_batches` |
+| 5. 打断→停播耗时被记录 | `BargeInMeter::record_barge_in / record_stop`（`voice_agent.hpp`） | 自检断言 `barge_in_to_stop_us` |
+| 6/7. 缺模型明确报错（不静默退回） | `make_asr` 缺模型分支 + `--allow-mock-fallback`（`voice_agent.hpp`） | `--asr whisper` 缺模型时 exit!=0 且输出 `unavailable` |
+
 ## 设计要点
 
 - **决策引擎自包含**（纯 C++20，不链接 NimRTC）：决策是算术运算，任何构建机都能
   无头运行，验收测试因此是确定性的。
+- **语音链路只依赖 `nimrtc::opus`**：TTS 回传需要真的 Opus 编码器
+  （`Encoder::encode_int16`，vendored libopus）；ASR/LLM 模型则走运行时
+  可插拔路径，不引入编译期模型 SDK 依赖（spec 需求 6）。
 - **场景固定种子**（`kScenarioSeed`）：100 次决策可复现；刷怪密度经过校准
   （p=0.20、寿命 3..5 tick），三个策略的准确率都稳定在 90% 以上，同时多怪重叠帧
   足以把三种排序规则区分开（实测 heuristic=100 / reactive=96 / predictive=97）。

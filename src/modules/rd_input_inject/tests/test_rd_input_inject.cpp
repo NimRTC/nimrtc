@@ -39,6 +39,12 @@
 // so it is reachable -- and testable -- on every platform.
 #include "../src/macos_keycodes.hpp"
 
+// The Linux input-layer codes and the X11 keysyms are portable data
+// too (see ../src/linux_input_codes.hpp), for the same reason: the
+// Linux backend's two injection vocabularies must be verifiable on
+// every CI leg, not only on a Linux one.
+#include "../src/linux_input_codes.hpp"
+
 // The base class is not exported through the public header, so the
 // test reaches it by a relative path.  That is deliberate: the base
 // class is an implementation detail, and a test that only used the
@@ -574,5 +580,283 @@ TEST(RdInputInject, TheMacosKeycodeTableRefusesTheUnknownKey) {
     // used 0 as its sentinel would silently refuse a valid key.
     EXPECT_EQ(macos_keycode_for(inj::NeutralKey::kA), 0x00);
     EXPECT_NE(macos_keycode_for(inj::NeutralKey::kA), kMacVKUnknown);
+}
+
+// ===========================================================================
+// 9. The Linux input codes and the X11 keysyms
+// ===========================================================================
+//
+// The Linux backend has two injection vocabularies, and they are
+// unrelated:
+//
+//   - the uinput path speaks the *kernel's* codes (`KEY_A` is 30,
+//     `BTN_LEFT` is 0x110);
+//   - the XTest path speaks the *X server's* (`XK_a` is 0x61, and the
+//     left button is the number `1`).
+//
+// Passing one to the other does not fail loudly: the X server accepts
+// a key it does not recognise and injects *nothing*, so the device
+// reports success while the operator's keystrokes go nowhere.  The
+// tables are therefore checked here, on every CI leg, with the
+// expected values spelled out literally -- so a wrong *entry* is
+// caught, not merely a change.
+
+TEST(RdInputInject, TheLinuxKeycodeTableIsCorrect) {
+    using namespace nimrtc::rd_input_inject::detail;
+
+    // The letters.  These are the US layout's hardware positions: the
+    // kernel numbers the keys in the order they sit on the keyboard.
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kA), 30);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kS), 31);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kD), 32);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF), 33);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kG), 34);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kH), 35);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kJ), 36);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kK), 37);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kL), 38);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kQ), 16);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kW), 17);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kE), 18);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kR), 19);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kT), 20);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kY), 21);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kU), 22);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kI), 23);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kO), 24);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kP), 25);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kZ), 44);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kX), 45);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kC), 46);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kV), 47);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kB), 48);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kN), 49);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kM), 50);
+
+    // The editing / navigation keys.
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kEnter), 28);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kTab), 15);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kSpace), 57);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kBackspace), 14);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kDelete), 111);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kEscape), 1);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kHome), 102);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kPageUp), 104);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kEnd), 107);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kPageDown), 109);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kLeft), 105);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kRight), 106);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kDown), 108);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kUp), 103);
+
+    // The modifiers.
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kShift), 42);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kControl), 29);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kAlt), 56);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kMeta), 125);
+
+    // The function keys.
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF1), 59);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF2), 60);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF3), 61);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF4), 62);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF5), 63);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF6), 64);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF7), 65);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF8), 66);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF9), 67);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF10), 68);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF11), 87);
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kF12), 88);
+}
+
+TEST(RdInputInject, TheLinuxButtonCodeTableIsCorrect) {
+    using namespace nimrtc::rd_input_inject::detail;
+
+    EXPECT_EQ(linux_button_code_for(nimrtc::rd_input::MouseButton::kLeft),
+              0x110);  // BTN_LEFT
+    EXPECT_EQ(linux_button_code_for(nimrtc::rd_input::MouseButton::kRight),
+              0x111);  // BTN_RIGHT
+    EXPECT_EQ(linux_button_code_for(nimrtc::rd_input::MouseButton::kMiddle),
+              0x112);  // BTN_MIDDLE
+    EXPECT_EQ(linux_button_code_for(nimrtc::rd_input::MouseButton::kBack),
+              0x113);  // BTN_SIDE
+    EXPECT_EQ(linux_button_code_for(nimrtc::rd_input::MouseButton::kForward),
+              0x114);  // BTN_EXTRA
+}
+
+TEST(RdInputInject, TheX11KeysymTableIsCorrect) {
+    using namespace nimrtc::rd_input_inject::detail;
+
+    // The letters.  For Latin-1 the X11 KeySym *is* the character
+    // code, so 'a' is 0x61.
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kA), 0x0061);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kB), 0x0062);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kC), 0x0063);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kD), 0x0064);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kE), 0x0065);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF), 0x0066);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kG), 0x0067);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kH), 0x0068);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kI), 0x0069);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kJ), 0x006A);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kK), 0x006B);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kL), 0x006C);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kM), 0x006D);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kN), 0x006E);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kO), 0x006F);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kP), 0x0070);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kQ), 0x0071);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kR), 0x0072);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kS), 0x0073);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kT), 0x0074);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kU), 0x0075);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kV), 0x0076);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kW), 0x0077);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kX), 0x0078);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kY), 0x0079);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kZ), 0x007A);
+
+    // The editing / navigation keys.  X11 spells "page up" and "page
+    // down" as "prior" and "next".
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kEscape), 0xFF1B);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kTab), 0xFF09);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kEnter), 0xFF0D);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kSpace), 0x0020);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kBackspace), 0xFF08);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kDelete), 0xFFFF);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kHome), 0xFF50);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kEnd), 0xFF57);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kPageUp), 0xFF55);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kPageDown), 0xFF56);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kLeft), 0xFF51);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kUp), 0xFF52);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kRight), 0xFF53);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kDown), 0xFF54);
+
+    // The modifiers.  The X server names the *left* variant of each.
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kShift), 0xFFE1);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kControl), 0xFFE3);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kAlt), 0xFFE9);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kMeta), 0xFFEB);
+
+    // The function keys.
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF1), 0xFFBE);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF2), 0xFFBF);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF3), 0xFFC0);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF4), 0xFFC1);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF5), 0xFFC2);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF6), 0xFFC3);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF7), 0xFFC4);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF8), 0xFFC5);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF9), 0xFFC6);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF10), 0xFFC7);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF11), 0xFFC8);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kF12), 0xFFC9);
+}
+
+TEST(RdInputInject, TheX11ButtonNumberTableIsCorrect) {
+    using namespace nimrtc::rd_input_inject::detail;
+
+    // The X server's conventional numbering.  These are *not* the
+    // kernel's BTN_* codes, which is the whole point: the XTest path
+    // used to pass BTN_LEFT (0x110) where the server expects 1, and
+    // the server accepted it silently while injecting nothing.
+    EXPECT_EQ(x11_button_number_for(nimrtc::rd_input::MouseButton::kLeft), 1u);
+    EXPECT_EQ(x11_button_number_for(nimrtc::rd_input::MouseButton::kMiddle), 2u);
+    EXPECT_EQ(x11_button_number_for(nimrtc::rd_input::MouseButton::kRight), 3u);
+    EXPECT_EQ(x11_button_number_for(nimrtc::rd_input::MouseButton::kBack), 8u);
+    EXPECT_EQ(x11_button_number_for(nimrtc::rd_input::MouseButton::kForward), 9u);
+}
+TEST(RdInputInject, TheTwoLinuxVocabulariesDoNotCollide) {
+    using namespace nimrtc::rd_input_inject::detail;
+
+    // The regression this table exists to prevent: the XTest path used
+    // the *kernel's* codes, so a key press asked the X server for a
+    // key it does not have.  The X server accepts it and injects
+    // nothing -- the operator's keystroke goes nowhere while the
+    // device reports success.
+    //
+    // So for every key the table knows, the two vocabularies must
+    // disagree.  If they ever agreed, one of the tables would have
+    // been copied from the other by mistake.
+    const inj::NeutralKey kKeys[] = {
+        inj::NeutralKey::kA,  inj::NeutralKey::kZ,
+        inj::NeutralKey::kF1, inj::NeutralKey::kF12,
+        inj::NeutralKey::kEnter, inj::NeutralKey::kEscape,
+        inj::NeutralKey::kSpace, inj::NeutralKey::kTab,
+        inj::NeutralKey::kLeft, inj::NeutralKey::kRight,
+        inj::NeutralKey::kUp,   inj::NeutralKey::kDown,
+        inj::NeutralKey::kHome, inj::NeutralKey::kEnd,
+        inj::NeutralKey::kPageUp, inj::NeutralKey::kPageDown,
+        inj::NeutralKey::kShift, inj::NeutralKey::kControl,
+        inj::NeutralKey::kAlt,  inj::NeutralKey::kMeta,
+    };
+    for (const inj::NeutralKey key : kKeys) {
+        EXPECT_NE(linux_keycode_for(key), kLinuxKeyUnknown)
+            << "the kernel table does not know the key";
+        EXPECT_NE(x11_keysym_for(key), kX11KeySymUnknown)
+            << "the X11 table does not know the key";
+        EXPECT_NE(linux_keycode_for(key), x11_keysym_for(key))
+            << "the kernel code and the X11 KeySym must not be the same "
+               "value -- one of the tables was copied from the other";
+    }
+}
+
+TEST(RdInputInject, TheAsciiTablesAreCorrect) {
+    using namespace nimrtc::rd_input_inject::detail;
+
+    // The uinput side: the US layout's key for the character.
+    EXPECT_EQ(linux_keycode_for_ascii('a'), 30);   // KEY_A
+    EXPECT_EQ(linux_keycode_for_ascii('z'), 44);   // KEY_Z
+    EXPECT_EQ(linux_keycode_for_ascii('0'), 11);   // KEY_0
+    EXPECT_EQ(linux_keycode_for_ascii('9'), 10);   // KEY_9
+    EXPECT_EQ(linux_keycode_for_ascii(' '), 57);   // KEY_SPACE
+    EXPECT_EQ(linux_keycode_for_ascii('\n'), 28);  // KEY_ENTER
+    EXPECT_EQ(linux_keycode_for_ascii('\t'), 15);  // KEY_TAB
+    EXPECT_EQ(linux_keycode_for_ascii('/'), 53);   // KEY_SLASH
+    EXPECT_EQ(linux_keycode_for_ascii('\\'), 43);  // KEY_BACKSLASH
+    EXPECT_EQ(linux_keycode_for_ascii(','), 51);   // KEY_COMMA
+    EXPECT_EQ(linux_keycode_for_ascii('.'), 52);   // KEY_DOT
+    EXPECT_EQ(linux_keycode_for_ascii('-'), 12);   // KEY_MINUS
+    EXPECT_EQ(linux_keycode_for_ascii('='), 13);   // KEY_EQUAL
+    EXPECT_EQ(linux_keycode_for_ascii('['), 26);   // KEY_LEFTBRACE
+    EXPECT_EQ(linux_keycode_for_ascii(']'), 27);   // KEY_RIGHTBRACE
+    EXPECT_EQ(linux_keycode_for_ascii(';'), 39);   // KEY_SEMICOLON
+    EXPECT_EQ(linux_keycode_for_ascii('\''), 40);  // KEY_APOSTROPHE
+    EXPECT_EQ(linux_keycode_for_ascii('`'), 41);   // KEY_GRAVE
+
+    // A character with no key on the US layout is refused, not guessed.
+    EXPECT_EQ(linux_keycode_for_ascii('\x01'), kLinuxKeyUnknown);
+    EXPECT_EQ(linux_keycode_for_ascii('\x7F'), kLinuxKeyUnknown);
+
+    // The X11 side: for Latin-1 the KeySym is the character code, with
+    // the two control characters spelled out.
+    EXPECT_EQ(x11_keysym_for_ascii('a'), 0x0061);
+    EXPECT_EQ(x11_keysym_for_ascii('Z'), 0x005A);
+    EXPECT_EQ(x11_keysym_for_ascii(' '), 0x0020);
+    EXPECT_EQ(x11_keysym_for_ascii('/'), 0x002F);
+    EXPECT_EQ(x11_keysym_for_ascii('\n'), 0xFF0D);  // XK_Return
+    EXPECT_EQ(x11_keysym_for_ascii('\r'), 0xFF0D);  // XK_Return
+    EXPECT_EQ(x11_keysym_for_ascii('\t'), 0xFF09);  // XK_Tab
+
+    // A control character with no KeySym on this path is refused.
+    EXPECT_EQ(x11_keysym_for_ascii('\x01'), kX11KeySymUnknown);
+    EXPECT_EQ(x11_keysym_for_ascii('\x7F'), kX11KeySymUnknown);
+}
+
+TEST(RdInputInject, TheLinuxTablesRefuseTheUnknownKey) {
+    using namespace nimrtc::rd_input_inject::detail;
+
+    EXPECT_EQ(linux_keycode_for(inj::NeutralKey::kNone), kLinuxKeyUnknown);
+    EXPECT_EQ(x11_keysym_for(inj::NeutralKey::kNone), kX11KeySymUnknown);
+    EXPECT_EQ(linux_button_code_for(nimrtc::rd_input::MouseButton::kUnknown),
+              kLinuxButtonUnknown);
+    EXPECT_EQ(x11_button_number_for(nimrtc::rd_input::MouseButton::kUnknown),
+              kX11ButtonUnknown);
+
+    // The sentinel must not collide with a real entry.
+    EXPECT_NE(linux_keycode_for(inj::NeutralKey::kA), kLinuxKeyUnknown);
+    EXPECT_NE(x11_keysym_for(inj::NeutralKey::kA), kX11KeySymUnknown);
 }
 

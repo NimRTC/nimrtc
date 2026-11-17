@@ -44,28 +44,11 @@
 
 #include <nimrtc/rd_input_inject/key_map.hpp>
 
+#include "../../linux_input_codes.hpp"
+
 #include "../../injector_base.hpp"
 
 namespace nimrtc::rd_input_inject::detail {
-
-/**
- * @brief The Linux input-event key code for a neutral key.
- *
- * These are the `KEY_*` constants from `linux/input-event-codes.h` —
- * the codes the kernel's input layer uses.
- *
- * @return the code, or 0 when the table does not know the key.
- */
-int linux_keycode_for(NeutralKey key) noexcept;
-
-/**
- * @brief The Linux button code for a mouse button.
- *
- * These are the `BTN_*` constants.
- *
- * @return the code, or 0 when the table does not know the button.
- */
-int linux_button_code_for(rd_input::MouseButton button) noexcept;
 
 /** The Linux backend. */
 class LinuxInjector final : public InjectorBase {

@@ -7,6 +7,8 @@
 
 #include "linux_input.hpp"
 
+#include "../../linux_input_codes.hpp"
+
 #include <nimrtc/core/log.hpp>
 
 #include <cstdlib>
@@ -30,94 +32,23 @@
 namespace nimrtc::rd_input_inject::detail {
 namespace {
 
-// The Linux input-layer key codes (`linux/input-event-codes.h`).
-int keycode_for_neutral(NeutralKey key) noexcept {
-    switch (key) {
-        case NeutralKey::kEscape:    return KEY_ESC;
-        case NeutralKey::kTab:       return KEY_TAB;
-        case NeutralKey::kEnter:     return KEY_ENTER;
-        case NeutralKey::kSpace:     return KEY_SPACE;
-        case NeutralKey::kBackspace: return KEY_BACKSPACE;
-        case NeutralKey::kDelete:    return KEY_DELETE;
-        case NeutralKey::kHome:      return KEY_HOME;
-        case NeutralKey::kEnd:       return KEY_END;
-        case NeutralKey::kPageUp:    return KEY_PAGEUP;
-        case NeutralKey::kPageDown:  return KEY_PAGEDOWN;
-        case NeutralKey::kLeft:      return KEY_LEFT;
-        case NeutralKey::kUp:        return KEY_UP;
-        case NeutralKey::kRight:     return KEY_RIGHT;
-        case NeutralKey::kDown:      return KEY_DOWN;
-        case NeutralKey::kShift:     return KEY_LEFTSHIFT;
-        case NeutralKey::kControl:   return KEY_LEFTCTRL;
-        case NeutralKey::kAlt:       return KEY_LEFTALT;
-        case NeutralKey::kMeta:      return KEY_LEFTMETA;
-
-        case NeutralKey::kF1:  return KEY_F1;
-        case NeutralKey::kF2:  return KEY_F2;
-        case NeutralKey::kF3:  return KEY_F3;
-        case NeutralKey::kF4:  return KEY_F4;
-        case NeutralKey::kF5:  return KEY_F5;
-        case NeutralKey::kF6:  return KEY_F6;
-        case NeutralKey::kF7:  return KEY_F7;
-        case NeutralKey::kF8:  return KEY_F8;
-        case NeutralKey::kF9:  return KEY_F9;
-        case NeutralKey::kF10: return KEY_F10;
-        case NeutralKey::kF11: return KEY_F11;
-        case NeutralKey::kF12: return KEY_F12;
-
-        case NeutralKey::kA: return KEY_A;
-        case NeutralKey::kB: return KEY_B;
-        case NeutralKey::kC: return KEY_C;
-        case NeutralKey::kD: return KEY_D;
-        case NeutralKey::kE: return KEY_E;
-        case NeutralKey::kF: return KEY_F;
-        case NeutralKey::kG: return KEY_G;
-        case NeutralKey::kH: return KEY_H;
-        case NeutralKey::kI: return KEY_I;
-        case NeutralKey::kJ: return KEY_J;
-        case NeutralKey::kK: return KEY_K;
-        case NeutralKey::kL: return KEY_L;
-        case NeutralKey::kM: return KEY_M;
-        case NeutralKey::kN: return KEY_N;
-        case NeutralKey::kO: return KEY_O;
-        case NeutralKey::kP: return KEY_P;
-        case NeutralKey::kQ: return KEY_Q;
-        case NeutralKey::kR: return KEY_R;
-        case NeutralKey::kS: return KEY_S;
-        case NeutralKey::kT: return KEY_T;
-        case NeutralKey::kU: return KEY_U;
-        case NeutralKey::kV: return KEY_V;
-        case NeutralKey::kW: return KEY_W;
-        case NeutralKey::kX: return KEY_X;
-        case NeutralKey::kY: return KEY_Y;
-        case NeutralKey::kZ: return KEY_Z;
-
-        case NeutralKey::kNone: break;
-    }
-    return 0;
-}
-
-int button_code_for(rd_input::MouseButton button) noexcept {
-    switch (button) {
-        case rd_input::MouseButton::kLeft:   return BTN_LEFT;
-        case rd_input::MouseButton::kRight:  return BTN_RIGHT;
-        case rd_input::MouseButton::kMiddle: return BTN_MIDDLE;
-        case rd_input::MouseButton::kBack:   return BTN_SIDE;
-        case rd_input::MouseButton::kForward:return BTN_EXTRA;
-        case rd_input::MouseButton::kUnknown:break;
-    }
-    return 0;
-}
+// The key and button tables are *not* here: they live in
+// `../../linux_input_codes.hpp`, which carries no platform type and is
+// therefore compiled (and unit-tested) on every CI leg.  What is
+// here is the part that is genuinely Linux-and-X11-specific: the two
+// injection vocabularies and the calls that consume them.
+//
+// The two vocabularies are unrelated, and mixing them up does not
+// fail loudly -- the X server accepts a key it does not recognise and
+// injects nothing, so the device reports success while the
+// operator's keystrokes go nowhere:
+//
+//   - uinput speaks the kernel's codes (`KEY_A`, `BTN_LEFT`);
+//   - XTest speaks the X server's (`XK_a` -- which the call site
+//     converts to a layout-specific keycode -- and the button number
+//     `1`).
 
 } // namespace
-
-int linux_keycode_for(NeutralKey key) noexcept {
-    return keycode_for_neutral(key);
-}
-
-int linux_button_code_for(rd_input::MouseButton button) noexcept {
-    return button_code_for(button);
-}
 
 // ---------------------------------------------------------------------------
 // The backend
@@ -131,7 +62,21 @@ LinuxInjector::LinuxInjector() {
         if (display != nullptr && display[0] != '\0') {
             Display* dpy = XOpenDisplay(display);
             if (dpy != nullptr) {
-                if (XTestQueryExtension(dpy, nullptr, nullptr, nullptr, nullptr)) {
+                // `XTestQueryExtension()` writes to **all five** of its
+                // out-parameters -- it is not a "may write" API -- so
+                // passing `nullptr` for any of them is a null-pointer
+                // write inside libXtst, and the injector crashes the
+                // process on construction.
+                //
+                // The values are not needed here (the return value is
+                // the answer), so they go into locals that are simply
+                // ignored.
+                int event_base = 0;
+                int error_base = 0;
+                int major = 0;
+                int minor = 0;
+                if (XTestQueryExtension(dpy, &event_base, &error_base,
+                                        &major, &minor)) {
                     mode_ = Mode::kXTest;
                 } else {
                     XCloseDisplay(dpy);
@@ -202,10 +147,13 @@ bool LinuxInjector::open_uinput() noexcept {
     for (const NeutralKey key : {NeutralKey::kEscape, NeutralKey::kTab,
                                  NeutralKey::kEnter, NeutralKey::kSpace,
                                  NeutralKey::kA, NeutralKey::kZ}) {
-        const int code = keycode_for_neutral(key);
-        if (code != 0) ::ioctl(fd, UI_SET_KEYBIT, code);
+        const LinuxKeyCode code = linux_keycode_for(key);
+        if (code != kLinuxKeyUnknown) ::ioctl(fd, UI_SET_KEYBIT, code);
     }
-    for (const int code : {BTN_LEFT, BTN_RIGHT, BTN_MIDDLE}) {
+    for (const LinuxButtonCode code :
+         {linux_button_code_for(rd_input::MouseButton::kLeft),
+          linux_button_code_for(rd_input::MouseButton::kRight),
+          linux_button_code_for(rd_input::MouseButton::kMiddle)}) {
         ::ioctl(fd, UI_SET_KEYBIT, code);
     }
 
@@ -303,21 +251,22 @@ bool LinuxInjector::do_inject_mouse_move(std::int32_t dx, std::int32_t dy) {
 
 bool LinuxInjector::do_inject_button(rd_input::MouseButton button,
                                      rd_input::ButtonAction action) {
-    const int code = button_code_for(button);
-    if (code == 0) return false;
-
     const int value = (action == rd_input::ButtonAction::kDown) ? 1 : 0;
 
 #ifdef NIMRTC_HAS_XTEST
     if (mode_ == Mode::kXTest) {
+        // The X server numbers its buttons 1..5 (and 8, 9); the
+        // kernel's `BTN_*` codes are a different vocabulary and are
+        // meaningless here.
+        const X11ButtonNumber number = x11_button_number_for(button);
+        if (number == kX11ButtonUnknown) return false;
+
         Display* dpy = XOpenDisplay(nullptr);
         if (dpy == nullptr) return false;
         if (value == 1) {
-            XTestFakeButtonEvent(dpy, static_cast<unsigned int>(code),
-                                 True, CurrentTime);
+            XTestFakeButtonEvent(dpy, number, True, CurrentTime);
         } else {
-            XTestFakeButtonEvent(dpy, static_cast<unsigned int>(code),
-                                 False, CurrentTime);
+            XTestFakeButtonEvent(dpy, number, False, CurrentTime);
         }
         XFlush(dpy);
         XCloseDisplay(dpy);
@@ -326,6 +275,8 @@ bool LinuxInjector::do_inject_button(rd_input::MouseButton button,
 #endif
 #ifdef NIMRTC_HAS_UINPUT
     if (mode_ == Mode::kUinput) {
+        const LinuxButtonCode code = linux_button_code_for(button);
+        if (code == kLinuxButtonUnknown) return false;
         return write_event(EV_KEY, code, value);
     }
 #endif
@@ -378,17 +329,33 @@ bool LinuxInjector::do_inject_key(NeutralKey key,
         return false;
     }
 
-    const int code = keycode_for_neutral(key);
-    if (code == 0) return false;  // the table does not know the key
-
+    // The two backends speak different vocabularies, so the code is
+    // resolved *per backend* below rather than once here.
     const int value = (action == rd_input::KeyAction::kDown) ? 1 : 0;
 
 #ifdef NIMRTC_HAS_XTEST
     if (mode_ == Mode::kXTest) {
+        // XTest speaks the X server's vocabulary, and the X server
+        // wants a **keycode** -- the number it assigned to a physical
+        // key on the *active* keyboard layout -- not a KeySym and
+        // certainly not the kernel's key code.  `XKeysymToKeycode()` is
+        // the mapping, and it is layout-aware: the same KeySym lands on
+        // a different keycode on a different layout.
+        //
+        // A KeySym the active layout has no key for maps to keycode 0,
+        // which is not a key: injecting it would send a bogus event
+        // that the server drops, so the call is refused instead.
+        const X11KeySym sym = x11_keysym_for(key);
+        if (sym == kX11KeySymUnknown) return false;  // the table's gap
+
         Display* dpy = XOpenDisplay(nullptr);
         if (dpy == nullptr) return false;
-        XTestFakeKeyEvent(dpy, static_cast<unsigned int>(code),
-                          value == 1 ? True : False, CurrentTime);
+        const KeyCode code = XKeysymToKeycode(dpy, sym);
+        if (code == 0) {
+            XCloseDisplay(dpy);
+            return false;  // the active layout has no key for it
+        }
+        XTestFakeKeyEvent(dpy, code, value == 1 ? True : False, CurrentTime);
         XFlush(dpy);
         XCloseDisplay(dpy);
         return true;
@@ -396,6 +363,8 @@ bool LinuxInjector::do_inject_key(NeutralKey key,
 #endif
 #ifdef NIMRTC_HAS_UINPUT
     if (mode_ == Mode::kUinput) {
+        const LinuxKeyCode code = linux_keycode_for(key);
+        if (code == kLinuxKeyUnknown) return false;  // the table's gap
         return write_event(EV_KEY, code, value);
     }
 #endif
@@ -403,51 +372,34 @@ bool LinuxInjector::do_inject_key(NeutralKey key,
 }
 
 bool LinuxInjector::do_inject_text(const std::string& text) {
-    // The text is typed as the *keycode* of the character on a US
-    // layout.  Unlike Windows and macOS, the Linux kernel's input
-    // layer has no "unicode string" event, so a layout-dependent
-    // mapping is unavoidable on this path.  The characters that have a
-    // US-layout keycode are typed; the rest are skipped (the caller
-    // can send them as a `kText` event on a platform whose backend
-    // supports unicode).
-    struct AsciiKey { char ch; int code; };
-    static const AsciiKey kAscii[] = {
-        {'a', KEY_A}, {'b', KEY_B}, {'c', KEY_C}, {'d', KEY_D},
-        {'e', KEY_E}, {'f', KEY_F}, {'g', KEY_G}, {'h', KEY_H},
-        {'i', KEY_I}, {'j', KEY_J}, {'k', KEY_K}, {'l', KEY_L},
-        {'m', KEY_M}, {'n', KEY_N}, {'o', KEY_O}, {'p', KEY_P},
-        {'q', KEY_Q}, {'r', KEY_R}, {'s', KEY_S}, {'t', KEY_T},
-        {'u', KEY_U}, {'v', KEY_V}, {'w', KEY_W}, {'x', KEY_X},
-        {'y', KEY_Y}, {'z', KEY_Z},
-        {'0', KEY_0}, {'1', KEY_1}, {'2', KEY_2}, {'3', KEY_3},
-        {'4', KEY_4}, {'5', KEY_5}, {'6', KEY_6}, {'7', KEY_7},
-        {'8', KEY_8}, {'9', KEY_9},
-        {' ', KEY_SPACE}, {'\n', KEY_ENTER}, {'\t', KEY_TAB},
-        {'-', KEY_MINUS}, {'=', KEY_EQUAL}, {'[', KEY_LEFTBRACE},
-        {']', KEY_RIGHTBRACE}, {';', KEY_SEMICOLON}, {'\'', KEY_APOSTROPHE},
-        {'`', KEY_GRAVE}, {'\\', KEY_BACKSLASH}, {',', KEY_COMMA},
-        {'.', KEY_DOT}, {'/', KEY_SLASH},
-    };
-
+    // The text is typed as the *key* of the character on a US layout.
+    // Unlike Windows and macOS, neither the Linux kernel's input layer
+    // nor the X11 protocol has a "unicode string" event, so a
+    // layout-dependent mapping is unavoidable on this path.  The
+    // characters that have a US-layout key are typed; the rest are
+    // skipped (the caller can send them as a `kText` event on a
+    // platform whose backend supports unicode).
+    //
+    // The two backends need the character's key in their own
+    // vocabulary: the kernel's `KEY_*` code on the uinput path, the
+    // X server's KeySym on the XTest path.  Neither is the other's.
     bool ok = true;
     for (const char ch : text) {
-        int code = 0;
-        for (const AsciiKey& entry : kAscii) {
-            if (entry.ch == ch) { code = entry.code; break; }
-        }
-        if (code == 0) continue;  // the layout has no key for it
-
-        // The raw code has to be written directly: `do_inject_key()`
-        // takes a *neutral* key and maps it through the table, and this
-        // path has a raw kernel code already.
 #ifdef NIMRTC_HAS_XTEST
         if (mode_ == Mode::kXTest) {
+            const X11KeySym sym = x11_keysym_for_ascii(ch);
+            if (sym == kX11KeySymUnknown) continue;  // no KeySym for it
+
             Display* dpy = XOpenDisplay(nullptr);
             if (dpy == nullptr) { ok = false; break; }
-            XTestFakeKeyEvent(dpy, static_cast<unsigned int>(code), True,
-                              CurrentTime);
-            XTestFakeKeyEvent(dpy, static_cast<unsigned int>(code), False,
-                              CurrentTime);
+            const KeyCode code = XKeysymToKeycode(dpy, sym);
+            if (code == 0) {
+                // The active layout has no key for this character.
+                XCloseDisplay(dpy);
+                continue;
+            }
+            XTestFakeKeyEvent(dpy, code, True, CurrentTime);
+            XTestFakeKeyEvent(dpy, code, False, CurrentTime);
             XFlush(dpy);
             XCloseDisplay(dpy);
             continue;
@@ -455,12 +407,14 @@ bool LinuxInjector::do_inject_text(const std::string& text) {
 #endif
 #ifdef NIMRTC_HAS_UINPUT
         if (mode_ == Mode::kUinput) {
+            const LinuxKeyCode code = linux_keycode_for_ascii(ch);
+            if (code == kLinuxKeyUnknown) continue;  // no key for it
+
             if (!write_event(EV_KEY, code, 1)) { ok = false; break; }
             if (!write_event(EV_KEY, code, 0)) { ok = false; break; }
             continue;
         }
 #endif
-        (void)code;
     }
     return ok;
 }

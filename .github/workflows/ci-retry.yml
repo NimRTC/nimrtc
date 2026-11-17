@@ -57,10 +57,71 @@
 # Scope
 # -----
 #
-# `ci`, `ci-e2e` and `ci-fast` -- every workflow whose jobs can leave
-# the merge gate red.  `release` and `soak` are deliberately excluded:
-# a release run is a deliberate, manually-triggered act, and a retried
-# release run would be a second attempt at a publication.
+# `ci`, `ci-e2e`, `ci-fast` and `release` -- every workflow whose jobs
+# can leave the merge gate or a release cut red.  `soak` is the only
+# workflow left out, and not because a release measurement should not
+# be retried:
+#
+#   * Both soak jobs carry `continue-on-error: true` (the verdict
+#     lives in the evidence record, not in the job status -- see the
+#     comment above `continue-on-error` in `soak.yml`).  A job that
+#     ran and failed therefore still reports `success`, so the
+#     classifier would classify it as `fine` and never touch it.  The
+#     exclusion is about the *starved* case only.
+#   * A starved soak job would be safe to re-run, but re-running it
+#     does not help: the soak window is a statement about
+#     *calendar* days, and `tools/run_soak.py` counts a day green only
+#     when it carries a PASS record measured on the candidate tree.
+#     A retry that lands on the next UTC day produces a record for a
+#     *different* day, which is a second data point rather than a
+#     replacement -- and a day whose only record is INCONCLUSIVE
+#     breaks the streak just as a missing day does.
+#
+# In short: the soak is a measurement, and re-measuring a day is not
+# the same act as re-running a build.
+#
+# Why `release` belongs here
+# --------------------------
+#
+# A release cut is the most expensive thing this repository does, and a
+# starved runner should not be the reason it has to be redone by hand.
+# The `release` workflow is already written to be re-run safely: the
+# `publish-release` job recreates the draft and then explicitly
+# refreshes its body ("Refresh the draft release body"), precisely so
+# that a re-run is idempotent rather than leaving a stale body behind.
+#
+# Two properties of the retry mechanism were verified experimentally
+# before `release` was added to this list, because both of them decide
+# whether the retry publishes a *complete* release:
+#
+#   1. A job-level re-run revives a dependent job that was SKIPPED
+#      because its dependency failed.  This is the `release` shape:
+#      `publish-release` has `needs:` on all four build jobs, so a
+#      starved build job skips the publish job.  Verified: a
+#      dependent job went from `skipped` back to `success` after the
+#      dependency was re-run at the job level.
+#
+#   2. An artefact uploaded in attempt 1 is still downloadable in
+#      attempt 2.  Artefacts belong to the *run*, not the attempt, so
+#      the publish job in attempt 2 finds the three bundles the other
+#      build jobs uploaded in attempt 1.  Verified: a payload uploaded
+#      in attempt 1 was read back in attempt 2.
+#
+# A third property was verified for the same reason, because
+# `release.yml` is the one workflow whose concurrency group does NOT
+# cancel in progress (`cancel-in-progress: false`, so a superseded
+# re-run of a tag is idempotent).  A `false` group *queues* a second
+# run instead of cancelling the first, so the re-run could in
+# principle have waited behind the very run that was trying to
+# re-queue it.  It does not: a job-level re-run starts immediately
+# even under a `false` group, and its dependent job comes back with
+# it.  Verified under the exact release shape.
+#
+# The one case that could have broken this is a 409 from
+# `actions/upload-artifact` (artefacts are immutable in v4+, so the
+# same name cannot be uploaded twice in one run).  It cannot happen
+# here: a job is only retried when **no step of it ever ran**, so it
+# never uploaded anything in the first place.
 #
 # Permissions
 # -----------
@@ -82,7 +143,7 @@ on:
   # default branch -- which is why this file has to be merged before it
   # can act on anything.
   workflow_run:
-    workflows: [ci, ci-e2e, ci-fast]
+    workflows: [ci, ci-e2e, ci-fast, release]
     types: [completed]
 
   # Manual escape hatch: re-run the retry logic against any run, on

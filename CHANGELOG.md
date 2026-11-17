@@ -36,6 +36,37 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that pins every classification, and the self-test runs both in CI and
   as a ctest case (`test_ci_retry_runner`).
 
+  The scope covers `ci`, `ci-e2e`, `ci-fast` and `release`.  `release`
+  needed three properties to be verified experimentally before it
+  could be included, because a release cut is the most expensive
+  thing the repository does and a partial one is worse than a red
+  one:
+
+  * a job-level re-run revives a dependent job that was **skipped**
+    because its dependency failed — `publish-release` has `needs:` on
+    all four build jobs, so a starved build job skips the publish job
+    (verified: a dependent went from `skipped` back to `success`);
+  * an artefact uploaded in attempt 1 is still downloadable in attempt
+    2, so the publish job finds the three bundles the other build
+    jobs uploaded (verified: a payload uploaded in attempt 1 was read
+    back in attempt 2);
+  * a job-level re-run starts immediately even under the
+    `cancel-in-progress: false` concurrency group that `release.yml`
+    uses to keep a superseded re-run idempotent (verified under the
+    exact release shape).
+
+  The `upload-artifact` 409 hazard cannot occur: a job is only
+  retried when **no step of it ever ran**, so it never uploaded
+  anything in the first place.
+
+  `soak` is the one workflow left out.  Both of its jobs carry
+  `continue-on-error: true` (the verdict lives in the evidence record,
+  not the job status), so a job that ran and failed still reports
+  `success`; and a starved soak job would not be helped by a retry,
+  because the window is a statement about *calendar* days and a
+  retry landing on the next UTC day produces a second data point
+  rather than a replacement.
+
 - **The remote-desktop session guard** (`src/modules/rd_session/`).  A
   locked Windows workstation breaks the screen capture in two different,
   both expensive ways: DXGI Desktop Duplication is refused outright
@@ -82,6 +113,30 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   needs an elevated prompt).
 
 ### Fixed
+
+- **The DTLS-over-UDP loopback test failed on a coin flip.**  Its PASS
+  criterion was `client_master_key[0] != 0`, and any single byte of a
+  freshly-derived SRTP master key is `0x00` about 1/256 of the time —
+  so the test went red roughly once every 256 runs, for no reason at
+  all.  It fired for real on 2026-11-17 in the CI run of PR #69
+  (run 44009282768, job `windows / msvc`): both ends had derived the
+  *same* key (`client_key[0..3]=00246f7a` on A and on B), so the ECDH
+  was real and the export had succeeded — the key was entirely
+  non-zero apart from its first byte.
+
+  The check now requires at least one non-zero byte in the 16-byte
+  master key on each side, and additionally requires the two ends to
+  agree on the key — which a real handshake produces and a
+  zero-filled buffer cannot fake.  The same defect had already been
+  fixed in the sibling test `tests/test_dtls_over_arq_udp.cpp`; this
+  one had been left behind.
+
+  Worth noting: the CI auto-retry workflow classified this as a
+  **genuine** failure (`steps=20`, runner assigned) and deliberately
+  left it alone, because a job that ran and failed belongs to the
+  tree and must not be re-run.  That was the right call — but it also
+  meant the flake could not be papered over and had to be fixed at the
+  source.
 
 - **The VideoToolbox encoder emits its parameter sets in band.**  A
   `VTCompressionSession` keeps the SPS / PPS / VPS out of band, in the

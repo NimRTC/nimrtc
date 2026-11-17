@@ -492,10 +492,36 @@ bool run_test() {
     //  - both sides connected
     //  - both sides have SRTP keying material
     //  - the keying material is non-zero (real ECDH happened)
+    //
+    // The check must NOT be `client_master_key[0] != 0`: any single byte
+    // of a freshly-derived SRTP key is 0x00 about 1/256 of the time, so
+    // that assertion fails spuriously roughly once every 256 runs.  It
+    // really did: the 2026-11-17 CI run of PR #69 failed here with
+    // `client_key[0..3]=00246f7a` on BOTH sides -- the two ends had
+    // derived the *same* key (so the ECDH was real), and the key was
+    // entirely non-zero apart from its first byte.  The same defect
+    // was already fixed in the sibling test
+    // `tests/test_dtls_over_arq_udp.cpp`; this test had been left
+    // behind.
+    //
+    // What the assertion is actually FOR is "the key derivation ran
+    // end to end" -- the failure mode it guards against is wolfSSL
+    // failing to export the keying material and leaving it
+    // zero-initialised (see the `wolfSSL_KeepArrays` comment in
+    // `dtls_wolfssl_session.cpp`).  So: require at least one non-zero
+    // byte in the 16-byte master key on each side, and additionally
+    // require the two ends to agree on it, which is what a real
+    // handshake produces and a zero-filled buffer cannot fake.
+    auto has_nonzero_byte = [](const auto& key) {
+        for (auto byte : key) if (byte != 0) return true;
+        return false;
+    };
     const bool k_pass =
         a_conn && b_conn &&
         a_keys.has_value() && b_keys.has_value() &&
-        a_keys->client_master_key[0] != 0;
+        has_nonzero_byte(a_keys->client_master_key) &&
+        has_nonzero_byte(b_keys->client_master_key) &&
+        a_keys->client_master_key == b_keys->client_master_key;
 
     std::fprintf(stderr, "[A] %s\n", k_pass ? "PASS" : "FAIL");
     return k_pass;

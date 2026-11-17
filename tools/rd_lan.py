@@ -15,6 +15,7 @@ real thing.
 
 import argparse
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -146,6 +147,166 @@ def read_viewer_stats(log_path: str):
     }
 
 
+# ---------------------------------------------------------------------------
+# Chrome viewer (--viewer-url)
+#
+# When `--viewer-url <url>` is given, the Chrome waterfall page
+# (interop/chrome/demo_waterfall.html) joins the run as a browser-side
+# control group: it connects to a NimRTC WebTransport server with
+# `new WebTransport(url)`, draws the received-frame waterfall, and is
+# handed the run's verdict on its verdict channel when the session ends.
+#
+# The verdict channel is the page's `window._rdVerdict` /
+# `window._showVerdict` hook (driven here over the browser channel via
+# Playwright); the page also accepts the same JSON object over the
+# WebTransport data plane.  A best-effort `demo-wtserver` is started on
+# --wt-port so the page has a live WebTransport plane to draw.
+#
+# When `--viewer-url` is NOT passed, none of this runs and the harness
+# behaves exactly as before.
+# ---------------------------------------------------------------------------
+
+_CHROME_CANDIDATES = {
+    "Windows": [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ],
+    "Linux": [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+    ],
+    "Darwin": [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ],
+}
+
+
+def _find_chrome() -> str:
+    """Locate a Chrome/Chromium executable, or return an empty string.
+
+    ``NIMRTC_CHROME_PATH`` wins; otherwise the per-platform candidate
+    list is tried.  An empty result tells Playwright to fall back to its
+    bundled Chromium.
+    """
+    override = os.environ.get("NIMRTC_CHROME_PATH", "").strip()
+    if override and os.path.isfile(override):
+        return override
+    for candidate in _CHROME_CANDIDATES.get(platform.system(), []):
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def find_demo_wtserver() -> str:
+    """Locate the demo-wtserver binary in the build tree (best-effort).
+
+    The waterfall page's own data plane needs a WebTransport listener to
+    light up; when the binary has not been built we carry on without it —
+    the page reports its own connection state honestly.
+    """
+    exe = ".exe" if os.name == "nt" else ""
+    build_root = os.path.abspath(os.path.join(HERE, "..", "build"))
+    candidates = []
+    if os.path.isdir(build_root):
+        for tree in sorted(os.listdir(build_root)):
+            base = os.path.join(build_root, tree)
+            if not os.path.isdir(base):
+                continue
+            candidates += [
+                os.path.join(base, "examples", "demo-wtserver" + exe),
+                os.path.join(base, "examples", "demo-wtserver",
+                             "demo-wtserver" + exe),
+                os.path.join(base, "Debug", "examples", "demo-wtserver" + exe),
+                os.path.join(base, "Release", "examples", "demo-wtserver" + exe),
+            ]
+    found = [p for p in candidates if os.path.isfile(p)]
+    return max(found, key=os.path.getmtime) if found else ""
+
+
+def launch_chrome_viewer(viewer_url: str, wt_port: int, timeout_s: int):
+    """Open the Chrome waterfall page; return (page, browser) or (None, None).
+
+    Best-effort on every leg: a missing demo-wtserver binary, a missing
+    Playwright, or a missing Chrome are all reported and degrade to
+    (None, None) — the console verdict still prints, and the run is
+    marked FAIL because the requested viewer was not reachable.
+    """
+    wtserver = find_demo_wtserver()
+    wtserver_proc = None
+    if wtserver:
+        env = dict(os.environ,
+                   NIMRTC_BUILD_ROOT=os.path.abspath(os.path.join(HERE, "..", "build")))
+        try:
+            wtserver_proc = subprocess.Popen(
+                [wtserver, "--port", str(wt_port),
+                 "--duration", str(timeout_s + 30)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+            )
+            print(f"[viewer] demo-wtserver on UDP :{wt_port} for the waterfall page")
+        except OSError as exc:
+            print(f"[viewer] could not start demo-wtserver: {exc}")
+    else:
+        print("[viewer] demo-wtserver not built — the page will report "
+              "its own connection state")
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[viewer] playwright is not installed — cannot drive the Chrome "
+              "page (pip install playwright && python -m playwright install chromium)")
+        if wtserver_proc is not None:
+            wtserver_proc.terminate()
+        return None, None
+
+    chrome_exe = _find_chrome()
+    launch_kwargs = {"headless": True}
+    if chrome_exe:
+        launch_kwargs["executable_path"] = chrome_exe
+    try:
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(
+            args=["--webtransport-developer-mode", "--ignore-certificate-errors"],
+            **launch_kwargs,
+        )
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(viewer_url)
+        print(f"[viewer] Chrome waterfall page opened: {viewer_url}")
+        return page, browser
+    except Exception as exc:
+        print(f"[viewer] could not launch the Chrome page: {exc}")
+        try:
+            pw.stop()
+        except Exception:
+            pass
+        if wtserver_proc is not None:
+            wtserver_proc.terminate()
+        return None, None
+
+
+def deliver_verdict_to_viewer(page, verdict: dict) -> None:
+    """Push the run verdict onto the Chrome page's verdict channel.
+
+    The page reads `window._rdVerdict` and renders it through
+    `window._showVerdict(verdict)`; it also accepts the same object over
+    the WebTransport data plane (see interop/chrome/demo_waterfall.html).
+    """
+    try:
+        page.evaluate(
+            "(v) => { window._rdVerdict = v;"
+            " if (typeof window._showVerdict === 'function')"
+            "   window._showVerdict(v); }",
+            verdict,
+        )
+        print("[viewer] verdict delivered to the Chrome page ✓")
+    except Exception as exc:
+        print(f"[viewer] could not deliver the verdict to the Chrome page: {exc}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--media", default="rd",
@@ -167,6 +328,16 @@ def main() -> int:
                              "the address the clients connect to. Use the "
                              "LAN address (e.g. 192.168.1.20) to exercise the "
                              "cross-network shape instead of the loopback")
+    parser.add_argument("--viewer-url", default=None,
+                        help="optional: URL of the Chrome waterfall page "
+                             "(interop/chrome/demo_waterfall.html) to drive as "
+                             "a browser-side control group. The run verdict is "
+                             "pushed onto the page's verdict channel when the "
+                             "session ends. When omitted the harness behaves "
+                             "exactly as before (device + viewer clients only).")
+    parser.add_argument("--wt-port", type=int, default=9443,
+                        help="WebTransport UDP port for the Chrome viewer page "
+                             "(default 9443)")
     args = parser.parse_args()
 
     # HERE is <repo>/tools, so the repository root is one level up and
@@ -193,8 +364,24 @@ def main() -> int:
         device_extra.append("--inject")
 
     device = start_client("device", url, device_extra, device_log)
+    viewer_page = None
+    viewer_browser = None
+    verdict_delivered = False
     try:
         code = read_pairing_code(device_log)
+
+        # ---- Chrome viewer (--viewer-url) ---------------------------------
+        # Open the waterfall page as a browser-side control group: it
+        # connects to a WebTransport listener with `new WebTransport(url)`
+        # and is handed the run verdict on its verdict channel when the
+        # media session ends.  Without --viewer-url this block is skipped
+        # entirely — behaviour is exactly as before.
+        if args.viewer_url:
+            viewer_page, viewer_browser = launch_chrome_viewer(
+                args.viewer_url, args.wt_port, args.duration + 30)
+            if viewer_page is None:
+                print("FAIL: --viewer-url given but the Chrome viewer could "
+                      "not be launched — see the [viewer] notes above")
 
         viewer_extra = ["--media", args.media, "--duration", str(args.duration),
                         "--code", code]
@@ -227,6 +414,13 @@ def main() -> int:
             service.wait(timeout=5)
         except subprocess.TimeoutExpired:
             service.kill()
+        # If an exception unwound the try before the verdict was delivered,
+        # close the Chrome viewer so nothing is left running.
+        if viewer_browser is not None and not verdict_delivered:
+            try:
+                viewer_browser.close()
+            except Exception:
+                pass
 
     # The clients are terminated on the way out; that is expected and is
     # not a failure of the session.
@@ -273,6 +467,29 @@ def main() -> int:
             ok = False
         else:
             print("OK: the media plane delivered and rendered frames")
+
+    # ---- Chrome verdict delivery ------------------------------------------
+    # The verdict goes onto the Chrome page's verdict channel so the
+    # browser-side control group shows the same PASS/FAIL as the console.
+    if args.viewer_url:
+        if viewer_page is not None:
+            verdict_obj = {
+                "pass": ok,
+                "decoded": stats.get("decoded") if stats is not None else None,
+                "rendered": stats.get("rendered") if stats is not None else None,
+                "dropped": stats.get("dropped") if stats is not None else None,
+                "frames": stats.get("frames") if stats is not None else None,
+            }
+            deliver_verdict_to_viewer(viewer_page, verdict_obj)
+            verdict_delivered = True
+            try:
+                viewer_browser.close()
+            except Exception:
+                pass
+        else:
+            print("FAIL: the Chrome viewer was requested but never opened — "
+                  "the verdict was not delivered to the page")
+            ok = False
     return 0 if ok else 1
 
 

@@ -2022,6 +2022,85 @@ struct NIMRTC_API_STABLE VideoSyncStats {
 };
 
 // ---------------------------------------------------------------------------
+// The data-channel plane (plan Track S / S6)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief One data channel's statistics (plan Track S / S6).
+ *
+ * The data-channel plane had **no** statistics at all before this
+ * entry: `ControlChannelStats` describes the engine's *own* control
+ * channel (the remote-desktop control plane), not the user-facing
+ * channels a host opens with `create_data_channel()`.  A host that
+ * opened a "telemetry" channel and a "cmd" channel could not tell
+ * whether either was actually moving data — the classic "is the
+ * feature working?" question that a statistics surface exists to
+ * answer.
+ *
+ * The shape is the same as the video (`VideoStreamStats`) and audio
+ * (`AudioStreamStats`) entries: **one entry per channel**, each with
+ * its own identity and its own counters.
+ *
+ * ## Where the numbers come from
+ *
+ * The **inbound** half is the engine's own account: the engine
+ * installs the channel's callbacks, so it sees every inbound message
+ * and can count it.  The **outbound** half is the *backend's* account
+ * (`plugins::IDataChannel::stats()`): only the backend knows how many
+ * messages it handed to the transport, how many a
+ * partial-reliability policy dropped, and how many it had to
+ * retransmit.  A backend that does not implement the seam reports
+ * zeroes there.
+ *
+ * @see Stats::data_channels
+ */
+struct NIMRTC_API_STABLE DataChannelStats {
+    /** The engine-assigned channel id (1-based, monotonically
+     *  increasing per engine).  Unique within one engine. */
+    std::uint32_t channel_id = 0;
+
+    /** The channel's label (the identity the host gave it when it
+     *  called `create_data_channel()`). */
+    std::string label;
+
+    /** The reliability mode the channel was created with, as the
+     *  canonical name ("reliable-ordered", "unreliable",
+     *  "partial-reliable-ttl", "partial-reliable-count").
+     *
+     *  A host that wants to know *why* a message was dropped reads
+     *  this: the two partial modes are the only ones that drop. */
+    std::string reliability;
+
+    /** The messages the channel sent (the backend's own count). */
+    std::uint64_t messages_sent = 0;
+
+    /** The bytes the channel sent (the backend's own count). */
+    std::uint64_t bytes_sent = 0;
+
+    /** The messages the channel received (the engine's count of the
+     *  inbound callbacks). */
+    std::uint64_t messages_received = 0;
+
+    /** The bytes the channel received. */
+    std::uint64_t bytes_received = 0;
+
+    /** The messages a partial-reliability policy dropped (the
+     *  backend's own count). */
+    std::uint64_t messages_dropped = 0;
+
+    /** The messages the backend retransmitted. */
+    std::uint64_t messages_retransmitted = 0;
+
+    /** The messages still waiting in the outbound queue (a gauge). */
+    std::uint64_t messages_pending = 0;
+
+    /** The channel's last reported state ("connecting", "open",
+     *  "closing", "closed", "error").  Empty when the backend never
+     *  reported one. */
+    std::string state;
+};
+
+// ---------------------------------------------------------------------------
 // NimRTCEngine
 // ---------------------------------------------------------------------------
 
@@ -4130,6 +4209,20 @@ public:
         // second audio source: the alternative is to redraw the whole
         // surface then, and every caller with it.
         std::vector<AudioStreamStats> audio_streams;
+        // ---- The per-channel data-channel entries (v1.2 plan Track S / S6)
+        //
+        // One entry per **data channel the host opened** with
+        // `create_data_channel()`, each with its own identity (the
+        // engine-assigned id and the label) and its own counters.
+        //
+        // The list is empty when the host never opened a channel, so a
+        // host that does not use the data plane sees no change in its
+        // telemetry.  It is a list rather than a single struct so that
+        // the *shape* survives the arrival of a second channel — the
+        // alternative is to redraw the whole surface then, and every
+        // caller with it.
+        std::vector<DataChannelStats> data_channels;
+
         // ---- The per-stage CPU-time instrumentation (plan J1) ------------
         //
         // The plan's exit measurement is written in terms of time, so the

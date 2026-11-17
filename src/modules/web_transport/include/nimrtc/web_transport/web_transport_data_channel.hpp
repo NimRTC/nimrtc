@@ -174,6 +174,15 @@ public:
     /** Replace the state callback. */
     void set_on_state(plugins::DataChannelStateCallback cb) noexcept override;
 
+    /** The channel's own counters (v1.2.0, plan Track S / S6).
+     *
+     *  The outbound half is the backend's business — the channel counts
+     *  what it handed to the transport, what a partial-reliability
+     *  policy dropped, and what the ARQ retransmitted.  The inbound
+     *  half is counted by the engine (which owns the message
+     *  callback), so this method reports the outbound figures only. */
+    plugins::DataChannelStats stats() const noexcept override;
+
     /** Wire this channel's inbound routes on the session.  Safe to
      *  call before `open(cfg)` — the wiring is (re)done by `open(cfg)`
      *  once the framing mode is known.  `close()` removes it. */

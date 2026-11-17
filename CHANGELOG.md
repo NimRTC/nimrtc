@@ -9,6 +9,56 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The data-channel plane has statistics (v1.2 plan item `S6`).**
+  `NimRTCEngine::Stats` carries a new `std::vector<DataChannelStats>
+  data_channels` -- **one entry per channel the host opened** with
+  `create_data_channel()`, in creation order.  Before this there was
+  *nothing*: `ControlChannelStats` describes the engine's own control
+  channel (the remote-desktop control plane), not the user-facing
+  channels a host opens, so a host that opened a "telemetry" channel and
+  a "cmd" channel could not tell whether either was actually moving
+  data -- the classic "is the feature working?" question a statistics
+  surface exists to answer.
+  The entry carries the channel's identity (the engine-assigned
+  `channel_id`, the `label` the host gave it, the `reliability` mode as
+  a canonical *name* rather than an enum) plus its counters.
+  **The counters come from two different parties, and that is the whole
+  design.**  The *inbound* half (`messages_received` / `bytes_received`)
+  is the **engine's** account: the engine installs the channel's
+  callbacks, so it sees every inbound message and counts it.  The
+  *outbound* half (`messages_sent` / `bytes_sent` / `messages_dropped` /
+  `messages_retransmitted` / `messages_pending`) is the **backend's**
+  account, reached through the new additive
+  `plugins::IDataChannel::stats()` seam.  The engine cannot derive
+  those numbers -- it only sees the `send()` call, and what happens to
+  the message afterwards (queued, retransmitted, dropped when its
+  lifetime expired) happens inside the backend.
+  The seam is **additive**: `plugins::IDataChannel::stats()` has a
+  default implementation that returns an all-zero struct, so a backend
+  that does not track its own counters keeps compiling and simply
+  reports nothing.  The engine republishes those zeroes rather than
+  inventing a number.
+  To make the inbound half work even when the host installs no message
+  callback of its own, `create_data_channel()` now hands the host a
+  **proxy** around the backend: the proxy forwards every call
+  unchanged, counts the inbound traffic on the way, and records the last
+  state the backend reported.  The engine keeps a `shared_ptr` to the
+  backend (so the statistics can still ask it for its outbound counters
+  after the host drops its handle), and the lambdas the proxy installs
+  on the backend capture *shared* state rather than the proxy's `this`
+  -- the backend may outlive the proxy, and a late inbound message must
+  not find a dangling pointer.
+  `SctpDataChannel` and `WebTransportDataChannel` both implement the
+  seam; the WebTransport one reports the ARQ's drop / retransmission
+  counts and the outbound queue depth it already kept.
+  The counters are cumulative since the channel was created, so the
+  difference of two readings is the increment; `messages_pending` is
+  the exception and is a gauge (the queue depth at the moment of the
+  reading).  The list is empty when the host never opened a channel, so
+  a host that does not use the data plane sees no change in its
+  telemetry.
+  The surface is documented in `docs/api/engine_api.md` §13.2 and pinned
+  by `tests/test_engine_datachannel_stats.cpp` (12 cases).
 - **The acoustic echo canceller is now measured, and its "on by default" claim
   is asserted in CI (v1.2 plan item `E3`).**
   `audio3a::Config::enable_aec` has always defaulted to `true` and

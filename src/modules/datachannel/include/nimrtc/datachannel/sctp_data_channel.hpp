@@ -77,6 +77,7 @@
 // a v0.13.x follow-up.
 
 #include <nimrtc/core/api_version.hpp>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -236,6 +237,14 @@ public:
     /** Replace the state callback. noexcept per the seam contract. */
     void set_on_state(plugins::DataChannelStateCallback cb) noexcept override;
 
+    /** The channel's own counters (v1.2.0, plan Track S / S6).
+     *
+     *  The outbound half is the engine's business — the channel counts
+     *  what it handed to the socket; the inbound half is counted by
+     *  the engine (which owns the callback), so this method reports
+     *  the outbound figures only. */
+    plugins::DataChannelStats stats() const noexcept override;
+
     /** Emit DATA_CHANNEL_OPEN (RFC 8832 §5.1, PPID=50) on stream 0.
      *  Idempotent — the DCEP OPEN is sent at most once per channel.
      *  `open()` sends it automatically when a config is already known;
@@ -292,6 +301,15 @@ private:
     /** True while the DCEP handshake is outstanding.  RFC 8832 §6: until
      *  the peer answers, every user message is sent ordered. */
     bool                              handshake_pending_ = false;
+
+    // ---- The outbound counters (plan Track S / S6) ------------------------
+    //
+    // The channel's own account of what it handed to the socket.  The
+    // engine cannot derive these: it only sees the `send()` call, and
+    // what happens to the message afterwards happens inside the
+    // backend.
+    std::atomic<std::uint64_t>        messages_sent_{0};
+    std::atomic<std::uint64_t>        bytes_sent_{0};
 };
 
 #ifdef _MSC_VER

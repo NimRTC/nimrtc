@@ -362,6 +362,46 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Leaf compile proof` CI step, so a runner image that loses the package
   fails the build instead of silently dropping the backend.
 
+- **The XTest path injected the *wrong* keys and buttons, and crashed the
+  process on construction.**  Compiling the XTest backend (PR #76) proved
+  it *builds*; it did not prove it *works*, and it did not.
+
+  The Linux injector has **two** injection vocabularies, and the XTest
+  path was using the wrong one.
+
+  * **The keys were injected with the kernel's codes.**  The XTest path
+    called `XTestFakeKeyEvent(dpy, KEY_A, ...)` — `KEY_A` is the
+    *kernel input layer's* code (30), from `linux/input-event-codes.h`.
+    `XTestFakeKeyEvent()` wants an X11 **keycode**: the number the X
+    server assigned to a physical key on the *active* layout.  The two
+    numbering schemes are unrelated, so the server was asked for a key
+    that does not exist on the layout and injected **nothing** — while
+    the injector reported success.  The X server's own vocabulary is the
+    **KeySym** (`XK_a`, `XK_Return`), which the call site now converts
+    to a keycode with `XKeysymToKeycode()`; that conversion is
+    layout-aware, which is exactly what a keycode needs to be.
+  * **The buttons were injected with the kernel's codes too.**
+    `XTestFakeButtonEvent(dpy, BTN_LEFT, ...)` sent `0x110` where the X
+    server expects a **button number**: `1` (left), `2` (middle),
+    `3` (right), `4`/`5` (the wheel), `8`/`9` (back/forward).  A
+    button number outside the server's range is silently dropped.
+  * **Constructing the injector could segfault the process.**
+    `XTestQueryExtension(dpy, nullptr, nullptr, nullptr, nullptr)` passed
+    a null pointer for all four of its out-parameters, but the function
+    writes to **all five** of them unconditionally.  On a host with a
+    reachable X server this crashed inside `libXtst` before the
+    injector's first method was ever called.
+
+  The two vocabularies are now kept apart explicitly: the kernel's
+  `KEY_*`/`BTN_*` codes are used only on the uinput path, the X server's
+  KeySyms and button numbers only on the XTest path, and each is
+  resolved at its own call site.  The tables live in a new portable
+  header (`src/linux_input_codes.hpp`) that carries **no platform
+  type**, so the unit test verifies all of them on **every** CI leg —
+  including the Windows one, where the Linux backend is never compiled.
+  A table that could only be checked on a Linux machine is a table that
+  rots silently between two Linux machines.
+
 - **The DTLS-over-UDP loopback test failed on a coin flip.**  Its PASS
   criterion was `client_master_key[0] != 0`, and any single byte of a
   freshly-derived SRTP master key is `0x00` about 1/256 of the time —

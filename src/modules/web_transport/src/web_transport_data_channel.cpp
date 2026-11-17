@@ -249,6 +249,8 @@ struct WebTransportDataChannel::State {
     std::uint64_t sent = 0;
     std::uint64_t dropped = 0;
     std::uint64_t retransmitted = 0;
+    /** The bytes handed to the transport (plan Track S / S6). */
+    std::uint64_t bytes_sent = 0;
 };
 
 /** One decoded inbound message, ready to be delivered to the user. */
@@ -651,6 +653,7 @@ void WebTransportDataChannel::flush_outbound() noexcept {
         if (offer_to_transport(pending.bytes)) {
             std::lock_guard<std::mutex> l{tx_mutex_};
             ++state_->sent;
+            state_->bytes_sent += pending.bytes.size();
             continue;
         }
 
@@ -1126,6 +1129,22 @@ std::uint64_t WebTransportDataChannel::retransmitted_messages() const noexcept {
     if (!state_) return 0;
     std::lock_guard<std::mutex> l{tx_mutex_};
     return state_->retransmitted;
+}
+
+plugins::DataChannelStats WebTransportDataChannel::stats() const noexcept {
+    plugins::DataChannelStats out;
+    if (!state_) return out;
+    std::lock_guard<std::mutex> l{tx_mutex_};
+    out.messages_sent         = state_->sent;
+    out.bytes_sent            = state_->bytes_sent;
+    out.messages_dropped      = state_->dropped;
+    out.messages_retransmitted = state_->retransmitted;
+    // The messages that are still waiting in the outbound queue — a
+    // gauge, not a counter.
+    out.messages_pending = state_->tx.size();
+    // The inbound half is counted by the engine (which owns the
+    // message callback), so the backend reports zeroes there.
+    return out;
 }
 
 // ===========================================================================

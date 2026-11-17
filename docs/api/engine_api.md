@@ -994,6 +994,11 @@ struct Stats {
 
     // RTCP Extended Reports (v1.2.0, session plan X1).
     uint64_t xr_report_blocks      = 0;  // XR blocks routed to the consumer
+
+    // The data channels the host opened (v1.2.0, plan Track S / S6).
+    // One entry per channel, in creation order; empty when the host
+    // never opened one.  See §13.1 for the entry's fields.
+    std::vector<DataChannelStats> data_channels;
 };
 Stats stats() const noexcept;
 
@@ -1217,6 +1222,61 @@ exactly one entry.  It is a **list** anyway: a second audio source (a
 second microphone, a programme bus) would make the flat counters
 unattributable, and a list grows where a single struct would have to be
 redrawn — redrawing it would break every caller at once.
+
+### 13.4 The data-channel statistics (v1.2.0, plan Track S / S6)
+
+`Stats::data_channels` carries **one entry per data channel the host
+opened** with `create_data_channel()`, in creation order.  The list is
+empty when the host never opened a channel, so a host that does not use
+the data plane sees no change in its telemetry.
+
+```cpp
+struct DataChannelStats {
+    uint32_t channel_id = 0;   // the engine-assigned id (1-based)
+    std::string label;         // the label the host gave the channel
+    std::string reliability;    // "reliable-ordered" / "unreliable" /
+                                // "partial-reliable-ttl" /
+                                // "partial-reliable-count"
+
+    uint64_t messages_sent = 0;          // the backend's count
+    uint64_t bytes_sent = 0;             // the backend's count
+    uint64_t messages_received = 0;      // the engine's count
+    uint64_t bytes_received = 0;         // the engine's count
+    uint64_t messages_dropped = 0;       // the backend's count
+    uint64_t messages_retransmitted = 0; // the backend's count
+    uint64_t messages_pending = 0;       // the backend's gauge
+
+    std::string state;   // "connecting" / "open" / "closing" /
+                         // "closed" / "error" ("" when none was reported)
+};
+```
+
+**The two-sided model.**  The counters come from two different parties,
+and that is the whole design:
+
+- The **inbound** half (`messages_received` / `bytes_received`) is the
+  *engine's* account: the engine installs the channel's callbacks, so it
+  sees every inbound message and counts it.
+- The **outbound** half (`messages_sent` / `bytes_sent` /
+  `messages_dropped` / `messages_retransmitted` / `messages_pending`) is
+  the *backend's* account, reached through the additive
+  `plugins::IDataChannel::stats()` seam.  The engine cannot derive
+  those numbers — it only sees the `send()` call, and what happens to
+  the message afterwards (queued, retransmitted, dropped when its
+  lifetime expired) happens inside the backend.
+
+A backend that does not implement the seam reports zeroes there.  The
+engine republishes those zeroes rather than inventing a number.
+
+**The counters are cumulative** since the channel was created, so the
+difference of two readings is the increment.  `messages_pending` is the
+exception: it is a *gauge* — the depth of the outbound queue at the
+moment of the reading.
+
+**`reliability` is a name, not an enum.**  The engine publishes the mode
+as the canonical string so a host does not have to know the enum's
+numeric values.  A host that wants to know *why* a message was dropped
+reads this field: the two partial modes are the only ones that drop.
 
 ---
 

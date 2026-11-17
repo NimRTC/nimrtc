@@ -44,6 +44,7 @@
  *   | `detail::QoeSeam`               | `engine_qoe_seam.hpp`         |
  *   | `detail::FeedbackState`         | `engine_feedback_state.hpp`   |
  *   | `detail::SecurityState`         | `engine_security_state.hpp`   |
+ *   | `detail::DataChannelState`      | `engine_datachannel_state.hpp`|
  *
  * The rule is simple: a member that only one feature reads or writes
  * belongs to that feature's collaborator, not to `Impl`.  The engine's
@@ -95,6 +96,7 @@
 #include "engine_audio_state.hpp"
 #include "engine_control_inbox.hpp"
 #include "engine_control_seam.hpp"
+#include "engine_datachannel_state.hpp"
 #include "engine_feedback_state.hpp"
 #include "engine_qoe_seam.hpp"
 #include "engine_inbound_state.hpp"
@@ -284,21 +286,11 @@ struct NimRTCEngine::Impl {
     //
     // Built by `make_transport_instance()` in `init_modules_once()` from
     // the Selector's resolved (media_factory_id, control_factory_id).
-    // The session owns the media and (optionally) control
-    // ITransportStack instances. `ice_t_` is a raw pointer into this
-    // session (see the comment above that field); `impl_->dtls` is a
-    // weak_ptr into the same session (v0.13.0, see the comment above
-    // the field).
-    //
-    // For the 4 browser-interop strategies (browser-call, agent-gateway,
-    // sfu-relay, cross-network-peer) the media stack is a
-    // WebRtcClassicStack (owning ICE / DTLS / RTP / SCTP) and the
-    // control stack is null — except for agent-gateway, which gets a
-    // RawUdpArqStack for its high-frequency control traffic.
-    //
+    // The session owns the media and (optionally) control ITransportStack
+    // instances. `ice_t_` is a raw pointer into this session and
+    // `impl_->dtls` is a weak_ptr into the same session (v0.13.0).
     // For teleop-ultra-low-latency (§5.3 Rule 2) both stacks are
-    // RawUdpArqStack, `impl_->dtls` is nullptr (no DTLS in the media
-    // path), and the audio pipeline falls back to a null encoder.
+    // RawUdpArqStack and `impl_->dtls` is nullptr.
     TransportSession session;
 
     // ---- The DTLS / SRTP install state --------------------------------
@@ -375,6 +367,15 @@ struct NimRTCEngine::Impl {
     // it, which is what lets a host compute an interval rate and
     // diff two readings.  See `engine_stats_state.hpp`.
     detail::StatsState stats_state;
+
+    // ---- The data-channel statistics (plan Track S / S6) ----------------
+    //
+    // The engine's account of the data channels the host opened: their
+    // identity, the inbound counters (the engine owns the callbacks) and
+    // the backend's outbound counters (asked for through the
+    // `plugins::IDataChannel::stats()` seam).  See
+    // `engine_datachannel_state.hpp`.
+    detail::DataChannelState data_channels;
 
     // ---- Cross-end timeline (ADR-017) ---------------------------------
     //

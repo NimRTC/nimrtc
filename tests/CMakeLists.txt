@@ -2419,6 +2419,15 @@ nimrtc_add_engine_test(test_engine_inbound_rtp_stats test_engine_inbound_rtp_sta
 nimrtc_add_engine_test(test_engine_audio_stream_stats test_engine_audio_stream_stats.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.2.0 (plan Track S / S6) — the data-channel statistics surface:
+# `Stats::data_channels`, one entry per channel the host opened, with
+# the engine's inbound counters and the backend's outbound counters.
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_datachannel_stats test_engine_datachannel_stats.cpp)
+
+# ---------------------------------------------------------------------------
 # v1.2.0 audio pipeline WP-9 — the cross-end capture timestamp of an
 # inbound audio frame (spec B-17).
 #

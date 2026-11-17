@@ -428,6 +428,21 @@ void NimRTCEngine::close() noexcept {
     impl_->audio3a_concrete.reset();
     codec_plugin_.reset();
     impl_->srtp.reset();
+    // ---- The data channels the host opened (plan Track S / S6) --------
+    //
+    // The engine keeps a shared handle on every channel it created (the
+    // statistics need the backend's outbound counters), so the engine
+    // closes them here rather than leaving them to the host's
+    // destructor.  The entries stay in the statistics state: a reading
+    // taken after close() still reports the last known numbers instead
+    // of an empty list.
+    {
+        std::lock_guard<std::mutex> lock(impl_->data_channels.mutex);
+        for (auto& entry : impl_->data_channels.channels) {
+            if (!entry.backend) continue;
+            entry.backend->close();
+        }
+    }
     // ---- WebTransport session teardown (v0.14.0-rc.1 follow-up) ----
     // Channels hold a non-owning pointer into wt_session — close it here
     // so no QUIC worker outlives the engine. Callers must destroy their
@@ -575,23 +590,31 @@ NimRTCEngine::create_data_channel(
                 "create_data_channel(): WebTransport session factory->create_data_channel() returned nullptr");
             return nullptr;
         }
-        if (on_data_message_) wch->set_on_message(on_data_message_);
-        if (on_data_state_)   wch->set_on_state(on_data_state_);
-        // WP-C1: install the identity-carrying callback.  The backend
-        // reports the channel's label; the engine adds the id it
-        // assigned to the channel.
+        // The engine keeps the backend alive (the statistics need its
+        // outbound counters even after the host drops its handle) and
+        // hands the host a proxy that counts the inbound traffic.
+        // See `engine_datachannel_state.hpp`.
+        std::shared_ptr<plugins::IDataChannel> backend{std::move(wch)};
+        const std::uint32_t cid = next_data_channel_id_++;
+        const std::string lbl{label};
+        auto shared = impl_->data_channels.add(cid, lbl, reliability, backend);
+        auto cbs = std::make_shared<detail::DataChannelCallbacks>();
+        // WP-C1: the host's callbacks go through the shared block, so
+        // the backend's late messages still find them.
+        cbs->on_message = on_data_message_;
+        cbs->on_state   = on_data_state_;
         if (on_data_message_ex_) {
-            const std::uint32_t cid = next_data_channel_id_++;
-            const std::string lbl{label};
-            wch->set_on_message_ex(
+            cbs->on_message_ex =
                 [this, cid, lbl](const plugins::DataChannelMessage& m) noexcept {
                     if (!on_data_message_ex_) return;
                     plugins::DataChannelMessage out = m;
                     out.channel_id = cid;
                     if (out.label.empty()) out.label = lbl;
                     on_data_message_ex_(out);
-                });
+                };
         }
+        std::unique_ptr<plugins::IDataChannel> proxy =
+            std::make_unique<detail::DataChannelProxy>(backend, shared, cbs);
         plugins::DataChannelConfig wdc_cfg;
         wdc_cfg.label       = std::string{label};
         wdc_cfg.reliability = reliability;
@@ -604,9 +627,9 @@ NimRTCEngine::create_data_channel(
             config_.datachannel_max_retransmits;
         wdc_cfg.max_packet_lifetime_ms =
             config_.datachannel_max_packet_lifetime_ms;
-        wch->open(wdc_cfg);
-        wch->open();
-        return wch;
+        proxy->open(wdc_cfg);
+        proxy->open();
+        return proxy;
     }
 
     const plugins::IDataChannelFactory* f =
@@ -626,24 +649,36 @@ NimRTCEngine::create_data_channel(
         return nullptr;
     }
 
+    // The engine keeps the backend alive (the statistics need its
+    // outbound counters even after the host drops its handle) and
+    // hands the host a proxy that counts the inbound traffic.
+    // See `engine_datachannel_state.hpp`.
+    std::shared_ptr<plugins::IDataChannel> backend{std::move(ch)};
+    const std::uint32_t cid = next_data_channel_id_++;
+    const std::string lbl{label};
+    auto shared = impl_->data_channels.add(cid, lbl, reliability, backend);
+    auto cbs = std::make_shared<detail::DataChannelCallbacks>();
+
     // Install callbacks BEFORE open() — the IDataChannel contract
     // requires set_on_message / set_on_state to be called before open()
-    // (per `plugins/datachannel.hpp` §"Thread safety").
-    if (on_data_message_) ch->set_on_message(on_data_message_);
-    if (on_data_state_)   ch->set_on_state(on_data_state_);
+    // (per `plugins/datachannel.hpp` §"Thread safety").  The proxy
+    // installs them on the backend; the host's own callbacks go into
+    // the shared block the proxy forwards to.
+    cbs->on_message = on_data_message_;
+    cbs->on_state   = on_data_state_;
     // WP-C1: the identity-carrying callback (the engine assigns the id).
     if (on_data_message_ex_) {
-        const std::uint32_t cid = next_data_channel_id_++;
-        const std::string lbl{label};
-        ch->set_on_message_ex(
+        cbs->on_message_ex =
             [this, cid, lbl](const plugins::DataChannelMessage& m) noexcept {
                 if (!on_data_message_ex_) return;
                 plugins::DataChannelMessage out = m;
                 out.channel_id = cid;
                 if (out.label.empty()) out.label = lbl;
                 on_data_message_ex_(out);
-            });
+            };
     }
+    std::unique_ptr<plugins::IDataChannel> proxy =
+        std::make_unique<detail::DataChannelProxy>(backend, shared, cbs);
 
     // Default config: matches WebRTC's ordered+reliable channel
     // (the common case for control / telemetry).  The reliability-aware
@@ -658,7 +693,7 @@ NimRTCEngine::create_data_channel(
     // the backend, so the ARQ can enforce them.
     cfg.max_retransmits = config_.datachannel_max_retransmits;
     cfg.max_packet_lifetime_ms = config_.datachannel_max_packet_lifetime_ms;
-    ch->open(cfg);
+    proxy->open(cfg);
 
     // Arm the channel itself (the IPlugin lifecycle).  The
     // IDataChannel::open(cfg) call above only stores the config; the
@@ -670,7 +705,7 @@ NimRTCEngine::create_data_channel(
     // reaches the application.  A non-kOk return means the channel is
     // unusable — report it and hand back nullptr instead of a channel
     // that silently fails.
-    const plugins::Status ch_rc = ch->open();
+    const plugins::Status ch_rc = proxy->open();
     if (ch_rc != plugins::kOk) {
         if (on_error_) on_error_(core::kEngineInternal,
             "create_data_channel(): IDataChannel::open() failed for the "
@@ -696,7 +731,7 @@ NimRTCEngine::create_data_channel(
     // `test_datachannel_engine` 5/5 PASS), made permanent.
     impl_->session_state.datachannel_transport_cookie = impl_->dtls;
 
-    return ch;
+    return proxy;
 }
 
 

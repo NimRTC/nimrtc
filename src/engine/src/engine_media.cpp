@@ -3422,6 +3422,42 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.qoe = impl_->qoe.snapshot();
     }
 
+    // ---- The data-channel plane (plan Track S / S6) ---------------------
+    //
+    // One entry per channel the host opened.  The **inbound** half is
+    // the engine's own account (the proxy counts the messages as they
+    // arrive); the **outbound** half is the backend's account, asked
+    // for through the additive `plugins::IDataChannel::stats()` seam.
+    //
+    // The list is empty when the host never opened a channel, so a
+    // host that does not use the data plane sees no change.
+    if (impl_ != nullptr) {
+        std::lock_guard<std::mutex> lock(impl_->data_channels.mutex);
+        out.data_channels.reserve(impl_->data_channels.channels.size());
+        for (const auto& entry : impl_->data_channels.channels) {
+            if (!entry.shared) continue;
+            DataChannelStats cs;
+            cs.channel_id  = entry.shared->channel_id;
+            cs.label       = entry.shared->label;
+            cs.reliability =
+                detail::datachannel_reliability_name(entry.shared->reliability);
+            cs.messages_received =
+                entry.shared->messages_received.load(std::memory_order_relaxed);
+            cs.bytes_received =
+                entry.shared->bytes_received.load(std::memory_order_relaxed);
+            cs.state = entry.shared->get_state();
+            if (entry.backend) {
+                const plugins::DataChannelStats bs = entry.backend->stats();
+                cs.messages_sent         = bs.messages_sent;
+                cs.bytes_sent           = bs.bytes_sent;
+                cs.messages_dropped     = bs.messages_dropped;
+                cs.messages_retransmitted = bs.messages_retransmitted;
+                cs.messages_pending     = bs.messages_pending;
+            }
+            out.data_channels.push_back(std::move(cs));
+        }
+    }
+
     // ---- The reading's identity (plan Track S / S1) ---------------------
     //
     // The two fields say *when* the counters above were measured.  The

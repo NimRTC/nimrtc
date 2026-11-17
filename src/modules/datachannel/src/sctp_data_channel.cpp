@@ -333,6 +333,16 @@ void SctpDataChannel::set_on_state(
     on_state_ = std::move(cb);
 }
 
+plugins::DataChannelStats SctpDataChannel::stats() const noexcept {
+    plugins::DataChannelStats out;
+    out.messages_sent = messages_sent_.load(std::memory_order_relaxed);
+    out.bytes_sent   = bytes_sent_.load(std::memory_order_relaxed);
+    // The inbound half is counted by the engine (which owns the
+    // message callback), and the SCTP socket has no drop or
+    // retransmission counters of its own to report.
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -340,6 +350,13 @@ void SctpDataChannel::set_on_state(
 Status SctpDataChannel::route_send(plugins::BufferView data) noexcept {
     if (!opened_) return kErrNotReady;
     if (!sock_)   return kErrNotReady;
+
+    // The channel's own account of what it put on the wire (plan Track
+    // S / S6).  Counted *before* the send so a refused message still
+    // counts as an attempt — the socket refusing it is the backend's
+    // problem to report, not the engine's to hide.
+    messages_sent_.fetch_add(1, std::memory_order_relaxed);
+    bytes_sent_.fetch_add(data.size(), std::memory_order_relaxed);
 
     const std::uint16_t stream = kSctpStreamId;
     // User payloads ride PPID string(51)/binary(53) per RFC 8831 §6.

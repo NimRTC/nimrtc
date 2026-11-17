@@ -45,6 +45,10 @@
  *     Additive: the four-member contract above keeps its exact
  *     signatures. The default implementation is a no-op, so a backend
  *     that cannot report the channel identity keeps compiling.
+ *   - `IDataChannel::stats()` / `DataChannelStats` — STABLE (v1.2.0,
+ *     plan Track S / S6). Additive: the default implementation
+ *     returns an all-zero struct, so a backend that does not track
+ *     its own counters keeps compiling.
  *   - `DataChannelFraming` / `DataChannelMessage` /
  *     `DataChannelMessageCallback` — STABLE (v1.2.0, WP-B / WP-C1).
  *     The framing mode and the identity-carrying message type.
@@ -134,6 +138,58 @@ struct NIMRTC_API_STABLE DataChannelMessage {
 
     /** The message payload (the frame prefix is not included). */
     BufferView data;
+};
+
+/**
+ * @brief One data channel's own counters (v1.2.0, plan Track S / S6).
+ *
+ * A backend is the only party that knows what it did with a message:
+ * how many it handed to the transport, how many a partial-reliability
+ * policy dropped, how many it had to retransmit.  The engine cannot
+ * derive those numbers — it only sees the `send()` call and the
+ * inbound callback.
+ *
+ * The counters here are therefore the **backend's** account, and the
+ * engine republishes them in its own per-channel statistics entry
+ * (`NimRTCEngine::Stats::data_channels`).
+ *
+ * ## Semantics
+ *
+ * Every field is a **cumulative counter** since the channel was
+ * created.  The difference of two readings is the increment that
+ * happened in between, so a host can turn it into a rate once it knows
+ * the interval's length.
+ *
+ * The struct is STABLE and additive: a new field may be added in a
+ * minor release, and a backend that does not implement a field simply
+ * leaves it at zero.
+ */
+struct NIMRTC_API_STABLE DataChannelStats {
+    /** The messages the backend handed to the transport. */
+    std::uint64_t messages_sent = 0;
+
+    /** The bytes the backend handed to the transport. */
+    std::uint64_t bytes_sent = 0;
+
+    /** The messages the backend dropped (a partial-reliability
+     *  policy exhausted its budget, or the message exceeded its
+     *  lifetime). */
+    std::uint64_t messages_dropped = 0;
+
+    /** The messages the backend retransmitted (the application-level
+     *  ARQ).  Zero for the modes that ride the transport's own
+     *  retransmission. */
+    std::uint64_t messages_retransmitted = 0;
+
+    /** The messages the backend received from the peer. */
+    std::uint64_t messages_received = 0;
+
+    /** The bytes the backend received from the peer. */
+    std::uint64_t bytes_received = 0;
+
+    /** The messages that were still waiting in the outbound queue at
+     *  the moment of the reading (a gauge, not a counter). */
+    std::uint64_t messages_pending = 0;
 };
 
 /** Configuration for a single data channel. */
@@ -278,6 +334,28 @@ public:
     /** Set the state-change callback. Must be called before open().
      *  @note Not thread-safe — call only from the engine thread. */
     NIMRTC_API_STABLE virtual void set_on_state(DataChannelStateCallback cb) noexcept = 0;
+
+    /**
+     * @brief The channel's own counters (v1.2.0, plan Track S / S6).
+     *
+     * *Additive* — the four-member contract above keeps its exact
+     * signatures.  The default implementation returns an all-zero
+     * struct, so a backend that does not track its own counters keeps
+     * compiling and simply reports nothing.
+     *
+     * The counters are the **backend's** account of what it did with
+     * the messages: how many it handed to the transport, how many a
+     * partial-reliability policy dropped, how many it retransmitted.
+     * The engine cannot derive those numbers — it only sees the
+     * `send()` call and the inbound callback — so a backend that
+     * implements this method is the only way a host can learn them.
+     *
+     * @note Thread-safe — a backend may be called from the host's
+     *       thread while the engine thread runs.
+     */
+    NIMRTC_API_STABLE virtual DataChannelStats stats() const noexcept {
+        return DataChannelStats{};
+    }
 };
 
 // ---------------------------------------------------------------------------

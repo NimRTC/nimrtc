@@ -248,7 +248,7 @@ bool ViewerSession::start() {
     // raw events (`last_displayed_frame()`, the control-channel
     // acceptance).
     if (opts_.qoe) {
-        qoe_ = std::make_unique<rd_qoe::QoeCollector>();
+        qoe_ = std::make_unique<rq::QoeCollector>();
     }
 
     // ---- The transport -----------------------------------------------------

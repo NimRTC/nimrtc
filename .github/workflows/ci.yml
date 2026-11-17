@@ -281,6 +281,96 @@ jobs:
           ctest --preset tests.msvc -R test_dtls_gmssl_tlcp --output-on-failure
 
   # ---------------------------------------------------------------------------
+  # Real WebRTC APM: the "3A is enabled by default" leg (plan E3).
+  #
+  # Every other CI leg configures with -DNIMRTC_VENDORED_WEBRTC_APM=OFF, so
+  # the *default* (ON) is asserted nowhere — the option could be flipped to
+  # OFF in cmake/NimRTCVendored.cmake and the whole matrix would stay green.
+  # This leg is the one that closes that hole:
+  #
+  #   * it prebuilds the real APM out-of-tree (meson) and configures with
+  #     the option LEFT AT ITS DEFAULT — no -D flag at all.  A default that
+  #     is not ON therefore fails the leg, which is the whole point;
+  #   * it runs the ERLE rig with NIMRTC_REQUIRE_WEBRTC_APM=1, so a build
+  #     that silently degraded to the stub 3A *fails* instead of skipping
+  #     (a skipped gtest case is a passing ctest case);
+  #   * the rig asserts ERLE >= 15 dB (ITU-T P.807's floor for a converged
+  #     canceller) against a synthetic echo path.
+  #
+  # It is ONE platform on purpose (docs/zh/architecture.md §11.5.5, "升级
+  # 路径"): the meson prebuild costs 10-20 min per platform, so folding it
+  # into the 4-platform matrix would multiply that by four.  The other
+  # three platforms keep the stub 3A, which is what makes this leg the
+  # only place the default is exercised.
+  # ---------------------------------------------------------------------------
+  apm-real:
+    name: linux-apm / real 3A
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-apm-real
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install ninja + Python + meson (CMake via pip)
+        # The upstream APM uses meson (not CMake) and pulls abseil-cpp in as
+        # a subproject, so meson + ninja are build prerequisites here.  The
+        # APM source tree itself is cloned by tools/fetch_webrtc_apm.py.
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 \
+            python3-pip pkg-config && break || { sudo apt-get update; sleep 15; }; done
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25" "meson>=1.10"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The meson prebuild is the expensive part (abseil-cpp + ~440 APM
+      # translation units).  Cache it so a rerun of this leg does not pay
+      # for it twice.  The key includes the patch series, because a patch
+      # change invalidates the build tree.
+      - name: Cache the APM prebuild
+        uses: actions/cache@v6
+        with:
+          path: |
+            src/third_party/webrtc_audio_processing/src
+            src/third_party/webrtc_audio_processing/build_meson
+          key: ${{ runner.os }}-apm-${{ hashFiles('src/third_party/webrtc_audio_processing/patches/**', 'tools/build_webrtc_apm.sh', 'tools/fetch_webrtc_apm.py') }}
+          restore-keys: |
+            ${{ runner.os }}-apm-
+
+      - name: Prebuild the WebRTC APM
+        shell: bash
+        run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
+
+      - name: Configure (APM left at its default)
+        # NOTE: no -DNIMRTC_VENDORED_WEBRTC_APM flag here on purpose.  The
+        # option's default IS the claim under test (docs/zh/architecture.md
+        # §11.5.5), and pinning it to ON would assert the *flag* rather
+        # than the default.  The release workflow pins it to ON because it
+        # must ship the real APM; this leg must prove the default already
+        # does.
+        run: |
+          cmake --preset debug \
+            -DNIMRTC_BUILD_EXAMPLES=OFF \
+            -DNIMRTC_BUILD_TESTS=ON
+
+      - name: Build the ERLE rig
+        run: cmake --build --preset debug --target test_audio3a_erle -j 2
+
+      - name: Measure the ERLE (the real APM, not the stub)
+        # NIMRTC_REQUIRE_WEBRTC_APM=1 turns "the APM is not in this build"
+        # from a skip into a failure.  Without it a stub build would skip
+        # all three cases and ctest would report the leg green while
+        # measuring nothing.
+        env:
+          NIMRTC_REQUIRE_WEBRTC_APM: "1"
+        run: |
+          ctest --preset tests --output-on-failure -R Audio3AErle
+
+  # ---------------------------------------------------------------------------
   # Docs: Markdown link / anchor integrity.
   # Cheap, platform-independent, and catches the class of rot that a
   # README rewrite introduces (relative paths written as if they were

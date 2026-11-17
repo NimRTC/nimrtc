@@ -73,6 +73,18 @@
  * that as "the ERLE measurement" would be meaningless.  The tests therefore
  * skip explicitly, and the artefact is only produced on a build that has the
  * APM.
+ *
+ * ## The `NIMRTC_REQUIRE_WEBRTC_APM` switch
+ *
+ * A skipped test is a *passing* test as far as ctest is concerned, so a CI
+ * leg that was supposed to measure the ERLE could report green while
+ * measuring nothing — the APM prebuild could have silently fallen back to
+ * the stub and the rig would have skipped three times and called it a day.
+ *
+ * Setting `NIMRTC_REQUIRE_WEBRTC_APM=1` turns that skip into a failure: the
+ * rig then insists that the real APM is present.  The CI leg that owns the
+ * "the APM is enabled by default" claim sets it, so the claim is checked
+ * rather than assumed.
  */
 
 #include <gtest/gtest.h>
@@ -81,6 +93,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <string_view>
 #include <vector>
 
 #include <nimrtc/audio3a/audio3a.hpp>
@@ -182,6 +196,37 @@ double tone_amplitude(const std::vector<float>& v, double freq_hz, std::uint32_t
 /** Print a measurement line so the numbers are visible without XML parsing. */
 void report(const char* label, double value) {
     std::printf("  [ERLE] %-30s %12.6g\n", label, value);
+}
+
+/**
+ * @brief True when the caller insists that the real APM is present.
+ *
+ * `NIMRTC_REQUIRE_WEBRTC_APM=1` turns the "APM not compiled in" skip into a
+ * failure.  See the file header for why.
+ */
+bool apm_is_required() {
+    const char* value = std::getenv("NIMRTC_REQUIRE_WEBRTC_APM");
+    if (value == nullptr || value[0] == '\0') return false;
+    const std::string_view v{value};
+    return v != "0" && v != "false" && v != "FALSE" && v != "no" && v != "off";
+}
+
+/**
+ * @brief Gate for every case in this suite.
+ *
+ * Without the real APM there is nothing to measure, so the case is skipped —
+ * unless the caller demanded the APM, in which case the absence is the
+ * failure being reported.
+ */
+void require_real_apm() {
+    if (webrtc_apm_compiled_in()) return;
+    if (apm_is_required()) {
+        ADD_FAILURE() << "NIMRTC_REQUIRE_WEBRTC_APM is set, but this build "
+                         "does not contain the real WebRTC APM "
+                         "(webrtc_apm_compiled_in() == false)";
+        return;
+    }
+    GTEST_SKIP() << "real WebRTC APM not compiled in — no ERLE to measure";
 }
 
 /** Push one capture frame through the 3A stage. */
@@ -301,9 +346,8 @@ std::vector<float> make_nearend_tone(std::size_t n, double freq_hz, float amp) {
 // in a *stationary* synthetic path; a broadband, delay-aligned synthetic path
 // is easier than a real room, so the rig holds a higher bar than that.
 TEST(Audio3AErle, CancellerSuppressesTheSyntheticEcho) {
-    if (!webrtc_apm_compiled_in()) {
-        GTEST_SKIP() << "real WebRTC APM not compiled in — no ERLE to measure";
-    }
+    require_real_apm();
+    if (!webrtc_apm_compiled_in()) return;
 
     const std::size_t n = (kWarmupFrames + kMeasureFrames) * kApmFrame;
     const auto reference = make_speechlike(n, 0xC0FFEE01u);
@@ -336,9 +380,8 @@ TEST(Audio3AErle, CancellerSuppressesTheSyntheticEcho) {
 // whole capture path.  This test pins down that the *near-end* talker — a
 // microphone signal with no echo in it — survives the canceller.
 TEST(Audio3AErle, NearEndTalkerSurvivesTheCanceller) {
-    if (!webrtc_apm_compiled_in()) {
-        GTEST_SKIP() << "real WebRTC APM not compiled in — no ERLE to measure";
-    }
+    require_real_apm();
+    if (!webrtc_apm_compiled_in()) return;
 
     const std::size_t n = (kWarmupFrames + kMeasureFrames) * kApmFrame;
     // The render path runs, so the canceller is fully active; the capture
@@ -380,9 +423,8 @@ TEST(Audio3AErle, NearEndTalkerSurvivesTheCanceller) {
 // control that proves the ERLE number above comes from the canceller and
 // not from an artefact of the rig.
 TEST(Audio3AErle, ControlRunWithoutTheCancellerReportsNoSuppression) {
-    if (!webrtc_apm_compiled_in()) {
-        GTEST_SKIP() << "real WebRTC APM not compiled in — no ERLE to measure";
-    }
+    require_real_apm();
+    if (!webrtc_apm_compiled_in()) return;
 
     const std::size_t n = (kWarmupFrames + kMeasureFrames) * kApmFrame;
     const auto reference = make_speechlike(n, 0x0BADC0DEu);

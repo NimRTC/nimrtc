@@ -124,6 +124,7 @@
 #include <thread>
 #include <type_traits>
 #include <vector>
+#include <cstddef>
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -330,7 +331,7 @@ public:
         addr.sin_family = AF_INET;
         addr.sin_port = 0;
         addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
-        if (::bind(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        if (::bind(sock_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
             close_socket(sock_);
             sock_ = kInvalidSocket;
             return false;
@@ -353,7 +354,7 @@ public:
         if (sock_ == kInvalidSocket) return 0;
         sockaddr_in addr{};
         socklen_t len = sizeof(addr);
-        if (::getsockname(sock_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        if (::getsockname(sock_, reinterpret_cast<struct sockaddr*>(&addr), &len) != 0) {
             return 0;
         }
         return ::ntohs(addr.sin_port);
@@ -371,11 +372,23 @@ public:
     /** Send a datagram.  Returns false on error. */
     bool send_to(const sockaddr_in& dst, const void* data, std::size_t len) noexcept {
         if (sock_ == kInvalidSocket) return false;
+        // The length argument is an `int` on Windows and a `size_t` on
+        // the BSDs, so the cast is spelled per platform -- otherwise
+        // the other platforms' compilers report a signedness
+        // conversion.
+#if defined(_WIN32)
         const auto n = ::sendto(sock_, static_cast<const char*>(data),
                                 static_cast<int>(len), 0,
-                                reinterpret_cast<const sockaddr*>(&dst),
-                                sizeof(dst));
+                                reinterpret_cast<const struct sockaddr*>(&dst),
+                                static_cast<int>(sizeof(dst)));
         return n == static_cast<int>(len);
+#else
+        const auto n = ::sendto(sock_, static_cast<const char*>(data),
+                                len, 0,
+                                reinterpret_cast<const struct sockaddr*>(&dst),
+                                static_cast<socklen_t>(sizeof(dst)));
+        return n == static_cast<ssize_t>(len);
+#endif
     }
 
     /**
@@ -385,10 +398,22 @@ public:
      */
     int recv_nowait(void* buf, std::size_t buf_size) noexcept {
         if (sock_ == kInvalidSocket) return 0;
+        // The length argument is an `int` on Windows and a `size_t` on
+        // the BSDs, and the return type is an `int` on Windows and an
+        // `ssize_t` on the BSDs -- so both are spelled per platform,
+        // otherwise the other platforms' compilers report a signedness
+        // conversion.
+#if defined(_WIN32)
         const auto n = ::recvfrom(sock_, static_cast<char*>(buf),
                                   static_cast<int>(buf_size), 0, nullptr, nullptr);
         if (n < 0) return 0;   // nothing pending
+        return n;
+#else
+        const auto n = ::recvfrom(sock_, static_cast<char*>(buf),
+                                  buf_size, 0, nullptr, nullptr);
+        if (n < 0) return 0;   // nothing pending
         return static_cast<int>(n);
+#endif
     }
 
 private:
@@ -1222,7 +1247,13 @@ int main(int argc, char** argv) {
         }
     }
 
+    // The Winsock scope is a no-op everywhere but Windows, where the
+    // socket calls need the library started first.  It is declared
+    // inside the Windows branch so that the other platforms do not
+    // carry an unused variable -- which their compilers reject.
+#if defined(_WIN32)
     WinsockScope winsock;
+#endif
 
     const RunResult r = run_scenario(opt);
 

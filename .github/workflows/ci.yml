@@ -512,10 +512,18 @@ jobs:
 
       # Ubuntu 22.04 ships CMake 3.22.3; CMakePresets.json uses preset
       # schema v6 which requires CMake ≥ 3.25. Pin a recent cmake via pip.
-      - name: Install ninja + Python (CMake via pip)
+      - name: Install ninja + Python + X11/PipeWire/EGL dev packages (CMake via pip)
+        # The X11, XFixes, PipeWire and VDPAU/EGL packages are the
+        # **leaf-adapter** dependencies of video_capture and video_sink.
+        # Every one of them is OPTIONAL in the CMake graph: a missing
+        # package silently skips a source file, so a leaf that does not
+        # compile stays invisible.  Installing them here is what makes
+        # the "Leaf compile proof" step below meaningful.
         run: |
           for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
-          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 && break || { sudo apt-get update; sleep 15; }; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 \
+            libx11-dev libxfixes-dev libpipewire-0.3-dev libspa-0.2-dev \
+            pkg-config && break || { sudo apt-get update; sleep 15; }; done
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -614,6 +622,37 @@ jobs:
             build/e2e/bench_weaknet.json
             build/e2e/bench_weaknet_netem.json
           retention-days: 14
+
+      # E2 — leaf compile proof (docs/plan/v1.2-next-plan.md §3 Track E).
+      #
+      # The module CMake probes for every Linux backend are *optional*: a
+      # missing package silently drops a source file, so this leg stayed
+      # green while `x11_capture.cpp`, `x11_cursor.cpp`,
+      # `pipewire_capture.cpp` and the EGL renderer path were never
+      # compiled on any platform.  The packages installed above make
+      # them compileable; this step makes "they compiled" a fact CI
+      # asserts, instead of something a reader has to infer from a log.
+      - name: Leaf compile proof (Linux adapters)
+        run: |
+          log=build/leaf-configure.log
+          cmake -S . -B build/leaf -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DNIMRTC_BUILD_TESTS=OFF \
+            -DNIMRTC_BUILD_EXAMPLES=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
+            -DNIMRTC_INSTALL=OFF > "$log" 2>&1 || { tail -50 "$log"; exit 1; }
+          grep -E '^-- (video_capture|  X11 capture|  X11 cursor|  PipeWire capture|  video_sink:)' "$log" || true
+          for needle in \
+            "the X11 capture backend is enabled" \
+            "the X11 cursor source is enabled" \
+            "the PipeWire capture backend is enabled" \
+            "NIMRTC_VIDEO_SINK_HAS_EGL=1"; do
+            grep -qF "$needle" "$log" || {
+              echo "::error::leaf compile proof: '$needle' missing from $log"
+              exit 1
+            }
+          done
+          cmake --build build/leaf --target nimrtc_video_capture nimrtc_video_sink -j 2
 
       - name: Upload build directory on failure
         if: failure()

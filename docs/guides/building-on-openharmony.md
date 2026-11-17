@@ -58,7 +58,7 @@ $ ls $OHOS_NATIVE_HOME/llvm/bin/clang++
 $OHOS_NATIVE_HOME/llvm/bin/clang++ --version
 # Expect: clang version 14+ for OHOS 4.0
 
-# 3) Perl (for the vendored wolfSSL / opus / usrsctp configure scripts)
+# 3) Perl (for the vendored wolfSSL / opus configure scripts)
 sudo apt install -y perl python3
 
 # 4) Ninja + CMake

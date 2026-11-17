@@ -90,12 +90,11 @@ struct NIMRTC_API_STABLE StackConfig {
     std::string dtls_id  = "wolfssl";  // dtls::IDtlsSessionFactory id (Slice 4)
     // sctp::ISctpSocketFactory id (Slice 5).
     //
-    // The registered SCTP id is "stub", NOT "usrsctp" — the usrsctp
-    // backend was retired from the default registration in v0.11.0
-    // (see `src/sctp/src/sctp_stub_factory.hpp` and the SCTP module's
-    // `register_default_plugins()`).  The previous default here was
-    // "usrsctp", which resolved to no factory at all, so every stack
-    // was built with a null SCTP component.
+    // The registered SCTP id is "stub" — the only SCTP backend that
+    // exists since v1.2.0 (plan E7 deleted the usrsctp backend and its
+    // vendored tree).  The previous default here was "usrsctp", which
+    // resolved to no factory at all, so every stack was built with a
+    // null SCTP component.
     std::string sctp_id  = "stub";
     // plugins::IRTPFactory id.  The registered RTP id is "webrtc"
     // (see `src/modules/rtp/src/rtp_plugin.cpp`).  The previous default

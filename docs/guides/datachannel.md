@@ -23,9 +23,10 @@ cfg.datachannel_backend = "web_transport";   // the default
 
 `"web_transport"` is the only backend that can reach a peer. The
 `"sctp"` backend was retired from the public selectors in v1.2.0 — it
-opened an in-process `usrsctp` loopback socket that never left the
+opened an in-process loopback socket that never left the
 process, so a channel created on it could never talk to a remote
-participant. See
+participant. (The usrsctp backend behind it was deleted in v1.2.0 —
+plan E7.) See
 [`docs/api/engine_config.md` §2.6.0](../api/engine_config.md) for the
 dispatch table.
 

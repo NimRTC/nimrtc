@@ -7,7 +7,7 @@
  *   2. Stub returns kErrNotReady from send_datagram.
  *   3. Stub returns kErrNotReady from send_stream.
  *   4. Stub returns kErrNotReady from send_partial_reliable.
- *   5. Factory id is exactly "stub" (NOT "usrsctp" — see DoD gate).
+ *   5. Factory id is exactly "stub" (the only SCTP backend since v1.2.0).
  *   6. register_default_plugins() is idempotent (Meyers-singleton latch).
  *   7. set_on_recv on the stub stores the callback (registration works).
  *
@@ -17,7 +17,7 @@
  * test-only accessor in `nimrtc::sctp::test_only::get_stub_factory()`.
  *
  * @note Slice 5 is a SEAM-ONLY change. The default impl is the stub; no
- *       usrsctp dependency is required to build or run this test.
+ *       third-party SCTP stack is required to build or run this test.
  */
 
 #include <gtest/gtest.h>
@@ -128,7 +128,7 @@ TEST_F(SctpFactoryTest, SendPartialReliableReturnsNotReady) {
 }
 
 // -----------------------------------------------------------------------------
-// (5) Factory id is exactly "stub" (NOT "usrsctp" — see DoD gate)
+// (5) Factory id is exactly "stub" (the only SCTP backend since v1.2.0 / E7)
 // -----------------------------------------------------------------------------
 TEST_F(SctpFactoryTest, FactoryIdIsStub) {
     const auto* factory =
@@ -137,9 +137,9 @@ TEST_F(SctpFactoryTest, FactoryIdIsStub) {
 
     EXPECT_EQ(factory->id(), "stub");
     EXPECT_NE(factory->id(), "usrsctp")
-        << "Slice 5 DoD gate: the factory id MUST be \"stub\" until v0.11.0 "
-           "lands the production backend; registering under \"usrsctp\" "
-           "would falsely imply the v0.11.0 default is integrated.";
+        << "v1.2.0 (plan E7): the usrsctp backend was deleted, so \"stub\" "
+           "is the only registered SCTP id; nothing may register under "
+           "\"usrsctp\".";
 }
 
 // -----------------------------------------------------------------------------
@@ -218,8 +218,14 @@ TEST_F(SctpFactoryTest, StubSocketExposesRecvRegistration) {
 }
 
 // -----------------------------------------------------------------------------
-// (Bonus) Display name explicitly mentions the v0.11.0 pending status
+// Display name explicitly states that there is no data plane
 // -----------------------------------------------------------------------------
+//
+// The stub is the *only* SCTP backend that has existed since v1.2.0
+// (plan E7 deleted the usrsctp backend and its vendored tree), so the
+// display name must not promise a future one.  It has to say, in the
+// words a host developer will actually read in a registry dump, that
+// this backend carries no data.
 TEST_F(SctpFactoryTest, DisplayNameMentionsPendingStatus) {
     const auto* factory =
         nimrtc::sctp::test_only::get_stub_factory();
@@ -227,9 +233,9 @@ TEST_F(SctpFactoryTest, DisplayNameMentionsPendingStatus) {
 
     const auto name = factory->display_name();
     EXPECT_NE(name.find("stub"), std::string_view::npos);
-    EXPECT_NE(name.find("v0.11.0"), std::string_view::npos)
-        << "Display name should make the pending status obvious to anyone "
-           "who reads the registry entry at runtime.";
+    EXPECT_NE(name.find("no data plane"), std::string_view::npos)
+        << "Display name should make the missing data plane obvious to "
+           "anyone who reads the registry entry at runtime.";
 }
 
 // -----------------------------------------------------------------------------

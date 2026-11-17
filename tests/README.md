@@ -106,7 +106,6 @@ debugger:
 | `test_dtls_seam` | `IDtlsSession` / `IDtlsSessionFactory` factory lookup, default-plugins registration | `tests/` |
 | `test_engine_plugin_loading` | Every engine `*_name` factory lookup resolves on a fresh process | `tests/` |
 | `test_datachannel_engine` | DataChannel creation through the engine (DC-1 Gate #1 §7 fallback) | `tests/` |
-| `test_sctp_usrsctp` | usrsctp backend (TPAL-5) | `tests/` |
 | `test_plugins/test_audio3a_tap` | PCM tap surface — pre/post 3A int16 + float variants | `tests/plugins/` |
 | `test_video_plugin_interfaces` | Polymorphism / capability flag invariants for video plugins | `tests/` |
 | `test_engine_video_plugins` | Engine resolves all 4 video plugins | `tests/` |

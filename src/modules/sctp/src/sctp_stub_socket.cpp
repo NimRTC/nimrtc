@@ -1,10 +1,11 @@
 /**
  * @file src/sctp/src/sctp_stub_socket.cpp
- * @brief SctpStubSocket — honest "not ready" implementation of ISctpSocket.
+ * @brief SctpStubSocket â honest "not ready" implementation of ISctpSocket.
  *
- * Stub impl pending v0.11.0 usrsctp integration per
- * `docs/plan/transport-selection.md` §7. Every send method returns
- * `plugins::kErrNotReady` so callers can detect the missing backend
+ * Stub impl — the SCTP seam has no data plane. Since v1.2.0 (plan E7)
+ * the usrsctp backend was deleted, and the production data plane is
+ * WebTransport over QUIC, which does not use this seam. Every send method
+ * returns `plugins::kErrNotReady` so callers can detect the missing backend
  * without silent data loss.
  */
 
@@ -21,8 +22,9 @@ plugins::Status SctpStubSocket::send_datagram(std::uint16_t stream,
     // Log at debug level so noisy tests don't spam stdout; the engine's
     // first call already proves the seam compiles and routes correctly.
     core::log::Logger::instance().debug(
-        "nimrtc::sctp::SctpStubSocket::send_datagram: not ready (Slice 5 stub); "
-        "v0.11.0 usrsctp integration pending");
+        "nimrtc::sctp::SctpStubSocket::send_datagram: not ready "
+        "(Slice 5 stub; no data plane — v1.2.0 / plan E7 removed the "
+        "usrsctp backend)");
     return plugins::kErrNotReady;
 }
 
@@ -31,8 +33,9 @@ plugins::Status SctpStubSocket::send_stream(std::uint16_t stream,
     (void)stream;
     (void)data;
     core::log::Logger::instance().debug(
-        "nimrtc::sctp::SctpStubSocket::send_stream: not ready (Slice 5 stub); "
-        "v0.11.0 usrsctp integration pending");
+        "nimrtc::sctp::SctpStubSocket::send_stream: not ready "
+        "(Slice 5 stub; no data plane — v1.2.0 / plan E7 removed the "
+        "usrsctp backend)");
     return plugins::kErrNotReady;
 }
 
@@ -45,7 +48,8 @@ plugins::Status SctpStubSocket::send_partial_reliable(
     (void)ttl;
     core::log::Logger::instance().debug(
         "nimrtc::sctp::SctpStubSocket::send_partial_reliable: not ready "
-        "(Slice 5 stub); v0.11.0 usrsctp integration pending");
+        "(Slice 5 stub; no data plane — v1.2.0 / plan E7 removed the "
+        "usrsctp backend)");
     return plugins::kErrNotReady;
 }
 

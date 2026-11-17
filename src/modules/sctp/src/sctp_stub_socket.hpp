@@ -2,8 +2,9 @@
  * @file src/sctp/src/sctp_stub_socket.hpp
  * @brief SctpStubSocket — honest "not ready" implementation of ISctpSocket.
  *
- * Stub impl pending v0.11.0 usrsctp integration per
- * `docs/plan/transport-selection.md` §7.
+ * Stub impl — the SCTP seam has no data plane. Since v1.2.0 (plan E7)
+ * the usrsctp backend was deleted; the production data plane is
+ * WebTransport over QUIC, which does not use this seam.
  *
  * The stub does NOT silently drop outbound messages. Every send method
  * returns `plugins::kErrNotReady` so the engine / tests can detect that

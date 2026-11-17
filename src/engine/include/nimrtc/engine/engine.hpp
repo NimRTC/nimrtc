@@ -205,7 +205,8 @@ struct NIMRTC_API_STABLE EngineConfig {
     std::string transport_stack_name;
 
     /** SCTP socket factory id (the `sctp::ISctpSocketFactory` seam).
-     *  Default = "stub" — the in-tree loopback reference backend.
+     *  Default = "stub" — the only registered SCTP backend since v1.2.0
+     *  (plan E7 deleted the usrsctp backend and its vendored tree).
      *  (The former default "usrsctp" resolved to no registered factory,
      *  so every stack was built with a null SCTP component.) */
     std::string sctp_socket_name = "stub";
@@ -917,7 +918,7 @@ struct NIMRTC_API_STABLE EngineConfig {
     //
     // Default = "web_transport" (since v0.15.0; WebTransport/QUIC path).
     // `"sctp"` was retired in v1.2.0: it was a loopback *test* backend
-    // (in-process usrsctp socket on 127.0.0.1, no SCTP-over-DTLS wiring),
+    // (in-process socket, no SCTP-over-DTLS wiring),
     // so it could never reach a remote peer — passing it now fails the
     // engine's `open()` with `kEngineInternal`.
     // Empty disables DataChannel entirely:
@@ -940,7 +941,7 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  `datachannel_backend` below and
      *  `docs/plan/datachannel-capability-plan.md` WP-A / DEC-4 = A1).
      *  `"sctp"` is now rejected: the SCTP factory opens an in-process
-     *  usrsctp loopback socket and the engine never wires SCTP-over-DTLS,
+     *  loopback socket and the engine never wires SCTP-over-DTLS,
      *  so it cannot reach a peer.
      *
      *  Setting this to `""` disables DataChannel entirely **in the legacy
@@ -969,8 +970,8 @@ struct NIMRTC_API_STABLE EngineConfig {
      *      in this mode.
      *    - `"sctp"` — **retired** (v1.2.0, `docs/plan/datachannel-capability-plan.md`
      *      WP-A / DEC-4 = A1).  The SCTP backend was a loopback *test*
-     *      backend: its factory opens an in-process usrsctp socket bound
-     *      to `127.0.0.1` and the engine never wires SCTP-over-DTLS, so
+     *      backend: its factory opens an in-process socket and the engine
+     *      never wires SCTP-over-DTLS, so
      *      it could never reach a remote peer.  Passing `"sctp"` now
      *      surfaces `kEngineInternal` via `on_error_` at `open()` time
      *      instead of silently resolving to a data plane that cannot work.

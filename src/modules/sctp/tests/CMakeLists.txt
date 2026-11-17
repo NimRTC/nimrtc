@@ -6,7 +6,7 @@
 #   - Factory creates a stub ISctpSocket.
 #   - send_datagram / send_stream / send_partial_reliable all return
 #     plugins::kErrNotReady.
-#   - Factory id is exactly "stub" (NOT "usrsctp" — see DoD gate).
+#   - Factory id is exactly "stub" (the only SCTP backend since v1.2.0).
 #   - register_default_plugins() is idempotent (Meyers-singleton latch).
 #
 # Built via GoogleTest (FetchContent if not installed) — mirrors the

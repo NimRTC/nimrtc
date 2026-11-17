@@ -7,13 +7,13 @@
 #   - SimpleDataChannelFactory<T> template usage in tests
 #
 # Scope (P2, this revision):
-#   - usrsctp-backed `SctpDataChannel : plugins::IDataChannel`
+#   - SCTP-backed `SctpDataChannel : plugins::IDataChannel`
 #   - `SctpDataChannelFactory : plugins::IDataChannelFactory` (id="sctp")
 #   - `register_default_plugins()` entry point (Meyers-singleton latch)
 #     that publishes the factory under id="sctp" in core::PluginRegistry.
 #
 # The channel wraps a `nimrtc::sctp::ISctpSocket` (resolved at
-# construction time via `core::PluginRegistry::get_sctp_socket("usrsctp")`)
+# construction time via `core::PluginRegistry::get_sctp_socket("stub")`)
 # so the SCTP transport layer lives in src/sctp/ — the datachannel
 # module owns only the IDataChannel glue + factory + registration.
 #

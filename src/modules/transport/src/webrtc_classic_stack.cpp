@@ -127,7 +127,7 @@ public:
             (void)rtp_->open();
         }
 
-        // SCTP: v1.1 Ts1 lifecycle — stub no-op, usrsctp validates readiness.
+        // SCTP: v1.1 Ts1 lifecycle — the stub backend is a no-op.
         if (sctp_) {
             (void)sctp_->open();
         }
@@ -221,7 +221,7 @@ public:
     }
 
     std::string_view display_name() const noexcept override {
-        return "WebRTC Classic — ICE + DTLS + RTP + SCTP (stub; v0.11 adds usrsctp)";
+        return "WebRTC Classic — ICE + DTLS + RTP + SCTP (stub)";
     }
 
     std::unique_ptr<ITransportStack>
@@ -280,14 +280,16 @@ public:
                             << cfg.rtp_id);
         }
 
-        // ---- SCTP (stub; v0.11.0 adds usrsctp) --------------------------
+        // ---- SCTP (stub backend; the data plane is WebTransport/QUIC) ---
         {
             const sctp::ISctpSocketFactory* f =
                 reg.get_sctp_socket(cfg.sctp_id);
             if (!f) {
                 NIMRTC_LOG_WARN("transport: WebRtcClassicStackFactory: "
                                 "SCTP factory not found: " << cfg.sctp_id
-                                << " (stub; v0.11.0 adds usrsctp)");
+                                << " (the stub backend is the only one; the "
+                                   "production data plane is "
+                                   "WebTransport/QUIC)");
                 return nullptr;
             }
             sctp::SctpConfig scfg;

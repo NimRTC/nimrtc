@@ -717,8 +717,7 @@ function(nimrtc_add_engine_test name source)
     if(WIN32)
         target_link_libraries(${name} PRIVATE ws2_32)
     elseif(APPLE)
-        # macOS clang has built-in atomics in libc++; usrsctp uses
-        # OSAtomicAdd32Barrier which requires linking against the C++ runtime.
+        # macOS clang has built-in atomics in libc++.
         # Do not link -latomic - it does not exist on macOS.
         target_link_libraries(${name} PRIVATE c++ pthread)
     else()
@@ -785,7 +784,7 @@ function(nimrtc_add_engine_test name source)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
-    # Engine tests that talk to a real usrsctp loopback can take up to
+    # Engine tests that wait on a real handshake can take up to
     # ~60 s on slow CI runners (two 30 s wait_for_established calls +
     # handshake jitter).  The default gtest TIMEOUT of 30 s is too tight
     # and causes spurious "Test #... (Timeout)" failures on GitHub-hosted
@@ -2215,28 +2214,6 @@ endif()
 nimrtc_add_engine_test(test_dtls_seam test_dtls_seam.cpp)
 
 # ---------------------------------------------------------------------------
-# TPAL-5 (v0.11.0) — usrsctp opt-in regression test.
-#
-# v0.11.0 cut: `nimrtc::sctp::register_default_plugins()` no longer
-# auto-registers `UsrsctpSocketFactory` (id="usrsctp"). The class still
-# compiles and links (the usrsctp sources are kept for opt-in callers);
-# this test exercises the opt-in path:
-#
-# Drives two UsrsctpSocket instances (AF_CONN loopback encapsulation)
-# to verify:
-#   - send_datagram enqueues into usrsctp's send queue (returns kOk)
-#   - on_recv callback fires on usrsctp's worker thread, payloads
-#     land in B's recv queue under a mutex/condvar
-#   - send_partial_reliable(ttl=10ms) call site compiles + returns kOk
-#   - factory slot "usrsctp" is NOT registered (v0.11.0 contract)
-#   - factory slot "stub" is still registered (Slice 5 regression)
-#
-# Links nimrtc::sctp, nimrtc::vendor::usrsctp transitively.
-# See docs/plan/v0.11-plan.md §2.2 (TPAL-5 deferred to v1.x).
-# ---------------------------------------------------------------------------
-nimrtc_add_engine_test(test_sctp_usrsctp test_sctp_usrsctp.cpp)
-
-# ---------------------------------------------------------------------------
 # P2 PCM tap test (audio3a pre/post 3A tap, §8.7).
 # Verifies round-trip: IAudio3A instance, install counting tap, feed 100 frames,
 # assert tap invocation count.
@@ -2255,8 +2232,8 @@ nimrtc_add_engine_test(test_audio3a_tap plugins/test_audio3a_tap.cpp)
 #     set_on_data_state() callbacks to the IDataChannel before its open().
 #   - Honours `cfg.datachannel_name = ""` as an explicit disable.
 #
-# Uses the same `nimrtc_add_engine_test` wiring as test_dtls_seam and
-# test_sctp_usrsctp — links the engine + every module that has a
+# Uses the same `nimrtc_add_engine_test` wiring as test_dtls_seam —
+# links the engine + every module that has a
 # `register_default_plugins()` so the Slice 8 typed slots are populated
 # end-to-end.  No network/ICE/DTLS interaction (the test stops at
 # create_offer() / create_data_channel() / close()).

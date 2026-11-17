@@ -57,12 +57,13 @@ endif()
 # 仅当 NIMRTC_ENABLE_DTLS_GMSSL=ON 时才构建上游静态库,OFF 时为空 stub.
 _nimrtc_vendor_add_if_populated(gmssl)
 _nimrtc_vendor_add_if_populated(webrtc_audio_processing)
-# TPAL-5 (v0.11.0) — usrsctp SCTP userland stack. Required by the
-# `UsrsctpSocket` production backend registered through
-# `nimrtc::sctp::register_default_plugins()`. Source populated under
-# `src/` by `scripts/vendor-fetch.sh usrsctp` (or curl/tar from
-# https://codeload.github.com/sctplab/usrsctp/tar.gz/refs/tags/0.9.5.0).
-_nimrtc_vendor_add_if_populated(usrsctp)
+# v1.2.0 (plan E7): the usrsctp SCTP userland stack is GONE.  It was
+# vendored for the `UsrsctpSocket` backend, which was never published into
+# `core::PluginRegistry` (v0.11.0) and whose public selector entry was
+# retired in v1.2.0 (WP-A / DEC-4 = A1).  The `src/third_party/usrsctp/`
+# tree and the `nimrtc_vendor_usrsctp` target were removed with it.
+#
+# The production data plane is WebTransport over QUIC (msquic).
 
 # -----------------------------------------------------------------------------
 # Remote-desktop plan Track C — libyuv (YUV / RGB scale + convert).

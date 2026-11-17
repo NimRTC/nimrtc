@@ -1,33 +1,23 @@
 /**
  * @file src/sctp/src/sctp_stub_factory.hpp
- * @brief SctpStubFactory — registration id "stub" (NOT "usrsctp").
+ * @brief SctpStubFactory — registration id "stub".
  *
- * Stub impl pending v0.11.0 usrsctp integration per
- * `docs/plan/transport-selection.md` §7.
+ * The stub is the only registered SCTP backend since v1.2.0 (plan E7):
+ * the usrsctp backend and its vendored tree were deleted, and the
+ * production data plane is WebTransport over QUIC, which does not go
+ * through the `ISctpSocket` seam at all.
  *
- * ## Why the id is "stub", not "usrsctp"
+ * ## Why the id is "stub"
  *
- * Per the Slice 5 spec, the registration id MUST be "stub" (and NOT
- * "usrsctp") until the production backend lands. This is a deliberate
- * signal to consumers and tests:
+ * The registration id is deliberately explicit: a consumer that resolves
+ * id "stub" gets the honest `SctpStubSocket` (every send returns
+ * `kErrNotReady`), so the failure is loud rather than silent.
  *
- *   - Anyone doing `PluginRegistry::get_sctp_socket("usrsctp")` will get
- *     `nullptr` until v0.11.0 — making it obvious that the production
- *     backend has not yet been wired in, rather than silently resolving
- *     a non-functional stub.
- *   - Anyone doing `get_sctp_socket("stub")` will get the honest
- *     `SctpStubSocket` (sends return kErrNotReady).
+ * ## v0.11.0 note (historical)
  *
- * This avoids the false impression that the v0.11.0 usrsctp default is
- * already integrated in v0.10.x — see the Slice 5 DoD gate "Registration
- * id is 'stub' — explicit, not 'usrsctp'".
- *
- * ## v0.11.0 migration note
- *
- * When `UsrsctpSocketFactory` lands, it MUST register under id "usrsctp"
- * (not overwrite "stub"). Both factories coexist; the engine / Profile
- * resolver picks "usrsctp" explicitly when ready. The stub stays around
- * for tests and downgrade scenarios — see transport-selection §8 #7.
+ * Per the Slice 5 spec the id had to be "stub" (and NOT "usrsctp") until
+ * a production backend landed. That backend never became reachable — it
+ * was removed in v1.2.0 — so "stub" stayed.
  */
 
 #ifndef NIMRTC_SCTP_SRC_SCTP_STUB_FACTORY_HPP
@@ -47,18 +37,17 @@ public:
     ~SctpStubFactory() override = default;
 
     std::string_view id() const noexcept override {
-        // Explicit "stub", NOT "usrsctp" — see file header rationale.
+        // Explicit "stub" — see file header rationale.
         return "stub";
     }
 
     std::string_view display_name() const noexcept override {
-        return "SCTP (stub; pending v0.11.0 usrsctp integration)";
+        return "SCTP (stub; no data plane)";
     }
 
     std::unique_ptr<ISctpSocket> create(const SctpConfig& /*cfg*/) const override {
-        // Config fields are ignored in Slice 5 — the stub has no backend
-        // state to configure. v0.11.0 will route cfg.max_num_streams,
-        // cfg.local_port, etc. into the usrsctp socket setup.
+        // Config fields are ignored — the stub has no backend
+        // state to configure.
         return std::make_unique<SctpStubSocket>();
     }
 };

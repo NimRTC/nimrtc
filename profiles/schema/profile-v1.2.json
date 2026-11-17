@@ -144,7 +144,7 @@
                 "raw-udp-arq",
                 "webrtc-quic"
               ],
-              "description": "Media-stack factory id. 'webrtc-classic' = libjuice + wolfSSL + usrsctp (default); 'raw-udp-arq' = bare UDP + ARQ (no SCTP, no browser interop); 'webrtc-quic' = v1.x WebTransport (not in v0.12.0)."
+              "description": "Media-stack factory id. 'webrtc-classic' = libjuice + wolfSSL (default); 'raw-udp-arq' = bare UDP + ARQ (no SCTP, no browser interop); 'webrtc-quic' = v1.x WebTransport (not in v0.12.0). The usrsctp backend was removed in v1.2.0 (plan E7)."
             },
             "max_p99_ms": {
               "type": "integer",

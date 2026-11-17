@@ -426,8 +426,8 @@ Security fixes skip the normal cadence:
 > install rules are implemented behind `NIMRTC_INSTALL` (default OFF).
 > `cmake/NimRTCInstall.cmake` centralises the coverage — public headers
 > to `<prefix>/include/`, every built `nimrtc_*` STATIC archive (plus
-> `opus` and `nimrtc_vendor_usrsctp`, which have no upstream install
-> coverage) to `<prefix>/lib/`, and a hand-written `NimRTCConfig.cmake`
+> `opus`, which has no upstream install coverage) to `<prefix>/lib/`, and a
+> hand-written `NimRTCConfig.cmake`
 > + `SameMajorVersion` version file to `<prefix>/lib/cmake/NimRTC/`.
 > `release.yml` already passes `-DNIMRTC_INSTALL=ON` on all five
 > configure legs. Windows downstream proof verified 2026-11-03

@@ -1633,7 +1633,7 @@ short:
 | Licence | Accepted | Examples |
 |---|---|---|
 | **BSD-2-Clause** | ✅ | `dav1d`, `openh264`, `libsamplerate` |
-| **BSD-3-Clause** (and `BSD-3-Clause Clear`) | ✅ | `libyuv`, `libvpx`, `libsrtp`, `libopus`, `usrsctp` |
+| **BSD-3-Clause** (and `BSD-3-Clause Clear`) | ✅ | `libyuv`, `libvpx`, `libsrtp`, `libopus` |
 | **Apache-2.0** | ✅ | `mbedtls`, `gmssl` |
 | **MIT** | ✅ | `portaudio`, `libjuice`, `msquic`, `nlohmann_json` |
 

@@ -145,7 +145,7 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
       <div>
         <h3>Deferred to v1.x (and why)</h3>
         <ul class="cross">
-          <li><b>DataChannel over SCTP-over-DTLS.</b> Chrome is moving DataChannel to WebTransport over QUIC; the <code>usrsctp</code> socket class is <code>@deprecated</code> and still compiles for opt-in callers, but is no longer auto-registered.</li>
+          <li><b>DataChannel over SCTP-over-DTLS.</b> Chrome is moving DataChannel to WebTransport over QUIC; the usrsctp socket backend was removed in v1.2.0, and the <code>"sctp"</code> DataChannel backend was retired from the public selectors.</li>
           <li><b>iOS / Android native.</b> Roadmap, not a current-track item. No ETA yet.</li>
           <li><b>Production-grade hardening.</b> API frozen at v1.0.2 per ADR-015 (<code>NIMRTC_API_VERSION</code> = 10002); SemVer guarantees apply from v1.0.1 (first published stable).</li>
         </ul>

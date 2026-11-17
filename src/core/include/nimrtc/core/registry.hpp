@@ -864,12 +864,14 @@ public:
 
     // -- SCTP socket (Transport PAL Slice 5 / Slice 8 hook) ---------------
     //
-    // Typed slot for `nimrtc::sctp::ISctpSocketFactory*`. The Slice 5
-    // default is the stub factory (id = "stub") ??every send returns
-    // kErrNotReady so callers can detect the missing usrsctp backend.
-    // v0.11.0 will register the production `UsrsctpSocketFactory`
-    // (id = "usrsctp") alongside the stub (see
-    // `docs/plan/transport-selection.md` ?6.2 / ?7).
+    // Typed slot for `nimrtc::sctp::ISctpSocketFactory*`. The only
+    // registered backend is the stub factory (id = "stub") — every send
+    // returns kErrNotReady, so callers can detect that there is no real
+    // SCTP data plane.
+    //
+    // v1.2.0 (plan E7): the usrsctp backend was deleted, so "stub" is
+    // now the *only* SCTP backend that exists.  The production data
+    // plane is WebTransport over QUIC.
     void register_sctp_socket(std::string_view id,
                               const sctp::ISctpSocketFactory* f);
     [[nodiscard]] const sctp::ISctpSocketFactory*

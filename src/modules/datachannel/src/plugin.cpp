@@ -60,7 +60,8 @@ void register_default_plugins() noexcept {
     static const int once = []() {
         core::log::Logger::instance().info(
             "nimrtc::datachannel: registering default plugins "
-            "(id=\"sctp\" [usrsctp-backed DataChannel via ISctpSocket seam])");
+            "(id=\"sctp\" [SCTP-backed DataChannel via the ISctpSocket seam; "
+            "the production data plane is WebTransport/QUIC])");
         detail::do_register_default_plugins();
         return 1;
     }();

@@ -283,9 +283,9 @@ TEST(IDataChannelFactory, IsConstructableFromSimpleFactory) {
     // Verify that SimpleDataChannelFactory is a concrete IDataChannelFactory.
     // The factory id must be non-empty for valid registration.
     nimrtc::plugins::SimpleDataChannelFactory<StubDataChannel> factory{
-        "sctp", "SCTP (usrsctp)"};
+        "sctp", "SCTP (stub)"};
 
     const nimrtc::plugins::IPluginFactory* base = &factory;
     EXPECT_EQ(base->id(), "sctp");
-    EXPECT_EQ(base->display_name(), "SCTP (usrsctp)");
+    EXPECT_EQ(base->display_name(), "SCTP (stub)");
 }

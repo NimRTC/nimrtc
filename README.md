@@ -656,9 +656,9 @@ yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651
 | DISC-1 — GitHub Discussions enabled | ✅ | v0.11.0 |
 | RFC-1 — RFC 001 (PCM Tap) Final | ✅ | v0.11.0 |
 | Chrome ↔ NimRTC media interop e2e (Case D, all four platforms) | ✅ | v0.11.0 |
-| TPAL-5 — SCTP usrsctp production backend (`UsrsctpSocketFactory` id=`"usrsctp"`) | ⏸️ **Deferred to v1.x** | The class is `@deprecated` and still compiles for opt-in callers; `sctp::register_default_plugins()` no longer auto-registers id="usrsctp". Forward direction: WebTransport over QUIC. See `docs/plan/v0.11-plan.md` §2.2 / §10. |
+| TPAL-5 — SCTP usrsctp production backend (`UsrsctpSocketFactory` id=`"usrsctp"`) | ❌ **Closed — removed** | The `usrsctp` backend and its vendored tree were **deleted** in v1.2.0 (plan E7); the class no longer exists. `"stub"` is now the only registered SCTP id, and the production data plane is WebTransport over QUIC. See `docs/plan/v1.2-next-plan.md` §3 Track E (E7). |
 | ADR-014 — WebTransport / QUIC vendor decision (msquic chosen) | ✅ | v0.14.0 |
-| DC-1 (WebTransport / msquic data plane) — msquic integration, `WebTransportMsQuicSession`, `WebTransportDataChannel`, `test_web_transport_msquic` 12/12, `test_web_transport_data_channel` 17/17, `test_datachannel_engine` 5/5, `test_sctp_usrsctp` 4/4 | ✅ | v0.14.0-beta.1 |
+| DC-1 (WebTransport / msquic data plane) — msquic integration, `WebTransportMsQuicSession`, `WebTransportDataChannel`, `test_web_transport_msquic` 12/12, `test_web_transport_data_channel` 17/17, `test_datachannel_engine` 5/5 | ✅ | v0.14.0-beta.1 |
 | DC-1 — Chrome e2e Case E (data exchange via the WebTransport JS API, not `createDataChannel()`) | ✅ **PASS E1–E6** | Chrome ↔ NimRTC datagram + bidi-stream echo (via `new WebTransport(url)`) PASS via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver`. Landed in v0.15.0, frozen in v1.0.0. |
 | DC-2 — transport-layer (L1) strict-priority send scheduling within the `Scheduler` (RTP × DC ordering) | ✅ (intra-scheduler ordering only — see `sched.hpp` § Scope note; not a wire-level cross-connection guarantee under the default `web_transport` backend) | `src/modules/sched/tests/test_sched_priority_dc.cpp` 17/17; landed in v1.0.0. |
 | SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ❌ **Closed — NO** | Closed 2026-10-19 (BDFL: SFU is not a project core goal); off the critical path. See `docs/plan/v1.0-plan.md` §7 + §12.5. |
@@ -794,7 +794,7 @@ nimrtc/
 │   ├── log/                   # Logger implementation
 │   ├── engine/                # NimRTCEngine façade (top-level entry)
 │   ├── dtls/                  # DTLS seam — wolfSSL + GMSSL backends
-│   ├── sctp/                  # SCTP seam — stub + usrsctp
+│   ├── sctp/                  # SCTP seam — stub only (usrsctp removed in v1.2.0)
 │   ├── transport/             # Transport stacks + strategies (webrtc-classic, raw-udp-arq, sfu-relay)
 │   ├── raw_udp/              # Raw UDP transport
 │   ├── web_transport/         # WebTransport / QUIC session (msquic)
@@ -844,7 +844,9 @@ Pinned in [`src/third_party/vendor.json`](src/third_party/vendor.json) (SHA-veri
 | `portaudio` | master | `src/third_party/portaudio/src` | ✅ yes (MIT; the audio-device backend) |
 | `libsamplerate` | master (0.2.2-20) | `src/third_party/libsamplerate/src` | ✅ yes (BSD-2-Clause; the sample-rate converter) |
 
-> `usrsctp` is also vendored under `src/third_party/usrsctp` for the SCTP seam.
+> `usrsctp` was vendored under `src/third_party/usrsctp` until v1.2.0, when the
+> backend and its tree were deleted (plan E7). The SCTP seam now ships the
+> `"stub"` factory only.
 >
 > `openh264` and `dav1d` are **opt-in** (`NIMRTC_PLUGINS_OPENH264` / `NIMRTC_PLUGINS_DAV1D`,
 > both default **OFF**); `libyuv`, `portaudio` and `libsamplerate` default **ON**.

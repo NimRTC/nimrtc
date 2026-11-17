@@ -88,8 +88,8 @@ set(NIMRTC_VENDOR_LIBS
     # Remote-desktop plan B11 — the optional software AV1 / VP9 encoders.
     nimrtc_vendor_svt_av1
     nimrtc_vendor_libvpx
-    # P1+
-    # nimrtc_vendor_usrsctp
+    # v1.2.0 (plan E7): `nimrtc_vendor_usrsctp` was removed here — the
+    # usrsctp vendor tree and the usrsctp backend were deleted together.
 )
 
 # Convenience aliases (nimrtc::vendor::<name>) — created by src/third_party/CMakeLists.txt
@@ -343,8 +343,8 @@ function(nimrtc_link_gmssl target)
         NIMRTC_HAS_DTLS_GMSSL=1)
 endfunction()
 
-# Future:
-# function(nimrtc_link_usrsctp target) ...
+# v1.2.0 (plan E7): the planned `nimrtc_link_usrsctp()` helper is gone with
+# the usrsctp vendor tree.
 function(nimrtc_link_webrtc_apm target)
     target_link_libraries(${target} PRIVATE nimrtc_WEBRTC_APM_acquired)
     target_compile_definitions(${target} PRIVATE NIMRTC_USE_WEBRTC_APM=1)

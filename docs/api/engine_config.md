@@ -391,7 +391,7 @@ changed the default of `datachannel_name` from `"sctp"` to `""`
 | Backend | Reaches a remote peer? | Notes |
 |---|---|---|
 | `"web_transport"` (default) | ✅ yes | WebTransport / QUIC on its own connection (separate from the ICE/DTLS media 5-tuple). This is the production data plane. |
-| `"sctp"` | ❌ **no** — **rejected** | **Retired in v1.2.0** (`docs/plan/datachannel-capability-plan.md` WP-A / DEC-4 = A1). The SCTP factory opens an in-process usrsctp socket bound to `127.0.0.1` (`src/sctp/src/usrsctp_socket.cpp`); the engine never wires SCTP-over-DTLS, so the backend could never reach a peer. Passing `"sctp"` now fails `open()` with `kEngineInternal` and an error message that says it is test-only. |
+| `"sctp"` | ❌ **no** — **rejected** | **Retired in v1.2.0** (`docs/plan/datachannel-capability-plan.md` WP-A / DEC-4 = A1). The SCTP factory opens an in-process loopback socket; the engine never wires SCTP-over-DTLS, so the backend could never reach a peer. Passing `"sctp"` now fails `open()` with `kEngineInternal` and an error message that says it is test-only. The usrsctp backend that backed it was deleted in v1.2.0 (plan E7), so `"stub"` is now the only registered SCTP id. |
 
 The SCTP factory stays registered in `core::PluginRegistry` as the
 in-tree **reference implementation** for the DCEP codec and the

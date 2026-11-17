@@ -13,7 +13,9 @@
  *     (`src/modules/rtp/src/rtp_plugin.cpp:255`).
  *   - `StackConfig::sctp_id` defaults to `"usrsctp"`, but the SCTP module
  *     deliberately registers only `"stub"`
- *     (`src/sctp/src/sctp_stub_factory.hpp:49`).
+ *     (`src/modules/sctp/src/sctp_stub_factory.hpp`).  (The default was
+ *     fixed to `"stub"`; the usrsctp backend itself was deleted in v1.2.0
+ *     — plan E7.)
  *
  * The mismatch was invisible because `WebRtcClassicStackFactory::create()`
  * returned a **half-built** stack instead of `nullptr` on a failed factory

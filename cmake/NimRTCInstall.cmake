@@ -20,10 +20,9 @@
 #     the bundle already ships their stack per RELEASING.md §4 — wolfSSL /
 #     libsrtp / libjuice / msquic install via their OWN upstream install()
 #     rules, so downstream finds those archives in <prefix>/lib/ already).
-#     EXCEPTION (§2b below): `opus` and `nimrtc_vendor_usrsctp` have no
-#     upstream install coverage (opus is added EXCLUDE_FROM_ALL; usrsctp
-#     is compiled directly by NimRTC), so they are installed here —
-#     otherwise the downstream final link misses opus_*/usrsctp symbols.
+#     EXCEPTION (§2b below): `opus` has no upstream install coverage
+#     (it is added EXCLUDE_FROM_ALL), so it is installed here —
+#     otherwise the downstream final link misses the opus_* symbols.
 #   - No install(EXPORT ...) set: the hand-written NimRTCConfig.cmake.in
 #     (find_library based) is the consumer contract, not a generated
 #     export file.
@@ -152,12 +151,14 @@ unset(_short)
 
 # --- 2b. Vendored STATIC libs without upstream install coverage --------------
 # `opus` (upstream libopus added EXCLUDE_FROM_ALL, so its own install()
-# rules never run) and `nimrtc_vendor_usrsctp` (compiled directly by
-# NimRTC, no upstream) would otherwise be missing from <prefix>/lib/,
-# and the downstream final link would miss opus_*/usrsctp symbols.
+# rules never run) would otherwise be missing from <prefix>/lib/, and the
+# downstream final link would miss the opus_* symbols.
 # wolfSSL / libsrtp / libjuice / msquic install via their OWN upstream
 # install() rules — do NOT duplicate them here.
-foreach(_vtgt opus nimrtc_vendor_usrsctp)
+#
+# v1.2.0 (plan E7): `nimrtc_vendor_usrsctp` used to be listed here too; the
+# usrsctp vendor tree was removed with the usrsctp backend.
+foreach(_vtgt opus)
   if(TARGET "${_vtgt}")
     get_target_property(_vtype "${_vtgt}" TYPE)
     if(_vtype STREQUAL "STATIC_LIBRARY")

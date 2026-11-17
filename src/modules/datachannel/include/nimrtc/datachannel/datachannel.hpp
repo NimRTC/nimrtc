@@ -6,7 +6,7 @@
  * In P1, no concrete implementation is provided — only the plugin interface
  * in `nimrtc/plugins/datachannel.hpp` is used by consumers.
  *
- * P2: replace this header with the usrsctp-backed SCTP implementation.
+ * P2: replace this header with the SCTP-backed implementation.
  *
  * @note P1 placeholder — interface defined in nimrtc/plugins/datachannel.hpp.
  */

@@ -23,8 +23,8 @@
 # std::flat_map stabilisation is still incomplete on MSVC (as of 19.43).
 set(NIMRTC_CXX_STANDARD 20 CACHE STRING "C++ standard for NimRTC")
 
-# We don't vendor anything that requires C, but usrsctp and libvpx have C
-# code — request C11 for hygiene.
+# We don't vendor anything that requires C, but libvpx has C code — request
+# C11 for hygiene.
 set(NIMRTC_C_STANDARD 11 CACHE STRING "C standard for vendored C libs")
 
 # -----------------------------------------------------------------------------
@@ -110,9 +110,9 @@ function(nimrtc_apply_options target)
 
     # Vendored third-party library targets (nimrtc_vendor_*) must receive
     # NO flags from NimRTCOptions. Their source trees ship with upstream
-    # warnings (flexible array members in usrsctp, old-style C casts in
-    # wolfSSL) that are not under our control. Skipping all options
-    # ensures they compile cleanly regardless of warning levels.
+    # warnings (old-style C casts in wolfSSL) that are not under our
+    # control. Skipping all options ensures they compile cleanly
+    # regardless of warning levels.
     string(TOLOWER "${target}" _target_lower)
     if(_target_lower MATCHES "^nimrtc_vendor_")
         return()
@@ -269,13 +269,10 @@ function(nimrtc_apply_options target)
 
         # LENIENT mode: relax warnings that are endemic to test harnesses
         # but never appear in production src/ code. See header comment.
-        # -Wno-pedantic is required because NimRTC's SCTP seam includes
-        # upstream usrsctp.h (a C99 header that uses flexible array
-        # members like `char sre_data[]`); GCC treats these as errors
-        # under -Wpedantic when compiled as C++. The usrsctp vendor
-        # target itself compiles the .c files as C, but any .cpp file
-        # that #includes <usrsctp.h> needs -Wno-pedantic to avoid the
-        # "ISO C++ forbids flexible array member" fatal.
+        # -Wno-pedantic is kept as a blanket relaxation for the test
+        # harnesses: vendored C headers that leak into a C++ TU (e.g. the
+        # netinet-style headers that use flexible array members) are errors
+        # under -Wpedantic when compiled as C++.
         if(NIMRTC_OPT_LENIENT)
             target_compile_options(${target} PRIVATE
                 -Wno-pedantic
@@ -287,8 +284,8 @@ function(nimrtc_apply_options target)
         # Treat warnings as errors on production targets (non-vendor).
         # wolfSSL is handled via WARNINGS_AS_ERRORS=OFF before add_subdirectory
         # in src/third_party/wolfssl/CMakeLists.txt so upstream warnings in
-        # wolfSSL headers don't affect nimrtc_dtls.  usrsctp vendor target
-        # is skipped entirely via the vendor_ return() guard above.
+        # wolfSSL headers don't affect nimrtc_dtls.  Vendored targets
+        # are skipped entirely via the vendor_ return() guard above.
         if(MSVC)
             target_compile_options(${target} PRIVATE /WX)
         else()

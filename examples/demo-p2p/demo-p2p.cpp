@@ -471,7 +471,7 @@ struct ProxyState {
     //
     // NB: SCTP-over-DTLS physical wiring is deferred to the v0.11.x
     // engine-integration follow-up PR.  For v0.11.0, `IDataChannel::send()`
-    // queues the payload into usrsctp's internal buffer but no
+    // queues the payload into the SCTP backend's internal buffer but no
     // DTLS-encrypted SCTP packet reaches the wire.  We log every
     // send/recv attempt so the e2e Chrome harness can pinpoint the
     // precise blocker, and v0.11.0 satisfies DC-1 Gate #1 via the §7
@@ -600,7 +600,7 @@ static void engine_tick_thread(ProxyState* st) {
                     // Re-configure with the correct reliability/ordering.
                     // open() was already called by the engine (returns kOk);
                     // calling it again with the per-channel cfg sets
-                    // usrsctp's per-stream reliability flags.
+                    // the backend's per-stream reliability flags.
                     raw->open(cfg);
                     // Transfer ownership into ProxyState::dcs map via direct
                     // member access (avoids DcChannel move/copy assignment which
@@ -634,7 +634,7 @@ static void engine_tick_thread(ProxyState* st) {
         // DoD Gate #1: once DTLS is connected AND each DataChannel is open,
         // attempt to send a 32-byte NimRTC→Chrome test payload per variant.
         // If the SCTP-over-DTLS wiring is incomplete (see TODO in
-        // engine.cpp), the send queues the message in usrsctp's buffer but
+        // engine.cpp), the send queues the message in the backend's buffer but
         // nothing traverses the wire — the Chrome harness will correctly
         // report recv=false for all variants.  This branch fires ONCE per
         // variant so we don't flood the log.

@@ -80,7 +80,7 @@ namespace plugins = nimrtc::plugins;
 // the user-supplied callbacks correctly.
 //
 // This stub does NOT actually transmit data — we don't drive a real
-// SCTP association (that's a separate test, test_sctp_usrsctp.cpp).
+// SCTP association.
 // The stub's open() succeeds immediately; send() / close() are no-ops;
 // set_on_message / set_on_state just stash the callback for later
 // assertion.
@@ -115,7 +115,8 @@ public:
 
     void send(plugins::BufferView /*data*/) override {
         // No-op: the test does not exercise send().  A real
-        // SctpDataChannel would queue the payload into usrsctp here.
+        // SctpDataChannel would queue the payload into the SCTP backend
+        // here.
     }
 
     void set_on_message(plugins::DataMessageCallback cb) noexcept override {

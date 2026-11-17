@@ -111,9 +111,9 @@ if(NIMRTC_MODULE_DTLS)
     add_subdirectory(dtls)
 endif()
 
-# The SCTP seam (Transport PAL Slice 5).  The usrsctp backend is built
-# into `nimrtc_sctp` but is NOT the default registration — the stub
-# factory (id="stub") is; see src/modules/sctp/CMakeLists.txt.
+# The SCTP seam (Transport PAL Slice 5).  The stub factory (id="stub") is
+# the only registered SCTP backend; the usrsctp backend was removed in
+# v1.2.0 (plan E7).  See src/modules/sctp/CMakeLists.txt.
 add_subdirectory(sctp)
 
 # The raw-UDP bypass seam (Transport PAL Slice 6).

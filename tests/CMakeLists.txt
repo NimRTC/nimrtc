@@ -3009,6 +3009,46 @@ if(NIMRTC_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
+# The CI auto-retry classifier.
+#
+# `.github/workflows/ci-retry.yml` re-runs the CI jobs that were starved
+# of a runner.  The safety of that workflow rests entirely on one
+# distinction: a job that never received a runner (no steps ran, no
+# runner assigned) is re-run, and a job that *ran* and failed is left
+# alone — because that failure belongs to the tree, and re-running it
+# would hide exactly the defect the CI run was for.
+#
+# `tools/ci_retry_runner.py --self-test` pins that classification: the
+# starved shape, the genuine-failure shape, the cancelled-but-scheduled
+# shape (a runner was assigned, so it was a superseded run rather than a
+# starved queue), and the unknown shape (an API response that omits the
+# `steps` field is not evidence of starvation).
+#
+# Registered as a ctest case for the same reason as the merge-gate
+# guard: a developer sees it next to the other gates, and `ctest` alone
+# is enough to catch the regression.  It is skipped (not failed) when no
+# Python interpreter is available -- a missing interpreter must not turn
+# into a red build on a machine that has no Python.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_ci_retry_runner
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/ci_retry_runner.py"
+                         --self-test)
+        set_tests_properties(test_ci_retry_runner PROPERTIES
+            TIMEOUT 60
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the CI auto-retry "
+            "classifier self-test (tools/ci_retry_runner.py).  CI runs it "
+            "as a dedicated step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # The engine-layering guard.
 #
 # `tools/check_engine_layering.py` enforces three things about

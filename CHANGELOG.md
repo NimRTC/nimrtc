@@ -9,6 +9,33 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **CI auto-retry for jobs that were starved of a runner.**  A
+  GitHub-hosted runner is not guaranteed: a job asking for a saturated
+  pool — the `macos-15` arm64 image is the chronic case in this
+  repository — can be starved until the platform gives up ("The job was
+  not acquired by Runner of type hosted even after multiple attempts"),
+  ending `cancelled` with **no steps** and **no runner**.  The run's
+  conclusion is then `failure` and the merge gate is red for a reason
+  that has nothing to do with the tree.  Measured on 2026-11-16: PRs
+  #65, #66 and #67 each needed a manual `gh run rerun` before the macOS
+  leg went green.
+
+  `.github/workflows/ci-retry.yml` now does that automatically, and the
+  safety argument is the interesting part: it re-runs **only** a job
+  that never received a runner (`steps == 0` **and** `runner_name == ""`).
+  A job that *ran* and failed is never re-run, because that failure
+  belongs to the tree and re-running it would hide exactly the defect
+  the CI run was for.  The two signatures are disjoint and were verified
+  against real runs of this repository (43938323684 → starved;
+  43877514623 → genuine).
+
+  The loop guard is the run's attempt counter: only attempt 1 is
+  retried, because a job-level re-run increments it (verified against
+  the API: run 43938323684 went 1 → 2 after a job-level re-run).  The
+  classifier lives in `tools/ci_retry_runner.py` with a `--self-test`
+  that pins every classification, and the self-test runs both in CI and
+  as a ctest case (`test_ci_retry_runner`).
+
 - **The remote-desktop session guard** (`src/modules/rd_session/`).  A
   locked Windows workstation breaks the screen capture in two different,
   both expensive ways: DXGI Desktop Duplication is refused outright

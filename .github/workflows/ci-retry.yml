@@ -1,0 +1,168 @@
+# =============================================================================
+# NimRTC CI auto-retry
+#
+# The problem this solves
+# -----------------------
+#
+# A GitHub-hosted runner is not guaranteed.  A job that asks for a
+# saturated pool -- the `macos-15` arm64 image is the chronic case in
+# this repository -- can sit in the queue until the platform gives up:
+#
+#     The job was not acquired by Runner of type hosted even after
+#     multiple attempts
+#
+# and end up `cancelled` with **no steps** and **no runner**.  The run's
+# conclusion is then `failure`, and the merge gate -- which requires
+# that check by name -- is red for a reason that has nothing to do with
+# the tree.
+#
+# Measured on 2026-11-16: PRs #65, #66 and #67 all needed a manual
+# `gh run rerun` before the macOS leg would go green.  The rerun is the
+# correct remedy, but doing it by hand makes CI unattended only for the
+# runs that happen to be watched.
+#
+# What it does NOT do
+# --------------------
+#
+# It does not re-run a failing build.  A job that *ran* and failed is
+# the tree's failure, and re-running it would hide exactly the defect
+# the CI run was for.  `tools/ci_retry_runner.py` classifies every job
+# before it touches one, and the two signatures are disjoint:
+#
+#     starved   steps == 0  AND  runner_name == ""   -> re-run
+#     genuine   the job ran and failed                -> left alone
+#
+# That distinction has been checked against real runs of this
+# repository:
+#
+#     run 43938323684  macos-clang / arm64   steps=0   runner=""   -> starved
+#     run 43877514623  macos-clang / arm64   steps=19  runner set -> genuine
+#     run 43864579652  linux-sanitizers / asan-ubsan  steps=11     -> genuine
+#
+# The loop guard
+# --------------
+#
+# A retry can itself be starved.  The script therefore only re-runs a
+# run's **first** attempt (`--max-attempt 1`): if the second attempt is
+# starved too, the platform is having a sustained outage and more
+# retries only burn runner minutes.  The run attempt counter is
+# reliable for this -- a job-level re-run increments it, which was
+# verified against the API (run 43938323684 went from attempt 1 to
+# attempt 2 after a job-level re-run).
+#
+# Because the re-run creates a new attempt, that attempt also fires
+# `workflow_run`.  The attempt counter is what makes that safe: the
+# second attempt is reported, not retried.
+#
+# Scope
+# -----
+#
+# `ci`, `ci-e2e` and `ci-fast` -- every workflow whose jobs can leave
+# the merge gate red.  `release` and `soak` are deliberately excluded:
+# a release run is a deliberate, manually-triggered act, and a retried
+# release run would be a second attempt at a publication.
+#
+# Permissions
+# -----------
+#
+# `actions: write` is required to call the re-run endpoint.  The
+# repository's default workflow permission is `read` (see
+# `GET /repos/:owner/:repo/actions/permissions/workflow`), so the grant
+# has to be explicit.
+# =============================================================================
+
+name: ci-retry
+
+on:
+  # Fires when a run of one of the watched workflows *completes*.  The
+  # payload carries the completed run's id and conclusion, which is
+  # what the script needs.
+  #
+  # NB: `workflow_run` only fires for workflows that exist on the
+  # default branch -- which is why this file has to be merged before it
+  # can act on anything.
+  workflow_run:
+    workflows: [ci, ci-e2e, ci-fast]
+    types: [completed]
+
+  # Manual escape hatch: re-run the retry logic against any run, on
+  # demand, without waiting for a `workflow_run` event.
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'The workflow run to inspect (e.g. 43938323684).'
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  # One retry per run at a time.  Two concurrent retries of the same run
+  # would race each other for the same runner slot, which is the very
+  # thing being worked around.  Different runs do not block each other.
+  group: ci-retry-${{ github.event.workflow_run.id || inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    name: ci-retry / starved jobs
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The retry logic lives on the default branch, and so does
+          # this workflow -- `workflow_run` always runs the workflow
+          # from the default branch.  Pinning the checkout to the
+          # default branch makes it explicit that the script is the
+          # merged one, not the one from the branch that happened to
+          # fail.
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Self-test the retry classifier
+        # The classifier is the whole safety argument of this workflow:
+        # it is what keeps a real failure from being re-run.  A guard
+        # that cannot fail is a guard that stopped guarding, so it is
+        # self-tested on every invocation.
+        run: python3 tools/ci_retry_runner.py --self-test
+
+      - name: Retry the starved jobs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `workflow_run.id` is the run that just completed.  The
+          # manual dispatch path may override it with a specific run.
+          TARGET_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TARGET_RUN_ID}" ]]; then
+            echo "::error::no run id to inspect"
+            exit 1
+          fi
+
+          echo "inspecting run ${TARGET_RUN_ID}"
+          python3 tools/ci_retry_runner.py \
+            --repo "${GITHUB_REPOSITORY}" \
+            --run-id "${TARGET_RUN_ID}" \
+            --max-attempt 1 \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Surface the verdict
+        # The summary is the record of what the workflow decided and
+        # why.  A retry that silently did nothing looks identical to a
+        # retry that worked, and only one of them is a red build.
+        if: always()
+        run: |
+          {
+            echo "### ci-retry"
+            echo ""
+            echo "Run \`${TARGET_RUN_ID:-n/a}\` inspected."
+            echo ""
+            echo "Only jobs that never received a runner are re-run. A job"
+            echo "that ran and failed is left alone, because that failure"
+            echo "belongs to the tree."
+          } >> "${GITHUB_STEP_SUMMARY}"
+        env:
+          TARGET_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}

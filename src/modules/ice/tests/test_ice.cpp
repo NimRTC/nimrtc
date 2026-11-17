@@ -439,8 +439,55 @@ TEST(IceTransportLoopback, TwoAgentsConnectAndExchangeData) {
     EXPECT_TRUE(b.selected_local().has_value());
     EXPECT_TRUE(b.selected_remote().has_value());
 
+    // ---- The seam's view of the nominated pair (v1.2.0 S5) ----------------
+    //
+    // `selected_pair()` is the *seam's* projection of the same pair the
+    // concrete accessors above report.  The two views must not disagree:
+    // the projection is assembled from one `juice_get_selected_candidates()`
+    // call, so it cannot straddle an ICE restart.
+    const auto pair_a = a.selected_pair();
+    ASSERT_TRUE(pair_a.has_value())
+        << "the seam must report the nominated pair once the checks settle";
+    EXPECT_EQ(pair_a->local.address,  a.selected_local()->host);
+    EXPECT_EQ(pair_a->local.port,     a.selected_local()->port);
+    EXPECT_EQ(pair_a->remote.address, a.selected_remote()->host);
+    EXPECT_EQ(pair_a->remote.port,    a.selected_remote()->port);
+
+    // The candidate *types* are published in RFC 8445 §5.1.2.1's spelling,
+    // and the protocol is lower-cased so a host can compare it without a
+    // case-insensitive compare.
+    EXPECT_EQ(pair_a->local.type,  "host");
+    EXPECT_EQ(pair_a->remote.type, "host");
+    EXPECT_EQ(pair_a->local.protocol,  "udp");
+    EXPECT_EQ(pair_a->remote.protocol, "udp");
+
+    // The two agents see *each other* as the remote end.
+    const auto pair_b = b.selected_pair();
+    ASSERT_TRUE(pair_b.has_value());
+    EXPECT_EQ(pair_a->remote.address, pair_b->local.address);
+    EXPECT_EQ(pair_b->remote.address, pair_a->local.address);
+
     a.close();
     b.close();
+}
+
+// -----------------------------------------------------------------------------
+// The seam's pair is empty before the checks nominate one
+// -----------------------------------------------------------------------------
+//
+// The pair's *absence* is a fact, not a missing field: it says "the
+// agent has not settled on a path yet".  The seam reports that as an
+// empty optional rather than as a half-filled pair.
+
+TEST(IceTransport, TheSeamPairIsEmptyUntilConnected) {
+    IceConfig cfg;
+    cfg.bind_address = "127.0.0.1";
+    IceTransport t{cfg};
+    ASSERT_EQ(t.open(), 0u);
+
+    EXPECT_FALSE(t.selected_pair().has_value());
+
+    t.close();
 }
 
 // -----------------------------------------------------------------------------

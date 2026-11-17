@@ -3422,6 +3422,16 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.qoe = impl_->qoe.snapshot();
     }
 
+    // ---- The transport plane (plan Track S / S5) -------------------------
+    //
+    // The ICE / DTLS / SRTP path the session runs over.  The projection
+    // reads each plane from its owner -- the ICE transport through the
+    // plugin seam, the DTLS session through the weak handle, the SRTP
+    // context through its own counters, and the round-trip time from the
+    // feedback collector -- so every number here is the number its owner
+    // reports, not a second measurement of it.
+    append_transport_stats(out.transport);
+
     // ---- The data-channel plane (plan Track S / S6) ---------------------
     //
     // One entry per channel the host opened.  The **inbound** half is

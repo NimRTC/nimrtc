@@ -9,6 +9,49 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The transport plane has statistics (v1.2 plan item `S5`).**
+  `NimRTCEngine::Stats` carries a new `TransportStats transport` -- the
+  **path the media travels over**: ICE (RFC 8445) -> DTLS (RFC 6347) ->
+  SRTP (RFC 3711).
+  Before this there was almost nothing: `Stats::srtp_drops` counted the
+  packets the outbound path could not encrypt, `dtls_state()` exposed the
+  DTLS state, and ICE -- the plane that decides *where the packets go* --
+  had **nothing at all**: no candidate pair, no round-trip time, no restart
+  count.  A session that "is not working" is almost never broken in DTLS
+  or SRTP: it is a path problem, and the statistics surface could not say
+  which path the traffic was taking.
+  The entry carries three planes:
+  - **ICE** -- `ice_state` (the same vocabulary as `ice_state_string()`),
+    `ice_restart_count`, `selected_pair` (an `IceCandidatePairInfo` with
+    *both* ends' address / port / protocol / candidate type), the derived
+    `relayed` bit, and `rtt_ms` + `has_rtt`.
+  - **DTLS** -- `dtls_state` (lower-cased and hyphen-separated),
+    `dtls_role`, and `dtls_fingerprint` in the RFC 8122 UPPER-hex form.
+  - **SRTP** -- `srtp_installed` (the authority on "is this session
+    encrypted"), the protected / unprotected RTP + RTCP counters,
+    `srtp_auth_failures` and `srtp_drops`.
+
+  Two design decisions are worth stating outright.
+  **No new probes.**  The RTT is the one the engine already measures from
+  the peer's Receiver Reports (the LSR / DLSR pair against our own Sender
+  Report, RFC 3550 6.4.1) -- the *same* figure the bandwidth estimator
+  consumes.  The statistics surface republishes it; it does not measure
+  it a second time, because two measurements of one quantity would
+  eventually disagree.  `has_rtt` says whether the number was *measured*
+  at all, which is what distinguishes "the RTT is 0 because the path is
+  fast" from "the RTT is 0 because nothing was ever measured".
+  **No copies of another owner's state.**  The ICE state and the candidate
+  pair are owned by the ICE agent (read through the new additive
+  `plugins::IICETransport::selected_pair()` seam, defaulted so a
+  third-party transport keeps compiling), the DTLS state by the DTLS
+  session, the SRTP counters by the SRTP context, and the round-trip time
+  by the network-feedback collector.  The projection lives in its own
+  translation unit (`src/engine/src/engine_transport_stats.cpp`) and
+  holds **no state**, so the surface cannot drift from the thing it
+  describes.
+  The surface is documented in `docs/api/engine_api.md` §13.5 and pinned by
+  `tests/test_engine_transport_stats.cpp` (12 cases).
+
 - **The data-channel plane has statistics (v1.2 plan item `S6`).**
   `NimRTCEngine::Stats` carries a new `std::vector<DataChannelStats>
   data_channels` -- **one entry per channel the host opened** with

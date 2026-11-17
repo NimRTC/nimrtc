@@ -252,6 +252,19 @@ private:
     std::uint64_t events_injected_ = 0;
     std::uint64_t events_denied_ = 0;
     std::uint64_t events_refused_ = 0;
+
+    // The most recent frame binding seen on an inbound event
+    // (v2-input-binder): the `ref_frame` id the event named, plus the
+    // capture instant and the frame age the device resolved it to.  The
+    // has_* flags are the honest report — an id the frame table no
+    // longer knows is shown as unknown, never guessed (spec risks 1
+    // and 2).
+    bool          has_binding_ref_frame_   = false;
+    std::uint64_t binding_ref_frame_id_    = 0;
+    bool          has_binding_capture_ts_  = false;
+    std::int64_t  binding_capture_ts_us_   = 0;
+    bool          has_binding_age_us_      = false;
+    std::int64_t  binding_age_us_          = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -506,6 +519,22 @@ void DeviceSession::handle_control_message(
 }
 
 void DeviceSession::apply_event(const rdi::InputEvent& event) {
+    // The frame binding (v2-input-binder): an event that names a frame
+    // gets its id resolved to the capture instant and the frame age —
+    // the "the click happened on the frame the operator was looking at"
+    // check (plan G5).  A lookup that misses is reported as unknown,
+    // never guessed (spec risks 1 and 2).
+    if (event.ref_frame.has_value()) {
+        has_binding_ref_frame_  = true;
+        binding_ref_frame_id_   = *event.ref_frame;
+        const auto capture_ts   = engine_->ref_frame_to_capture_ts(*event.ref_frame);
+        const auto age_us       = engine_->data_message_frame_age_us(*event.ref_frame);
+        has_binding_capture_ts_ = capture_ts.has_value();
+        if (capture_ts.has_value()) binding_capture_ts_us_ = *capture_ts;
+        has_binding_age_us_     = age_us.has_value();
+        if (age_us.has_value()) binding_age_us_ = *age_us;
+    }
+
     // The watchdog sees *every* event: any activity counts as liveness,
     // and a release of the dead-man button enters the safe state.
     watchdog_->observe(event, now_us());
@@ -615,16 +644,38 @@ int DeviceSession::run() {
             last_report_us = t;
             const auto stats = engine_->stats();
             const auto control = engine_->control_channel_stats();
+            // The frame binding (v2-input-binder): the `ref_frame` id the
+            // most recent input event named, and the capture instant /
+            // frame age the device resolved it to (spec req 4).  "none"
+            // and "n/a" are the honest reports for a frame the table does
+            // not know — the device never guesses a capture instant
+            // (spec risks 1 and 2).
+            std::string ref_frame_repr = "none";
+            if (has_binding_ref_frame_) {
+                ref_frame_repr = std::to_string(binding_ref_frame_id_);
+            }
+            std::string capture_ts_repr = "n/a";
+            if (has_binding_capture_ts_) {
+                capture_ts_repr = std::to_string(binding_capture_ts_us_);
+            }
+            std::string age_us_repr = "n/a";
+            if (has_binding_age_us_) {
+                age_us_repr = std::to_string(binding_age_us_);
+            }
             std::fprintf(stderr,
                          "[rd_device] capture=%llu pumped=%llu ctrl_in=%llu "
-                         "ctrl_sent=%llu injected=%llu denied=%llu refused=%llu\n",
+                         "ctrl_sent=%llu injected=%llu denied=%llu refused=%llu "
+                         "ref_frame=%s capture_ts_us=%s age_us=%s\n",
                          static_cast<unsigned long long>(stats.video_capture_device_frames_captured),
                          static_cast<unsigned long long>(stats.video_capture_pumped_frames),
                          static_cast<unsigned long long>(control.messages_received),
                          static_cast<unsigned long long>(control.messages_sent),
                          static_cast<unsigned long long>(events_injected_),
                          static_cast<unsigned long long>(events_denied_),
-                         static_cast<unsigned long long>(events_refused_));
+                         static_cast<unsigned long long>(events_refused_),
+                         ref_frame_repr.c_str(),
+                         capture_ts_repr.c_str(),
+                         age_us_repr.c_str());
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(5));

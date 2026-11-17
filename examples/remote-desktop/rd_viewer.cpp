@@ -37,7 +37,7 @@
  *   rd_viewer --codec av1           # pick the codec
  *   rd_viewer --duration 120        # stop after two minutes
  *   rd_viewer --no-input            # watch only; do not send any input
- *   rd_viewer --ref-frame           # bind the events to the displayed frame
+ *   rd_viewer --bind-ref-frame      # bind the events to the displayed frame
  * ```
  *
  * ## Threading
@@ -122,7 +122,7 @@ void print_usage(const char* prog) {
         "  --backend <class>     Codec backend: auto | hardware | software\n"
         "  --duration <sec>      Stop after N seconds (0 = forever)\n"
         "  --display-hz <hz>     The display rate the pointer is coalesced to\n"
-        "  --ref-frame           Bind the input events to the displayed frame\n"
+        "  --bind-ref-frame      Bind the input events to the displayed frame\n"
         "  --no-qoe              Do not collect the QoE metrics\n"
         "  --stun <host[:port]>  STUN server (default: stun.l.google.com:19302)\n"
         "  --no-stun             Disable STUN gathering\n"
@@ -596,7 +596,7 @@ int main(int argc, char** argv) {
             opts.duration_sec = std::atoi(argv[++i]);
         } else if (arg == "--display-hz" && has_next) {
             opts.display_hz = static_cast<std::uint32_t>(std::atoi(argv[++i]));
-        } else if (arg == "--ref-frame") {
+        } else if (arg == "--bind-ref-frame") {
             opts.bind_ref_frame = true;
         } else if (arg == "--no-qoe") {
             opts.qoe = false;

@@ -204,8 +204,23 @@ struct Bwe::Impl {
         // REMB during an active loss event is suspect (the receiver's
         // estimate is also stale), so we ignore REMB while a decrease is
         // pending and let the loss-event path own the rate update.
+        //
+        // The `loss_event_pending_` latch is **not** enough on its own.
+        // It is edge-triggered: it is set when the loss rate crosses the
+        // threshold from below, and cleared as soon as the multiplicative
+        // decrease has been applied.  So the *second* still-lossy report
+        // arrives with the latch already down, and the REMB override
+        // would adopt the receiver's (stale, higher) estimate and walk
+        // the sender straight back into the wall it had just been
+        // throttled away from.  That is the same defect the additive
+        // increase had, in the same place in the loop -- a raise gated
+        // on a transient state rather than on the state of the link.
+        //
+        // The guard is therefore the link itself: a REMB is only adopted
+        // on a report that said there was **no** loss.  While the link is
+        // still lossy, the multiplicative decrease owns the rate.
         if (feedback.remb_bps.has_value() && !loss_event_pending_ &&
-            !delay_overuse) {
+            !delay_overuse && !is_loss_now) {
             std::uint32_t remb = *feedback.remb_bps;
             // Apply trust factor and clamp
             remb = static_cast<std::uint32_t>(remb * kRembTrustFactor);

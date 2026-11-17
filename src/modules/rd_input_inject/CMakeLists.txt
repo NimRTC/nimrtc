@@ -41,6 +41,12 @@ set(NIMRTC_RD_INPUT_INJECT_SOURCES
     # too, where the macOS backend itself is never compiled.  A table
     # that can only be checked on an Apple machine rots silently.
     src/macos_keycodes.cpp
+    # The Linux input-layer codes and the X11 keysyms.  Same reasoning,
+    # and for the same reason: the Linux backend has two injection
+    # vocabularies (the kernel's `KEY_*` and the X server's `XK_*`),
+    # and mixing them up does not fail loudly -- the X server accepts
+    # a key it does not recognise and injects *nothing*.
+    src/linux_input_codes.cpp
     )
 
 # ---------------------------------------------------------------------------

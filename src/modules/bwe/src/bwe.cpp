@@ -264,6 +264,26 @@ struct Bwe::Impl {
             }
         } else {
             // ---- No loss event: cooldown check + additive increase ---------
+            //
+            // The additive increase is a **probe**, and a probe is only
+            // meaningful on a link that is actually clean.  When the
+            // link is *still* lossy — the loss rate stays above the
+            // threshold — the estimate must hold its value: the
+            // multiplicative decrease already fired for this congestion
+            // event, and raising the target again would walk the sender
+            // back into the wall it just hit.
+            //
+            // Without this guard the AIMD front-end behaved like a
+            // single-step correction: one halving, then a slow climb
+            // back to (and past) the original rate while a fifth of the
+            // packets were still being dropped.  The Goog-CC front-end
+            // already carried this guard (`!is_lossy`); the two
+            // estimators therefore disagreed under exactly the condition
+            // that matters.
+            //
+            // The **cooldown** is not the guard: it only bounds how long
+            // the decrease state lasts, and it expires on a clock, not
+            // on the state of the link.
             if (state_ == State::kDecrease) {
                 // Was decreasing, check if cooldown passed.
                 constexpr core::Milliseconds kDecreaseCooldown{500};
@@ -274,7 +294,7 @@ struct Bwe::Impl {
                 }
             }
 
-            if (state_ == State::kIncrease) {
+            if (state_ == State::kIncrease && !is_loss_now) {
                 // Additive increase: add increase_bps proportional to elapsed time.
                 if (last_change_time_.has_value()) {
                     const auto elapsed = feedback.timestamp - *last_change_time_;

@@ -333,10 +333,6 @@ void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame
     impl_->audio_state.audio_streams.def.samples_received += samples_per_ch;
     if (frame.concealed)     ++impl_->audio_state.audio_streams.def.frames_concealed;
     if (frame.fec_recovered) ++impl_->audio_state.audio_streams.def.frames_fec_recovered;
-<<<<<<< HEAD
-=======
-
->>>>>>> ffdca51d (refactor(engine): the per-stream audio state belongs to the audio plane (plan S4))
     // AEC reference path.
     //
     // The remote audio we are about to hand to the host for loudspeaker

@@ -242,6 +242,23 @@ estimator having raised anything. The artifact's `reports` array
 carries the raw evidence, and a failure itemises the offending reports
 rather than only reporting a count.
 
+### The busy host
+
+The sender is a *process on the host*, and a busy host cannot fill the
+link: it delivers less than the controller asked for, so the link never
+queues, nothing is dropped, and the two invariants that only mean
+something under real saturation — *delivered stayed within the
+capacity* and *offered load tracked the capacity* — have no answer.
+
+That case is detected by comparing the delivered rate against the
+controller's own target, and it is handled as a **skip**, not as a
+failure: a measurement that did not happen is not a result, and failing
+it would report a rate-control bug that is really a busy CI runner. The
+wrapper re-runs the scenario up to `MAX_SCENARIO_ATTEMPTS` times, and
+after that the scenario is a **failure** — a gate that cannot measure is
+not a gate. The verdict's `skips` array lists every property that went
+unchecked, so a green run cannot hide one.
+
 ## Release evidence (the seven-day soak)
 
 The v1.1 release gate needs one evidence record per platform per day.

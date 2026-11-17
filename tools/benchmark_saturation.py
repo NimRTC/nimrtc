@@ -158,10 +158,20 @@ SCENARIOS = (
 # ---------------------------------------------------------------------------
 
 #: How much the delivered rate may exceed the link's capacity, as a
-#: multiple.  The link's token bucket holds up to one second of credit,
-#: so a short window can legitimately deliver more than the nominal
-#: capacity; the slack covers that and nothing more.
-DELIVERED_OVER_CAPACITY_TOLERANCE = 1.30
+#: multiple.
+#:
+#: The link's token bucket holds up to **one second** of credit, so an
+#: idle moment lets the next second of traffic through at up to twice
+#: the nominal capacity.  A measurement window that straddles such a
+#: moment therefore sees up to 2x the capacity, and the bound has to
+#: allow it — a bound tighter than the link's own burst allowance would
+#: fail on the *physics* of the model rather than on anything the
+#: rate-control loop did.
+#:
+#: The slack below sits between the burst allowance (2.0) and the
+#: nominal capacity (1.0): the delivered rate must be within the
+#: capacity plus the burst, and no further.
+DELIVERED_OVER_CAPACITY_TOLERANCE = 2.00
 
 #: The loss rate at which the link counts as congested.  This is the
 #: estimator's own threshold (RFC 8698 §5.1's 2%), so a report above it
@@ -194,6 +204,30 @@ MAX_RAISES_ON_A_CONGESTED_REPORT = 0
 #: adapting; the bound is loose enough for the legitimate two-step
 #: descent and ascent the scenarios produce.
 MAX_LEVEL_CHANGES = 12
+
+#: How much of the controller's own target the sender must actually
+#: deliver during the saturation phase.
+#:
+#: This is the **host-health** signal, and it is what distinguishes a
+#: real measurement from a measurement that never happened.  The ladder
+#: converges the target onto a rung the link can carry, so the target is
+#: at or below the link's capacity; a delivered rate far *below* that
+#: target is not the link dropping packets, it is the sender failing to
+#: put the bytes on the wire — which happens when the CPU is busy.
+#:
+#: Without this distinction a busy CI runner produces a run that looks
+#: like a rate-control failure: the sender never fills the link, the
+#: link never queues, nothing is dropped, and the invariant that
+#: compares the offered load against the capacity fails for a reason
+#: that has nothing to do with the code under test.
+SENDER_TARGET_FLOOR = 0.70
+
+#: How many times a scenario may be re-run when the host was too busy to
+#: saturate the link.  A scenario that cannot be measured after this
+#: many attempts is a **failure**, not a pass: the benchmark is a gate,
+#: and a gate that silently degrades into a no-op is worse than no gate
+#: at all.
+MAX_SCENARIO_ATTEMPTS = 3
 
 
 def _load_module(path: Path, name: str):
@@ -387,10 +421,43 @@ def check_invariants(doc: dict) -> list[dict]:
             "detail": detail,
         })
 
+    def skip(name: str, measured, limit, detail: str) -> None:
+        """An invariant that could not be evaluated.
+
+        A skip is not a pass and not a failure: it says the *measurement*
+        did not happen (the host was too busy to fill the link), so the
+        property in question is simply unknown for this run.  It is
+        reported separately so that a green verdict cannot hide the fact
+        that a property went unchecked.
+        """
+        checks.append({
+            "invariant": name,
+            "ok": True,
+            "skipped": True,
+            "measured": measured,
+            "limit": limit,
+            "detail": detail,
+        })
+
     # 1. The saturation was real: packets were dropped.
     dropped = int(summary.get("packets_dropped", 0))
     add("saturation_was_real", dropped > 0, dropped, "> 0",
         "the link dropped packets, so it was genuinely at capacity")
+
+    # 1b. The host was healthy enough for the load-dependent invariants
+    #     to mean anything.  The sender is a process on the host: when
+    #     the CPU is busy it cannot put the bytes on the wire, so the
+    #     link never fills, the link never queues, nothing is dropped,
+    #     and every question of the form "what load did the link have to
+    #     drop?" has no answer.  That is a measurement that did not
+    #     happen, not a failure of the code under test — so it is
+    #     reported as a skip here, and the wrapper retries the scenario.
+    target_after = float(summary.get("target_after_saturation_bps", 0))
+    if target_after > 0:
+        delivered_ratio = saturated_delivered / target_after
+    else:
+        delivered_ratio = 0.0
+    host_was_healthy = delivered_ratio >= SENDER_TARGET_FLOOR
 
     # 2. The stream survived: the receiver kept getting data.
     add("stream_survived", saturated_delivered > 0,
@@ -413,20 +480,36 @@ def check_invariants(doc: dict) -> list[dict]:
 
     # 5. The delivered rate did not exceed the link's capacity.
     delivered_limit = capacity * DELIVERED_OVER_CAPACITY_TOLERANCE
-    add("delivered_stayed_within_capacity",
-        saturated_delivered <= delivered_limit,
-        int(saturated_delivered), f"<= {int(delivered_limit)}",
-        "the ladder converged onto the link's capacity instead of "
-        "overshooting it")
+    if host_was_healthy:
+        add("delivered_stayed_within_capacity",
+            saturated_delivered <= delivered_limit,
+            int(saturated_delivered), f"<= {int(delivered_limit)}",
+            "the ladder converged onto the link's capacity instead of "
+            "overshooting it")
+    else:
+        skip("delivered_stayed_within_capacity",
+             int(saturated_delivered), f"<= {int(delivered_limit)}",
+             "skipped: the sender delivered only "
+             f"{delivered_ratio:.0%} of the target, so the host was too "
+             "busy to saturate the link and the delivered rate was never "
+             "measured against a full link")
 
     # 6. The offered load stayed near the capacity.  A converged ladder
     #    offers roughly what the link can carry; a wildly different
     #    number means the ladder and the link disagree.
     if capacity > 0:
         offer_ratio = saturated_sent / capacity
-        add("offered_load_tracked_the_capacity", 0.5 <= offer_ratio <= 2.5,
-            round(offer_ratio, 3), "0.5 .. 2.5 x capacity",
-            "the offered load converged onto the link's capacity")
+        if host_was_healthy:
+            add("offered_load_tracked_the_capacity", 0.5 <= offer_ratio <= 2.5,
+                round(offer_ratio, 3), "0.5 .. 2.5 x capacity",
+                "the offered load converged onto the link's capacity")
+        else:
+            skip("offered_load_tracked_the_capacity",
+                 round(offer_ratio, 3), "0.5 .. 2.5 x capacity",
+                 "skipped: the sender delivered only "
+                 f"{delivered_ratio:.0%} of the target, so the host was too "
+                 "busy to saturate the link and the offered load was never "
+                 "measured against a full link")
 
     # 7. The ladder recovered and the stream got faster.
     rises_up = int(summary.get("level_rises", 0))
@@ -447,7 +530,18 @@ def check_invariants(doc: dict) -> list[dict]:
 
 
 def all_invariants_hold(checks: list[dict]) -> bool:
+    """True when no invariant failed.
+
+    A *skipped* invariant is not a failure: it means the measurement did
+    not happen.  Skips are counted separately by `skipped_invariants()`
+    so that a green verdict cannot quietly hide an unchecked property.
+    """
     return all(c["ok"] for c in checks)
+
+
+def skipped_invariants(checks: list[dict]) -> list[str]:
+    """The names of the invariants that could not be evaluated."""
+    return [c["invariant"] for c in checks if c.get("skipped")]
 
 
 # ---------------------------------------------------------------------------
@@ -497,13 +591,18 @@ def print_summary(doc: dict) -> None:
         checks = scenario.get("invariants", [])
         print("  invariants")
         for c in checks:
-            mark = "ok  " if c["ok"] else "FAIL"
+            if c.get("skipped"):
+                mark = "skip"
+            else:
+                mark = "ok  " if c["ok"] else "FAIL"
             print(f"    [{mark}] {c['invariant']:<32} "
                   f"measured {c['measured']}, limit {c['limit']}")
         print()
 
     verdict = doc.get("verdict", {})
     print(f"verdict: {verdict.get('all_invariants_hold')}")
+    for s in verdict.get("skips", []):
+        print(f"  SKIPPED {s['scenario']}.{s['invariant']}: {s['detail']}")
     if not verdict.get("all_invariants_hold", False):
         for f in verdict.get("failures", []):
             print(f"  FAILED {f['scenario']}.{f['invariant']}: "
@@ -568,17 +667,52 @@ def main() -> int:
 
     scenarios: list[dict] = []
     failures: list[dict] = []
+    skips: list[dict] = []
 
     for spec in SCENARIOS:
-        raw = run_benchmark(binary, args, spec["min_height"])
-        checks = check_invariants(raw)
+        # The sender is a process on the host, and a busy host cannot
+        # fill the link.  When that happens the load-dependent
+        # invariants are skipped rather than failed, and the scenario is
+        # re-run: a measurement that did not happen is not a result.
+        # After MAX_SCENARIO_ATTEMPTS the scenario is a **failure** —
+        # a gate that quietly degrades into a no-op is worse than no
+        # gate at all.
+        attempt = 0
+        while True:
+            attempt += 1
+            raw = run_benchmark(binary, args, spec["min_height"])
+            checks = check_invariants(raw)
+            if not skipped_invariants(checks) or attempt >= MAX_SCENARIO_ATTEMPTS:
+                break
+            print(f"scenario '{spec['name']}': the host was too busy to "
+                  f"saturate the link (attempt {attempt}/"
+                  f"{MAX_SCENARIO_ATTEMPTS}); re-running")
+
         for c in checks:
             if not c["ok"]:
                 failures.append({"scenario": spec["name"], **c})
+            elif c.get("skipped"):
+                if attempt >= MAX_SCENARIO_ATTEMPTS:
+                    # The scenario could not be measured even after the
+                    # retries: the host was too busy every time.  That
+                    # is a failure of the *gate*, not a pass with a
+                    # footnote — a gate that cannot measure is not a
+                    # gate.
+                    failures.append({
+                        "scenario": spec["name"],
+                        **c,
+                        "ok": False,
+                        "detail": (c["detail"] +
+                                   f"; still unmeasurable after "
+                                   f"{MAX_SCENARIO_ATTEMPTS} attempts"),
+                    })
+                else:
+                    skips.append({"scenario": spec["name"], **c})
         scenarios.append({
             "name": spec["name"],
             "title": spec["title"],
             "why": spec["why"],
+            "attempts": attempt,
             "config": raw.get("benchmark", {}),
             "summary": raw.get("summary", {}),
             "invariants": checks,
@@ -588,10 +722,19 @@ def main() -> int:
             # result; a non-empty one is the defect, itemised.
             "estimator_raises_on_congested_reports": raises_on_congested_reports(
                 raw, float(raw.get("benchmark", {}).get("saturation_s", 0) or 0)),
+            # The raw evidence: every feedback sample the estimator saw,
+            # with its loss rate, the estimate before and after, and the
+            # estimator's own reason.  The guard above is decided on
+            # these records, so they are carried into the artifact --
+            # a failure must be diagnosable from the file alone, not
+            # only from the code that reads it.
+            "reports": raw.get("reports", []),
             "curve": raw.get("curve", []),
         })
         print(f"ran scenario '{spec['name']}' "
-              f"({sum(1 for c in checks if c['ok'])}/{len(checks)} invariants)")
+              f"({sum(1 for c in checks if c['ok'] and not c.get('skipped'))}"
+              f"/{len(checks)} invariants, "
+              f"{len(skipped_invariants(checks))} skipped)")
 
     doc = {
         "schema": 1,
@@ -606,6 +749,7 @@ def main() -> int:
         "verdict": {
             "all_invariants_hold": not failures,
             "failures": failures,
+            "skips": skips,
         },
         "notes": [
             "The bandwidth estimator, the token-bucket pacer and the "
@@ -647,6 +791,18 @@ def main() -> int:
             "can drift upwards by a few bits after a decrease without the "
             "estimator having raised anything. The artifact's "
             "'reports' array carries the raw evidence.",
+            "An invariant may be **skipped** rather than passed or failed. "
+            "The sender is a process on the host, so when the CPU is busy "
+            "it cannot put the bytes on the wire: the link never fills, "
+            "the link never queues, nothing is dropped, and the questions "
+            "that only make sense under real saturation ('did the "
+            "delivered rate stay within the capacity?', 'did the offered "
+            "load track the capacity?') have no answer. The wrapper "
+            "detects that case -- the sender delivered far less than the "
+            "controller asked for -- re-runs the scenario, and reports "
+            "the properties it could not evaluate as skipped. After "
+            "MAX_SCENARIO_ATTEMPTS the scenario is a failure: a gate that "
+            "cannot measure is not a gate.",
         ],
     }
 
@@ -664,6 +820,11 @@ def main() -> int:
         print(f"error: {len(failures)} invariant(s) did not hold — the "
               f"artifact records them")
         return 1
+    if skips:
+        print()
+        print(f"warning: {len(skips)} invariant(s) were skipped — the host "
+              f"was too busy to saturate the link, so those properties were "
+              f"not measured (see the verdict's 'skips')")
     return 0
 
 

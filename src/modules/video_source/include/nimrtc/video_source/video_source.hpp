@@ -72,10 +72,10 @@ enum class NIMRTC_API_STABLE Pattern : std::uint8_t {
  *  `start_frame_seq` is the per-SSRC frame-sequence start and stays
  *  configurable (default 0) so a game can resume numbering after a
  *  restart instead of re-emitting seq 0. */
-inline constexpr std::uint32_t kDefaultSourceWidth    = 1280;
-inline constexpr std::uint32_t kDefaultSourceHeight   = 720;
-inline constexpr std::uint32_t kDefaultSourceFps      = 60;
-inline constexpr std::uint32_t kDefaultStartFrameSeq  = 0;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDefaultSourceWidth    = 1280;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDefaultSourceHeight   = 720;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDefaultSourceFps      = 60;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDefaultStartFrameSeq  = 0;
 
 struct NIMRTC_API_STABLE SourceConfig {
     std::uint32_t width  = kDefaultSourceWidth;

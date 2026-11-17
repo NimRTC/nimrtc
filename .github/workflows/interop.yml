@@ -137,6 +137,27 @@ jobs:
         shell: pwsh
         run: cmake --build build --config Debug -j
 
+      # The WebTransport server seam (Case E) needs a TLS certificate to
+      # complete the QUIC handshake.  msquic's SChannel backend loads the
+      # certificate from the Windows certificate store, so the certificate is
+      # created and installed here; its SHA-1 thumbprint is written to
+      # build/wtserver_hash.txt, which the listener reads at startup.  The
+      # certificate's SPKI SHA-256 is written to build/wtserver_spki.b64
+      # next to it, and the browser is told to trust exactly that public
+      # key (see the Case E step below).
+      #
+      # This step lives in the `windows-e2e` job (not in `windows-build`)
+      # because the certificate has to be trusted by the machine that runs
+      # the *browser*, and the browser only runs in this job.  The
+      # `windows-build` job has its own copy of the step because it runs
+      # the unit tests, and one of them starts `demo-wtserver`.
+      - name: Provision WebTransport TLS material
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass `
+            -File ./scripts/generate_wtserver_cert.ps1 `
+            -BuildDir "${{ github.workspace }}/build"
+
       - name: Install Python deps for e2e
         shell: pwsh
         run: |
@@ -167,6 +188,51 @@ jobs:
           $rc = $LASTEXITCODE
           echo "rc=$rc" >> $env:GITHUB_OUTPUT
           exit $rc
+
+      # ---------------------------------------------------------------------
+      # Case E — Chrome ↔ NimRTC interop (DTLS plane + WebTransport plane)
+      # ---------------------------------------------------------------------
+      #
+      # Case E is a SEPARATE step because it needs the WebTransport TLS
+      # material, and because the orchestrator's `--case=all` deliberately
+      # excludes it (the orchestrator's "all" is the four NimRTC↔NimRTC /
+      # NimRTC↔Chrome cases A/B/C/D; Case E is the explicit-interop pair).
+      #
+      # Why it is an ASSERTION and not a "provisioned but never run" step:
+      # until now the workflow generated the WebTransport certificate and
+      # then never executed Case E, so a broken Chrome interop could not
+      # fail CI.  It now runs both planes and fails the job on either.
+      #
+      # The certificate: `scripts/generate_wtserver_cert.ps1` puts the
+      # self-signed certificate into Cert:\CurrentUser\My (where msquic
+      # loads it) and writes the certificate's SPKI SHA-256 next to it.
+      # The harness hands that hash to Chrome via
+      # --ignore-certificate-errors-spki-list, which is what makes Chrome
+      # accept the server: without it Chrome rejects the handshake with
+      # alert 46 (QUIC_TLS_CERTIFICATE_UNKNOWN), and the case has failed
+      # every time it was run -- see docs/interop/chrome-interop-results.md.
+      #
+      # Deliberately NOT done here: installing the certificate into
+      # Cert:\CurrentUser\Root.  That call HANGS on a non-interactive
+      # runner (the protected-root prompt cannot be answered), and it
+      # would change the trust decisions of every other program on the
+      # machine for a test certificate's lifetime.
+      - name: Run Case E interop (DTLS + WebTransport)
+        id: case_e
+        shell: pwsh
+        run: |
+          python tools/run_e2e_acceptance.py --case=e 2>&1 |
+            Tee-Object -FilePath build/e2e/case_e_dtls_ci.log
+          $rc1 = $LASTEXITCODE
+          python tools/run_e2e_acceptance.py --case=e_webtransport 2>&1 |
+            Tee-Object -FilePath build/e2e/case_e_wt_ci.log
+          $rc2 = $LASTEXITCODE
+          if ($rc1 -ne 0 -or $rc2 -ne 0) {
+            Write-Output "Case E failed: dtls=$rc1 webtransport=$rc2"
+            exit 1
+          }
+          Write-Output "Case E passed: dtls=$rc1 webtransport=$rc2"
+          exit 0
 
       - name: Surface case-D status in Step Summary
         if: always()

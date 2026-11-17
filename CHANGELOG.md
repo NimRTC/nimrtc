@@ -7,6 +7,29 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The WebTransport certificate script no longer hangs on a CI runner.**
+  `scripts/generate_wtserver_cert.ps1` computes the certificate's SPKI
+  SHA-256 so that Chrome can be given an `--ignore-certificate-errors-spki-list`
+  entry.  It did that by reading `$cert.PublicKey.EncodedKeyValue`, which
+  opens the key through the platform crypto provider: on a **non-interactive**
+  runner that call never returns, so the script hung until the job's
+  30-minute timeout killed it.  Every Windows leg failed this way -- the log
+  showed `Certificate created` and then nothing for 27 minutes.
+
+  The SPKI is now read straight out of the certificate's own DER encoding,
+  which touches no provider at all.
+
+  This also fixes a latent correctness bug.  The old code rebuilt the SPKI
+  by hand with a hardcoded `rsaEncryption` AlgorithmIdentifier; for an RSA
+  key the result is byte-identical to the real SPKI, but for any other key
+  type it silently produced the **wrong** SPKI -- an EC certificate would
+  get an RSA AlgorithmIdentifier glued onto an EC key.  Taking the bytes out
+  of the certificate means the AlgorithmIdentifier is whatever the
+  certificate actually used.  Verified byte-for-byte against an independent
+  DER parse for both RSA (294-byte SPKI) and EC (91-byte SPKI) certificates.
+
 ### Added
 
 - **RTCP feedback is now broken down by type (Track S / `DS-4`).**
@@ -87,6 +110,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `NIMRTC_HAS_XTEST=1` was never defined and the whole X11 branch of the
   Linux injector was dead code (see the corresponding entry under
   *Fixed*).
+
+- **The Chrome interop results (plan E4).**  `docs/interop/chrome-interop-results.md`
+  records the re-run of the Chrome ↔ NimRTC interop matrix after the
+  DataChannel and video Part B merges, with the reproduction commands, the
+  per-assertion evidence and the root-cause write-up.  **Both** Case E planes
+  pass on Windows with Chrome 157:
+
+  - *DTLS-only* — Chrome's `dtlsState` reaches `connected`, the SRTP cipher
+    is negotiated, and NimRTC's own log line plus a `CLIENT_RANDOM` in the
+    wolfSSL keylog confirm the handshake from the server side.  Three
+    consecutive runs, no flake.
+  - *WebTransport* — the session reaches `ready`, a datagram is echoed
+    (`NIMRTC-WT-DGRAM-ECHO-01`) and a bidirectional stream is echoed.
+
+  `.github/workflows/interop.yml` now runs both planes as **assertions**: a
+  failure in either fails the job.  Previously the workflow generated the
+  WebTransport certificate and stopped there — `tools/run_e2e_acceptance.py`
+  has implemented both Case E runners all along, but nothing in CI ever
+  invoked them, so a broken Chrome interop could not turn CI red.
+
 - **CI auto-retry for jobs that were starved of a runner.**  A
   GitHub-hosted runner is not guaranteed: a job asking for a saturated
   pool — the `macos-15` arm64 image is the chronic case in this
@@ -228,6 +271,48 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `cmake/NimRTCConfig.cmake.in` no longer looks for `usrsctp`).
 
 ### Fixed
+
+- **The Chrome WebTransport interop handshake could never succeed, because the
+  server's certificate was never trusted by the browser.**
+  `scripts/generate_wtserver_cert.ps1` created the self-signed certificate
+  with `New-SelfSignedCertificate -CertStoreLocation Cert:\CurrentUser\My` —
+  the *personal* store, which is where msquic loads it from
+  (`QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`), so the **server side** was
+  always fine.  But the client validates the **chain**, and a self-signed
+  certificate is its own issuer (`CN=localhost` is both subject and issuer):
+  unless that exact certificate is trusted, it is an unknown root and the
+  handshake dies with `QUIC_TLS_CERTIFICATE_UNKNOWN` (alert 46).
+
+  The harness's `--ignore-certificate-errors` does not rescue it: Chromium's
+  QUIC proof verifier (`net/quic/crypto/proof_verifier_chromium.cc`) turns a
+  successful verification whose issuer is not a known root into
+  `ERR_QUIC_CERT_ROOT_NOT_KNOWN` regardless.
+
+  The fix follows the mechanism the DTLS plane of the same case already
+  uses: publish the certificate's **SPKI SHA-256** and hand it to Chrome via
+  `--ignore-certificate-errors-spki-list`, which pins the trust decision to
+  exactly this certificate's public key.
+  `scripts/generate_wtserver_cert.ps1` now writes the hash to
+  `build/wtserver_spki.b64`, and the WebTransport harness passes it to
+  Chrome.
+
+  Two alternatives were considered and rejected:
+
+  - *Installing the certificate into `Cert:\CurrentUser\Root`.*  It works
+    from an interactive desktop, but it **hangs on a non-interactive
+    runner**: the protected-root store raises a confirmation dialog that
+    nobody can answer on a GitHub Actions runner, so the script never
+    returns and the job dies at its timeout.  (It passed locally and hung
+    on CI — which is exactly what makes it easy to get wrong.)  It would
+    also change the trust decisions of every other program on the machine
+    for the lifetime of a test certificate.
+  - *Relying on `--ignore-certificate-errors` alone.*  Insufficient, as
+    above.
+
+  The WebTransport half of the Chrome interop case had been failing on every
+  attempt since 2026-10-24 for this reason alone; NimRTC's QUIC and
+  WebTransport code was never at fault.  The full write-up, including the
+  before/after evidence, is in `docs/interop/chrome-interop-results.md`.
 
 - **The audio allocation gate counted allocations made by *other* threads, so
   it failed on macOS for reasons that had nothing to do with the audio send

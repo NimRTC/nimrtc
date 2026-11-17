@@ -23,9 +23,13 @@ Evidence items (all must pass for overall PASS):
   E3. Datagram sent → datagram echoed back (RFC 9221 plane).
   E4. Bidirectional stream opened → stream data echoed back (reliable plane).
 
-The server certificate is self-signed; Chrome is launched with
---ignore-certificate-errors so it accepts localhost:9443 without a
-trusted CA.  This is safe for a local test harness only.
+The server certificate is self-signed, so Chrome would reject the
+handshake with alert 46 (QUIC_TLS_CERTIFICATE_UNKNOWN) unless the trust
+decision is pinned to that exact certificate.  The harness does so with
+--ignore-certificate-errors-spki-list, using the SPKI SHA-256 that
+scripts/generate_wtserver_cert.ps1 writes to build/wtserver_spki.b64.
+No machine-wide trust store is modified.  This is safe for a local test
+harness only.
 
 Usage
 -----
@@ -306,12 +310,46 @@ def run(wt_port: int = 9443, timeout_s: int = 20) -> dict:
         time.sleep(0.5)
 
         # ── 3. Launch headless Chrome ───────────────────────────────────────
+        #
+        # The self-signed certificate on localhost:9443 has to be trusted by
+        # the browser, or the handshake dies with alert 46
+        # (QUIC_TLS_CERTIFICATE_UNKNOWN).  There are two ways to get there:
+        #
+        #   * install the certificate in the machine's *trusted* store
+        #     (Cert:\CurrentUser\Root) -- but that mutates the trust
+        #     decisions of every other program on the machine, and on a
+        #     non-interactive runner the protected-root prompt HANGS;
+        #   * tell Chrome to trust exactly this certificate's public key,
+        #     via --ignore-certificate-errors-spki-list.
+        #
+        # The second one is what the DTLS plane of Case E already does
+        # (demo-p2p writes its SPKI; this harness passes it to Chrome), and
+        # it touches no machine state at all.
+        #
+        # The SPKI hash is written by scripts/generate_wtserver_cert.ps1
+        # next to the certificate hash, in the same base64 SHA-256 form
+        # Chrome expects.
+        spki_path = BUILD_DIR / "wtserver_spki.b64"
+        spki_list: list[str] = []
+        if spki_path.exists():
+            text = spki_path.read_text(errors="replace").strip()
+            if text:
+                spki_list = [text]
+                logger.info("SPKI allowlist: %s", text[:32])
+            else:
+                logger.warning("SPKI file %s is empty", spki_path)
+        else:
+            logger.warning("SPKI file %s not found -- Chrome will reject the "
+                           "certificate (alert 46). Run "
+                           "scripts/generate_wtserver_cert.ps1 first.",
+                           spki_path)
+
         chrome_args = [
             "--headless=new",
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--use-fake-ui-for-media-stream",
-            # Self-signed cert on localhost:9443 — accept it unconditionally.
+            # Self-signed cert on localhost:9443 — trust exactly this one.
             #
             # --ignore-certificate-errors alone is NOT enough: Chromium's
             # WebTransport client rejects every server certificate that is
@@ -323,6 +361,12 @@ def run(wt_port: int = 9443, timeout_s: int = 20) -> dict:
             # switches::kWebTransportDeveloperMode ("--webtransport-developer-mode")
             # disables exactly that known-root check, but only for WebTransport
             # connections — see net/quic/quic_context.h.
+            #
+            # --ignore-certificate-errors-spki-list is what actually pins the
+            # trust decision to THIS certificate's public key: Chromium
+            # treats a certificate whose SPKI hash is on the list as
+            # acceptable regardless of the chain.
+            #
             # This is safe ONLY for a local test harness.  Do NOT use in
             # production or open networks.
             "--webtransport-developer-mode",
@@ -333,6 +377,9 @@ def run(wt_port: int = 9443, timeout_s: int = 20) -> dict:
             "--log-level=0",
             f"--log-file={chrome_verbose_log}",
         ]
+        if spki_list:
+            chrome_args.append(
+                "--ignore-certificate-errors-spki-list=" + ",".join(spki_list))
         chrome_url = wt_html_url
 
         logger.info("Launching Chrome: %s", chrome_url)

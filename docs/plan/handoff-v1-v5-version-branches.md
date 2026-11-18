@@ -1,8 +1,29 @@
 # 交接事项：本地 v1–v5 版本分支的合并与推送
 
-**状态**：待办（等 release/1.2 稳定后执行）
+**状态**：✅ 已完成（2026-11-18 执行完毕，版本分支已推到 GitHub）
 **日期**：2026-11-18
 **相关**：`docs/plan/v1.2-next-plan.md`（1.2 开发线）、ADR-056（版本分支是追溯锚点）、ADR-079、D-70
+
+## 执行结果（2026-11-18）
+
+5 个版本分支已推到 `NimRTC/nimrtc`，**commit 一字未动**（没有 rebase）：
+
+```
+$ git ls-remote --heads origin | grep version/
+refs/heads/version/v1
+refs/heads/version/v2
+refs/heads/version/v3
+refs/heads/version/v4
+refs/heads/version/v5
+```
+
+本地 ↔ 远端逐个校验哈希一致（v1–v5 全部 MATCH）。
+tag `v1`…`v5` 早就在远端，**没有重推**。
+
+> **与 tag 的关系**：tag 指向的 commit 与分支尖端**内容一致但 commit 不同** ——
+> tag 是对应分支的 squash 版（`v1` 的 tag commit 就是 `version/v1` 的尖端；
+> `v2`–`v5` 的 tag commit 是同一条线的 squash 结果）。
+> 这与产物代码 squash 进 `main` 是同一回事，**不是缺陷**。
 
 ## 背景
 
@@ -48,14 +69,7 @@ git clone nimrtc-version-branches-20261118.bundle restored/
 cd restored && git checkout version/v5
 ```
 
-## 待办：等 1.2 稳定后合并推送
-
-**触发条件**：`release/1.2` 稳定（该线上的别的 agent 收工）。
-
-**为什么等**：现在推会与 1.2 的开发线撞车——main 落后 origin/main 5 个提交，
-1.2 还在动。此时动 main / 版本分支，容易把别人正在做的线搅乱。
-
-### 步骤（**不做 rebase**）
+## 执行步骤（**不做 rebase**）—— 已于 2026-11-18 执行
 
 > **决定：不 rebase。**
 > rebase 会重写版本分支的提交历史，而版本分支的 commit 已经被

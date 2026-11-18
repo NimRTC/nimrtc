@@ -104,7 +104,7 @@ Grep "video_stats|VideoStreamStats|IVideoStatsSink"  →  src/engine/  零命中
 | ID | Item | Landing | Acceptance |
 |---|---|---|---|
 | **DS-5** | **流级记录形状**：为多流场景提供"每个流一条记录"的查询形状（每条记录含流标识、方向、上述字段），而不是一个全局扁平结构体。libwebrtc 的 `RTCStatsReport` 是参照物，但**不追求 wire 兼容**——NimRTC 是 C++ 库，不做 W3C 形状的逐字段复刻。 | `E` | 两路流同时存在时，查询能分别返回各自的计数，不会混在一个总数里 |
-| **DS-6** | **ICE candidate-pair 统计**：暴露选中候选对的地址 / 协议 / RTT，以及候选对的可用性状态。RTT 取自引擎已有的 DTLS / SRTP / RTCP 反馈面，**不新增探针**。 | `E` + `M`（若 ICE 模块侧无该接口，在 `src/plugins/` 声明、在模块侧实现） | 选中对可查询到地址与 RTT；未选中的候选对标记为不可用 |
+| **DS-6** | **ICE candidate-pair 统计**：暴露选中候选对的地址 / 协议 / RTT，以及候选对的可用性状态。RTT 取自引擎已有的 DTLS / SRTP / RTCP 反馈面，**不新增探针**。 | `E` + `M`（若 ICE 模块侧无该接口，在 `src/plugins/` 声明、在模块侧实现） | **已落地 2026-11-18**（Track S / S5）：`Engine::Stats::transport`（`TransportStats`，`engine.hpp`）承载 ICE / DTLS / SRTP 三个平面。选中对通过新增的加法式 seam 方法 `plugins::IICETransport::selected_pair()`（默认返回 `std::nullopt`，第三方 transport 无需改动）暴露，模块侧由 `nimrtc::ice::IceTransport` 实现（**一次** `juice_get_selected_candidates()` 调用同时取两端，避免 ICE restart 跨调用拿到不一致的一对）。RTT 取自反馈面已有的 LSR / DLSR 测量（**无新探针**），并新增 `has_rtt` 标志区分"RTT 为 0 因为路径快"与"从未测量"。引擎侧投影在私有协作者 `src/engine/src/engine_transport_stats.{hpp,cpp}`，**不持有任何状态**——每个数字都从其 owner 读取。测试 `tests/test_engine_transport_stats.cpp`（12 项）+ `src/modules/ice/tests/test_ice.cpp` 的 seam 一致性用例 |
 | **DS-7** | **对端反馈消费**：消费对端 RR 里的 RTT 与 fraction lost，纳入统计面。这是引擎当前完全没读的一类信息（只发不收）。 | `M`（`src/modules/rtp` 已有 `parse_rr`）+ `E`（接线） | 收到带 RTT 的 RR 后，统计面能给出该 RTT 值与 fraction lost |
 | **DS-8** | **视频侧丢包与抖动**：音频侧已有 `audio_packets_lost` / `audio_jitter_ms`，视频侧补齐对等字段。 | `E` | 视频接收侧在丢包与抖动变化时，统计面数值相应变化 |
 

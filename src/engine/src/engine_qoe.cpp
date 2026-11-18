@@ -9,7 +9,8 @@
  * engine's half of the wiring:
  *
  *   - it resolves the collector through the registry's qoe-collector
- *     slot (`EngineConfig::qoe_collector_name`);
+ *     slot (`EngineConfig::qoe_collector_name`), whose default is the
+ *     built-in `"rd-qoe"`;
  *   - it reports the events the engine knows about — a frame reached
  *     the viewer, a frame was dropped, an input event went out;
  *   - it publishes the snapshot through `Stats::qoe`.
@@ -24,8 +25,11 @@
 #include "engine_qoe_seam.hpp"
 
 #include <chrono>
+#include <string>
+#include <string_view>
 
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/core/registry.hpp>
 #include <nimrtc/core/time.hpp>   // core::SteadyClock
 
 namespace nimrtc::engine {
@@ -46,11 +50,35 @@ std::int64_t now_us() noexcept {
 // ---------------------------------------------------------------------------
 
 uint32_t NimRTCEngine::resolve_qoe_collector() noexcept {
-    // An empty id means "no QoE metrics": the engine resolves nothing
-    // and `Stats::qoe` carries only the frame counters.  This is the
-    // default, so a session that does not want the metrics does not pay
-    // for the reservoir.
+    // An empty id is the **explicit opt-out**: the host asked for no
+    // QoE collector, so the engine resolves nothing and `Stats::qoe`
+    // carries only the frame counters (the presented / dropped counts,
+    // which are free).  The name is the only place that says so, and
+    // it says it unambiguously.
     if (config_.qoe_collector_name.empty()) return 0;
+
+    // The default id names the built-in collector, which lives in the
+    // `rd_qoe` module — an **optional** module.  A build without it has
+    // no such factory, and that is not an error: the metrics simply are
+    // not measured.  The engine degrades gracefully rather than failing
+    // `open()`, because "this build has no QoE module" is a property of
+    // the build, not a mistake by the host.
+    //
+    // Every *other* id is a hard error: a typo'd id would otherwise
+    // silently disable the metrics the host asked for, which is exactly
+    // the failure mode a default is supposed to prevent.
+    if (config_.qoe_collector_name == kDefaultQoeCollectorId &&
+        core::PluginRegistry::instance().get_qoe_collector(
+            kDefaultQoeCollectorId) == nullptr) {
+        const std::string msg =
+            std::string{"engine: the QoE collector '"} +
+            std::string{kDefaultQoeCollectorId} +
+            "' is not in this build (the rd_qoe module is optional) -- "
+            "the QoE metrics are not measured; set "
+            "EngineConfig::qoe_collector_name to \"\" to silence this";
+        core::log::Logger::instance().warn(msg);
+        return 0;
+    }
 
     const plugins::Status rc =
         impl_->qoe.resolve(config_.qoe_collector_name, config_.qoe_config);
@@ -80,6 +108,19 @@ void NimRTCEngine::note_frame_presented(std::int64_t capture_ts_us,
 void NimRTCEngine::note_frame_dropped(std::uint64_t count) noexcept {
     if (impl_ == nullptr) return;
     impl_->qoe.note_frame_dropped(count);
+}
+
+void NimRTCEngine::note_freeze(std::int64_t duration_ms) noexcept {
+    if (impl_ == nullptr) return;
+    impl_->qoe.note_freeze(duration_ms);
+}
+
+double NimRTCEngine::note_sharpness(const std::uint8_t* luma,
+                                    std::size_t stride,
+                                    std::size_t width,
+                                    std::size_t height) noexcept {
+    if (impl_ == nullptr) return 0.0;
+    return impl_->qoe.note_sharpness(luma, stride, width, height);
 }
 
 plugins::Status NimRTCEngine::send_input_event(

@@ -7,7 +7,166 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> Work that lands after `v1.2.0`.
+
+## [1.2.0] - 2026-11-18
+
+### Status: Release candidate
+
+> **The source version is `1.2.0`** (`project(VERSION)` in `CMakeLists.txt`,
+> `NIMRTC_API_VERSION` = 10200, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
+> `v1.2.0` is the release that closes the `v1.2` plan
+> (`docs/plan/v1.2-next-plan.md`): **Track E** (the convergence gates) and
+> **Track S** (the observability surface) are both complete.
+
+> Track E -- every gate is green:
+
+> | Gate | What it proves |
+> |---|---|
+> | **E1** | The public-header baseline is frozen in a checked-in manifest and CI fails on drift. |
+> | **E2** | macOS and Linux compile **every** adapter leaf (ScreenCaptureKit, Metal, EGL, Wayland), not just the Windows ones. |
+> | **E3** | The vendored AEC is on by default and is *measured*: the rig records **30.35 dB** ERLE, identically on Windows / MSVC and Linux / GCC 11. |
+> | **E4** | Both Chrome Case E planes (DTLS-only and WebTransport) PASS on Windows + Chrome 157, and the result is a CI assertion. |
+> | **E5** | The DXGI zero-copy hand-off is real, and its fallback is documented. |
+> | **E6** | The ABR behaviour is measured on a **saturated** link with real packet loss -- which uncovered an AIMD defect that is now fixed. |
+> | **E7** | The vendored `usrsctp` tree (269 files, ~5.5 MB) is gone; no dead SCTP backend is reachable. |
+> | **E8** | This section. |
+
+> Track S -- `getStats()` is now a surface a host can trust:
+
+> - **S1** -- the snapshot lifecycle (`snapshot_time_us`, `snapshot_seq`, `stats_snapshot()`, `stats_delta_since()`).
+> - **S2** -- the inbound RTP statistics, per SSRC.
+> - **S3** -- the `video_stats_bridge` wiring.
+> - **S4** -- the RTCP feedback, broken down by type, and the per-audio-stream statistics.
+> - **S5** -- the transport plane: ICE state + the nominated candidate pair + RTT, DTLS state / role / fingerprint, the SRTP counters.
+> - **S6** -- the data-channel plane.
+> - **S7** -- the remote-desktop breakdown: capture fps, encode / decode ms + p95, encode / decode fps, and the clamped drop accounting.
+> - **S8** -- the **stable field set**: a field is not renamed, retyped or removed in a minor release, its meaning does not change, and growth is additive.  The 145-field table is *derived*, not hand-maintained -- `tools/dump_stats_fields.py` parses `struct Stats` out of `engine.hpp` and CI fails when the header and `docs/api/stats_field_reference.md` disagree.
+
+> **Known limitations carried into this release** (none of them is a regression):
+
+> - **TURN over TLS is not negotiated.** `TurnTransport::Tls` is accepted by the API, but the negotiation is not implemented and the transport falls back to plain TCP.
+> - **The ABR benchmark measures a loop the engine does not yet drive.** `BitrateController::on_measured_bitrate()` is never called by the engine, so the shipped loop is not the measured loop.  The *estimator*, the *pacer* and the *resolution ladder* under test are the shipped ones; what is missing is the one call that would close the loop.
+> - **HEVC has no software decoder.** x265 is GPL-2.0, which the licence review excludes, so the HEVC screen-content path is hardware-only.
+> - **The QoE latency percentiles are measured but the freeze *finding* is only wired on the video path.** The input-to-photon measurement covers the control transport, as the acceptance criterion requires.
+
+
 ### Added
+
+- **`Engine::Stats` has a documented, CI-enforced stable field set (v1.2
+  plan item `S8`).**
+  `docs/api/engine_api.md` §13.7 states the contract -- a field is not
+  renamed, retyped or removed in a minor release, its meaning does not
+  change, and growth is additive -- and lists all **145** fields with their
+  type and the definition the header gives them, plus the shape of every
+  nested entry (`VideoStreamStats`, `InboundRtpStats`,
+  `AudioStreamStats`, `DataChannelStats`, `TransportStats`,
+  `VideoSyncStats`, `RemoteDesktopStats`).
+  The table is **derived, not hand-maintained**:
+  `tools/dump_stats_fields.py` parses `struct Stats` out of `engine.hpp`
+  and `--check docs/api/stats_field_reference.md` fails when the document
+  and the header disagree; the `docs / markdown links` CI job runs it, so
+  a field added to the header without its reference line fails the pull
+  request instead of surfacing as documentation rot months later.
+  The sample-app half is recorded next to the table: `demo-p2p`'s
+  `audio-rx` line (whose *shape* `tools/run_e2e_acceptance.py` parses as
+  part of the e2e gate), and the `rd_device` / `rd_viewer` / `rd_verify`
+  rows.
+
+- **The remote-desktop pipeline has a statistics breakdown (v1.2 plan item
+  `S7`).**
+  `NimRTCEngine::Stats` carries a new `RemoteDesktopStats remote_desktop`
+  -- the video pipeline broken into the three stages a screen-share
+  session is judged by, each in the unit a human reasons about.
+  Before this the numbers existed but were **scattered**: the capture
+  counters sat under `video_capture_*`, the codec telemetry under
+  `video_codec_*`, the per-stage timings under `video_stage_*`, and the
+  decode counters under `video_frames_decoded`.  A host asking the
+  remote-desktop question -- *"is the picture slow because the **capture**
+  is slow, or because the **encoder** is slow, or because the **decoder**
+  is slow?"* -- had to know which of a dozen prefixes carried which half
+  of the answer, and the answer was still **incomplete**: there was no
+  capture frame rate at all, and no decode-side cost that was reachable
+  without reaching into the private stage timings.
+  The entry carries:
+  - **capture** -- `capture_fps` (the rate the device delivered frames,
+    measured on the **device's own capture timestamps**, so a device that
+    stamps frames itself still yields the rate it actually ran at) and
+    `capture_ms` (the mean cost of the device handoff);
+  - **encode** -- `encode_fps` (the stage's throughput), `encode_ms`
+    (the mean cost of the codec's `encode()` call) and `encode_p95_ms`
+    (**the number a stutter shows up in** -- a good mean with a terrible
+    p95 is a session that hiccups);
+  - **decode** -- `decode_fps`, `decode_ms` and `decode_p95_ms`;
+  - **the counts** -- `frames_captured` / `frames_encoded` /
+    `frames_decoded`, plus the clamped `frames_dropped_before_encode`
+    (captured but never encoded) and
+    `frames_decoded_without_local_encode` (informational only -- a
+    receive-only session has an empty encode stage and a busy decode
+    stage, so it is deliberately kept out of the drop accounting).
+
+  Two design decisions are worth stating outright.
+  **Everything is derived, never measured twice.**  The costs come from
+  the per-stage instrumentation the engine already runs
+  (`Stats::video_stage_capture` / `video_stage_encode` /
+  `video_stage_decode`); the capture rate comes from the capture
+  timestamps that already travelled with every frame; the encode / decode
+  rates come from each stage's wall-clock span.  The block therefore
+  **cannot drift** from the table it summarises, and it added **no work
+  on the frame path** -- no new clock read, no new counter, no new lock.
+  **The units are the host's, not the engine's.**  The stage table
+  reports microseconds (and nanoseconds, for the sub-microsecond
+  stages); the breakdown reports **milliseconds** and **frames per
+  second**, because "the encode costs 4.2 ms" is a number an operator
+  reads without a division.
+
+  The surface is documented in `docs/api/engine_api.md` §13.6 and pinned
+  by `tests/test_engine_remote_desktop_stats.cpp` (5 cases: the baseline,
+  the outbound half, the inbound half, the agreement with the stage
+  table, and the clamped drop accounting).
+
+- **The transport plane has statistics (v1.2 plan item `S5`).**
+  `NimRTCEngine::Stats` carries a new `TransportStats transport` -- the
+  **path the media travels over**: ICE (RFC 8445) -> DTLS (RFC 6347) ->
+  SRTP (RFC 3711).
+  Before this there was almost nothing: `Stats::srtp_drops` counted the
+  packets the outbound path could not encrypt, `dtls_state()` exposed the
+  DTLS state, and ICE -- the plane that decides *where the packets go* --
+  had **nothing at all**: no candidate pair, no round-trip time, no restart
+  count.  A session that "is not working" is almost never broken in DTLS
+  or SRTP: it is a path problem, and the statistics surface could not say
+  which path the traffic was taking.
+  The entry carries three planes:
+  - **ICE** -- `ice_state` (the same vocabulary as `ice_state_string()`),
+    `ice_restart_count`, `selected_pair` (an `IceCandidatePairInfo` with
+    *both* ends' address / port / protocol / candidate type), the derived
+    `relayed` bit, and `rtt_ms` + `has_rtt`.
+  - **DTLS** -- `dtls_state` (lower-cased and hyphen-separated),
+    `dtls_role`, and `dtls_fingerprint` in the RFC 8122 UPPER-hex form.
+  - **SRTP** -- `srtp_installed` (the authority on "is this session
+    encrypted"), the protected / unprotected RTP + RTCP counters,
+    `srtp_auth_failures` and `srtp_drops`.
+
+  Two design decisions are worth stating outright.
+  **No new probes.**  The RTT is the one the engine already measures from
+  the peer's Receiver Reports (the LSR / DLSR pair against our own Sender
+  Report, RFC 3550 6.4.1) -- the *same* figure the bandwidth estimator
+  consumes.  The statistics surface republishes it; it does not measure
+  it a second time, because two measurements of one quantity would
+  eventually disagree.  `has_rtt` says whether the number was *measured*
+  at all, which is what distinguishes "the RTT is 0 because the path is
+  fast" from "the RTT is 0 because nothing was ever measured".
+  **No copies of another owner's state.**  The ICE state and the candidate
+  pair are owned by the ICE agent (read through the new additive
+  `plugins::IICETransport::selected_pair()` seam, defaulted so a
+  third-party transport keeps compiling), the DTLS state by the DTLS
+  session, the SRTP counters by the SRTP context, and the round-trip time
+  by the network-feedback collector.  The projection lives in its own
+  translation unit (`src/engine/src/engine_transport_stats.cpp`) and
+  holds **no state**, so the surface cannot drift from the thing it
+  describes.
+  The surface is documented in `docs/api/engine_api.md` §13.5 and pinned by
+  `tests/test_engine_transport_stats.cpp` (12 cases).
 
 - **The data-channel plane has statistics (v1.2 plan item `S6`).**
   `NimRTCEngine::Stats` carries a new `std::vector<DataChannelStats>
@@ -59,6 +218,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   telemetry.
   The surface is documented in `docs/api/engine_api.md` §13.2 and pinned
   by `tests/test_engine_datachannel_stats.cpp` (12 cases).
+
 - **The acoustic echo canceller is now measured, and its "on by default" claim
   is asserted in CI (v1.2 plan item `E3`).**
   `audio3a::Config::enable_aec` has always defaulted to `true` and
@@ -179,67 +339,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   A `Benchmark saturated link (plan E6)` step now runs in both the Windows
   and the Linux CI legs, and the artifact is uploaded with them.
-
-### Fixed
-
-- **The bandwidth estimator no longer climbs back into a wall it is still
-  hitting — through either of its two raise paths.**
-  The AIMD front-end's additive increase was gated on the decrease
-  *cooldown* alone, and the cooldown expires on a **clock**, not on the
-  **state of the link**.  So while the link was *still* lossy — the loss
-  rate still above the threshold — the estimate resumed climbing and
-  walked back up to, and past, the rate that had just been throttled.  The
-  front-end behaved like a single-step correction: one halving, then a
-  slow climb back into the congestion, while a fifth of the packets were
-  still being dropped.
-
-  The Goog-CC front-end already carried the correct guard (`!is_lossy`), so
-  the two estimators disagreed under exactly the condition that matters.
-
-  The **REMB override** had the same defect in the same loop, one branch
-  over.  It was gated on `loss_event_pending_`, which is *edge-triggered*:
-  the latch is set when the loss rate crosses the threshold from below, and
-  cleared as soon as the multiplicative decrease has been applied.  So the
-  *second* still-lossy report arrived with the latch already down, and the
-  receiver's stale (higher) estimate was adopted — walking the sender back
-  into the wall it had just been throttled away from.  The latch is the
-  wrong guard for the same reason the cooldown was: it describes a
-  transient state, not the state of the link.
-
-  Both fixes are the same clause — `&& !is_loss_now` — and both gain a
-  regression test in `src/modules/bwe/tests/test_bwe.cpp`, each with the
-  counterpart that the raise still happens once the link *is* clean (so
-  neither guard becomes a ratchet that never recovers).
-
-  The defects were found by *measuring* rather than by reading: the
-  saturated-link benchmark (plan item E6) drives the shipped estimator
-  against a real UDP link whose capacity is a token bucket, and the
-  estimate's climb is visible in the recorded per-report trace.  The
-  benchmark's `estimate_did_not_climb_while_congested` invariant is now the
-  regression guard for both, and it is asserted in CI.
-
-- **The WebTransport certificate script no longer hangs on a CI runner.**
-  `scripts/generate_wtserver_cert.ps1` computes the certificate's SPKI
-  SHA-256 so that Chrome can be given an `--ignore-certificate-errors-spki-list`
-  entry.  It did that by reading `$cert.PublicKey.EncodedKeyValue`, which
-  opens the key through the platform crypto provider: on a **non-interactive**
-  runner that call never returns, so the script hung until the job's
-  30-minute timeout killed it.  Every Windows leg failed this way -- the log
-  showed `Certificate created` and then nothing for 27 minutes.
-
-  The SPKI is now read straight out of the certificate's own DER encoding,
-  which touches no provider at all.
-
-  This also fixes a latent correctness bug.  The old code rebuilt the SPKI
-  by hand with a hardcoded `rsaEncryption` AlgorithmIdentifier; for an RSA
-  key the result is byte-identical to the real SPKI, but for any other key
-  type it silently produced the **wrong** SPKI -- an EC certificate would
-  get an RSA AlgorithmIdentifier glued onto an EC key.  Taking the bytes out
-  of the certificate means the AlgorithmIdentifier is whatever the
-  certificate actually used.  Verified byte-for-byte against an independent
-  DER parse for both RSA (294-byte SPKI) and EC (91-byte SPKI) certificates.
-
-### Added
 
 - **The statistics snapshot lifecycle (Track S / `S1`, design plan `DS-1`).**
   `Engine::Stats` was a flat struct of ~125 cumulative counters, and that
@@ -548,377 +647,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rd_device --recover-session` performs the recovery on demand (it
   needs an elevated prompt).
 
-### Removed
-
-- **The vendored `usrsctp` SCTP stack (plan E7).**  `src/third_party/usrsctp/`
-  — 269 files, ~5.5 MB — is gone, together with the `nimrtc_vendor_usrsctp`
-  CMake target, the two `@deprecated` public headers
-  (`nimrtc/sctp/usrsctp_factory.hpp`, `nimrtc/sctp/usrsctp_socket.hpp`), the
-  `usrsctp_socket.cpp` / `usrsctp_factory.cpp` implementations, and the
-  in-process `tests/test_sctp_usrsctp.cpp` regression test.
-
-  The scope turned out to be **much smaller than the plan first read**, and
-  the reason is worth stating: the SCTP data plane was already retired from
-  the *public* selector in v1.2.0 (`datachannel_backend = "sctp"` is
-  rejected by the engine with a hard error — WP-A / DEC-4 = A1), and
-  `nimrtc::sctp::register_default_plugins()` has published only the `"stub"`
-  factory since v0.11.0.  The `"usrsctp"` factory was therefore *unreachable
-  in production* long before this change; what remained was dead weight that
-  the build still paid for on every platform.
-
-  Concretely:
-
-  - `SctpDataChannel`'s production constructor no longer looks up
-    `get_sctp_socket("usrsctp")` — it resolves `"stub"`, the only registered
-    SCTP id.  The channel is still a well-defined "no data plane" channel
-    (every send returns `kErrNotReady`), and it is no longer a null-pointer
-    one.
-  - The `ISctpSocket` / `ISctpSocketFactory` seam is **unchanged**.  The
-    production data plane is WebTransport over QUIC (msquic), which never
-    went through this seam.
-  - The public header set shrinks from **191 to 189**; the manifest
-    (`docs/api/public_headers.manifest`) and the count-based gate
-    (`tests/test_api_classification.cpp`) are regenerated in the same PR, as
-    D-N6 requires.
-
-  The vendored tree was BSD-3-Clause; the removal is licence-neutral for
-  downstream consumers (the installed bundle ships fewer archives, and
-  `cmake/NimRTCConfig.cmake.in` no longer looks for `usrsctp`).
-
-### Fixed
-
-- **The Chrome WebTransport interop handshake could never succeed, because the
-  server's certificate was never trusted by the browser.**
-  `scripts/generate_wtserver_cert.ps1` created the self-signed certificate
-  with `New-SelfSignedCertificate -CertStoreLocation Cert:\CurrentUser\My` —
-  the *personal* store, which is where msquic loads it from
-  (`QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`), so the **server side** was
-  always fine.  But the client validates the **chain**, and a self-signed
-  certificate is its own issuer (`CN=localhost` is both subject and issuer):
-  unless that exact certificate is trusted, it is an unknown root and the
-  handshake dies with `QUIC_TLS_CERTIFICATE_UNKNOWN` (alert 46).
-
-  The harness's `--ignore-certificate-errors` does not rescue it: Chromium's
-  QUIC proof verifier (`net/quic/crypto/proof_verifier_chromium.cc`) turns a
-  successful verification whose issuer is not a known root into
-  `ERR_QUIC_CERT_ROOT_NOT_KNOWN` regardless.
-
-  The fix follows the mechanism the DTLS plane of the same case already
-  uses: publish the certificate's **SPKI SHA-256** and hand it to Chrome via
-  `--ignore-certificate-errors-spki-list`, which pins the trust decision to
-  exactly this certificate's public key.
-  `scripts/generate_wtserver_cert.ps1` now writes the hash to
-  `build/wtserver_spki.b64`, and the WebTransport harness passes it to
-  Chrome.
-
-  Two alternatives were considered and rejected:
-
-  - *Installing the certificate into `Cert:\CurrentUser\Root`.*  It works
-    from an interactive desktop, but it **hangs on a non-interactive
-    runner**: the protected-root store raises a confirmation dialog that
-    nobody can answer on a GitHub Actions runner, so the script never
-    returns and the job dies at its timeout.  (It passed locally and hung
-    on CI — which is exactly what makes it easy to get wrong.)  It would
-    also change the trust decisions of every other program on the machine
-    for the lifetime of a test certificate.
-  - *Relying on `--ignore-certificate-errors` alone.*  Insufficient, as
-    above.
-
-  The WebTransport half of the Chrome interop case had been failing on every
-  attempt since 2026-10-24 for this reason alone; NimRTC's QUIC and
-  WebTransport code was never at fault.  The full write-up, including the
-  before/after evidence, is in `docs/interop/chrome-interop-results.md`.
-
-- **The audio allocation gate counted allocations made by *other* threads, so
-  it failed on macOS for reasons that had nothing to do with the audio send
-  path.**  `tests/test_engine_audio_alloc.cpp` replaces the global
-  `operator new` to measure the §3.5 budget ("zero heap allocations per
-  emitted audio packet").  The replacement is process-wide, so **every**
-  thread in the process passed through it — including the VideoToolbox
-  H.264 encoder's own threads, which the engine selects on macOS and which
-  allocate behind the engine's back.  The `macos-clang / arm64` leg
-  therefore failed with "the audio send path allocated 2 times over 100
-  packets", and the count varied run to run.
-
-  The probe now records the **allocating thread's id** and counts only the
-  allocations made by the thread that armed the measuring scope — the
-  thread running the send path.  A background thread's allocation is not
-  the send path's allocation, and mixing the two makes the gate
-  untestable rather than strict.
-
-  The failure message now also reports **what** was allocated (the size of
-  each allocation, read out into a caller-owned buffer so that rendering
-  the diagnostic does not pollute the very measurement being reported).
-  The probe was verified to still catch real drift: injecting one
-  per-packet allocation into the send path fails the gate with "100 times
-  over 100 packets", and reverting it turns the gate green again.
-
-  Note that the sibling test
-  (`TheAllocationCountDoesNotGrowWithThePacketCount`) already encoded the
-  honest form of the criterion — the count must not *grow* with the packet
-  count — which is what the remediation plan's §3.5 acceptance line
-  actually says ("分配次数不随包数增长").
-
-- **The Wayland support in the video sink had never been compiled on any
-  build host.**  `wayland-protocols` ships the protocol **XML**, not the C
-  headers — `xdg-shell-client-protocol.h` and
-  `linux-dmabuf-v1-client-protocol.h` are *generated* by `wayland-scanner`.
-  The CMake lookup searched for the generated header with `find_path`, so
-  it never succeeded: `NIMRTC_VIDEO_SINK_HAS_XDG_SHELL` and
-  `NIMRTC_VIDEO_SINK_HAS_DMABUF` stayed undefined and roughly twenty
-  branches of `egl_renderer.cpp` were dead code.  The XML is now located
-  (via the `pkg-config` `pkgdatadir` first) and both the client header and
-  the marshalling code are generated from it.
-
-  Forcing the macros on exposed four real defects behind them:
-
-  * `wl_shm_pool_create_buffer()` was called with three arguments instead
-    of six (`pool, offset, width, height, stride, format`), and its
-    result — a `struct wl_buffer*` — was then used as the raw pixel
-    buffer, i.e. an invalid memory write into a protocol object.  The
-    `wl_shm` CPU path now backs the pool with an anonymous file
-    (`memfd_create`, with a `mkstemp` + `unlink` fallback), maps it with
-    `mmap(MAP_SHARED)`, and copies the picture into the mapping — which is
-    what the protocol actually requires, since the compositor maps *the
-    same file* on its side.  The mapping is released with `munmap()` on a
-    geometry change and on teardown.
-  * The DMA-BUF import called an API that does not exist in the protocol
-    (`zwp_linux_dmabuf_v1_params_add_fd`, `..._set_offset`,
-    `..._add_plane`, `..._create_buffer`).  It now uses
-    `zwp_linux_buffer_params_v1_add()` plus `..._create_immed()`, attaches
-    the resulting `wl_buffer` to the surface, and releases the previous
-    buffer only after the new one has been committed.
-  * `xdg_surface_commit()` and `wl_display_commit()` are not Wayland
-    requests.  The xdg state is committed through `wl_surface_commit()` on
-    the `wl_surface` it wraps; the display through `wl_display_flush()`.
-  * The registry listener was missing the `global_remove` member, and the
-    DMA-BUF interface was bound at a hard-coded version instead of the
-    advertised one.
-
-  The generated marshalling code is plain C, while the library's warning
-  set is C++-oriented (`-Wnon-virtual-dtor`, `-Wold-style-cast`,
-  `-Woverloaded-virtual`) — and GCC *rejects* those options for a C
-  translation unit, fatally under `-Werror`.  The generated code
-  therefore lives in its own `OBJECT` library, which keeps it out of the
-  C++ warning set.
-
-  Verified: builds clean with warnings-as-errors on Linux (g++-13, all six
-  optional paths enabled) and on Windows (MSVC 2022, Debug), and the
-  protocol interface symbols are now defined in the archive.
-
-- **The Wayland sink compiled but could not present.**  E2 proved the
-  Wayland leaves *compile*; running the sink under a headless Weston
-  showed that neither presentation path reached the display, and that
-  the EGL path tore the client connection down.
-
-  * **`EGL_BAD_ACCESS` (0x3002) on every frame.**  `init_egl()` bound the
-    context on the thread that called `open()` and left it bound there.
-    EGL binds a context to the **calling thread** and refuses to bind one
-    already current elsewhere, so the presenter thread's `eglMakeCurrent()`
-    failed on every frame.  `init_egl()` now releases its binding and
-    calls `eglReleaseThread()` when it is done querying the surface,
-    leaving the context free for the presenter thread.
-  * **`xdg_surface has never been configured`.**  `init_wayland()`
-    committed the initial xdg state and moved on; the first frame was
-    then committed before the compositor's configure had arrived, which
-    is a protocol error — Weston kills the client.  The surface now waits
-    (bounded round trips, so a compositor that never configures cannot
-    hang `open()`) for the first configure and its acknowledgement
-    before `open()` returns.
-  * **A failed swap was counted as a presented frame.**
-    `draw_with_egl()` ignored the result of `eglSwapBuffers()` and
-    returned `true` unconditionally, so `presented` could report frames
-    that never reached the compositor.  The swap result is now the
-    return value.
-
-  Verified under headless Weston on Ubuntu 22.04: the EGL path and the
-  `wl_shm` CPU path each present a full 1280x720 and a letterboxed
-  320x180 stream with no protocol errors.
-
-- **The X11 input-injection path had never been compiled.—**  The Linux
-  injector has two backends: XTest (via `libXtst`) and uinput (via the
-  kernel's `linux/uinput.h`).  `libxtst-dev` was not among the CI
-  install packages, so `NIMRTC_HAS_XTEST=1` was never defined and the
-  entire X11 branch of `linux_input.cpp` — the key, button and
-  wheel injection through XTest — was dead code on every build
-  host.
-
-  Compiling it exposed two real defects.
-
-  * `XTestFakeRelativeMotionEvent()` was called with `nullptr` as its
-    fourth argument, but that parameter is the event *delay* (an
-    `unsigned long` timestamp), not a pointer — the call could
-    never have compiled, so relative mouse motion through XTest could not
-    have worked.  It now passes `CurrentTime`, matching every other
-    XTest call in the file.
-  * The module linked `libXtst` but not `libX11`.  The XTest *extension*
-    lives in `libXtst`, but the calls it is made through —
-    `XOpenDisplay`, `XFlush`, `XCloseDisplay` — live in `libX11`
-    itself, so the link failed with `undefined reference to symbol
-    'XFlush'`.  (`libXtst` records a dependency on `libX11`, but it does
-    not carry it into the link line.)  `libX11` is now linked as well.
-
-  Both the XTest and the uinput backends are now asserted by the
-  `Leaf compile proof` CI step, so a runner image that loses the package
-  fails the build instead of silently dropping the backend.
-
-- **The XTest path injected the *wrong* keys and buttons, and crashed the
-  process on construction.**  Compiling the XTest backend (PR #76) proved
-  it *builds*; it did not prove it *works*, and it did not.
-
-  The Linux injector has **two** injection vocabularies, and the XTest
-  path was using the wrong one.
-
-  * **The keys were injected with the kernel's codes.**  The XTest path
-    called `XTestFakeKeyEvent(dpy, KEY_A, ...)` — `KEY_A` is the
-    *kernel input layer's* code (30), from `linux/input-event-codes.h`.
-    `XTestFakeKeyEvent()` wants an X11 **keycode**: the number the X
-    server assigned to a physical key on the *active* layout.  The two
-    numbering schemes are unrelated, so the server was asked for a key
-    that does not exist on the layout and injected **nothing** — while
-    the injector reported success.  The X server's own vocabulary is the
-    **KeySym** (`XK_a`, `XK_Return`), which the call site now converts
-    to a keycode with `XKeysymToKeycode()`; that conversion is
-    layout-aware, which is exactly what a keycode needs to be.
-  * **The buttons were injected with the kernel's codes too.**
-    `XTestFakeButtonEvent(dpy, BTN_LEFT, ...)` sent `0x110` where the X
-    server expects a **button number**: `1` (left), `2` (middle),
-    `3` (right), `4`/`5` (the wheel), `8`/`9` (back/forward).  A
-    button number outside the server's range is silently dropped.
-  * **Constructing the injector could segfault the process.**
-    `XTestQueryExtension(dpy, nullptr, nullptr, nullptr, nullptr)` passed
-    a null pointer for all four of its out-parameters, but the function
-    writes to **all five** of them unconditionally.  On a host with a
-    reachable X server this crashed inside `libXtst` before the
-    injector's first method was ever called.
-
-  The two vocabularies are now kept apart explicitly: the kernel's
-  `KEY_*`/`BTN_*` codes are used only on the uinput path, the X server's
-  KeySyms and button numbers only on the XTest path, and each is
-  resolved at its own call site.  The tables live in a new portable
-  header (`src/linux_input_codes.hpp`) that carries **no platform
-  type**, so the unit test verifies all of them on **every** CI leg —
-  including the Windows one, where the Linux backend is never compiled.
-  A table that could only be checked on a Linux machine is a table that
-  rots silently between two Linux machines.
-
-- **The DTLS-over-UDP loopback test failed on a coin flip.**  Its PASS
-  criterion was `client_master_key[0] != 0`, and any single byte of a
-  freshly-derived SRTP master key is `0x00` about 1/256 of the time —
-  so the test went red roughly once every 256 runs, for no reason at
-  all.  It fired for real on 2026-11-17 in the CI run of PR #69
-  (run 44009282768, job `windows / msvc`): both ends had derived the
-  *same* key (`client_key[0..3]=00246f7a` on A and on B), so the ECDH
-  was real and the export had succeeded — the key was entirely
-  non-zero apart from its first byte.
-
-  The check now requires at least one non-zero byte in the 16-byte
-  master key on each side, and additionally requires the two ends to
-  agree on the key — which a real handshake produces and a
-  zero-filled buffer cannot fake.  The same defect had already been
-  fixed in the sibling test `tests/test_dtls_over_arq_udp.cpp`; this
-  one had been left behind.
-
-  Worth noting: the CI auto-retry workflow classified this as a
-  **genuine** failure (`steps=20`, runner assigned) and deliberately
-  left it alone, because a job that ran and failed belongs to the
-  tree and must not be re-run.  That was the right call — but it also
-  meant the flake could not be papered over and had to be fixed at the
-  source.
-
-- **The VideoToolbox encoder emits its parameter sets in band.**  A
-  `VTCompressionSession` keeps the SPS / PPS / VPS out of band, in the
-  sample buffer's `CMFormatDescriptionRef`, and returns length-prefixed
-  (AVCC) slice NALs with no parameter sets in the bitstream at all.  A
-  keyframe produced that way carries no way to start decoding: a
-  cross-decoder pair (the VideoToolbox encoder against the OpenH264
-  decoder) failed with `kErrCorrupt` (4100).
-
-  The encoder now extracts the parameter sets through
-  `CMVideoFormatDescriptionGetH264ParameterSetAtIndex` /
-  `CMVideoFormatDescriptionGetHEVCParameterSetAtIndex`, collects them
-  once per session — outside the output callback, so the callback still
-  allocates nothing — and prepends them as Annex-B start codes on every
-  keyframe.  The prefixing itself is a reusable helper
-  (`prepend_parameter_sets()` in `vt_common.hpp`) with unit tests.
-
-- **`MakePluginOpts` no longer trips GCC's `-Wmissing-field-initializers`.**
-  `open_failure_detail` had no default member initializer, so every
-  designated initialization of the struct warned under GCC 13 with
-  `-Wextra -Werror`.  The member now has an explicit `= {}` initializer,
-  which fixes it at the declaration instead of at every call site.
-
-- **The zero-allocation hot-path gate and the codec round-trip test pin
-  the software backend.**  Both picked whichever backend the platform
-  preferred, so the hot-path benchmark measured the hardware codec's
-  memory behaviour on one CI leg and not on another, and the
-  round-trip test paired a hardware encoder with a software decoder.
-  Both now ask for the software backend explicitly, which is what makes
-  the zero-allocation budget and the cross-backend round-trip
-  deterministic.
-
-- **The merge of the M1C platform capture layer onto the remote-desktop
-  branch.**  `origin/main` carried the M1C capture layer (Windows
-  Graphics Capture / DXGI Desktop Duplication, macOS ScreenCaptureKit,
-  Linux X11 + the XDG-desktop-portal PipeWire path) while this branch
-  carried the remote-desktop plan's M1–M4 work.  The two sides
-  implemented the *same* seams twice, so the merge had to pick one
-  implementation of each and reconcile the rest.
-
-  - **The capture seam keeps the M1C layer; the cursor layer keeps the
-    remote-desktop one.**  The M1C platform backends
-    (`windows_capture.hpp`, `unix_capture.hpp`) and the portable cursor
-    layer (`cursor_compositor.hpp` / `cursor_source.hpp`) are
-    complementary, not competing, so both stay.  The *older* duplicate
-    platform backends (`dxgi_desktop_dup.*`, `wgc_capture.*`,
-    `portal_capture.*`, `screen_capture_kit.*`, `x11_capture.*`,
-    `win_cursor_source.*`, `x11_cursor_source.*`) and the *duplicate*
-    cursor classes (`AlphaCursorCompositor`, `CursorState`) were dropped
-    — the M1C layer already provides them.
-
-  - **There is no capture → frame-stream adapter.**  The M1C layer
-    shipped a `CaptureSourceAdapter` between the capture device and the
-    frame stream; this branch's engine pump polls
-    `IVideoCapture::pop_frame()` and translates the frame inline, so the
-    adapter is redundant and was removed (`capture_source_adapter.hpp` /
-    `.cpp` and its test).  `IVideoCaptureFactory::create_source()` went
-    with it — the factory only creates *devices*.
-
-  - **The zero-copy decision is now explicit.**  `VideoSourceFrame` grew
-    `capture_surface_contract`: a capture device that negotiated a
-    zero-copy surface says so, and the engine then hands the surface to
-    the encoder **unconditionally** (there is no CPU copy to fall back
-    to).  A frame that merely carries a GPU handle — a host's own
-    surface — stays *opt-in*, governed by
-    `EngineConfig::video_zero_copy`, exactly as before.  Before this
-    distinction existed the two cases were indistinguishable, so a host
-    that turned the flag off still got the zero-copy path.
-
-  - **The GPU device token travels with the frame.**
-    `CaptureFrame` / `VideoSourceFrame` carry the device that owns the
-    surface, and `GpuHandle::device` is filled from it.  A surface is
-    meaningless without its device: NVENC registers the texture against
-    the device the session was opened with and refuses a texture from
-    another one.
-
-  - **A capture device that reports an error is closed before it is
-    reopened.**  `open()` on an already-open device is a no-op for most
-    backends, so the recovery used to be silently ineffective; the pump
-    now tears the device down and builds it up again.
-
-  - **The synthetic capture device advertises its dirty rectangles.**
-    The negotiated format said `has_dirty_rects = false` while the
-    frames carried the rectangles, so a consumer that trusted the
-    format would ignore metadata that was present and correct.
-
-  - **The public-header baseline moved from 189 to 190.**  The merge
-    added `video_capture/dirty_rect_diff.hpp` and
-    `core/gpu_device_registry.hpp` and removed
-    `video_capture/capture_source_adapter.hpp` — a net `+1`.
-
-
-### Added
-
 - **The capture → encoder zero-copy seam (v1.3, remote-desktop plan
   B10 / M1).**  The two halves of the zero-copy claim were each proven
   on their own — the capture device delivers a GPU surface with
@@ -1138,7 +866,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     - `tools/check_dead_modules.py`'s `PENDING_WIRING` list is now
       **empty**: both `rd_input` and `rd_qoe` are reachable from the
       composition root, so neither needs a waiver.
-
 
 - **The multi-stream video plane (v1.4, remote-desktop plan H1 / H2 / H4).**
   The engine held exactly **one** of each video plugin
@@ -2874,6 +2601,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path now uses it instead of its own arithmetic — one rule, not two — and
   the video's elastic share arrives with the rate controller (B2) on the
   same terms.  Covered by 16 cases in `tests/test_bandwidth_allocation.cpp`.
+
 - **Two plugin seams for the audio pipeline (audio pipeline WP-1).** The
   receive path needs a codec-side decoder (one RTP payload in, PCM frames
   out) and a pipeline-side receiver (jitter buffer, concealment, FEC
@@ -2893,6 +2621,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The audio error range `0x1A40`..`0x1A48` in `core/engine_errors.hpp`.
   - `src/modules/audio_rx/` -- the self-contained module that will carry
     the receive pipeline.
+
 - **The Opus side of the audio-decoder seam (audio pipeline WP-2).** The
   Opus module now publishes a `plugins::IAudioDecoder` under the id
   `"opus"` in the registry's audio-decoder category, next to the codec
@@ -2913,6 +2642,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the round-trip, the multi-frame payload, the malformed payload, the
     concealment frame properties and the in-band FEC recovery of a lost
     frame.
+
 - **The jitter-buffer seam can now be told which clock the stream runs
   on.** `plugins::IJB` gains one virtual, `configure(const JBConfig&)`,
   callable after `create()` and before the first `push()`. A jitter buffer
@@ -2923,6 +2653,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "unspecified" instead of silently assuming video; the concrete module
   keeps its historical 90 kHz reading for a `clock_rate_hz` of 0, so the
   video path -- which never configures the buffer -- is unchanged.
+
 - **The audio receive pipeline module (audio pipeline WP-3).** The module
   `src/modules/audio_rx/` implements the receive side of the pipeline: it
   resolves its jitter buffer and its decoder through `core::PluginRegistry`
@@ -2948,6 +2679,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     downmix", plus the concealment cap (silence beyond the cap), the
     stream clock rate the jitter buffer is configured with, and the two
     null-product paths of B-16.
+
 - **Negotiated payload-type routing and a completed audio m-line (audio
   pipeline WP-6, spec B-4 / B-14).** The engine used to demultiplex
   inbound RTP with a single rule -- "if the payload type is the video one
@@ -2979,6 +2711,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The routing table lives in a private engine header
     (`src/engine/src/audio_routing.hpp`), so the public surface is
     unchanged: the scan still reports 109 headers and 730 symbols.
+
 - **The engine drives the audio receive pipeline as a plugin (audio
   pipeline WP-7, spec A-9 / A-10 / B-11 / B-15 / B-16).** The receive
   path was the last place where the engine still owned a concrete module:
@@ -3019,6 +2752,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     in `kDefaultRegistrars[]`. Neither is an include: the public header
     set is unchanged, and the scan still reports 109 headers and 730
     symbols.
+
 - **The audio pipeline's engine integration tests (audio pipeline WP-11,
   spec V-1 / V-2).**  Two new test binaries:
   - `tests/test_engine_audio_send.cpp` — the send path's two promises.
@@ -3035,6 +2769,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     tick-rate independence (30 Hz and 200 Hz produce the same audio) and
     the real two-engine loopback over 127.0.0.1, where engine A feeds
     PCM and engine B decodes it.
+
 - **The Chrome → NimRTC audio direction is now observed (audio pipeline
   WP-11, spec V-3).**  The Chrome interop page used to add a *recvonly*
   transceiver, so Chrome never sent a packet and NimRTC's receive path
@@ -3056,6 +2791,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The Chrome offer fixture (`interop/fixtures/chrome_opus_offer.sdp`)
     and its expected-parsing document now describe the `sendrecv` offer
     the page really sends.
+
 - **The audio encoder's bitrate follows the bandwidth estimate.**  The
   engine used to hand the Opus encoder a fixed 64 kbps regardless of
   the link, so a session on a narrow link lost its audio instead of
@@ -3074,12 +2810,14 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     which now reconfigures the *running* encoder in place instead of
     re-creating it — an adaptation step no longer resets the codec state
     or its statistics.
+
 - **The mono default is 32 kbps.**  The engine hard-coded 64 kbps for
   the audio encoder, which is the stereo number; a mono configuration
   (`pcm_channels = 1`, the default) now gets 32 kbps.  An unset
   `opus::EncoderConfig::bitrate_bps` (0) resolves to the channel-count
   default — 32 kbps mono, 64 kbps stereo — through the new
   `opus::default_bitrate_bps_for_channels()`.
+
 - **The receiver-side network-feedback collector (v1.2.0 M1, spec
   F1 / F2 / F4 / F6).**  The bandwidth estimator was never fed: the
   engine read `IBwe::estimate()` in its tick, but nothing ever called
@@ -3126,6 +2864,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     transport-cc arrival series, the acknowledged sequence range and the
     per-packet sizes.  Every field is additive — an estimator that
     ignores them behaves exactly as before.
+
 - **The bandwidth signal is now *selected*, not assumed (v1.2.0 M2, F5;
   ADR-018).**  The collector had a fixed source precedence
   (transport-cc → loss/RTT → REMB) that never consulted the
@@ -3167,6 +2906,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     would silently disable the preferred signal.
   - The collector is the only place with a policy branch — the engine
     contains none (ADR-018 Decision 5).
+
 - **The transport-cc signal now actually drives the estimate (v1.2.0 M2,
   F5/F6; ADR-018 Decision 4).**  The arrival series reached the
   estimator, and nothing read it: under the `kTransportCc` policy the
@@ -3345,8 +3085,80 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `additionalProperties`-as-schema, `propertyNames` and `minLength`
     keywords the new block needs).
 
+- **`VideoSinkStats` reports which route a frame took to the display
+  (v1.2 plan item `E5`).**
+  Three new counters:
+  - `gpu_device_copies` — GPU surfaces copied device-to-device into the
+    present target (the zero-copy hand-off, confirmed);
+  - `gpu_staging_fallbacks` — GPU surfaces that had to go through host
+    memory to be shown (a decoder or driver configuration that is not
+    zero-copy all the way to the display);
+  - `gpu_surfaces_refused` — surfaces refused outright (a foreign
+    backend, an unusable handle) — a configuration error, not a fallback.
+
+  On a healthy DXGI loop only the first one grows.  Deciding which GPUs
+  take which path is now a **reading**, not an experiment.
 
 ### Changed
+
+- **`EngineConfig::qoe_collector_name` now defaults to the built-in
+  `"rd-qoe"` collector (v1.2 plan item `S7` / plan `J3`).**
+  Before this the field defaulted to the empty string, which meant "no
+  QoE metrics" -- so a remote-desktop session, which is judged on exactly
+  those metrics (the freeze count, the end-to-end latency percentiles,
+  the input-to-photon latency), had to know the name of a plugin to be
+  told how it felt.  The name is now the built-in collector's id, and the
+  rules around it are:
+  - the **default** is `"rd-qoe"`, the id the `rd_qoe` module registers
+    under (also published as `engine::kDefaultQoeCollectorId`);
+  - an **empty** name is the explicit opt-out: no collector is resolved,
+    the metrics are not measured, and `Stats::qoe` carries only the frame
+    counters (the presented / dropped counts, which the engine keeps
+    anyway) -- the honest answer to "what was the latency percentile?"
+    when it was not measured;
+  - a **named** id that does not resolve is a configuration error at
+    `open()` time.  The engine never silently falls back, because a
+    typo'd id would otherwise mask an integrator error;
+  - the **default** id is the one exception to that rule: the `rd_qoe`
+    module is optional by construction, so a build without it has no
+    factory to resolve.  That is a property of the *build*, not a mistake
+    by the host, so the engine degrades gracefully -- a warning, no
+    collector, and `open()` still succeeds.
+
+- **The freeze findings now reach the QoE collector.**
+  The *definition* of a freeze lives in the `video_stats` module (the
+  threshold and the idle detection) and the *accounting* lives in the
+  `rd_qoe` collector (the numbers a host reads in `Stats::qoe`), but
+  nothing connected the two: the sink counted the freezes and the QoE
+  snapshot's `freeze_count` / `freeze_total_ms` / `freeze_longest_ms`
+  stayed at zero -- a metric that was measured and then never published.
+  The engine is the only party that sees both, so it is the courier: the
+  sink gained a `set_freeze_callback()` seam, the engine installs it and
+  forwards each finding to the collector.
+
+  Both detection paths report: the **gap** between two rendered frames
+  and the **idle** window the tick notices when the picture stops
+  arriving.  A session whose peer simply stopped sending is exactly the
+  case the metric exists for, and it is detected by the tick rather than
+  by a render.
+
+  The seam is **additive** and **optional**: `IVideoStatsSink` gains a
+  defaulted callback, so a third-party sink keeps compiling, and the
+  engine installs the callback only when the video-statistics sink is
+  present.
+
+- **The QoE collector's sharpness proxy is now measured.**
+  `QoeSnapshot::sharpness_proxy` was defined and computed by the
+  `rd_qoe` module, but nothing ever handed it a picture: the engine
+  holds the decoded luma plane and the collector knows how to turn a
+  picture into a sharpness number, so the engine now carries the pixels
+  over on the render path.
+
+  Only the **planar YUV 4:2:0** layouts are measured -- those are the
+  ones that *have* a luma plane the collector can read.  A BGRA frame
+  has no luma at all, and converting one would cost more than the metric
+  is worth, so the proxy simply is not measured for those frames and the
+  snapshot says so by staying at zero.
 
 - **The engine's outbound RTP packing is now concentrated in one file
   (v1.4, architecture-remediation plan §4.5.1, ADR-025 Decision 4).**
@@ -3747,6 +3559,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The five families are added from `src/modules/CMakeLists.txt` in
     dependency order (`dtls` before `transport`, `sctp` before
     `datachannel`) instead of from the top-level `CMakeLists.txt`.
+
 - **The plugin contract is now explicit — the engine says which families it
   can actually replace, and what happens when one is missing (v1.2.0,
   architecture remediation plan §2).**  The plugin system had three
@@ -3862,6 +3675,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `StreamPriority` enum, `set_stream_priority()`,
     `enqueue_for_stream*()` and `select_next_packet()` keep their names and
     semantics.
+
 - **`<nimrtc/core/registry.hpp>` no longer drags the optional-module
   seams into every translation unit (P1 hardening, 2026-11-09).**  The
   header used to `#include` 18 seam headers in a "backward-compat shim"
@@ -3894,6 +3708,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `nimrtc/plugins/` seams) or the specific seam header (for the
     optional modules).  `<nimrtc/core/registry.hpp>` alone keeps the
     registry API and the registration macros working unchanged.
+
 - **The outbound send path no longer allocates a heap buffer per packet
   (P1 hardening, 2026-11-09).**  The engine built each outbound RTP
   packet in a *member* vector and then **moved** it into the scheduler,
@@ -3917,6 +3732,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     recycled is cleared so the pool does not keep stale packet bytes
     alive.
   - Covered by `src/modules/sched/tests/test_scheduler.cpp`.
+
 - **The README no longer overstates the hardware codec support.**  The
   capability table claimed "H.264 hardware backends (NVENC / NVDEC /
   AMF / QSV / DXVA / VA-API / OpenH264)" without distinguishing the
@@ -3935,11 +3751,13 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The CMake options were re-worded to match: `NIMRTC_PLUGINS_NVENC`
     is the encoder, `NIMRTC_PLUGINS_NVDEC` is the decoder, and
     `NIMRTC_PLUGINS_VAAPI` is the encoder.
+
 - **`opus::EncoderConfig::bitrate_bps` now defaults to 0 (= codec
   default) instead of 64000.**  0 resolves to 32 kbps for a mono encoder
   and 64 kbps for a stereo one, so the default follows the channel
   count instead of assuming stereo.  A caller that set the field
   explicitly is unaffected.
+
 - **The Opus plugin frames its own output (audio pipeline WP-11, spec
   B-5).**  The codec plugin used to hand the raw libopus frame to the
   caller and let the engine work out the RTP payload — so the config
@@ -3949,6 +3767,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   noise rather than as an error.  The plugin now frames the encoder's
   output itself (the TOC byte libopus wrote plus the frame body) and the
   packetiser reads the TOC instead of deriving one.
+
 - **The in-band redundancy is configurable (audio pipeline WP-11, spec
   B-8).**  `EngineConfig::audio_redundancy_percent` (default 5 %) is
   handed to the encoder, so every frame carries a low-bitrate copy of
@@ -3957,6 +3776,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `plugins::AudioReceiverConfig::packet_loss_perc` carry the value
   across the seams.  Without it the encoder embeds no copy at all and
   the FEC recovery path cannot work.
+
 - **Every engine now owns its own audio send state (audio pipeline WP-5,
   spec A-6 / A-7 / A-8).** The outbound audio path had three defects that
   all came from the same root: the send state lived in function-local
@@ -3994,8 +3814,540 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `a=ssrc` line, which is what makes Chrome count our inbound RTP at
     all. The demo no longer appends a stale constant SSRC of its own.
 
+### Removed
+
+- **The vendored `usrsctp` SCTP stack (plan E7).**  `src/third_party/usrsctp/`
+  — 269 files, ~5.5 MB — is gone, together with the `nimrtc_vendor_usrsctp`
+  CMake target, the two `@deprecated` public headers
+  (`nimrtc/sctp/usrsctp_factory.hpp`, `nimrtc/sctp/usrsctp_socket.hpp`), the
+  `usrsctp_socket.cpp` / `usrsctp_factory.cpp` implementations, and the
+  in-process `tests/test_sctp_usrsctp.cpp` regression test.
+
+  The scope turned out to be **much smaller than the plan first read**, and
+  the reason is worth stating: the SCTP data plane was already retired from
+  the *public* selector in v1.2.0 (`datachannel_backend = "sctp"` is
+  rejected by the engine with a hard error — WP-A / DEC-4 = A1), and
+  `nimrtc::sctp::register_default_plugins()` has published only the `"stub"`
+  factory since v0.11.0.  The `"usrsctp"` factory was therefore *unreachable
+  in production* long before this change; what remained was dead weight that
+  the build still paid for on every platform.
+
+  Concretely:
+
+  - `SctpDataChannel`'s production constructor no longer looks up
+    `get_sctp_socket("usrsctp")` — it resolves `"stub"`, the only registered
+    SCTP id.  The channel is still a well-defined "no data plane" channel
+    (every send returns `kErrNotReady`), and it is no longer a null-pointer
+    one.
+  - The `ISctpSocket` / `ISctpSocketFactory` seam is **unchanged**.  The
+    production data plane is WebTransport over QUIC (msquic), which never
+    went through this seam.
+  - The public header set shrinks from **191 to 189**; the manifest
+    (`docs/api/public_headers.manifest`) and the count-based gate
+    (`tests/test_api_classification.cpp`) are regenerated in the same PR, as
+    D-N6 requires.
+
+  The vendored tree was BSD-3-Clause; the removal is licence-neutral for
+  downstream consumers (the installed bundle ships fewer archives, and
+  `cmake/NimRTCConfig.cmake.in` no longer looks for `usrsctp`).
 
 ### Fixed
+
+- **The derived `Stats` field table was missing nine fields.**
+  `tools/dump_stats_fields.py` parsed `struct Stats` out of
+  `engine.hpp` to *derive* the field reference, and the CI gate
+  compared that derivation with the document on disk.  But the parser's
+  declaration pattern did not recognise two of the shapes the struct
+  actually uses -- a **namespace-qualified** type (`plugins::QoeSnapshot`)
+  and a **brace-initialised** member (`RemoteDesktopStats remote_desktop{}`)
+  -- so those members were silently dropped from the derivation.
+
+  The consequence is the worst kind of documentation drift: the gate
+  *passed*, because the document had been generated from the same
+  incomplete derivation.  The two blocks that a remote-desktop session
+  is judged on -- `Stats::qoe` and `Stats::remote_desktop` -- were
+  absent from the "stable field set" contract, along with the seven
+  earlier members the same pattern had swallowed.
+
+  The parser now accepts a qualified type and a brace initialiser, and
+  the table lists all **145** fields.  The gate can still be fooled by a
+  shape it does not know, but it no longer fails *silently* on the two
+  shapes the header uses today.
+
+- **`Stats::remote_desktop.capture_fps` no longer drops to zero when the
+  capture device's queue overflows.**
+  The cadence record treated a frame whose timestamp was not strictly
+  greater than the last one as "no new delivery" and refused to count it.
+  That is backwards for the case the number exists for: the device's
+  queue is bounded, so when the pump falls behind, the device drops the
+  oldest frame and the next handoff can carry a timestamp the pump has
+  already passed — exactly under load, the rate then collapsed to 0 (or
+  to whatever an earlier, quieter window measured).  A *delivery* is now
+  identified by its **sequence number**; the timestamp is only the span
+  endpoint, and a span that moves backwards is reported as **unknown**
+  (0 fps) rather than as a plausible-looking wrong number.  The counting
+  rule moved to its own header, `src/engine/src/engine_capture_cadence.hpp`,
+  so the unit test pins the same rule the pump uses.
+  (Regression caught by `macos-clang / arm64` on the S7 landing.)
+
+- **The bandwidth estimator no longer climbs back into a wall it is still
+  hitting — through either of its two raise paths.**
+  The AIMD front-end's additive increase was gated on the decrease
+  *cooldown* alone, and the cooldown expires on a **clock**, not on the
+  **state of the link**.  So while the link was *still* lossy — the loss
+  rate still above the threshold — the estimate resumed climbing and
+  walked back up to, and past, the rate that had just been throttled.  The
+  front-end behaved like a single-step correction: one halving, then a
+  slow climb back into the congestion, while a fifth of the packets were
+  still being dropped.
+
+  The Goog-CC front-end already carried the correct guard (`!is_lossy`), so
+  the two estimators disagreed under exactly the condition that matters.
+
+  The **REMB override** had the same defect in the same loop, one branch
+  over.  It was gated on `loss_event_pending_`, which is *edge-triggered*:
+  the latch is set when the loss rate crosses the threshold from below, and
+  cleared as soon as the multiplicative decrease has been applied.  So the
+  *second* still-lossy report arrived with the latch already down, and the
+  receiver's stale (higher) estimate was adopted — walking the sender back
+  into the wall it had just been throttled away from.  The latch is the
+  wrong guard for the same reason the cooldown was: it describes a
+  transient state, not the state of the link.
+
+  Both fixes are the same clause — `&& !is_loss_now` — and both gain a
+  regression test in `src/modules/bwe/tests/test_bwe.cpp`, each with the
+  counterpart that the raise still happens once the link *is* clean (so
+  neither guard becomes a ratchet that never recovers).
+
+  The defects were found by *measuring* rather than by reading: the
+  saturated-link benchmark (plan item E6) drives the shipped estimator
+  against a real UDP link whose capacity is a token bucket, and the
+  estimate's climb is visible in the recorded per-report trace.  The
+  benchmark's `estimate_did_not_climb_while_congested` invariant is now the
+  regression guard for both, and it is asserted in CI.
+
+- **The WebTransport certificate script no longer hangs on a CI runner.**
+  `scripts/generate_wtserver_cert.ps1` computes the certificate's SPKI
+  SHA-256 so that Chrome can be given an `--ignore-certificate-errors-spki-list`
+  entry.  It did that by reading `$cert.PublicKey.EncodedKeyValue`, which
+  opens the key through the platform crypto provider: on a **non-interactive**
+  runner that call never returns, so the script hung until the job's
+  30-minute timeout killed it.  Every Windows leg failed this way -- the log
+  showed `Certificate created` and then nothing for 27 minutes.
+
+  The SPKI is now read straight out of the certificate's own DER encoding,
+  which touches no provider at all.
+
+  This also fixes a latent correctness bug.  The old code rebuilt the SPKI
+  by hand with a hardcoded `rsaEncryption` AlgorithmIdentifier; for an RSA
+  key the result is byte-identical to the real SPKI, but for any other key
+  type it silently produced the **wrong** SPKI -- an EC certificate would
+  get an RSA AlgorithmIdentifier glued onto an EC key.  Taking the bytes out
+  of the certificate means the AlgorithmIdentifier is whatever the
+  certificate actually used.  Verified byte-for-byte against an independent
+  DER parse for both RSA (294-byte SPKI) and EC (91-byte SPKI) certificates.
+
+- **`Stats::remote_desktop.capture_fps` no longer drops to zero when the
+  capture device's queue overflows.**
+  The cadence record treated a frame whose timestamp was not strictly
+  greater than the last one as "no new delivery" and refused to count it.
+  That is backwards for the case the number exists for: the device's
+  queue is bounded, so when the pump falls behind, the device drops the
+  oldest frame and the next handoff can carry a timestamp the pump has
+  already passed — exactly under load, the rate then collapsed to 0 (or
+  to whatever an earlier, quieter window measured).  A *delivery* is now
+  identified by its **sequence number**; the timestamp is only the span
+  endpoint, and a span that moves backwards is reported as **unknown**
+  (0 fps) rather than as a plausible-looking wrong number.  The counting
+  rule moved to its own header, `src/engine/src/engine_capture_cadence.hpp`,
+  so the unit test pins the same rule the pump uses.
+  (Regression caught by `macos-clang / arm64` on the S7 landing.)
+
+- **The bandwidth estimator no longer climbs back into a wall it is still
+  hitting — through either of its two raise paths.**
+  The AIMD front-end's additive increase was gated on the decrease
+  *cooldown* alone, and the cooldown expires on a **clock**, not on the
+  **state of the link**.  So while the link was *still* lossy — the loss
+  rate still above the threshold — the estimate resumed climbing and
+  walked back up to, and past, the rate that had just been throttled.  The
+  front-end behaved like a single-step correction: one halving, then a
+  slow climb back into the congestion, while a fifth of the packets were
+  still being dropped.
+
+  The Goog-CC front-end already carried the correct guard (`!is_lossy`), so
+  the two estimators disagreed under exactly the condition that matters.
+
+  The **REMB override** had the same defect in the same loop, one branch
+  over.  It was gated on `loss_event_pending_`, which is *edge-triggered*:
+  the latch is set when the loss rate crosses the threshold from below, and
+  cleared as soon as the multiplicative decrease has been applied.  So the
+  *second* still-lossy report arrived with the latch already down, and the
+  receiver's stale (higher) estimate was adopted — walking the sender back
+  into the wall it had just been throttled away from.  The latch is the
+  wrong guard for the same reason the cooldown was: it describes a
+  transient state, not the state of the link.
+
+  Both fixes are the same clause — `&& !is_loss_now` — and both gain a
+  regression test in `src/modules/bwe/tests/test_bwe.cpp`, each with the
+  counterpart that the raise still happens once the link *is* clean (so
+  neither guard becomes a ratchet that never recovers).
+
+  The defects were found by *measuring* rather than by reading: the
+  saturated-link benchmark (plan item E6) drives the shipped estimator
+  against a real UDP link whose capacity is a token bucket, and the
+  estimate's climb is visible in the recorded per-report trace.  The
+  benchmark's `estimate_did_not_climb_while_congested` invariant is now the
+  regression guard for both, and it is asserted in CI.
+
+- **The WebTransport certificate script no longer hangs on a CI runner.**
+  `scripts/generate_wtserver_cert.ps1` computes the certificate's SPKI
+  SHA-256 so that Chrome can be given an `--ignore-certificate-errors-spki-list`
+  entry.  It did that by reading `$cert.PublicKey.EncodedKeyValue`, which
+  opens the key through the platform crypto provider: on a **non-interactive**
+  runner that call never returns, so the script hung until the job's
+  30-minute timeout killed it.  Every Windows leg failed this way -- the log
+  showed `Certificate created` and then nothing for 27 minutes.
+
+  The SPKI is now read straight out of the certificate's own DER encoding,
+  which touches no provider at all.
+
+  This also fixes a latent correctness bug.  The old code rebuilt the SPKI
+  by hand with a hardcoded `rsaEncryption` AlgorithmIdentifier; for an RSA
+  key the result is byte-identical to the real SPKI, but for any other key
+  type it silently produced the **wrong** SPKI -- an EC certificate would
+  get an RSA AlgorithmIdentifier glued onto an EC key.  Taking the bytes out
+  of the certificate means the AlgorithmIdentifier is whatever the
+  certificate actually used.  Verified byte-for-byte against an independent
+  DER parse for both RSA (294-byte SPKI) and EC (91-byte SPKI) certificates.
+
+- **The Chrome WebTransport interop handshake could never succeed, because the
+  server's certificate was never trusted by the browser.**
+  `scripts/generate_wtserver_cert.ps1` created the self-signed certificate
+  with `New-SelfSignedCertificate -CertStoreLocation Cert:\CurrentUser\My` —
+  the *personal* store, which is where msquic loads it from
+  (`QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`), so the **server side** was
+  always fine.  But the client validates the **chain**, and a self-signed
+  certificate is its own issuer (`CN=localhost` is both subject and issuer):
+  unless that exact certificate is trusted, it is an unknown root and the
+  handshake dies with `QUIC_TLS_CERTIFICATE_UNKNOWN` (alert 46).
+
+  The harness's `--ignore-certificate-errors` does not rescue it: Chromium's
+  QUIC proof verifier (`net/quic/crypto/proof_verifier_chromium.cc`) turns a
+  successful verification whose issuer is not a known root into
+  `ERR_QUIC_CERT_ROOT_NOT_KNOWN` regardless.
+
+  The fix follows the mechanism the DTLS plane of the same case already
+  uses: publish the certificate's **SPKI SHA-256** and hand it to Chrome via
+  `--ignore-certificate-errors-spki-list`, which pins the trust decision to
+  exactly this certificate's public key.
+  `scripts/generate_wtserver_cert.ps1` now writes the hash to
+  `build/wtserver_spki.b64`, and the WebTransport harness passes it to
+  Chrome.
+
+  Two alternatives were considered and rejected:
+
+  - *Installing the certificate into `Cert:\CurrentUser\Root`.*  It works
+    from an interactive desktop, but it **hangs on a non-interactive
+    runner**: the protected-root store raises a confirmation dialog that
+    nobody can answer on a GitHub Actions runner, so the script never
+    returns and the job dies at its timeout.  (It passed locally and hung
+    on CI — which is exactly what makes it easy to get wrong.)  It would
+    also change the trust decisions of every other program on the machine
+    for the lifetime of a test certificate.
+  - *Relying on `--ignore-certificate-errors` alone.*  Insufficient, as
+    above.
+
+  The WebTransport half of the Chrome interop case had been failing on every
+  attempt since 2026-10-24 for this reason alone; NimRTC's QUIC and
+  WebTransport code was never at fault.  The full write-up, including the
+  before/after evidence, is in `docs/interop/chrome-interop-results.md`.
+
+- **The audio allocation gate counted allocations made by *other* threads, so
+  it failed on macOS for reasons that had nothing to do with the audio send
+  path.**  `tests/test_engine_audio_alloc.cpp` replaces the global
+  `operator new` to measure the §3.5 budget ("zero heap allocations per
+  emitted audio packet").  The replacement is process-wide, so **every**
+  thread in the process passed through it — including the VideoToolbox
+  H.264 encoder's own threads, which the engine selects on macOS and which
+  allocate behind the engine's back.  The `macos-clang / arm64` leg
+  therefore failed with "the audio send path allocated 2 times over 100
+  packets", and the count varied run to run.
+
+  The probe now records the **allocating thread's id** and counts only the
+  allocations made by the thread that armed the measuring scope — the
+  thread running the send path.  A background thread's allocation is not
+  the send path's allocation, and mixing the two makes the gate
+  untestable rather than strict.
+
+  The failure message now also reports **what** was allocated (the size of
+  each allocation, read out into a caller-owned buffer so that rendering
+  the diagnostic does not pollute the very measurement being reported).
+  The probe was verified to still catch real drift: injecting one
+  per-packet allocation into the send path fails the gate with "100 times
+  over 100 packets", and reverting it turns the gate green again.
+
+  Note that the sibling test
+  (`TheAllocationCountDoesNotGrowWithThePacketCount`) already encoded the
+  honest form of the criterion — the count must not *grow* with the packet
+  count — which is what the remediation plan's §3.5 acceptance line
+  actually says ("分配次数不随包数增长").
+
+- **The Wayland support in the video sink had never been compiled on any
+  build host.**  `wayland-protocols` ships the protocol **XML**, not the C
+  headers — `xdg-shell-client-protocol.h` and
+  `linux-dmabuf-v1-client-protocol.h` are *generated* by `wayland-scanner`.
+  The CMake lookup searched for the generated header with `find_path`, so
+  it never succeeded: `NIMRTC_VIDEO_SINK_HAS_XDG_SHELL` and
+  `NIMRTC_VIDEO_SINK_HAS_DMABUF` stayed undefined and roughly twenty
+  branches of `egl_renderer.cpp` were dead code.  The XML is now located
+  (via the `pkg-config` `pkgdatadir` first) and both the client header and
+  the marshalling code are generated from it.
+
+  Forcing the macros on exposed four real defects behind them:
+
+  * `wl_shm_pool_create_buffer()` was called with three arguments instead
+    of six (`pool, offset, width, height, stride, format`), and its
+    result — a `struct wl_buffer*` — was then used as the raw pixel
+    buffer, i.e. an invalid memory write into a protocol object.  The
+    `wl_shm` CPU path now backs the pool with an anonymous file
+    (`memfd_create`, with a `mkstemp` + `unlink` fallback), maps it with
+    `mmap(MAP_SHARED)`, and copies the picture into the mapping — which is
+    what the protocol actually requires, since the compositor maps *the
+    same file* on its side.  The mapping is released with `munmap()` on a
+    geometry change and on teardown.
+  * The DMA-BUF import called an API that does not exist in the protocol
+    (`zwp_linux_dmabuf_v1_params_add_fd`, `..._set_offset`,
+    `..._add_plane`, `..._create_buffer`).  It now uses
+    `zwp_linux_buffer_params_v1_add()` plus `..._create_immed()`, attaches
+    the resulting `wl_buffer` to the surface, and releases the previous
+    buffer only after the new one has been committed.
+  * `xdg_surface_commit()` and `wl_display_commit()` are not Wayland
+    requests.  The xdg state is committed through `wl_surface_commit()` on
+    the `wl_surface` it wraps; the display through `wl_display_flush()`.
+  * The registry listener was missing the `global_remove` member, and the
+    DMA-BUF interface was bound at a hard-coded version instead of the
+    advertised one.
+
+  The generated marshalling code is plain C, while the library's warning
+  set is C++-oriented (`-Wnon-virtual-dtor`, `-Wold-style-cast`,
+  `-Woverloaded-virtual`) — and GCC *rejects* those options for a C
+  translation unit, fatally under `-Werror`.  The generated code
+  therefore lives in its own `OBJECT` library, which keeps it out of the
+  C++ warning set.
+
+  Verified: builds clean with warnings-as-errors on Linux (g++-13, all six
+  optional paths enabled) and on Windows (MSVC 2022, Debug), and the
+  protocol interface symbols are now defined in the archive.
+
+- **The Wayland sink compiled but could not present.**  E2 proved the
+  Wayland leaves *compile*; running the sink under a headless Weston
+  showed that neither presentation path reached the display, and that
+  the EGL path tore the client connection down.
+
+  * **`EGL_BAD_ACCESS` (0x3002) on every frame.**  `init_egl()` bound the
+    context on the thread that called `open()` and left it bound there.
+    EGL binds a context to the **calling thread** and refuses to bind one
+    already current elsewhere, so the presenter thread's `eglMakeCurrent()`
+    failed on every frame.  `init_egl()` now releases its binding and
+    calls `eglReleaseThread()` when it is done querying the surface,
+    leaving the context free for the presenter thread.
+  * **`xdg_surface has never been configured`.**  `init_wayland()`
+    committed the initial xdg state and moved on; the first frame was
+    then committed before the compositor's configure had arrived, which
+    is a protocol error — Weston kills the client.  The surface now waits
+    (bounded round trips, so a compositor that never configures cannot
+    hang `open()`) for the first configure and its acknowledgement
+    before `open()` returns.
+  * **A failed swap was counted as a presented frame.**
+    `draw_with_egl()` ignored the result of `eglSwapBuffers()` and
+    returned `true` unconditionally, so `presented` could report frames
+    that never reached the compositor.  The swap result is now the
+    return value.
+
+  Verified under headless Weston on Ubuntu 22.04: the EGL path and the
+  `wl_shm` CPU path each present a full 1280x720 and a letterboxed
+  320x180 stream with no protocol errors.
+
+- **The X11 input-injection path had never been compiled.—**  The Linux
+  injector has two backends: XTest (via `libXtst`) and uinput (via the
+  kernel's `linux/uinput.h`).  `libxtst-dev` was not among the CI
+  install packages, so `NIMRTC_HAS_XTEST=1` was never defined and the
+  entire X11 branch of `linux_input.cpp` — the key, button and
+  wheel injection through XTest — was dead code on every build
+  host.
+
+  Compiling it exposed two real defects.
+
+  * `XTestFakeRelativeMotionEvent()` was called with `nullptr` as its
+    fourth argument, but that parameter is the event *delay* (an
+    `unsigned long` timestamp), not a pointer — the call could
+    never have compiled, so relative mouse motion through XTest could not
+    have worked.  It now passes `CurrentTime`, matching every other
+    XTest call in the file.
+  * The module linked `libXtst` but not `libX11`.  The XTest *extension*
+    lives in `libXtst`, but the calls it is made through —
+    `XOpenDisplay`, `XFlush`, `XCloseDisplay` — live in `libX11`
+    itself, so the link failed with `undefined reference to symbol
+    'XFlush'`.  (`libXtst` records a dependency on `libX11`, but it does
+    not carry it into the link line.)  `libX11` is now linked as well.
+
+  Both the XTest and the uinput backends are now asserted by the
+  `Leaf compile proof` CI step, so a runner image that loses the package
+  fails the build instead of silently dropping the backend.
+
+- **The XTest path injected the *wrong* keys and buttons, and crashed the
+  process on construction.**  Compiling the XTest backend (PR #76) proved
+  it *builds*; it did not prove it *works*, and it did not.
+
+  The Linux injector has **two** injection vocabularies, and the XTest
+  path was using the wrong one.
+
+  * **The keys were injected with the kernel's codes.**  The XTest path
+    called `XTestFakeKeyEvent(dpy, KEY_A, ...)` — `KEY_A` is the
+    *kernel input layer's* code (30), from `linux/input-event-codes.h`.
+    `XTestFakeKeyEvent()` wants an X11 **keycode**: the number the X
+    server assigned to a physical key on the *active* layout.  The two
+    numbering schemes are unrelated, so the server was asked for a key
+    that does not exist on the layout and injected **nothing** — while
+    the injector reported success.  The X server's own vocabulary is the
+    **KeySym** (`XK_a`, `XK_Return`), which the call site now converts
+    to a keycode with `XKeysymToKeycode()`; that conversion is
+    layout-aware, which is exactly what a keycode needs to be.
+  * **The buttons were injected with the kernel's codes too.**
+    `XTestFakeButtonEvent(dpy, BTN_LEFT, ...)` sent `0x110` where the X
+    server expects a **button number**: `1` (left), `2` (middle),
+    `3` (right), `4`/`5` (the wheel), `8`/`9` (back/forward).  A
+    button number outside the server's range is silently dropped.
+  * **Constructing the injector could segfault the process.**
+    `XTestQueryExtension(dpy, nullptr, nullptr, nullptr, nullptr)` passed
+    a null pointer for all four of its out-parameters, but the function
+    writes to **all five** of them unconditionally.  On a host with a
+    reachable X server this crashed inside `libXtst` before the
+    injector's first method was ever called.
+
+  The two vocabularies are now kept apart explicitly: the kernel's
+  `KEY_*`/`BTN_*` codes are used only on the uinput path, the X server's
+  KeySyms and button numbers only on the XTest path, and each is
+  resolved at its own call site.  The tables live in a new portable
+  header (`src/linux_input_codes.hpp`) that carries **no platform
+  type**, so the unit test verifies all of them on **every** CI leg —
+  including the Windows one, where the Linux backend is never compiled.
+  A table that could only be checked on a Linux machine is a table that
+  rots silently between two Linux machines.
+
+- **The DTLS-over-UDP loopback test failed on a coin flip.**  Its PASS
+  criterion was `client_master_key[0] != 0`, and any single byte of a
+  freshly-derived SRTP master key is `0x00` about 1/256 of the time —
+  so the test went red roughly once every 256 runs, for no reason at
+  all.  It fired for real on 2026-11-17 in the CI run of PR #69
+  (run 44009282768, job `windows / msvc`): both ends had derived the
+  *same* key (`client_key[0..3]=00246f7a` on A and on B), so the ECDH
+  was real and the export had succeeded — the key was entirely
+  non-zero apart from its first byte.
+
+  The check now requires at least one non-zero byte in the 16-byte
+  master key on each side, and additionally requires the two ends to
+  agree on the key — which a real handshake produces and a
+  zero-filled buffer cannot fake.  The same defect had already been
+  fixed in the sibling test `tests/test_dtls_over_arq_udp.cpp`; this
+  one had been left behind.
+
+  Worth noting: the CI auto-retry workflow classified this as a
+  **genuine** failure (`steps=20`, runner assigned) and deliberately
+  left it alone, because a job that ran and failed belongs to the
+  tree and must not be re-run.  That was the right call — but it also
+  meant the flake could not be papered over and had to be fixed at the
+  source.
+
+- **The VideoToolbox encoder emits its parameter sets in band.**  A
+  `VTCompressionSession` keeps the SPS / PPS / VPS out of band, in the
+  sample buffer's `CMFormatDescriptionRef`, and returns length-prefixed
+  (AVCC) slice NALs with no parameter sets in the bitstream at all.  A
+  keyframe produced that way carries no way to start decoding: a
+  cross-decoder pair (the VideoToolbox encoder against the OpenH264
+  decoder) failed with `kErrCorrupt` (4100).
+
+  The encoder now extracts the parameter sets through
+  `CMVideoFormatDescriptionGetH264ParameterSetAtIndex` /
+  `CMVideoFormatDescriptionGetHEVCParameterSetAtIndex`, collects them
+  once per session — outside the output callback, so the callback still
+  allocates nothing — and prepends them as Annex-B start codes on every
+  keyframe.  The prefixing itself is a reusable helper
+  (`prepend_parameter_sets()` in `vt_common.hpp`) with unit tests.
+
+- **`MakePluginOpts` no longer trips GCC's `-Wmissing-field-initializers`.**
+  `open_failure_detail` had no default member initializer, so every
+  designated initialization of the struct warned under GCC 13 with
+  `-Wextra -Werror`.  The member now has an explicit `= {}` initializer,
+  which fixes it at the declaration instead of at every call site.
+
+- **The zero-allocation hot-path gate and the codec round-trip test pin
+  the software backend.**  Both picked whichever backend the platform
+  preferred, so the hot-path benchmark measured the hardware codec's
+  memory behaviour on one CI leg and not on another, and the
+  round-trip test paired a hardware encoder with a software decoder.
+  Both now ask for the software backend explicitly, which is what makes
+  the zero-allocation budget and the cross-backend round-trip
+  deterministic.
+
+- **The merge of the M1C platform capture layer onto the remote-desktop
+  branch.**  `origin/main` carried the M1C capture layer (Windows
+  Graphics Capture / DXGI Desktop Duplication, macOS ScreenCaptureKit,
+  Linux X11 + the XDG-desktop-portal PipeWire path) while this branch
+  carried the remote-desktop plan's M1–M4 work.  The two sides
+  implemented the *same* seams twice, so the merge had to pick one
+  implementation of each and reconcile the rest.
+
+  - **The capture seam keeps the M1C layer; the cursor layer keeps the
+    remote-desktop one.**  The M1C platform backends
+    (`windows_capture.hpp`, `unix_capture.hpp`) and the portable cursor
+    layer (`cursor_compositor.hpp` / `cursor_source.hpp`) are
+    complementary, not competing, so both stay.  The *older* duplicate
+    platform backends (`dxgi_desktop_dup.*`, `wgc_capture.*`,
+    `portal_capture.*`, `screen_capture_kit.*`, `x11_capture.*`,
+    `win_cursor_source.*`, `x11_cursor_source.*`) and the *duplicate*
+    cursor classes (`AlphaCursorCompositor`, `CursorState`) were dropped
+    — the M1C layer already provides them.
+
+  - **There is no capture → frame-stream adapter.**  The M1C layer
+    shipped a `CaptureSourceAdapter` between the capture device and the
+    frame stream; this branch's engine pump polls
+    `IVideoCapture::pop_frame()` and translates the frame inline, so the
+    adapter is redundant and was removed (`capture_source_adapter.hpp` /
+    `.cpp` and its test).  `IVideoCaptureFactory::create_source()` went
+    with it — the factory only creates *devices*.
+
+  - **The zero-copy decision is now explicit.**  `VideoSourceFrame` grew
+    `capture_surface_contract`: a capture device that negotiated a
+    zero-copy surface says so, and the engine then hands the surface to
+    the encoder **unconditionally** (there is no CPU copy to fall back
+    to).  A frame that merely carries a GPU handle — a host's own
+    surface — stays *opt-in*, governed by
+    `EngineConfig::video_zero_copy`, exactly as before.  Before this
+    distinction existed the two cases were indistinguishable, so a host
+    that turned the flag off still got the zero-copy path.
+
+  - **The GPU device token travels with the frame.**
+    `CaptureFrame` / `VideoSourceFrame` carry the device that owns the
+    surface, and `GpuHandle::device` is filled from it.  A surface is
+    meaningless without its device: NVENC registers the texture against
+    the device the session was opened with and refuses a texture from
+    another one.
+
+  - **A capture device that reports an error is closed before it is
+    reopened.**  `open()` on an already-open device is a no-op for most
+    backends, so the recovery used to be silently ineffective; the pump
+    now tears the device down and builds it up again.
+
+  - **The synthetic capture device advertises its dirty rectangles.**
+    The negotiated format said `has_dirty_rects = false` while the
+    frames carried the rectangles, so a consumer that trusted the
+    format would ignore metadata that was present and correct.
+
+  - **The public-header baseline moved from 189 to 190.**  The merge
+    added `video_capture/dirty_rect_diff.hpp` and
+    `core/gpu_device_registry.hpp` and removed
+    `video_capture/capture_source_adapter.hpp` — a net `+1`.
 
 - **Every shipped example compiled and then refused to start.**  The
   remote-desktop clients (`rd_device`, `rd_viewer`) and the other
@@ -4207,6 +4559,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   define now follows the **source** rather than the option, so the
   module builds its stub implementation and reports `DEGRADED` at
   runtime -- the honest state -- instead of failing to compile.
+
 - **The stage-timing test was flaky** (it failed on roughly a third of
   its runs).  It asserted that the capture stage cost more than zero
   *microseconds*, but popping a frame from a queue costs tens of
@@ -4226,7 +4579,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > `docs/plan/audio-pipeline-dev-plan.md`; the ladder the owner fixed on
 > 2026-11-06 puts the whole audio body (WP-0 .. WP-11) into `v1.2.0`, so
 > nothing here is a feature release of the `v1.1` line.
-
 
 - **The per-stream bandwidth share was assigned to the wrong stream
   (remote-desktop plan D5).**  `bandwidth_allocation.hpp`'s
@@ -4320,7 +4672,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   locale-independent `19.xx` pattern, and falls back to the toolset
   directory name under `VC\Tools\MSVC\` if the banner does not parse.
   Both the English and the Chinese banner now resolve to `19.43`.
-
 
 - **The engine closed the capture device twice (remote-desktop plan
   A1 / A10).**  `NimRTCEngine::shutdown_video_capture()` closed the
@@ -4562,6 +4913,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   found by checking that the entire run binds.  The two mode-resolution
   tests never dial the server — they only *configure* one — so they now
   use the IANA TURN port as a placeholder.
+
 - **`EngineConfig::video_capture_name` was a knob the engine never read
   (remote-desktop plan A1; remediation Phase 2 §2.2).**  The capture
   seam was fully built — the `IVideoCapture` interface, the registry
@@ -4733,6 +5085,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     OS-assigned ephemeral ports.
   - Verified: all 15 ICE tests pass — 5 sequential runs and 4
     `ctest -j 4` runs, all 15/15.
+
 - **The DXGI Desktop Duplication backend called three DXGI APIs that do
   not exist, so the capture module did not compile on Windows.**  The
   file was written against a *newer* DXGI than the SDK it builds
@@ -4818,6 +5171,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Covered by `tests/test_engine_xr_tmmbr.cpp` (the Statistics Summary
     cases assert the L and J flag bits on the parsed wire block, for
     both a "loss,jitt" and a "loss"-only peer request).
+
 - **`ParsedFmtp` wrote its payload into an inactive union member (UB, caught
   by UBSan as `load of value 13, which is not a valid value for type
   'bool'`).**  `ParsedFmtp` is a hand-rolled variant: an anonymous union of
@@ -4835,6 +5189,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   operations go through them, so the "the member named by `kind` is the
   constructed one" invariant holds on every path.  Four regression tests
   pin the invariant.
+
 - **The H.265 `sprop-parameter-sets` parser read freed memory.**  The
   combined legacy form (`sprop-parameter-sets=vps,sps,pps`) was parsed by
   binding a `std::string_view` to `v.substr(...)`, where `v` is a
@@ -4850,6 +5205,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   buffer, so the reassembled OBU was two bytes short of the original and
   the OBU type was lost.  The buffer is now sized for the header as
   well.
+
 - **Every hand-written `ctest` wrapper test was reported as "Not Run" in a
   non-Debug build.**  CMake 4.0's multi-config generator wraps each
   `add_test()` in a four-branch `CTEST_CONFIGURATION_TYPE` conditional
@@ -4948,6 +5304,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The Linux downstream proof in CI never caught this because GCC 11+
     defaults to `gnu++17`, which is enough for the headers; only the
     MSVC consumer broke.
+
 - **The engine's public header still said the video pipeline was not
   wired into the RTP / DTLS / SRTP path.**  `engine.hpp` carried a
   "P1.1/R3 scope" note claiming that "the engine currently does not pipe
@@ -4964,6 +5321,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the source runs its own cadence thread, so the host pulls frames and
     pushes them through `send_video()` rather than the engine wiring the
     source into the encoder.
+
 - **The video payload type was negotiated in three places that could
   disagree (v1.2.0 video plan, C9 + C11).**  The engine had three
   independent ideas of "the video payload type", and a mismatch between
@@ -4994,6 +5352,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (`src/engine/src/video_negotiation.hpp`), shared by the SDP layer and
     the media layer so the producer and the consumer cannot drift apart.
   - Covered by 5 cases in `tests/test_video_negotiation.cpp`.
+
 - **The transport-wide congestion-control feedback was parsed against the
   wrong wire format (v1.2.0 M1, F4 groundwork).**  `rtp::Parser::parse_transport_cc`
   did not implement the draft's encoding.  The status symbols live *inside*
@@ -5021,6 +5380,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     list; before, the padding bytes were parsed as a packet chunk.
   - Cross-checked against `draft-holmer-rmcat-transport-wide-cc-extensions-01`,
     libwebrtc and Pion; ADR-018 records the normative statement.
+
 - **The scheduler sent up to eight times the budgeted bitrate.**  The
   per-drain allowance was computed as *packets per second* but compared
   against a *per-drain* counter, so a host that drained every 125 ms
@@ -5046,6 +5406,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     initialisation keeps compiling.
   - `stats().current_bitrate_bps` now reports the *observed* egress
     rate of the last drain instead of always 0.
+
 - **A packet the transport refused was silently thrown away.**  When
   the drain callback vetoed a packet (the transport is not accepting
   traffic right now), the scheduler had already popped it off the queue
@@ -5056,6 +5417,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transport is not accepting traffic, so lower-priority queues must not
   be attempted either).  The same fix applies to the per-stream
   selection path.
+
 - **The inbound Opus payload was decoded without its TOC byte (audio
   pipeline WP-11, defect F-1).**  The depacketiser strips the TOC byte
   (it describes the *packet*, not the frame), but libopus decodes
@@ -5065,6 +5427,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pick a configuration the frame was never coded for — noise instead of
   PCM.  The decoder now rebuilds the code-0 packet before it calls
   libopus.
+
 - **A DTLS session could not change its role after it was opened.**  The
   wolfSSL context is built with a *role-specific* method, so a context
   built for the server cannot drive a client handshake — wolfSSL fails
@@ -5073,18 +5436,21 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *after* `open()` built the context with the default role, so a
   NimRTC-to-NimRTC session always failed.  The session now rebuilds its
   context when the role changes.
+
 - **The rebuild of the DTLS context lost the SRTP keying material.**  The
   rebuild reset the `std::optional` that holds the keys, and
   `export_srtp_keys()` returns early on an empty optional — the session
   came up "Connected" while the engine reported "no keying material",
   and the SRTP context was never installed.  The same reset existed in
   the re-handshake path.  Both put a fresh key set back now.
+
 - **An empty PCM buffer vanished silently (audio pipeline WP-11, spec
   A-8).**  `send_audio()` returned `kEngineInvalidParam` and the host
   heard silence with no explanation.  Every rejection on the send path
   now increments `Stats::audio_encode_errors` and fires `on_error` at a
   throttled rate, so a host whose PCM never reaches the wire can see
   why.
+
 - **The soak evidence window erased the failures it was supposed to
   record.** The summary kept only the *last* record per case per day, so a
   FAIL that a later PASS on the same day followed was silently erased: the
@@ -5099,6 +5465,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gate names it. Exact duplicate records are dropped, because the runbook's
   merge procedure appends the CI records into `build/soak/` and running it
   twice inflated the failure count.
+
 - **A tooling failure was dressed up as a product regression.** The
   signaling-server wait was 5 seconds, which is not enough for the server
   to reach its first log line when the 3am scheduled task starts on a
@@ -5106,9 +5473,11 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "signaling_server did not open :<port>" and an *empty* log. The wait is
   now 30 seconds, and the runner prints the child's log tail on failure so
   the two cases are distinguishable next time.
+
 - **The acceptance runner lost a port race.** The runner now waits for the
   port instead of assuming it is free, so a slow start no longer turns
   into a spurious failure.
+
 - **The SCTP DataChannel was a shell: it was never opened, and every
   inbound message arrived twice.**  `create_data_channel()` called only
   `IDataChannel::open(cfg)` — the overload that caches the config — and
@@ -5119,6 +5488,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   channel with `IPlugin::open()` and, when that fails, reports the
   error through `on_error_` and returns `nullptr` instead of handing
   back a channel that silently fails.
+
 - **An inbound SCTP message was delivered to the application twice.**  The
   socket fired both the payload-protocol-aware callback and the legacy
   callback for the same chunk, and the channel had registered both — so
@@ -5127,6 +5497,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mutually exclusive: the payload-protocol-aware one wins when it is
   registered, the legacy one is the fallback for backends that do not
   speak that seam.
+
 - **The DCEP wire format did not carry the channel's QoS.**  The channel
   type was encoded as one of only three values, so an unordered or
   unreliable channel looked like a reliable in-order one to the peer,
@@ -5135,6 +5506,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   high-order bit flags unordered delivery), the priority survives the
   round trip, and a malformed or reserved channel type is rejected
   instead of being guessed at.
+
 - **The DCEP handshake never happened, and the channel lied about its
   state.**  The channel announced `"open"` the moment it was opened —
   before any association existed and before the peer had acknowledged
@@ -5152,11 +5524,13 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     having acknowledged the channel.
   - Until the handshake completes, every user message is sent ordered,
     whatever the channel's own ordering semantics are (RFC 8832 §6).
+
 - **The reliability parameter was encoded through a 16-bit variable.**
   The shift chain assumed a 32-bit value, which made MSVC warn about
   the shift and left the correct result resting on an integer-promotion
   accident.  The variable is now 32 bits wide, and a reliable channel
   carries a reliability parameter of 0 as RFC 8832 requires.
+
 - **`Session.EndToEnd` failed on every platform whose `unordered_map`
   orders the session's streams differently from x86_64.**  The test
   indexed `Session::streams()` positionally (`streams()[0]` for the
@@ -5165,6 +5539,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unspecified — and on aarch64 (and on macOS arm64) the video stream
   came first, so the audio lookup returned `nullptr` and the test
   failed.  The test now looks each stream up by its id.
+
 - **The DTLS handshake-reassembler test helper shifted a 16-bit value by
   40 bits, which is undefined behaviour.**  `make_record()` writes the
   six bytes of the 48-bit DTLS record sequence number, but
@@ -5175,6 +5550,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   became visible now because the DTLS module's own test suite never
   ran before the test-discovery fix above — with it running, the
   `asan-ubsan` CI leg failed on all eight of its cases.
+
 - **The Phase 0.3 benchmark's allocation probe collided with the
   sanitizer runtimes.**  `bench_engine_hotpath` replaces the global
   `operator new` / `operator delete` to count allocations, but a
@@ -5188,9 +5564,40 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `alloc_probe_enabled: false` in that build — a sanitizer build is
   about races and memory errors, not about allocation counts.
 
+- **The D3D11 sink's GPU path bypassed the presentation clock and the
+  latest-wins mailbox (v1.2 plan item `E5`).**
+  device-to-device copy and the `Present()` **on the caller's thread**,
+  outside the presenter's deadline wait and outside the single-slot
+  mailbox.  Two consequences, both silent:
+  - a producer that pushed GPU frames faster than the display could show
+    them was blocked on the GPU, and every GPU frame was presented — the
+    "latest-wins" back-pressure did not apply to the GPU path at all, so
+    its `frames_dropped_present` and `present_fps` ignored GPU traffic;
+  - a sink fed a **mix** of GPU and CPU frames (a decode path that falls
+    back per frame) presented twice per tick: once from the caller's
+    thread and once from the presenter's — the picture could tear and the
+    frame rate doubled.
+
+  The GPU frame now goes into the same mailbox as a CPU frame, carrying a
+  reference to the `GpuBuffer` so the texture outlives the borrowed
+  `render()` call, and the **presenter thread** does the copy on the
+  presentation clock.
+
+- **The D3D11 GPU path could copy a non-BGRA8 texture into a BGRA8
+  present target.**
+  `CopyResource` requires both textures to agree on format and geometry;
+  the old code called it unconditionally, so an NV12 / P010 decoder
+  output (or any surface of a different size) produced a D3D11 validation
+  error and presented an unchanged or garbage frame.  The copy is now
+  `CopyResource` only for a BGRA8 surface in the offscreen mode and a
+  clipped `CopySubresourceRegion` otherwise, and a surface that cannot be
+  presented without a format conversion takes the **documented fallback**:
+  it is presented from its CPU mirror, or refused with `kErrUnsupported`
+  so the engine's render-path rule decodes to host pixels — never copied
+  as garbage.  The fallback is documented in `docs/api/engine_api.md`
+  §13.8 and in the renderer's header.
 
 ### Performance
-
 
 - **The media hot paths no longer allocate per frame or per packet
   (v1.2.0, architecture remediation plan §3 -- the C class).**  Six of
@@ -5358,9 +5765,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the Phase 0.3 benchmark's other two sections and are tracked
     separately.
 
-
 ### Tooling
-
 
 - **The plugin author guide for the capture / codec / sink / audio-device
   seams (v1.4, remote-desktop plan K5).**  The existing
@@ -5428,7 +5833,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `docs/zh/architecture.md` §6 gained the matching honest inventory
     ("视频侧实际交付的编解码器与设备").
 
-
 - **The gtest discovery timeout was too short for a loaded host.**
   `gtest_discover_tests` re-runs each test binary to enumerate its
   cases, and the probe had 10 seconds.  On a busy Windows machine a
@@ -5468,16 +5872,21 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   printed as shared. A test failure that no upstream report explains is a
   plain test failure and fails the job too. The gate's own classification
   is pinned by a self-test that runs on every push.
+
 - **A tag watcher for `v1.1.0`, with signature verification and a
   release-gate status snapshot.** The watcher probes the repository it is
   pointed at separately from the repository the scripts live in, so a
   fork cannot be mistaken for the origin.
+
 - **A 7-day soak evidence collector** on the scheduled runners, with a
   runbook that appends the CI records instead of overwriting them.
+
 - **An offline release signature verifier** that accepts valid signatures
   produced by the release key.
+
 - **A release-gate status snapshot** (`tools/v11_status.py`) and the
   `v1.1.0` release-candidate record.
+
 - **A MSVC developer-environment build wrapper** (`scripts/msvc_build.bat`)
   that runs a command inside the VS 2022 x64 developer env, with a `raw`
   mode for arbitrary commands. The `raw` mode never ran the command --
@@ -5489,8 +5898,10 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the block early and aborted the script; the messages are free of
   parentheses now, and the `%errorlevel%` reads became `!errorlevel!` so
   the value is the one the command returned.
+
 - **The WebRTC APM prebuild is now a hard release gate** (the APM content
   that actually ships is reported, not just the prebuild outcome).
+
 - **An MSVC environment sanitizer** (`scripts/msvc_env.bat`) that clears
   the `CL`, `_CL_` and `CLFLAGS` variables before a build. A `CL` that
   carries a language-standard option is applied to C and to C++ sources
@@ -5501,6 +5912,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cleared values are printed, and `NIMRTC_KEEP_CL=1` keeps them for the
   rare build that genuinely needs one. Both `scripts/build.bat` and
   `scripts/msvc_build.bat` call it.
+
 - **A CMake cache repair tool** (`scripts/repair_msvc_cache.py`) that
   drops the probe results a polluted environment produced. CMake records
   a failed probe as an *empty* cache value and never recomputes it, so a

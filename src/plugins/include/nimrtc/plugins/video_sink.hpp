@@ -231,6 +231,27 @@ struct NIMRTC_API_STABLE VideoSinkStats {
      *  reflects what the *display* actually got rather than what the
      *  producer offered. */
     std::uint32_t present_fps         = 0;
+    /** GPU surfaces copied device-to-device into the present target.
+     *
+     *  Remote-desktop plan E5: this is the counter that proves the
+     *  zero-copy hand-off happened — the picture never entered host
+     *  memory between decode and present. */
+    std::uint64_t gpu_device_copies    = 0;
+    /** GPU surfaces that had to be staged through host memory on their
+     *  way to the display (the documented fallback).
+     *
+     *  A presentation sink counts here when it cannot consume the
+     *  surface's format natively: today an `ID3D11Texture2D` that is not
+     *  BGRA8 (an NV12 / P010 decoder output) is presented from its CPU
+     *  mirror, or refused so the engine decodes to host pixels.  A host
+     *  that sees this counter move has a driver or decoder configuration
+     *  that is not zero-copy all the way to the display. */
+    std::uint64_t gpu_staging_fallbacks = 0;
+    /** GPU surfaces the sink refused outright (a foreign backend, an
+     *  unusable handle, a format it cannot present).  A non-zero value
+     *  here alongside `gpu_staging_fallbacks` is a configuration issue,
+     *  not a timing artefact. */
+    std::uint64_t gpu_surfaces_refused  = 0;
 };
 
 // ---------------------------------------------------------------------------

@@ -240,6 +240,7 @@ void Collector::handle_receiver_report(core::ByteSpan block,
             const std::int64_t rtt_us = elapsed_us - dlsr_us;
             if (rtt_us >= 0) {
                 snap_.rtt = core::Milliseconds{static_cast<std::int64_t>(rtt_us / 1000)};
+                snap_.has_rtt = true;
             }
         }
     }

@@ -113,6 +113,12 @@ struct D3D11Renderer::Impl {
     std::atomic<std::uint64_t> render_errors_{0};
     std::atomic<std::int64_t>  last_render_age_us_{0};
     std::atomic<std::uint32_t> present_fps_{0};
+    /** GPU surfaces copied device-to-device into the present target. */
+    std::atomic<std::uint64_t> gpu_copies_{0};
+    /** GPU surfaces that had to go through host staging (plan E5). */
+    std::atomic<std::uint64_t> gpu_staging_readbacks_{0};
+    /** GPU surfaces refused outright (foreign backend / bad handle). */
+    std::atomic<std::uint64_t> gpu_surfaces_refused_{0};
 
     /** The most recent frame's metadata (for `current_frame_info()`). */
     mutable std::mutex      info_mutex_;
@@ -134,6 +140,10 @@ struct D3D11Renderer::Impl {
         std::int64_t capture_ts_us = 0;
         std::uint32_t frame_seq     = 0;
         std::uint32_t rtp_timestamp = 0;
+        /** Non-null when the frame is a GPU surface: the mailbox holds a
+         *  reference on it, so the texture outlives the borrowed
+         *  `render()` call.  When set, `pixels` is unused. */
+        std::shared_ptr<const plugins::GpuBuffer> surface;
         /** True when a frame is waiting. */
         bool valid = false;
     };
@@ -218,8 +228,21 @@ struct D3D11Renderer::Impl {
     bool resize_offscreen(std::uint32_t width, std::uint32_t height);
 
     /** Copy a D3D11 texture into the present target device-side and
-     *  present it. */
-    bool present_texture(ID3D11Texture2D* texture);
+     *  present it.
+     *
+     *  @param texture  The source texture.
+     *  @param width    The source width (sizes / resizes the offscreen
+     *                  target).
+     *  @param height   The source height.
+     *  @param castable True when the source is exactly the present
+     *                  format (BGRA8), so a plain `CopyResource` is
+     *                  legal; otherwise the copy goes through
+     *                  `CopySubresourceRegion`, which clips to the
+     *                  target. */
+    bool present_texture(ID3D11Texture2D* texture,
+                         std::uint32_t width,
+                         std::uint32_t height,
+                         bool castable);
 
     /** Present whatever is in the back buffer. */
     bool do_present();
@@ -333,6 +356,26 @@ void D3D11Renderer::Impl::present_loop() {
 
 bool D3D11Renderer::Impl::present_one(const Slot& slot) {
     if (!slot.valid) return false;
+    if (slot.surface) {
+#if defined(_WIN32)
+        // The GPU path.  The mailbox holds a reference on the surface,
+        // so the texture is alive here even though the producer's
+        // `render()` call returned long ago.
+        auto* texture =
+            static_cast<ID3D11Texture2D*>(slot.surface->handle().handle);
+        if (!texture) return false;
+        const std::uint32_t w  = slot.surface->width();
+        const std::uint32_t ht = slot.surface->height();
+        if (w == 0 || ht == 0) return false;
+        const bool ok = present_texture(
+            texture, w, ht,
+            slot.surface->format() == plugins::VideoPixelFormat::kBGRA);
+        if (ok) gpu_copies_.fetch_add(1, std::memory_order_relaxed);
+        return ok;
+#else
+        return true;
+#endif
+    }
     if (slot.pixels.empty() || slot.width == 0 || slot.height == 0) {
         return false;
     }
@@ -607,8 +650,18 @@ bool D3D11Renderer::Impl::present_bgra(const std::uint8_t* pixels,
     return do_present();
 }
 
-bool D3D11Renderer::Impl::present_texture(ID3D11Texture2D* texture) {
+bool D3D11Renderer::Impl::present_texture(ID3D11Texture2D* texture,
+                                           std::uint32_t width,
+                                           std::uint32_t height,
+                                           bool castable) {
     if (!device_ || !context_ || !texture) return false;
+
+    // A surface of a different geometry resizes the offscreen target,
+    // exactly as the CPU path does.  (A swap chain's back buffer is the
+    // window's, so it keeps its size and the copy is clipped.)
+    if (offscreen_ && (offscreen_w_ != width || offscreen_h_ != height)) {
+        if (!resize_offscreen(width, height)) return false;
+    }
 
     ID3D11Texture2D* target = offscreen_ ? offscreen_ : back_buffer_;
     ID3D11RenderTargetView* target_rtv =
@@ -622,8 +675,24 @@ bool D3D11Renderer::Impl::present_texture(ID3D11Texture2D* texture) {
 
     // The device-side copy: the source texture goes straight into the
     // present target.  No host copy happens on this path — that is the
-    // whole point of the GPU delivery route (plan E1).
-    context_->CopyResource(target, texture);
+    // whole point of the GPU delivery route (plan E1 / E5).
+    //
+    // `CopyResource` requires the two textures to agree on format and
+    // geometry, so it is the fast path for a BGRA8 surface in the
+    // offscreen mode; anything else is clipped through
+    // `CopySubresourceRegion`, still device-to-device.
+    if (castable && offscreen_) {
+        context_->CopyResource(target, texture);
+    } else {
+        D3D11_BOX box{};
+        box.left = 0;
+        box.top = 0;
+        box.right  = std::min(width,  offscreen_ ? offscreen_w_ : back_buffer_w_);
+        box.bottom = std::min(height, offscreen_ ? offscreen_h_ : back_buffer_h_);
+        box.back = 1;
+        box.front = 0;
+        context_->CopySubresourceRegion(target, 0, 0, 0, 0, texture, 0, &box);
+    }
 
     return do_present();
 }
@@ -730,6 +799,7 @@ plugins::Status D3D11Renderer::render(
         }
         impl_->slot_.pixels.assign(src, src + static_cast<std::ptrdiff_t>(
                                                   src_stride) * frame.height);
+        impl_->slot_.surface.reset();
         impl_->slot_.width         = frame.width;
         impl_->slot_.height        = frame.height;
         impl_->slot_.capture_ts_us = frame.capture_ts_us;
@@ -763,25 +833,87 @@ plugins::Status D3D11Renderer::render(
     if (!impl_ || !impl_->running_.load(std::memory_order_acquire)) {
         return plugins::kErrNotReady;
     }
-    if (!surface.has_gpu_handle()) return plugins::kErrInvalidParam;
+    if (!surface.has_gpu_handle()) {
+        impl_->gpu_surfaces_refused_.fetch_add(1, std::memory_order_relaxed);
+        return plugins::kErrInvalidParam;
+    }
     if (surface.handle().backend != plugins::GpuBackend::kWindowsD3D11Texture) {
+        impl_->gpu_surfaces_refused_.fetch_add(1, std::memory_order_relaxed);
         return plugins::kErrUnsupported;
     }
     auto* texture = static_cast<ID3D11Texture2D*>(surface.handle().handle);
-    if (!texture) return plugins::kErrInvalidParam;
-
-    // The GPU path: the surface goes device-side into the present
-    // target.  No host copy, so `bytes_copied` stays at zero on this
-    // route (plan B10).
-    if (!impl_->present_texture(texture)) {
-        impl_->render_errors_.fetch_add(1, std::memory_order_relaxed);
-        return plugins::kErrHardwareError;
+    if (!texture || surface.width() == 0 || surface.height() == 0) {
+        impl_->gpu_surfaces_refused_.fetch_add(1, std::memory_order_relaxed);
+        return plugins::kErrInvalidParam;
     }
+
+    // ---- The documented fallback (plan E5) --------------------------------
+    //
+    // A surface that is not the present format (BGRA8) cannot go into the
+    // present target with a device-to-device copy, and this module carries
+    // no format-converting shader.  If the surface has a CPU mirror, that
+    // mirror *is* the picture: present it through the CPU path.  If it has
+    // none, there is nothing to present — say so (`kErrUnsupported`), so
+    // the engine's render-path rule decodes to host pixels next time, and
+    // count the fallback instead of pretending the frame was shown.
+    if (surface.format() != plugins::VideoPixelFormat::kBGRA) {
+        impl_->gpu_staging_readbacks_.fetch_add(1, std::memory_order_relaxed);
+        if (!surface.has_cpu_mirror()) {
+            return plugins::kErrUnsupported;
+        }
+        plugins::VideoSourceFrame f{};
+        f.width   = surface.width();
+        f.height  = surface.height();
+        f.format  = surface.format();
+        f.plane_y = surface.cpu_y();
+        f.stride_y = surface.stride_y();
+        if (is_planar_yuv_420(surface.format())) {
+            f.plane_u  = surface.cpu_u();
+            f.plane_v  = surface.cpu_v();
+            f.stride_u = surface.stride_u();
+            f.stride_v = surface.stride_v();
+        }
+        return render(f);
+    }
+
+    // ---- The GPU path -----------------------------------------------------
+    //
+    // The frame goes into the *same* latest-wins mailbox as a CPU frame,
+    // and the presenter thread does the device-side copy on its own
+    // clock.  Doing the copy here instead would (a) block the producer on
+    // the GPU and (b) present outside the presentation clock, so GPU and
+    // CPU frames mixed on one sink would double the frame rate and
+    // corrupt the drop accounting (plan E5).
+    //
+    // The mailbox takes its own reference: `surface` is borrowed for the
+    // duration of this call (the seam's lifetime contract) and the
+    // presenter needs it later.
+    {
+        std::lock_guard<std::mutex> lock(impl_->mtx_);
+        if (impl_->slot_.valid) {
+            impl_->frames_dropped_present_.fetch_add(1,
+                                                      std::memory_order_relaxed);
+            impl_->frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+        }
+        impl_->slot_.pixels.clear();
+        impl_->slot_.surface       =
+            std::make_shared<plugins::GpuBuffer>(
+                surface.handle(), surface.width(), surface.height(),
+                surface.format());
+        impl_->slot_.width         = surface.width();
+        impl_->slot_.height        = surface.height();
+        impl_->slot_.capture_ts_us = 0;
+        impl_->slot_.frame_seq     = 0;
+        impl_->slot_.rtp_timestamp = 0;
+        impl_->slot_.valid         = true;
+    }
+    impl_->cv_.notify_all();
+
     impl_->frames_rendered_.fetch_add(1, std::memory_order_relaxed);
-    impl_->frames_presented_.fetch_add(1, std::memory_order_relaxed);
     return plugins::kOk;
 #else
     (void)surface;
+    impl_->gpu_surfaces_refused_.fetch_add(1, std::memory_order_relaxed);
     return plugins::kErrUnsupported;
 #endif
 }
@@ -824,6 +956,14 @@ plugins::VideoSinkStats D3D11Renderer::stats() const noexcept {
     s.frames_presented =
         impl_->frames_presented_.load(std::memory_order_relaxed);
     s.present_fps = impl_->present_fps_.load(std::memory_order_relaxed);
+    // GPU-path accounting (plan E5): the split between these counters is
+    // what tells a host whether the fast path is taken on its hardware.
+    s.gpu_device_copies =
+        impl_->gpu_copies_.load(std::memory_order_relaxed);
+    s.gpu_staging_fallbacks =
+        impl_->gpu_staging_readbacks_.load(std::memory_order_relaxed);
+    s.gpu_surfaces_refused =
+        impl_->gpu_surfaces_refused_.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(impl_->mtx_);
         s.presenter_queue_depth = impl_->slot_.valid ? 1u : 0u;

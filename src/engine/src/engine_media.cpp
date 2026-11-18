@@ -27,6 +27,11 @@
 // concrete `rtp::` type.
 #include "rtp_packetizer.hpp"
 
+// The QoE collector's sharpness proxy reads a **luma plane**, so the
+// engine has to know which decoded layouts actually have one (the
+// planar YUV 4:2:0 family does; BGRA / RGB24 do not).
+#include <nimrtc/video_frame/frame.hpp>
+
 namespace nimrtc::engine {
 
 // The staging step's names are used unqualified below; they come from
@@ -436,6 +441,20 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // that never touches video does not pay for it, and so a re-open()
     // starts from a clean slate.
     impl_->video_state.video_stats.ensure_created();
+
+    // Plan J6 / S7: the freeze *finding* and the freeze *accounting* live
+    // in two different modules -- the `video_stats` sink owns the
+    // definition of a freeze (the threshold and the idle detection),
+    // and the `rd_qoe` collector owns the metric a host reads in
+    // `Stats::qoe`.  The engine is the only party that sees both, so it
+    // is the courier between them.
+    //
+    // Without this wiring the sink counted the freezes and the QoE
+    // snapshot's `freeze_count` / `freeze_total_ms` / `freeze_ratio`
+    // stayed at zero -- a metric that is measured and then never
+    // published.
+    impl_->video_state.video_stats.set_freeze_callback(
+        [this](std::int64_t duration_ms) { note_freeze(duration_ms); });
 
     // Remote-desktop plan H1: the video stream set's clock starts with
     // the session, so the per-stream rates (H4) are measured against a
@@ -1450,6 +1469,22 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                         static_cast<std::int64_t>(enc.info.capture_ts_us),
                         enc.info.frame_seq,
                         static_cast<double>(config_.video_fps));
+                    // Plan J3: the sharpness proxy.  The luma plane is
+                    // right here — the decoded frame's own pixels — and
+                    // the collector is the only party that knows how to
+                    // turn a picture into a sharpness number, so the
+                    // engine carries the pixels over.
+                    //
+                    // Only the **planar YUV** layouts have a luma plane
+                    // the collector can read (it computes a 3x3
+                    // Laplacian over the luma).  A BGRA frame has no
+                    // luma at all, and converting one would cost more
+                    // than the metric is worth — so the proxy simply is
+                    // not measured for those frames, and the snapshot
+                    // says so by staying at zero.
+                    if (is_planar_yuv_420(layout.format) && planes[0] != nullptr) {
+                        note_sharpness(planes[0], stride_y, w, h);
+                    }
                 } else {
                     impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kDecoderError);
@@ -3401,6 +3436,45 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.video_stage_total_p95_us =
             out.video_stage_capture.p95_us + out.video_stage_convert.p95_us +
             out.video_stage_encode.p95_us + out.video_stage_packetize.p95_us;
+
+        // ---- The remote-desktop breakdown (plan S7) ----------------------
+        //
+        // Derived from the same table, in the units a human reasons
+        // about (milliseconds, frames per second).  Nothing here is a
+        // second measurement: every number is `value / 1e6` (the mean
+        // and the percentile read in the **same** nanosecond unit, so a
+        // p95 can never read below the mean through a rounding
+        // artefact), a sample count, or a rate over the stage's own
+        // wall-clock span.
+        auto& rd = out.remote_desktop;
+        const auto ms_from_ns = [](double ns) { return ns / 1'000'000.0; };
+
+        rd.capture_ms  = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kCapture)));
+        rd.capture_fps = impl_->video_state.capture_fps();
+        rd.frames_captured = impl_->video_state.capture_frames_produced();
+
+        rd.encode_ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kEncode)));
+        rd.encode_p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kEncode, 95)));
+        rd.encode_fps    = t.rate_hz(Stage::kEncode);
+        rd.frames_encoded = t.samples(Stage::kEncode);
+
+        rd.decode_ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kDecode)));
+        rd.decode_p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kDecode, 95)));
+        rd.decode_fps    = t.rate_hz(Stage::kDecode);
+        rd.frames_decoded = t.samples(Stage::kDecode);
+
+        // The drops: frames the device produced that the encoder never
+        // saw.  Only meaningful once both stages have run; a session
+        // that has captured but not yet encoded has "dropped" nothing
+        // yet, so the difference is clamped at 0 rather than wrapping.
+        rd.frames_dropped_before_encode =
+            rd.frames_captured > rd.frames_encoded
+                ? rd.frames_captured - rd.frames_encoded
+                : 0;
+        rd.frames_decoded_without_local_encode =
+            rd.frames_decoded > rd.frames_encoded
+                ? rd.frames_decoded - rd.frames_encoded
+                : 0;
     }
 
     // ---- The render clock (remote-desktop plan E5) -----------------------
@@ -3421,6 +3495,16 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     if (impl_ != nullptr) {
         out.qoe = impl_->qoe.snapshot();
     }
+
+    // ---- The transport plane (plan Track S / S5) -------------------------
+    //
+    // The ICE / DTLS / SRTP path the session runs over.  The projection
+    // reads each plane from its owner -- the ICE transport through the
+    // plugin seam, the DTLS session through the weak handle, the SRTP
+    // context through its own counters, and the round-trip time from the
+    // feedback collector -- so every number here is the number its owner
+    // reports, not a second measurement of it.
+    append_transport_stats(out.transport);
 
     // ---- The data-channel plane (plan Track S / S6) ---------------------
     //

@@ -147,6 +147,17 @@ public:
         maxima_ns_[idx] = std::max(maxima_ns_[idx], nanos);
         ++samples_[idx];
 
+        // Plan S7: the *wall-clock* span of the stage's life.  The
+        // sample durations above measure how long each call took; they
+        // cannot tell how often the stage ran.  Stamping the first
+        // sample's arrival and the latest one's gives the stage a rate
+        // (samples over elapsed time) without another clock read on
+        // the frame path — every caller already timed its own call.
+        const std::int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (samples_[idx] == 1) first_ns_[idx] = now_ns;
+        last_ns_[idx] = now_ns;
+
         // The reservoir: a ring buffer of the most recent samples, used
         // for the percentile.  It is per-stage so that a stage which
         // runs once per frame and a stage which runs once per keyframe
@@ -222,6 +233,27 @@ public:
      */
     [[nodiscard]] std::uint64_t percentile_us(Stage stage,
                                              unsigned percentile) const noexcept {
+        return ns_to_us(percentile_ns(stage, percentile));
+    }
+
+    /**
+     * @brief The `percentile`-th percentile of the recent samples, in
+     *         **nanoseconds**.
+     *
+     * The exact view, for the same reason `mean_ns()` exists: the
+     * microsecond view rounds, so a stage whose samples sit below a
+     * microsecond reports zero there — and a *mean* and a *percentile*
+     * that are rounded differently can end up **inverted** (a p95 that
+     * reads below the mean), which is a number no host can interpret.
+     * Reading both in the same unit keeps them comparable.
+     *
+     * @param stage       The stage.
+     * @param percentile  0..100.
+     * @return The value in nanoseconds, or 0 when the stage was never
+     *         sampled.
+     */
+    [[nodiscard]] std::uint64_t percentile_ns(Stage stage,
+                                              unsigned percentile) const noexcept {
         const auto idx = static_cast<std::size_t>(stage);
         if (idx >= kStageCount) return 0;
         const auto n = ring_count_[idx];
@@ -235,7 +267,25 @@ public:
         const std::size_t rank =
             static_cast<std::size_t>((percentile * sorted.size() + 99) / 100);
         const std::size_t pos = rank == 0 ? 0 : rank - 1;
-        return ns_to_us(sorted[std::min(pos, sorted.size() - 1)]);
+        return sorted[std::min(pos, sorted.size() - 1)];
+    }
+
+    /**
+     * @brief The rate the stage ran at, in samples per second (plan S7).
+     *
+     * Measured over the stage's whole life: from the first sample's
+     * arrival to the latest one's.  0 when fewer than two samples were
+     * recorded or when they share an instant — the rate is not
+     * measurable yet, which is different from "zero".
+     */
+    [[nodiscard]] double rate_hz(Stage stage) const noexcept {
+        const auto idx = static_cast<std::size_t>(stage);
+        if (idx >= kStageCount) return 0.0;
+        const auto n = samples_[idx];
+        if (n < 2) return 0.0;
+        const auto span_ns = last_ns_[idx] - first_ns_[idx];
+        if (span_ns <= 0) return 0.0;
+        return static_cast<double>(n - 1) * 1e9 / static_cast<double>(span_ns);
     }
 
     /** Forget every sample (used when the session restarts). */
@@ -243,6 +293,8 @@ public:
         totals_ns_.fill(0);
         maxima_ns_.fill(0);
         samples_.fill(0);
+        first_ns_.fill(0);
+        last_ns_.fill(0);
         for (std::size_t i = 0; i < kStageCount; ++i) {
             reservoirs_[i].fill(0);
             ring_head_[i] = 0;
@@ -278,6 +330,12 @@ private:
     std::array<std::uint64_t, kStageCount> totals_ns_{};
     std::array<std::uint64_t, kStageCount> maxima_ns_{};
     std::array<std::uint64_t, kStageCount> samples_{};
+
+    /** The steady-clock stamp of the stage's first and latest sample,
+     *  in nanoseconds since the epoch (plan S7: the wall-clock view,
+     *  which is what turns a sample count into a rate). */
+    std::array<std::int64_t, kStageCount> first_ns_{};
+    std::array<std::int64_t, kStageCount> last_ns_{};
     std::array<std::array<std::uint64_t, kReservoirSize>, kStageCount> reservoirs_{};
     std::array<std::size_t, kStageCount> ring_head_{};
     std::array<std::size_t, kStageCount> ring_count_{};

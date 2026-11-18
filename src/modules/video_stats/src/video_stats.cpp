@@ -215,6 +215,7 @@ public:
                                                std::memory_order_relaxed);
                     last_freeze_ms_.store(gap_ms,
                                           std::memory_order_relaxed);
+                    notify_freeze(static_cast<std::int64_t>(gap_ms));
                 }
                 last_rendered_ts_us_.store(capture_ts_us,
                                             std::memory_order_release);
@@ -324,6 +325,7 @@ public:
                         idle_ms, std::memory_order_relaxed);
                     last_freeze_ms_.store(idle_ms,
                                           std::memory_order_relaxed);
+                    notify_freeze(static_cast<std::int64_t>(idle_ms));
                     // Anchor future freezes to "now" so we don't keep
                     // attributing the same idle period on every tick.
                     last_rendered_ts_us_.store(now_us,
@@ -562,6 +564,28 @@ private:
     // A fixed-size ring buffer, so the hot path never allocates.
     mutable std::mutex         bitrate_mutex_;
     BitrateWindow              bitrate_window_;
+
+    // The freeze callback.  Guarded by its own mutex: it is written
+    // once (at wiring time) and read on the render / tick paths.
+    mutable std::mutex                       freeze_cb_mutex_;
+    std::function<void(std::int64_t)>        freeze_cb_;
+
+    /** Tell the listener about a freeze, if one is installed. */
+    void notify_freeze(std::int64_t duration_ms) noexcept {
+        std::function<void(std::int64_t)> cb;
+        {
+            std::lock_guard<std::mutex> lk(freeze_cb_mutex_);
+            cb = freeze_cb_;
+        }
+        if (cb) cb(duration_ms);
+    }
+
+public:
+    void set_freeze_callback(
+        std::function<void(std::int64_t)> cb) override {
+        std::lock_guard<std::mutex> lk(freeze_cb_mutex_);
+        freeze_cb_ = std::move(cb);
+    }
 };
 
 } // namespace

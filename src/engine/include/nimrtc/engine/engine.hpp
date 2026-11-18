@@ -163,6 +163,21 @@ struct VideoStream;
 
 namespace nimrtc::engine {
 
+/** The plugin id of the built-in QoE collector (plan J3 / J6).
+ *
+ *  The `rd_qoe` module registers its factory under this id.  It is the
+ *  default value of `EngineConfig::qoe_collector_name`, so a session
+ *  that says nothing about QoE still gets the metrics a remote-desktop
+ *  session is judged by.
+ *
+ *  The module is **optional**: a build without it has no factory under
+ *  this id, and the engine degrades gracefully instead of failing
+ *  `open()`.  A host that wants to be explicit about the degradation
+ *  can check `core::PluginRegistry::get_qoe_collector(...)` before
+ *  opening the engine. */
+NIMRTC_API_STABLE inline constexpr std::string_view kDefaultQoeCollectorId =
+    "rd-qoe";
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -329,25 +344,38 @@ struct NIMRTC_API_STABLE EngineConfig {
     // never includes a concrete module's header (Layout Invariant 4 /
     // ADR-025).
     //
-    // The collector is **off by default**: a session that does not ask
-    // for the metrics does not pay for the reservoir, and the engine
-    // still publishes the frame counts (the presented / dropped
-    // counters are free).
+    // The collector is **on by default**: a remote-desktop session is
+    // judged on exactly these metrics (the freeze count, the latency
+    // percentiles, the input-to-photon latency), and a host should not
+    // have to name a plugin to learn them.  The default costs one
+    // bounded reservoir (see `qoe_config` below), and a build without
+    // the `rd_qoe` module simply does without it.
 
     /** The QoE-collector plugin id (plan J3 / J6).
      *
      *  The id names the *factory* the engine resolves through
      *  `core::PluginRegistry::get_qoe_collector(...)`.  The built-in
-     *  implementation registers under `"rd-qoe"`.
+     *  implementation registers under `"rd-qoe"`, which is therefore
+     *  the **default**: a session that says nothing gets the built-in
+     *  collector.
      *
-     *  Empty means "no QoE collector": the metrics are not measured and
-     *  `Stats::qoe` carries only the frame counters.  It is empty by
-     *  default.
+     *  **Empty means "no QoE collector"**: the metrics are not measured
+     *  and `Stats::qoe` carries only the frame counters.  That is the
+     *  explicit way to opt out — a session that measures the latency
+     *  percentiles does not want to pay for the reservoir, and the
+     *  name is the only place that says so.
      *
-     *  An unknown id is a hard error at `open()` time — the engine does
-     *  not silently fall back (a typo'd id would otherwise mask an
-     *  integrator error). */
-    std::string qoe_collector_name;
+     *  A **named** id that does not resolve is a hard error at
+     *  `open()` time — the engine does not silently fall back (a typo'd
+     *  id would otherwise mask an integrator error).
+     *
+     *  The one exception is the default id itself: when the `rd_qoe`
+     *  module is not in the build there is no factory to resolve, and
+     *  that is *not* an error — the metrics are simply not measured.
+     *  A host that named `"rd-qoe"` explicitly in a build without the
+     *  module gets the same graceful degradation, because the id
+     *  names a module that is optional by construction. */
+    std::string qoe_collector_name = "rd-qoe";
 
     /** The collector's configuration (plan J3 / J6).
      *
@@ -1886,6 +1914,227 @@ struct NIMRTC_API_STABLE AudioStreamStats {
 };
 
 // ---------------------------------------------------------------------------
+// The transport plane (v1.2 plan Track S / S5)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief One end of the ICE candidate pair the session is using.
+ *
+ * The engine's transport plane is ICE (RFC 8445) -> DTLS (RFC 6347) ->
+ * SRTP (RFC 3711), and the *first* of those is the one that decides
+ * **where the packets actually go**.  A session that "is not working"
+ * is almost never broken in DTLS or SRTP: it is a path problem -- the
+ * candidate pair was never nominated, or it was nominated through a
+ * relay the host did not expect.
+ *
+ * This struct says which path that is.  It is the seam's
+ * `plugins::IceCandidate`, projected into the engine's public surface
+ * so a host does not have to reach past `get_ice_transport()` and
+ * interpret the plugin vocabulary itself.
+ *
+ * @see TransportStats::selected_pair
+ */
+struct NIMRTC_API_STABLE IceCandidateInfo {
+    /** The candidate's IP literal (no brackets, even for IPv6). */
+    std::string address;
+
+    /** The candidate's port. */
+    std::uint16_t port = 0;
+
+    /** The candidate's transport protocol, lower-cased: "udp" / "tcp".
+     *
+     *  ICE-over-TCP (RFC 6544) is not implemented yet (plan C2), so this
+     *  is "udp" for every pair a v1.2.0 engine can select. */
+    std::string protocol;
+
+    /** The candidate's type, lower-cased: "host", "srflx", "prflx" or
+     *  "relay" (RFC 8445 5.1.2.1).
+     *
+     *  "relay" is the one a host usually wants to see: it says the
+     *  traffic is going through a TURN server, which explains a latency
+     *  the host would otherwise attribute to the network. */
+    std::string type;
+};
+
+/**
+ * @brief The ICE candidate pair the session is using.
+ *
+ * A *pair* is one path: our end and the peer's end, connected to each
+ * other by the connectivity checks (RFC 8445 5.1.2).  Both ends are
+ * published because a diagnosis usually needs both -- "where does my
+ * traffic leave from, and where does it arrive?" -- and because the two
+ * ends can differ in *kind*: a local host candidate reaching a remote
+ * relay candidate is the shape of a TURN-relayed path.
+ *
+ * @see TransportStats::selected_pair
+ */
+struct NIMRTC_API_STABLE IceCandidatePairInfo {
+    /** Our end of the pair. */
+    IceCandidateInfo local;
+
+    /** The peer's end of the pair. */
+    IceCandidateInfo remote;
+};
+
+/**
+ * @brief The transport-plane statistics (v1.2 plan Track S / S5).
+ *
+ * The v1.2 plan's **S5** row says the engine's statistics surface had
+ * "**ICE has no statistics at all**: no candidate-pair entries, no RTT,
+ * no `selected_local()` / `selected_remote()`", and that this is also
+ * the precondition the connectivity track's **C4** row depends on
+ * ("Surface `selected_local()` / `selected_remote()`, candidate pairs,
+ * and failure reasons through the Track S registry").
+ *
+ * This struct is that surface.  It carries the three planes of the
+ * session's transport:
+ *
+ *   - **ICE** -- the agent's state, the candidate pair it nominated, and
+ *     the round-trip time the feedback path measured.
+ *   - **DTLS** -- the handshake's state and the role the negotiation
+ *     resolved (RFC 5763 5).
+ *   - **SRTP** -- how much was protected, how much was unprotected, and
+ *     how many packets failed to authenticate.
+ *
+ * ## Why one struct and not three
+ *
+ * The three planes are one *path*, and a diagnosis that reads them
+ * separately has to reassemble the path by hand.  The typical question
+ * a host asks is "is this session encrypted, and is it going where I
+ * think it is?" -- and the answer needs all three: the ICE state says
+ * whether there is a path, the DTLS state says whether the path is
+ * protected, and the SRTP counters say whether the protection is
+ * actually working.
+ *
+ * ## What is *not* here
+ *
+ * **No new probes.**  The RTT is the one the engine already measures
+ * from the peer's Receiver Reports (the LSR / DLSR pair against our own
+ * Sender Report, RFC 3550 6.4.1) -- the same figure the bandwidth
+ * estimator consumes.  The statistics surface republishes it; it does
+ * not measure it a second time.
+ *
+ * **No per-candidate-pair list.**  libjuice nominates exactly one pair
+ * and does not expose the others it tried, so a list of candidate pairs
+ * would be a list of one -- and, worse, would suggest the engine can
+ * enumerate paths it cannot actually see.  What the engine publishes is
+ * the pair that is *in use*, plus the counters that say whether it is
+ * working.
+ *
+ * @see Stats::transport
+ */
+struct NIMRTC_API_STABLE TransportStats {
+    // ---- ICE (RFC 8445) ----------------------------------------------------
+    /** The ICE agent's state, lower-cased: "disconnected", "gathering",
+     *  "connecting", "connected", "completed" or "failed".
+     *
+     *  Empty before the engine has a transport.  This is the same
+     *  vocabulary as `NimRTCEngine::ice_state_string()`. */
+    std::string ice_state;
+
+    /** The ICE restarts performed so far (RFC 8445 9.1.1.1).
+     *
+     *  0 means the session never restarted. */
+    std::uint32_t ice_restart_count = 0;
+
+    /** The candidate pair the agent nominated, if it has nominated one.
+     *
+     *  Empty until the connectivity checks settle on a path, which is
+     *  *after* the agent reaches Connected.  A session that stays empty
+     *  here while `ice_state` says "connected" is a session whose
+     *  checks passed but whose nomination has not landed yet -- the two
+     *  facts are distinct and a host diagnosing a slow connect needs
+     *  both. */
+    std::optional<IceCandidatePairInfo> selected_pair;
+
+    /** True when the selected pair goes through a TURN relay.
+     *
+     *  This is the *derived* form of `selected_pair`'s candidate types,
+     *  published separately because it is the one bit a host actually
+     *  branches on: a relayed path has a different latency profile and
+     *  a different failure mode than a direct one. */
+    bool relayed = false;
+
+    /** The round-trip time, in milliseconds, as measured by the peer's
+     *  Receiver Reports.
+     *
+     *  **Instantaneous, not cumulative** -- it is the latest measurement,
+     *  not a running total.  It is 0 until the peer has sent a
+     *  Receiver Report that carries a usable LSR / DLSR pair; the
+     *  engine does not synthesise a value it has not measured. */
+    std::uint32_t rtt_ms = 0;
+
+    /** True once a Receiver Report with a usable RTT has been received.
+     *
+     *  This is what distinguishes "the RTT is 0 because the path is
+     *  fast" from "the RTT is 0 because nothing was ever measured" --
+     *  a distinction a host cannot make from the number alone. */
+    bool has_rtt = false;
+
+    // ---- DTLS (RFC 6347) ---------------------------------------------------
+
+    /** The DTLS session's state, lower-cased: "closed", "initial",
+     *  "hello-verify", "hello-sent", "hello-received",
+     *  "certificate-received", "key-exchange", "change-cipher-spec",
+     *  "finished", "connected" or "failed".
+     *
+     *  Empty before the engine has a DTLS session. */
+    std::string dtls_state;
+
+    /** The DTLS role the negotiation resolved: "client" or "server".
+     *
+     *  Per RFC 5763 5 the offerer is normally the server, but the
+     *  negotiation is driven by the peer's `a=setup` attribute, so
+     *  neither end can assume its role.  Empty before the negotiation
+     *  has run. */
+    std::string dtls_role;
+
+    /** The local certificate's fingerprint, in the colon-separated UPPER
+     *  hex form of RFC 8122 ("AA:BB:...").
+     *
+     *  Empty before the DTLS session has a certificate. */
+    std::string dtls_fingerprint;
+
+    // ---- SRTP (RFC 3711) ---------------------------------------------------
+
+    /** True once the DTLS-derived keying material has been installed and
+     *  the outbound path is encrypted.
+     *
+     *  This is the *authority* on "is this session encrypted": every
+     *  send path checks it before encrypting. */
+    bool srtp_installed = false;
+
+    /** The RTP packets the SRTP layer protected (encrypted). */
+    std::uint64_t srtp_rtp_packets_protected = 0;
+
+    /** The RTP packets the SRTP layer unprotected (decrypted). */
+    std::uint64_t srtp_rtp_packets_unprotected = 0;
+
+    /** The RTCP packets the SRTP layer protected (SRTCP). */
+    std::uint64_t srtp_rtcp_packets_protected = 0;
+
+    /** The RTCP packets the SRTP layer unprotected. */
+    std::uint64_t srtp_rtcp_packets_unprotected = 0;
+
+    /** The packets the SRTP layer refused: an authentication-tag
+     *  mismatch, a replay, or a malformed packet.
+     *
+     *  A non-zero count means the peer sent something the engine could
+     *  not authenticate -- a wrong key, a replayed packet, or a
+     *  corrupted one.  It is the single most security-relevant number
+     *  on this surface. */
+    std::uint64_t srtp_auth_failures = 0;
+
+    /** The packets the engine had to send but could not encrypt (no
+     *  usable key).
+     *
+     *  This is the same figure the flat `Stats::srtp_drops` carries;
+     *  it is repeated here so a host that reads only the transport
+     *  entry has the complete picture of the SRTP plane. */
+    std::uint64_t srtp_drops = 0;
+};
+
+// ---------------------------------------------------------------------------
 // The render / presentation plane (remote-desktop plan E5 / E6 / E7 / E9)
 // ---------------------------------------------------------------------------
 
@@ -2100,6 +2349,110 @@ struct NIMRTC_API_STABLE DataChannelStats {
     std::string state;
 };
 
+// ---------------------------------------------------------------------------
+// The remote-desktop pipeline breakdown (v1.2 plan Track S / S7)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Where the remote-desktop pipeline's time went.
+ *
+ * The QoE block (`plugins::QoeSnapshot`) measures what the operator
+ * *felt* — freezes, latency, sharpness.  This block answers the
+ * operator's follow-up question: **why**.  It is the pipeline broken
+ * into its stages, each reported in the unit a human reasons about:
+ *
+ *   - **capture** — how often the device produced a frame, and how long
+ *     the device handoff took;
+ *   - **encode** — how long the codec's encode call took, and how many
+ *     frames it processed;
+ *   - **decode** — the receive side's counterpart.
+ *
+ * ## Where the numbers come from
+ *
+ * Everything here is **derived** from the per-stage instrumentation
+ * (`Stats::video_stage_capture` / `video_stage_encode` /
+ * `video_stage_decode`) and from the capture timestamp the pipeline
+ * already carries.  Nothing is timed a second time, so this block can
+ * never disagree with the stage timings it summarises — and adding it
+ * cost no work on the frame path.
+ *
+ * ## The frame rates
+ *
+ * `capture_fps` is the rate the *device* delivered frames, measured as
+ * `(frames - 1) / (last capture timestamp - first capture timestamp)`.
+ * It uses the device's own capture timestamps, not the engine's wall
+ * clock, so a device that stamps with its own clock still yields the
+ * rate *it* ran at.  `encode_fps` and `decode_fps` are the rates the
+ * respective stage *ran at*, measured over the engine's monotonic
+ * clock across the stage's whole life — they describe the stage's
+ * throughput, which is what a "can this machine encode 1080p60?"
+ * question is really asking.
+ *
+ * All three are 0 until there are at least two samples and a positive
+ * interval; 0 means "not measurable yet", not "zero frames per second".
+ *
+ * ## The frame counts
+ *
+ * `frames_captured` is the device's frame count (`capture_ts_us`
+ * advances once per device frame), `frames_encoded` and
+ * `frames_decoded` are the stage sample counts.  The *difference*
+ * between them is the drop — a frame that was captured but never
+ * reached the encoder, or an encoded frame never decoded — so the
+ * block carries the differences explicitly rather than making every
+ * host subtract two numbers (and get the sign wrong).
+ *
+ * @see Stats::remote_desktop
+ * @see Stats::video_stage_capture / video_stage_encode / video_stage_decode
+ */
+struct NIMRTC_API_STABLE RemoteDesktopStats {
+    /** The frame rate the capture device delivered, in frames per
+     *  second (0 when not measurable yet). */
+    double capture_fps = 0.0;
+
+    /** The mean cost of the capture device handoff, in milliseconds. */
+    double capture_ms = 0.0;
+
+    /** The frame rate the encoder ran at, in frames per second
+     *  (0 when the encoder never ran). */
+    double encode_fps = 0.0;
+
+    /** The mean cost of the codec's encode call, in milliseconds. */
+    double encode_ms = 0.0;
+
+    /** The p95 cost of the codec's encode call, in milliseconds — the
+     *  number a stutter shows up in.  A good mean with a terrible p95
+     *  is a session that hiccups. */
+    double encode_p95_ms = 0.0;
+
+    /** The frame rate the decoder ran at, in frames per second
+     *  (0 when the decoder never ran). */
+    double decode_fps = 0.0;
+
+    /** The mean cost of the codec's decode call, in milliseconds. */
+    double decode_ms = 0.0;
+
+    /** The p95 cost of the codec's decode call, in milliseconds. */
+    double decode_p95_ms = 0.0;
+
+    /** The frames the capture device delivered. */
+    std::uint64_t frames_captured = 0;
+
+    /** The frames the encoder processed. */
+    std::uint64_t frames_encoded = 0;
+
+    /** The frames the decoder processed. */
+    std::uint64_t frames_decoded = 0;
+
+    /** The frames captured but never handed to the encoder
+     *  (`max(0, frames_captured - frames_encoded)`). */
+    std::uint64_t frames_dropped_before_encode = 0;
+
+    /** The frames decoded (receive side) that were never encoded
+     *  locally — this is informational only and is **not** an error
+     *  counter: a receive-only session has an empty encode stage and a
+     *  busy decode stage.  Kept out of the drop accounting on purpose. */
+    std::uint64_t frames_decoded_without_local_encode = 0;
+};
 // ---------------------------------------------------------------------------
 // NimRTCEngine
 // ---------------------------------------------------------------------------
@@ -3744,6 +4097,10 @@ public:
         /** The reading's sequence number; increases by one per reading. */
         std::uint64_t snapshot_seq = 0;
 
+        /** The legacy SRTP drop counter: every SRTP auth-tag mismatch
+         *  since open().  The v1.2 transport block (`Stats::transport`)
+         *  carries the same figure alongside the rest of the SRTP plane;
+         *  this one stays because hosts read it. */
         int srtp_drops = 0;
         // ---- Video counters (v1.1 V1, additive) -------------------------
         // All cumulative since open().  Wired to the already-existing
@@ -3827,7 +4184,10 @@ public:
         // `video_zero_copy_fallbacks` counts the frames that carried a
         // GPU handle but fell back to the CPU path (the codec does not
         // support the zero-copy entry point, or it failed).
+        /** Frames that took the GPU path (no CPU staging). */
         std::uint64_t video_zero_copy_frames    = 0;
+
+        /** Frames that carried a GPU handle but fell back to the CPU. */
         std::uint64_t video_zero_copy_fallbacks = 0;
         // ---- Video receive-side delivery path (remote-desktop plan E1) ---
         //
@@ -4209,6 +4569,24 @@ public:
         // second audio source: the alternative is to redraw the whole
         // surface then, and every caller with it.
         std::vector<AudioStreamStats> audio_streams;
+
+        // ---- The transport plane (v1.2 plan Track S / S5) ------------------
+        //
+        // The ICE / DTLS / SRTP path the session runs over: the agent's
+        // state, the candidate pair it nominated, the round-trip time the
+        // feedback path measured, and the SRTP counters that say whether
+        // the protection is working.
+        //
+        // This entry is **additive**: the flat `srtp_drops` field above
+        // keeps its meaning and its value, and the new entry carries the
+        // same figure in `transport.srtp_drops` so a host that reads only
+        // the transport entry has the complete picture.
+        //
+        // @see TransportStats
+
+        /** The ICE / DTLS / SRTP path the session runs over. */
+        TransportStats transport;
+
         // ---- The per-channel data-channel entries (v1.2 plan Track S / S6)
         //
         // One entry per **data channel the host opened** with
@@ -4315,14 +4693,32 @@ public:
          * viewer's frame rate, the sharpness proxy and the
          * input-to-photon latency.
          *
-         * The metrics are only measured when a QoE collector is
-         * configured (`EngineConfig::qoe_collector_name`).  Without one
-         * this snapshot carries the **frame counters** — the presented
-         * and dropped frame counts, which the engine keeps anyway — and
+         * The metrics are measured whenever a QoE collector is
+         * resolved -- which, by default, is the built-in `"rd-qoe"` (see
+         * `EngineConfig::qoe_collector_name`).  Without one this
+         * snapshot carries the **frame counters** -- the presented and
+         * dropped frame counts, which the engine keeps anyway -- and
          * zeroes for the metrics, which is the honest answer to "what was
          * the latency percentile?" when it was not measured.
          */
         plugins::QoeSnapshot qoe{};
+
+        /**
+         * @brief The remote-desktop pipeline breakdown (v1.2 plan **S7**).
+         *
+         * The QoE block above answers "how did the session *feel*"; this
+         * block answers "**where did the time go**".  It is a
+         * remote-desktop-shaped view of the per-stage instrumentation
+         * (`video_stage_*`): the capture / encode / decode means in
+         * milliseconds, the frame rates they imply, and the count of
+         * frames that were captured but never encoded (the gap between
+         * two stages is a frame that was dropped in between).
+         *
+         * Every value here is **derived** from a measurement that
+         * already exists — nothing is timed a second time.  The
+         * definitions are in `RemoteDesktopStats` above.
+         */
+        RemoteDesktopStats remote_desktop{};
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -4942,6 +5338,13 @@ private:
 
     /** Fill the per-stream audio statistics entries (plan Track S / S4). */
     void append_audio_stream_stats(std::vector<AudioStreamStats>& out) const noexcept;
+
+    /** Fill the transport-plane statistics entry (plan Track S / S5).
+     *
+     *  Projects the ICE agent's state and selected candidate pair, the
+     *  DTLS session's state and role, the SRTP context's counters and
+     *  the feedback path's round-trip time onto one `TransportStats`. */
+    void append_transport_stats(TransportStats& out) const noexcept;
     /** Close and release every extra stream's plugins. */
     void shutdown_extra_video_streams() noexcept;
 
@@ -5352,11 +5755,21 @@ private:
      * @brief Resolve the QoE collector through the registry seam.
      *
      *  Called from `init_modules_once()`.  Resolution is **not** fatal
-     *  when the collector is simply not configured (the default): the
+     *  when the collector is simply **not wanted**: an empty
+     *  `EngineConfig::qoe_collector_name` is the explicit opt-out, the
      *  metrics are then not measured and `Stats::qoe` carries only the
-     *  frame counters.  A *configured but unknown* id IS an error — the
-     *  engine does not silently fall back, because a typo'd id would
-     *  otherwise mask an integrator error.
+     *  frame counters.
+     *
+     *  It is also not fatal when the **default** id (`"rd-qoe"`) names
+     *  a module that is not in this build: the `rd_qoe` module is
+     *  optional by construction, and "this build has no QoE module" is
+     *  a property of the build, not a mistake by the host.  The engine
+     *  degrades gracefully (with a warning) instead of failing
+     *  `open()`.
+     *
+     *  A *named* id that does not resolve IS an error — the engine does
+     *  not silently fall back, because a typo'd id would otherwise mask
+     *  an integrator error.
      */
     uint32_t resolve_qoe_collector() noexcept;
 
@@ -5382,6 +5795,38 @@ private:
      *  Feeds the QoE collector's drop counter (plan item J3).
      */
     void note_frame_dropped(std::uint64_t count = 1) noexcept;
+
+    /**
+     * @brief Report that the picture stood still.
+     *
+     *  Feeds the QoE collector's freeze metric (plan item J6).  The
+     *  *detection* is owned by the `video_stats` module — the engine
+     *  only carries the finding to the collector, which is the only
+     *  party that can see both.
+     *
+     *  @param duration_ms  how long the picture stood still, in
+     *                      milliseconds.  Negative values are ignored.
+     */
+    void note_freeze(std::int64_t duration_ms) noexcept;
+
+    /**
+     * @brief Report the sharpness of a presented picture.
+     *
+     *  Feeds the QoE collector's sharpness proxy (plan item J3).  The
+     *  *computation* is the collector's — the engine only carries the
+     *  pixels to it, because the engine is the only party that holds
+     *  the decoded luma plane.
+     *
+     *  @param luma    the luma plane's first pixel.
+     *  @param stride  the row stride in bytes.
+     *  @param width   the picture width.
+     *  @param height  the picture height.
+     *  @return the sharpness that was computed (0 when not measured).
+     */
+    double note_sharpness(const std::uint8_t* luma,
+                          std::size_t stride,
+                          std::size_t width,
+                          std::size_t height) noexcept;
 
     /**
      * @brief Put the channel's queued messages on the wire.

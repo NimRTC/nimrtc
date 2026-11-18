@@ -118,6 +118,13 @@ bool NimRTCEngine::pump_video_capture() noexcept {
         return false;
     }
 
+    // Plan S7: the capture cadence, from the device's own timestamps.
+    // The capture stage's *cost* is measured above; the *rate* it
+    // delivers frames at needs the timestamps, which only the device
+    // has.  Recorded here so a frames-dropped-before-encode figure can
+    // be derived from it later.
+    vstate.note_captured_frame(captured.capture_ts_us, captured.frame_seq);
+
     // ---- The media clock ------------------------------------------------
     //
     // The capture seam reports a *capture* timestamp (microseconds).  The
@@ -510,6 +517,10 @@ bool NimRTCEngine::pump_video_capture_gpu() noexcept {
         ++vstate.video_capture_pumped_metadata;
         return false;
     }
+
+    // Plan S7: the GPU path delivers frames too, so it feeds the same
+    // cadence record as the CPU path.
+    vstate.note_captured_frame(frame.capture_ts_us, frame.frame_seq);
 
     // ---- The media clock ------------------------------------------------
     //

@@ -457,6 +457,17 @@ public:
     std::optional<Candidate> selected_local()  const noexcept;
     std::optional<Candidate> selected_remote() const noexcept;
 
+    /** @override plugins::IICETransport
+     *
+     *  The selected candidate pair, projected onto the seam's shape.
+     *
+     *  The pair is assembled from the *same* two sources the concrete
+     *  `selected_local()` / `selected_remote()` accessors use — the
+     *  candidate SDP strings libjuice reports for the nominated pair —
+     *  so the two views can never disagree about which pair is live.
+     *  Empty until the agent nominates one. */
+    std::optional<plugins::IceCandidatePair> selected_pair() const noexcept override;
+
     /** Trigger a fresh gathering round. open() calls this automatically. */
     plugins::Status gather_candidates() noexcept;
 

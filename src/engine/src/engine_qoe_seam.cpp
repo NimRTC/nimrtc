@@ -122,6 +122,11 @@ void QoeSeam::note_frame_dropped(std::uint64_t count) noexcept {
     if (collector_) collector_->on_frame_dropped(count);
 }
 
+void QoeSeam::note_freeze(std::int64_t duration_ms) noexcept {
+    if (duration_ms < 0) return;
+    if (collector_) collector_->on_freeze_detected(duration_ms);
+}
+
 void QoeSeam::note_input_event(std::int64_t ts_us,
                                std::uint64_t event_id) noexcept {
     if (!collector_) return;

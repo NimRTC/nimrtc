@@ -55,6 +55,30 @@
  * converting an NV12 surface would need a video-processing shader that
  * this module does not carry.
  *
+ * ### Where the GPU copy happens (plan E5)
+ *
+ * Both paths hand the frame to the *same* single-slot mailbox, and the
+ * **presenter thread** performs the copy onto the present target.  The
+ * GPU path therefore never touches the device context on the caller's
+ * thread: a GPU frame costs the producer a reference-count bump, and the
+ * copy happens on the presentation clock like every other frame.  Mixing
+ * GPU and CPU frames on one sink cannot present twice per tick or skew
+ * the drop accounting.  The mailbox holds a reference on the
+ * `GpuBuffer`, so the texture outlives the borrowed `render()` call.
+ *
+ * ### The documented fallback (plan E5)
+ *
+ * Zero-copy to the *display* requires the surface to be in the present
+ * format.  When it is not — an NV12 / P010 decoder output, or a driver
+ * that hands back a texture this module cannot copy — the sink does not
+ * pretend: it counts the frame in `VideoSinkStats::gpu_staging_fallbacks`
+ * and presents it through the CPU path from the surface's CPU mirror.
+ * A surface with neither the present format nor a CPU mirror is refused
+ * with `kErrUnsupported`, which the engine's render-path rule turns into
+ * "decode to host pixels" for the next frame.  A successful GPU-to-GPU
+ * copy is counted in `gpu_device_copies`; a surface of the wrong backend
+ * or an unusable handle in `gpu_surfaces_refused`.
+ *
  * @note Remote-desktop plan E1 / E2 / E5 / E8.
  */
 

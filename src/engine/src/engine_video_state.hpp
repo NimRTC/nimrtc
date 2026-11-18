@@ -461,10 +461,12 @@ struct VideoState {
 
     // ---- The capture cadence (v1.2 plan Track S / S7) -------------------
     //
-    // How many frames the *device* delivered and over what span of its
-    // own clock.  The counting rule (sequence numbers are the identity
-    // of a delivery, timestamps are not assumed monotonic) lives in
-    // `engine_capture_cadence.hpp`, next to the unit test that pins it.
+    // How many frames the *device* produced and over what span of its
+    // own clock.  The counting rule (a delivery is identified by its
+    // sequence number *and* its timestamp; the rate comes from the
+    // sequence span, so a frame the device dropped at its own bounded
+    // queue still counts) lives in `engine_capture_cadence.hpp`, next
+    // to the unit test that pins it.
     CaptureCadence capture_cadence;
 
     /** Record one delivered frame (its timestamp and its sequence). */
@@ -478,7 +480,13 @@ struct VideoState {
         return capture_cadence.fps();
     }
 
-    /** How many frames the device delivered. */
+    /** How many frames the device *produced* (the frames it dropped at
+     *  its own bounded queue included). */
+    [[nodiscard]] std::uint64_t capture_frames_produced() const noexcept {
+        return capture_cadence.produced();
+    }
+
+    /** How many deliveries the pump actually saw. */
     [[nodiscard]] std::uint64_t capture_frames_seen_count() const noexcept {
         return capture_cadence.frames;
     }

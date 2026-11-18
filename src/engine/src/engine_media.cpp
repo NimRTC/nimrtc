@@ -3416,7 +3416,7 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
 
         rd.capture_ms  = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kCapture)));
         rd.capture_fps = impl_->video_state.capture_fps();
-        rd.frames_captured = impl_->video_state.capture_frames_seen_count();
+        rd.frames_captured = impl_->video_state.capture_frames_produced();
 
         rd.encode_ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kEncode)));
         rd.encode_p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kEncode, 95)));

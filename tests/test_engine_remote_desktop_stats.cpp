@@ -119,6 +119,13 @@ public:
     np::Status open() noexcept override {
         if (open_) return np::kOk;
         open_ = true;
+        // The producer thread is stopped by `close()`, and the state is
+        // shared by every instance (the factory hands the same state to
+        // each device), so the stop flag has to be cleared here --
+        // otherwise the second engine in the same process gets a device
+        // whose producer exits immediately and which therefore never
+        // delivers a frame.
+        state_->stop.store(false);
         producer_ = std::thread([this] { produce_loop(); });
         return np::kOk;
     }
@@ -604,7 +611,8 @@ TEST_F(EngineRemoteDesktopStats, CadenceSurvivesNonMonotonicDevice) {
     // clock is what it is.
     EXPECT_NEAR(cadence.fps(), 30.0, 0.01);
 
-    // A repeated sequence is the *same* delivery handed over twice.
+    // The *same* delivery handed over twice: the same sequence number
+    // **and** the same timestamp.
     cadence.note(66'666, 3);
     EXPECT_EQ(cadence.frames, 3u)
         << "the same frame popped twice is not a new delivery";
@@ -633,6 +641,74 @@ TEST_F(EngineRemoteDesktopStats, CadenceSurvivesNonMonotonicDevice) {
     wrap.note(33'333, 0xFFFFFFFFu);
     wrap.note(66'666, 0u);
     EXPECT_EQ(wrap.frames, 3u);
+}
+
+// ---------------------------------------------------------------------------
+// 7. The rate comes from the *sequence* span, so a frame the device
+//    dropped at its own bounded queue still counts.
+//
+// This is the second regression the macOS CI caught on the first
+// landing.  The device's queue is bounded: when the pump falls behind,
+// the device drops the oldest frame and hands over the next one, whose
+// timestamp is *later*.  Dividing the frames the pump *saw* by the
+// device's clock span then reports a rate below the device's own --
+// on the CI runner, 17 fps for a device that produced 30 -- which
+// answers "how fast did the engine drain the device?" while claiming
+// to answer "how fast did the device run?".
+//
+// The sequence number is the device's own production counter, so the
+// span between the first and the last sequence counts the frames the
+// device *produced*, dropped ones included.
+// ---------------------------------------------------------------------------
+
+TEST_F(EngineRemoteDesktopStats, CadenceRateCountsTheFramesTheDeviceDropped) {
+    nimrtc::engine::detail::CaptureCadence cadence;
+
+    // The device produced five frames on its own 33 333 us clock; the
+    // pump saw three of them (it fell behind twice and the device
+    // dropped the oldest).  The timestamps are the *device's* clock, so
+    // the gap a dropped frame leaves is visible in them.
+    cadence.note(0,        1);
+    cadence.note(66'666,   3);   // sequence 2 was dropped
+    cadence.note(133'332,  5);   // sequence 4 was dropped
+
+    EXPECT_EQ(cadence.frames, 3u)
+        << "the pump saw three frames";
+    EXPECT_EQ(cadence.produced(), 5u)
+        << "the device produced five: the sequence span counts the "
+           "frames the device dropped at its own queue";
+
+    // The rate is the device's: five frames over four intervals of
+    // 33 333 us is 30 fps, NOT the 15 fps that the seen count would
+    // have produced.
+    EXPECT_NEAR(cadence.fps(), 30.0, 0.01)
+        << "the rate must be the rate the device ran at, not the rate "
+           "the engine drained it at";
+}
+
+// ---------------------------------------------------------------------------
+// 8. A device that does not number its frames at all.
+//
+// The ScreenCaptureKit and X11 backends leave `frame_seq` at zero, so
+// the sequence carries no information and every delivery looks like a
+// repeat of the last one.  Such a device must still be counted, and
+// its rate falls back to the seen count over the device's clock --
+// which answers "how fast did the pipeline run?", the best available
+// answer when the dropped frames cannot be told from the delivered
+// ones.
+// ---------------------------------------------------------------------------
+
+TEST_F(EngineRemoteDesktopStats, CadenceHandlesADeviceThatDoesNotNumberFrames) {
+    nimrtc::engine::detail::CaptureCadence cadence;
+
+    cadence.note(0,          0);
+    cadence.note(33'333,     0);
+    cadence.note(66'666,     0);
+
+    EXPECT_EQ(cadence.frames, 3u)
+        << "a device that leaves frame_seq at zero must still be counted";
+    EXPECT_EQ(cadence.produced(), 3u);
+    EXPECT_NEAR(cadence.fps(), 30.0, 0.01);
 }
 
 }  // namespace

@@ -357,6 +357,17 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         // user-pluggable seam yet (see the remediation plan's B1 note).
         scfg.raw_id  = config_.raw_udp_name;
 
+        // The control stack opens its **own** UDP socket (plan G2), so
+        // it needs its own bind address.  The media stack's ICE socket
+        // and the control stack's ARQ socket are then two distinct
+        // 5-tuples — the acceptance criterion the remote-desktop plan
+        // states for G2 ("the two stacks carry independent traffic on
+        // different 5-tuples").
+        //
+        // The port stays 0 (OS picks), so the two sockets cannot
+        // collide even when both bind the same address.
+        scfg.raw_local_host = config_.local_bind_address;
+
         // ---- Bind the Selector to the plugin registry --------------------
         //
         // The transport module does not depend on `core::PluginRegistry`
@@ -1340,6 +1351,16 @@ int NimRTCEngine::tick() noexcept {
     // The inbound messages are drained here too, so the host's callback
     // runs on the engine's thread — never on the ARQ thread, and never
     // under the channel lock.
+    //
+    // The G2 path's **receive** side needs a pump: the ARQ session
+    // queues the datagrams it accepted and fires the receive callback
+    // when that queue is drained.  Nothing else drains it (the ARQ
+    // session has no consumer thread of its own), so without this the
+    // control plane's inbound path never fires — the plane was
+    // structurally present and behaviourally dead.
+    if (impl_->session.control_stack) {
+        impl_->session.control_stack->pump_control();
+    }
     flush_control_channel();
     drain_control_messages();
 

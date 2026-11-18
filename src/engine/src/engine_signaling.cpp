@@ -837,6 +837,27 @@ std::string NimRTCEngine::create_offer() noexcept {
         if (!m.mid.empty()) sdp.bundle_mids.push_back(m.mid);
     }
 
+    // ---- The control plane's address (remote-desktop plan G2) -----------
+    //
+    // The control plane rides its **own** transport (its own UDP socket,
+    // its own 5-tuple), so the peer has to learn that transport's
+    // address out of band — the media SDP does not describe it.
+    //
+    // It travels as a session-level attribute,
+    // `a=x-nimrtc-control:<host:port>`.  The peer reads it and points
+    // its own control path at us (see `process_remote_sdp()` below).
+    //
+    // Without it the control session can only ever be half-open: the
+    // side that answers learns the peer from the first inbound
+    // datagram, but the side that offers has nobody to send to.
+    if (impl_->session.control_stack) {
+        const std::string control_ep =
+            impl_->session.control_stack->control_local_endpoint();
+        if (!control_ep.empty()) {
+            sdp.extra_attrs.emplace_back("x-nimrtc-control", control_ep);
+        }
+    }
+
     // The session changed → the offer we just produced is the new
     // baseline, so the "needs renegotiation" flag goes back to false
     // (N2).
@@ -893,6 +914,49 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         std::string("process_remote_sdp: remote description is an ")
         + (remote_is_answer ? "ANSWER" : "OFFER")
         + (remote_is_answer ? " to our offer" : " — we answer it"));
+
+    // ---- The peer's control-plane address (remote-desktop plan G2) ------
+    //
+    // The control plane rides its own transport (its own UDP socket and
+    // therefore its own 5-tuple), so the peer's address for it travels
+    // in the description as `a=x-nimrtc-control:<host:port>`.
+    //
+    // This is the step that makes the control session *bidirectional*:
+    // without it the peer is unknown to us, so the first control
+    // message would have nowhere to go.
+    //
+    // The address may be at session level (our own generator puts it
+    // there) or at media level (a peer that put it in an m-line), so
+    // both are consulted.
+    {
+        std::string peer_control_ep;
+        for (const auto& [k, v] : remote.extra_attrs) {
+            if (k == "x-nimrtc-control" && !v.empty()) {
+                peer_control_ep = v;
+                break;
+            }
+        }
+        if (peer_control_ep.empty()) {
+            for (const auto& m : remote.media) {
+                for (const auto& [k, v] : m.extra_attrs) {
+                    if (k == "x-nimrtc-control" && !v.empty()) {
+                        peer_control_ep = v;
+                        break;
+                    }
+                }
+                if (!peer_control_ep.empty()) break;
+            }
+        }
+
+        if (!peer_control_ep.empty() && impl_->session.control_stack) {
+            const plugins::Status rc =
+                impl_->session.control_stack->set_control_peer(peer_control_ep);
+            core::log::Logger::instance().info(
+                std::string{"engine[control]: the peer's control endpoint is '"} +
+                peer_control_ep + "' (status=" +
+                plugins::status_string(rc) + ")");
+        }
+    }
 
     // ---- Remote media clock rates (ADR-017 §"Decision 6") ----------------
     //
@@ -2186,6 +2250,19 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         }
         if (ans.bundle_mids.empty()) {
             ans.bundle_mids = {"0"};
+        }
+    }
+
+    // ---- The control plane's address (remote-desktop plan G2) -----------
+    //
+    // The answer carries our control endpoint too, so the offerer
+    // learns where to send its control messages.  Without it the
+    // offerer's control path stays one-way.
+    if (impl_->session.control_stack) {
+        const std::string control_ep =
+            impl_->session.control_stack->control_local_endpoint();
+        if (!control_ep.empty()) {
+            ans.extra_attrs.emplace_back("x-nimrtc-control", control_ep);
         }
     }
 

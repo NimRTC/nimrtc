@@ -9,6 +9,57 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.2.0`.
 
+- **The audio jitter buffer's memory is bounded, and the bound is
+  reported (v1.3 plan item `Q2`, video plan `R4`).**
+  `jb::Config::max_packets` was **declared and never read**: its own
+  comment said *"Hard cap on buffered packets (FIFO trim from oldest when
+  exceeded)"*, but nothing in the module read it, and the plugin adapter
+  hard-coded `512`. The buffer's `frame_buffer_` — a `std::map` keyed by
+  RTP timestamp that only ever shrinks in `pop()` / `flush()` — therefore
+  grew without limit: a peer that sent a new timestamp per packet, or a
+  stream whose frames never became playable, could make the receiver
+  allocate as much as it liked.
+
+  The bound is now real, and it has two halves:
+
+  - **`Config::max_bytes` is new** (default 4 MiB) and joins
+    `max_packets` (default 512). A packet-count cap alone does not bound
+    memory — the packets of one stream can differ in size by orders of
+    magnitude — so the byte count is the half that actually caps what the
+    receiver holds. Both bounds are enforced in the same loop; `0`
+    disables either half, and the historical unbounded behaviour stays
+    available on request.
+  - **The trim runs *before* the insert**, so the packet that has just
+    arrived can never be the one the bound evicts. This is the video
+    jitter buffer's `enforce_inflight_cap(incoming=1)` rule applied
+    verbatim; without it the newest audio — the one the peer just sent —
+    would always be the first to be dropped. The victim is the *oldest*
+    frame, which is the frame that has already missed its slot.
+
+  The bound is reachable from a host and visible to one:
+
+  - `plugins::JBConfig::max_packets` is new — `0` means "use the
+    implementation's default", a negative value means unbounded — so the
+    cap crosses the plugin seam instead of being frozen at `512` inside
+    the adapter.
+  - The drop counter is reported all the way up: `jb::Stats::packets_dropped`
+    → `plugins::IJB::Stats::packets_dropped` →
+    `plugins::IAudioReceiver::Stats::packets_dropped` →
+    `Engine::Stats::audio_packets_dropped` and
+    `AudioStreamStats::packets_dropped`. Each step republishes the
+    buffer's own counter unchanged, so there is no second copy of the
+    bookkeeping that could drift from what the buffer really did.
+
+  The tests all fail on the pre-change code:
+  `src/modules/jb/tests/test_jb.cpp` (the bound itself: the packet count
+  and the byte count never exceed their caps under a sustained overrun,
+  the drops are counted, the newest packet is never the victim, the oldest
+  frame is trimmed first, and tightening the cap takes effect
+  immediately), `src/modules/jb/tests/test_jb_plugin.cpp` (the seam: the
+  cap crosses it, the drop counter comes back, and a live reconfigure
+  carries the new cap), and a propagation case in
+  `src/modules/audio_rx/tests/test_audio_rx.cpp`.
+
 - **The control plane now rides a real socket, and the G2 criterion is
   measured instead of asserted (remote-desktop plan `G2`, v1.2 plan item
   `E6`).**

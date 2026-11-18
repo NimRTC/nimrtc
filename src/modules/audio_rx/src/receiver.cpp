@@ -430,6 +430,9 @@ plugins::IAudioReceiver::Stats Pipeline::stats() const noexcept {
             if (js.jitter_ms > 0.0) {
                 out.jitter_ms = static_cast<std::uint32_t>(js.jitter_ms);
             }
+            // The jitter buffer's own drop counter (video plan R4 /
+            // v1.3 plan Q2) — republished unchanged.
+            out.packets_dropped += js.packets_dropped;
         }
     }
     return out;

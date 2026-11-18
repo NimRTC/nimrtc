@@ -180,6 +180,7 @@ namespace nimrtc::engine::detail {
     X(audio_fec_recovered_frames, core::StatSemantics::kCumulative)                  \
     X(audio_packets_lost, core::StatSemantics::kCumulative)                          \
     X(audio_decode_errors, core::StatSemantics::kCumulative)                         \
+    X(audio_packets_dropped, core::StatSemantics::kCumulative)                        \
     X(audio_jitter_ms, core::StatSemantics::kGauge)                                  \
     X(audio_playout_delay_ms, core::StatSemantics::kGauge)                           \
     X(audio_encoder_bitrate_bps, core::StatSemantics::kGauge)                        \

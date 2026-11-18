@@ -48,7 +48,17 @@ Config to_concrete_config(const plugins::JBConfig& p) noexcept {
     c.initial_delay = core::Milliseconds{p.initial_depth_ms};
     c.min_delay     = core::Milliseconds{p.min_depth_ms};
     c.max_delay     = core::Milliseconds{p.max_depth_ms};
-    c.max_packets   = 512;          // plugin interface doesn't expose this
+    // The memory bound (video plan R4 / v1.3 plan Q2).  `max_packets == 0`
+    // means "use the implementation's default"; a negative value means
+    // "unbounded", which is the historical behaviour.
+    if (p.max_packets < 0) {
+        c.max_packets = 0;            // 0 in the concrete config = unbounded
+        c.max_bytes   = 0;            // ... and so is the byte bound
+    } else if (p.max_packets > 0) {
+        c.max_packets = static_cast<std::size_t>(p.max_packets);
+    } else {
+        c.max_packets = 512;
+    }
     // The concrete module reads clock_rate_hz == 0 as "90 kHz" (its
     // historical default).  A stream that knows its own clock calls
     // configure() and sets the real rate (spec B-3 / F-6).
@@ -206,6 +216,8 @@ plugins::IJB::Stats PluginAdapter::stats() const noexcept {
         s.frames_out      = cs.frames_emitted;
         s.frames_dropped  = cs.packets_dropped;
         s.jitter_ms       = static_cast<double>(cs.current_jitter.count()) / 1000.0;
+        // The memory bound's own counter (video plan R4 / v1.3 plan Q2).
+        s.packets_dropped = cs.packets_dropped;
     }
     s.packets_received = packets_received_.load(std::memory_order_relaxed);
     return s;

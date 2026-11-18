@@ -4,12 +4,17 @@
 //
 // P0: Config/Stats/Frame defaults.
 // P1: push/pop/flush/reset behaviour.
+// Q2: the memory bound (video plan R4 / v1.3 plan Q2).
 // =============================================================================
 
 #include <gtest/gtest.h>
 
 #include <nimrtc/jb/jitter_buffer.hpp>
 #include <nimrtc/rtp/packet.hpp>
+
+#include <cstdint>
+#include <optional>
+#include <vector>
 
 namespace {
 
@@ -361,6 +366,278 @@ TEST(JbJitterBuffer, CaptureLatencySetOnFirstPacket) {
     ASSERT_TRUE(frame.has_value());
     EXPECT_TRUE(frame->first_arrival.has_value());
     EXPECT_EQ(*frame->first_arrival, t0);
+}
+
+// =============================================================================
+// The memory bound (v1.3 plan Q2 / video plan R4)
+//
+// The bound is what makes the jitter buffer's memory *bounded*: a peer that
+// sends faster than the receiver drains — or a stream whose frames never
+// become playable — must not be able to grow the buffer without limit.
+//
+// The tests below are the ones that would have failed before the bound was
+// enforced: `Config::max_packets` used to be a declaration that nothing read.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Helper — build a packet with a payload of `payload_bytes` bytes.
+//
+// The default make_view() payload is 2 bytes, which is too small to make a
+// byte bound bite; the byte-bound tests need packets whose *size* is the
+// thing being measured.
+// ---------------------------------------------------------------------------
+std::optional<PacketView> make_sized_view(std::uint16_t seq,
+                                          std::uint32_t timestamp,
+                                          std::size_t payload_bytes) {
+    PacketBuilder b;
+    b.set_ssrc(0xCAFEBABEu).set_seq(seq).set_timestamp(timestamp)
+        .set_payload_type(96).set_marker(false);
+    std::vector<std::uint8_t> payload(payload_bytes, 0x5A);
+    b.set_payload(ByteSpan{payload.data(), payload.size()});
+    ByteBuffer raw = b.build();
+
+    Parser p;
+    auto r = p.parse(ByteSpan{raw.data(), raw.size()});
+    if (!r.ok()) return std::nullopt;
+    return std::make_optional(std::move(r).value());
+}
+
+TEST(JbMemoryBound, PacketCountNeverExceedsTheCap) {
+    // A sustained overrun: push far more packets than the cap, without
+    // popping.  The buffered count must never exceed the cap.
+    Config cfg;
+    cfg.max_packets = 16;
+    cfg.max_bytes   = 0;            // the packet count is the bound under test
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    for (std::uint16_t i = 0; i < 200; ++i) {
+        auto pv = make_view(i, /*ts*/ 1000u + i, /*pt*/ 96);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+
+        EXPECT_LE(jb.stats().buffered_packets, cfg.max_packets)
+            << "the packet count must never exceed the cap (pushed "
+            << static_cast<int>(i) + 1 << " packets)";
+    }
+
+    EXPECT_EQ(jb.stats().buffered_packets, cfg.max_packets);
+}
+
+TEST(JbMemoryBound, SustainedOverrunReportsTheDrops) {
+    // The trim must be *reported*: a host that sees the counter move knows
+    // the receiver could not keep up with the sender.
+    Config cfg;
+    cfg.max_packets = 8;
+    cfg.max_bytes   = 0;
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    for (std::uint16_t i = 0; i < 100; ++i) {
+        auto pv = make_view(i, /*ts*/ 2000u + i, /*pt*/ 96);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+    }
+
+    const Stats s = jb.stats();
+    EXPECT_EQ(s.buffered_packets, 8u);
+    EXPECT_EQ(s.packets_dropped, 92u)
+        << "100 packets pushed, 8 kept → 92 dropped";
+}
+
+TEST(JbMemoryBound, TheNewestPacketIsNeverTheVictim) {
+    // The trim runs *before* the insert, so the packet that has just
+    // arrived is never the one the bound evicts.  Without that rule the
+    // newest audio — the one the peer just sent — would always be the
+    // first to be dropped.
+    Config cfg;
+    cfg.max_packets = 4;
+    cfg.max_bytes   = 0;
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    for (std::uint16_t i = 0; i < 4; ++i) {
+        auto pv = make_view(i, /*ts*/ 3000u + i, /*pt*/ 96);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+    }
+
+    // The fifth packet evicts the *oldest* frame, not the new one.
+    auto newest = make_view(4, /*ts*/ 3004, /*pt*/ 96);
+    ASSERT_TRUE(newest.has_value());
+    jb.push(*newest, t0, std::nullopt);
+
+    auto frames = jb.flush();
+    ASSERT_EQ(frames.size(), 4u);
+    std::vector<std::uint32_t> timestamps;
+    for (const auto& f : frames) timestamps.push_back(f.frame_timestamp);
+    EXPECT_EQ(timestamps, (std::vector<std::uint32_t>{3001u, 3002u, 3003u, 3004u}))
+        << "the frame that was just pushed must survive the trim, and the "
+           "oldest one must be the victim";
+}
+
+TEST(JbMemoryBound, APacketThatJoinsABufferedFrameStillRespectsTheCap) {
+    // A frame may carry more than one packet (redundant audio paths, and
+    // the receiver's own reassembly).  The cap counts *packets*, so such a
+    // packet is charged against it like any other — the buffer stays
+    // bounded either way.
+    Config cfg;
+    cfg.max_packets = 4;
+    cfg.max_bytes   = 0;
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    for (std::uint16_t i = 0; i < 4; ++i) {
+        auto pv = make_view(i, /*ts*/ 9000u + i, /*pt*/ 96);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+    }
+    ASSERT_EQ(jb.stats().buffered_packets, 4u);
+
+    // The fifth packet joins the *first* frame (same RTP timestamp).
+    auto joiner = make_view(99, /*ts*/ 9000, /*pt*/ 96);
+    ASSERT_TRUE(joiner.has_value());
+    jb.push(*joiner, t0, std::nullopt);
+
+    EXPECT_LE(jb.stats().buffered_packets, cfg.max_packets);
+    EXPECT_EQ(jb.stats().packets_dropped, 1u)
+        << "the oldest frame is trimmed to make room for the joiner";
+}
+
+TEST(JbMemoryBound, TheOldestFrameIsTrimmedFirst) {
+    // The trim is FIFO from the oldest (the map is keyed by RTP timestamp).
+    Config cfg;
+    cfg.max_packets = 3;
+    cfg.max_bytes   = 0;
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    // Push out of order on purpose: the *timestamp* is what decides which
+    // frame is oldest, not the arrival order.
+    for (std::uint32_t ts : {100u, 300u, 200u, 400u}) {
+        auto pv = make_view(static_cast<std::uint16_t>(ts), ts, /*pt*/ 96);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+    }
+
+    // ts=100 is the oldest → it is the one that was trimmed.
+    auto frames = jb.flush();
+    ASSERT_EQ(frames.size(), 3u);
+    std::vector<std::uint32_t> timestamps;
+    for (const auto& f : frames) timestamps.push_back(f.frame_timestamp);
+    EXPECT_EQ(timestamps, (std::vector<std::uint32_t>{200u, 300u, 400u}));
+}
+
+TEST(JbMemoryBound, ByteCountNeverExceedsTheCap) {
+    // A packet-count cap alone does not bound memory: the packets of one
+    // stream can have wildly different sizes.  The byte bound is the one
+    // that caps what the receiver actually holds.
+    Config cfg;
+    cfg.max_packets = 0;            // the byte count is the bound under test
+    cfg.max_bytes   = 4096;
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    for (std::uint16_t i = 0; i < 50; ++i) {
+        auto pv = make_sized_view(i, /*ts*/ 4000u + i, /*payload*/ 1024);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+
+        EXPECT_LE(jb.stats().buffered_bytes, cfg.max_bytes)
+            << "the byte count must never exceed the cap (pushed "
+            << static_cast<int>(i) + 1 << " packets of 1 KiB)";
+    }
+
+    EXPECT_EQ(jb.stats().buffered_bytes, 4096u);
+    EXPECT_GT(jb.stats().packets_dropped, 0u);
+}
+
+TEST(JbMemoryBound, ByteCountBoundsMemoryWithVariedPacketSizes) {
+    // The same bound, with packets whose sizes differ by two orders of
+    // magnitude: a count-only cap would let this through.
+    Config cfg;
+    cfg.max_packets = 0;
+    cfg.max_bytes   = 8192;
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    for (std::uint16_t i = 0; i < 40; ++i) {
+        const std::size_t size = (i % 4 == 0) ? 4000 : 100;
+        auto pv = make_sized_view(i, /*ts*/ 5000u + i, size);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+
+        EXPECT_LE(jb.stats().buffered_bytes, cfg.max_bytes);
+    }
+    EXPECT_GT(jb.stats().packets_dropped, 0u);
+}
+
+TEST(JbMemoryBound, TighteningTheCapTakesEffectImmediately) {
+    // A host that tightens the bound at runtime expects the buffer to be
+    // inside it *now* — not at the next push().
+    Config cfg;
+    cfg.max_packets = 64;
+    cfg.max_bytes   = 0;
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    for (std::uint16_t i = 0; i < 32; ++i) {
+        auto pv = make_view(i, /*ts*/ 6000u + i, /*pt*/ 96);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+    }
+    ASSERT_EQ(jb.stats().buffered_packets, 32u);
+
+    Config tighter = cfg;
+    tighter.max_packets = 8;
+    jb.update_config(tighter);
+
+    EXPECT_EQ(jb.stats().buffered_packets, 8u);
+    EXPECT_EQ(jb.stats().packets_dropped, 24u);
+}
+
+TEST(JbMemoryBound, AnUnboundedBufferKeepsEverything) {
+    // 0 disables the cap on both halves: the historical behaviour stays
+    // available for a caller that wants it.
+    Config cfg;
+    cfg.max_packets = 0;
+    cfg.max_bytes   = 0;
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    for (std::uint16_t i = 0; i < 100; ++i) {
+        auto pv = make_view(i, /*ts*/ 7000u + i, /*pt*/ 96);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+    }
+
+    const Stats s = jb.stats();
+    EXPECT_EQ(s.buffered_packets, 100u);
+    EXPECT_EQ(s.packets_dropped, 0u);
+}
+
+TEST(JbMemoryBound, DroppedPacketsAreNotCountedAsEmitted) {
+    // The drop counter and the emit counter are two different things: a
+    // trimmed frame is neither emitted nor played out.
+    Config cfg;
+    cfg.max_packets = 4;
+    cfg.max_bytes   = 0;
+    JitterBuffer jb{cfg};
+
+    TimePoint t0 = SteadyClock::now();
+    for (std::uint16_t i = 0; i < 40; ++i) {
+        auto pv = make_view(i, /*ts*/ 8000u + i, /*pt*/ 96);
+        ASSERT_TRUE(pv.has_value());
+        jb.push(*pv, t0, std::nullopt);
+    }
+
+    EXPECT_EQ(jb.stats().frames_emitted, 0u);
+
+    auto frames = jb.flush();
+    EXPECT_EQ(frames.size(), 4u);
+    EXPECT_EQ(jb.stats().frames_emitted, 0u)
+        << "flush() is a drain, not a playout";
+    EXPECT_EQ(jb.stats().buffered_bytes, 0u);
 }
 
 }  // namespace

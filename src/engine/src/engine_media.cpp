@@ -3313,6 +3313,10 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         const auto rx = audio_receiver_->stats();
         out.audio_packets_lost     = rx.packets_lost;
         out.audio_decode_errors    = rx.decode_errors;
+        // The jitter buffer's own drop counter (v1.3 plan Q2 / video plan
+        // R4) — republished unchanged, so there is no second copy of the
+        // bookkeeping that could drift from what the buffer really did.
+        out.audio_packets_dropped  = rx.packets_dropped;
         out.audio_jitter_ms        = rx.jitter_ms;
         out.audio_playout_delay_ms = rx.current_delay_ms;
     }
@@ -3924,6 +3928,8 @@ void NimRTCEngine::append_audio_stream_stats(
             const auto rx = audio_receiver_->stats();
             s.packets_lost     = rx.packets_lost;
             s.decode_errors    = rx.decode_errors;
+            // The jitter buffer's own drop counter (v1.3 plan Q2).
+            s.packets_dropped  = rx.packets_dropped;
             s.jitter_ms        = rx.jitter_ms;
             s.playout_delay_ms = rx.current_delay_ms;
         }

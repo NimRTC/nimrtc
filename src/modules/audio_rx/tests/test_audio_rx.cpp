@@ -114,6 +114,15 @@ public:
         return 0;
     }
 
+    /** Simulate the jitter buffer's memory bound firing (v1.3 plan Q2).
+     *
+     *  The double cannot grow without limit the way the concrete buffer
+     *  did, so the test tells it how many packets the bound dropped.
+     *  The pipeline has to republish that figure unchanged. */
+    void simulate_drops(std::uint64_t packets) noexcept {
+        stats_.packets_dropped = packets;
+    }
+
     /** The configuration the pipeline handed over (spec B-3). */
     const nimrtc::plugins::JBConfig& config() const noexcept { return config_; }
 
@@ -243,8 +252,21 @@ class FakeJitterBufferFactory : public nimrtc::plugins::IJBFactory {
 public:
     std::string_view id() const noexcept override { return "test_fake_jb"; }
     std::string_view display_name() const noexcept override { return "test fake jb"; }
-    nimrtc::plugins::IJB* create() const override { return new FakeJitterBuffer(); }
+    nimrtc::plugins::IJB* create() const override {
+        auto* jb = new FakeJitterBuffer();
+        // The pipeline creates the buffer, so the test cannot hold a
+        // pointer to it; the last instance is recorded in a file-local
+        // static instead.  The tests are single-threaded.
+        s_last = jb;
+        return jb;
+    }
+
+    /** The buffer the pipeline created last (nullptr before the first
+     *  receiver is built). */
+    static FakeJitterBuffer* s_last;
 };
+
+FakeJitterBuffer* FakeJitterBufferFactory::s_last = nullptr;
 
 /** The factory of the fake decoder. */
 class FakeDecoderFactory : public nimrtc::plugins::IAudioDecoderFactory {
@@ -277,6 +299,10 @@ protected:
         static const FakeDecoderFactory s_decoder_factory{};
         reg.register_jb(s_jb_factory.id(), &s_jb_factory);
         reg.register_audio_decoder(s_decoder_factory.id(), &s_decoder_factory);
+
+        // The buffer of the previous test is gone (the pipeline deleted
+        // it), so the recorded pointer must not survive it.
+        FakeJitterBufferFactory::s_last = nullptr;
 
         // The module under test registers itself.
         nimrtc::audio_rx::register_default_plugins();
@@ -393,6 +419,31 @@ TEST_F(AudioRxTest, TimelineCountsTheLossInTheStatistics) {
     EXPECT_EQ(stats.frames_played_out, 4u);
     EXPECT_EQ(stats.frames_concealed, 2u);
     EXPECT_EQ(stats.packets_lost, 2u);
+}
+
+// ---------------------------------------------------------------------------
+// V-1: The jitter buffer's memory bound (v1.3 plan Q2)
+// ---------------------------------------------------------------------------
+
+TEST_F(AudioRxTest, TheJitterBuffersDropsAreRepublished) {
+    // The jitter buffer's memory bound (v1.3 plan Q2 / video plan R4) is
+    // the *report* that the receiver could not keep up with the sender.
+    // The pipeline has to republish the buffer's own counter unchanged —
+    // a second copy of the bookkeeping would drift from what the buffer
+    // really did.
+    auto rx = make_receiver(make_config());
+    ASSERT_TRUE(rx);
+
+    push(*rx, 0, 1);
+    rx->tick(1000);
+
+    // The buffer is created when the stream opens (on the first push).
+    ASSERT_NE(FakeJitterBufferFactory::s_last, nullptr);
+
+    EXPECT_EQ(rx->stats().packets_dropped, 0u);
+
+    FakeJitterBufferFactory::s_last->simulate_drops(7);
+    EXPECT_EQ(rx->stats().packets_dropped, 7u);
 }
 
 // ---------------------------------------------------------------------------

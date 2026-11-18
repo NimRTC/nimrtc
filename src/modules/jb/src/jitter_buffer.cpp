@@ -132,6 +132,90 @@ struct JitterBuffer::Impl {
     // Statistics
     std::size_t buffered_packets_ = 0;
 
+    /// The payload bytes the buffer currently holds.
+    ///
+    /// The bound is what makes the buffer's memory bounded (video plan R4
+    /// / v1.3 plan Q2): a packet-count cap alone does not, because the
+    /// packets of one stream can differ in size by orders of magnitude.
+    std::size_t buffered_bytes_ = 0;
+
+    /// The payload bytes of one buffered frame.
+    ///
+    /// The packets of a frame are *views* into the caller's buffer, so
+    /// the frame's byte count is the sum of the payload spans.
+    static std::size_t frame_bytes(const Frame& frame) noexcept {
+        std::size_t total = 0;
+        for (const rtp::PacketView& p : frame.packets) {
+            total += p.payload.size();
+        }
+        return total;
+    }
+
+    /**
+     * @brief Enforce the memory bound (video plan R4 / v1.3 plan Q2).
+     *
+     * The bound has two halves, and both are enforced here:
+     *
+     *   - `Config::max_packets` — the packet count.
+     *   - `Config::max_bytes` — the payload bytes.
+     *
+     * The packet count alone does not bound memory: the packets of one
+     * stream can differ in size by orders of magnitude, so the byte
+     * bound is the one that actually caps what the receiver holds.
+     *
+     * The trim removes the **oldest** frame, which is the semantics the
+     * config has always declared ("FIFO trim from oldest when
+     * exceeded").  The oldest frame is the one that is *late* — the
+     * audio the host is about to hear is the newest, and the oldest is
+     * the frame that has already missed its slot.  Trimming from the
+     * oldest therefore keeps the playout latency bounded (the buffer
+     * can never lag further behind than its own size) instead of
+     * letting the receiver fall permanently behind the sender.
+     *
+     * The frame that was *just received* is never the victim: the trim
+     * runs **before** the incoming packet is inserted (the video
+     * buffer's `enforce_inflight_cap(incoming=1)` rule, applied
+     * verbatim), so the newest audio — the one the peer just sent — is
+     * always the last to be dropped.
+     *
+     * The dropped packets are counted in `packets_dropped_`, so the trim
+     * is *reported* rather than silent: a host that sees the counter
+     * move knows the receiver could not keep up with the sender.
+     *
+     * @param incoming_packets  the packets that are about to be inserted.
+     * @param incoming_bytes    the payload bytes they will add.
+     */
+    void enforce_memory_bound(std::size_t incoming_packets = 0,
+                               std::size_t incoming_bytes = 0) noexcept {
+        if (config_.max_packets == 0 && config_.max_bytes == 0) return;
+
+        for (;;) {
+            const bool over_packets =
+                config_.max_packets != 0
+                && buffered_packets_ + incoming_packets > config_.max_packets;
+            const bool over_bytes =
+                config_.max_bytes != 0
+                && buffered_bytes_ + incoming_bytes > config_.max_bytes;
+            if (!over_packets && !over_bytes) return;
+            if (frame_buffer_.empty()) return;
+
+            // The oldest frame goes first.  std::map iteration is in
+            // key order, and the key is the RTP timestamp, so begin() is
+            // the oldest frame the buffer holds.
+            auto it = frame_buffer_.begin();
+            const std::size_t dropped_packets = it->second.packets.size();
+            buffered_packets_ -= dropped_packets;
+            buffered_bytes_ -= frame_bytes(it->second);
+            packets_dropped_ += dropped_packets;
+            frame_arrival_times_.erase(it->first);
+            frame_buffer_.erase(it);
+
+            jb_debug("JB: trimmed the oldest frame to stay inside the "
+                     "memory bound (%zu packets, %zu bytes left)",
+                     buffered_packets_, buffered_bytes_);
+        }
+    }
+
     /** Push one packet into the buffer. */
     void push(const rtp::PacketView& packet, core::TimePoint arrival,
               std::optional<std::uint64_t> ref_frame) {
@@ -175,6 +259,22 @@ struct JitterBuffer::Impl {
                             : base_delay_for_pt(packet.payload_type);
         }
 
+        // ---- The memory bound (video plan R4 / v1.3 plan Q2) -------------
+        //
+        // The trim runs *before* the insert, so the packet that has just
+        // arrived can never be the one the bound evicts: the newest audio
+        // is always the last to be dropped.  This is the video buffer's
+        // rule (`enforce_inflight_cap(incoming=1)`) applied verbatim.
+        //
+        // The bound is checked against the state the insert is *about* to
+        // create, so the buffer is inside the cap once the insert is done.
+        //
+        // The cap counts *packets*, not frames: a packet that joins a
+        // frame the buffer already holds is still a packet, so it is
+        // charged against the cap like any other.
+        enforce_memory_bound(/*incoming_packets=*/1,
+                             /*incoming_bytes=*/packet.payload.size());
+
         // ---- Insert packet into the per-timestamp Frame ------------------
         auto& frame = frame_buffer_[packet.timestamp];
         frame.packets.push_back(packet);
@@ -199,6 +299,7 @@ struct JitterBuffer::Impl {
         }
 
         buffered_packets_++;
+        buffered_bytes_ += packet.payload.size();
 
         jb_trace("JB: pushed packet seq=%u ts=%u pt=%u, buffered=%zu",
                  packet.seq, packet.timestamp, packet.payload_type,
@@ -260,6 +361,7 @@ struct JitterBuffer::Impl {
                 frame_buffer_.erase(it++);
 
                 buffered_packets_ -= frame.packets.size();
+                buffered_bytes_ -= frame_bytes(frame);
                 frames_emitted_++;
 
                 jb_trace("JB: emitting frame ts=%u packets=%zu",
@@ -285,6 +387,7 @@ struct JitterBuffer::Impl {
         frame_buffer_.clear();
         frame_arrival_times_.clear();
         buffered_packets_ = 0;
+        buffered_bytes_ = 0;
 
         jb_debug("JB: flushed %zu frames", frames.size());
         return frames;
@@ -300,6 +403,7 @@ struct JitterBuffer::Impl {
         tracker_.reset();
         sync_tracker_policy();
         buffered_packets_ = 0;
+        buffered_bytes_ = 0;
         target_delay_ = {};
     }
 
@@ -310,6 +414,7 @@ struct JitterBuffer::Impl {
             .packets_dropped  = packets_dropped_,
             .current_delay    = target_delay_,
             .current_jitter   = tracker_.jitter(),
+            .buffered_bytes   = buffered_bytes_,
         };
     }
 
@@ -319,6 +424,10 @@ struct JitterBuffer::Impl {
         if (!config_.adaptive) {
             target_delay_ = config_.initial_delay;
         }
+        // A *lower* cap must take effect immediately, not at the next
+        // push(): a host that tightens the bound at runtime expects the
+        // buffer to be inside it now.
+        enforce_memory_bound();
     }
 
     Config config() const noexcept { return config_; }

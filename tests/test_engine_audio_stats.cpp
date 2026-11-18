@@ -324,6 +324,7 @@ TEST_F(EngineAudioStats, FreshEngineReportsZeroAudioCounters) {
     EXPECT_EQ(s.audio_fec_recovered_frames, 0u);
     EXPECT_EQ(s.audio_packets_lost, 0u);
     EXPECT_EQ(s.audio_decode_errors, 0u);
+    EXPECT_EQ(s.audio_packets_dropped, 0u);
     EXPECT_EQ(s.audio_jitter_ms, 0u);
     EXPECT_EQ(s.audio_playout_delay_ms, 0u);
 

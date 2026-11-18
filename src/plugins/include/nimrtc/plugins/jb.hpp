@@ -54,6 +54,21 @@ struct NIMRTC_API_STABLE JBConfig {
     int max_depth_ms = 200;
     int min_depth_ms = 10;
     int target_delay_ms = 0;
+
+    /**
+     * @brief The hard cap on the packets the buffer holds.
+     *
+     *  The bound is what makes the buffer's memory **bounded** (video
+     *  plan R4 / v1.3 plan Q2): a peer that sends faster than the
+     *  receiver drains must not be able to grow the buffer without
+     *  limit.  The buffer drops the *oldest* frame when the cap is
+     *  exceeded and counts the dropped packets.
+     *
+     *  0 means "use the implementation's default".  A negative value
+     *  means "unbounded" — which is the historical behaviour, and is
+     *  **not** recommended: it is the state that video plan R4 was
+     *  written about. */
+    int max_packets = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -99,6 +114,22 @@ public:
         uint64_t frames_dropped = 0;
         uint64_t packets_received = 0;
         double   jitter_ms = 0.0;
+
+        /**
+         * @brief The packets the buffer dropped to stay inside its memory
+         *        bound (video plan R4 / v1.3 plan Q2).
+         *
+         *  The jitter buffer's bound is what keeps the receiver's memory
+         *  bounded when a peer sends faster than the receiver drains, or
+         *  sends frames that never become playable.  A non-zero value is
+         *  the *report* of that bound firing — it says "the receiver
+         *  could not keep up", not "something failed".
+         *
+         *  It is the concrete buffer's own counter, republished
+         *  unchanged: the adapter does not re-count it, so there is no
+         *  second copy of the bookkeeping that could drift from what the
+         *  buffer really did. */
+        uint64_t packets_dropped = 0;
     };
     virtual Stats stats() const noexcept = 0;
 

@@ -216,7 +216,7 @@ def digest(version: str, changelog: str, limit: int | None = None) -> str:
         "> This is the **digest** of the release notes: one line per change.  "
         "The full text -- every entry in prose, with its measurements, its "
         "caveats and its code references -- is in [`CHANGELOG.md`]"
-        f"(`https://github.com/NimRTC/nimrtc/blob/v{version}/CHANGELOG.md`), "
+        f"(https://github.com/NimRTC/nimrtc/blob/v{version}/CHANGELOG.md), "
         "under the `## ["
         + version
         + "]` heading."

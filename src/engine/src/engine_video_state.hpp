@@ -42,6 +42,7 @@
 #include <nimrtc/plugins/video_pipeline.hpp>
 
 #include "audio_routing.hpp"
+#include "engine_capture_cadence.hpp"
 #include "engine_gpu_mailbox.hpp"
 #include "engine_ref_frame_table.hpp"
 #include "engine_render_state.hpp"
@@ -457,6 +458,38 @@ struct VideoState {
     /** The RTP timestamp (90 kHz) the media clock's origin is anchored
      *  at. */
     std::uint32_t capture_rtp_base_ts = 0;
+
+    // ---- The capture cadence (v1.2 plan Track S / S7) -------------------
+    //
+    // How many frames the *device* produced and over what span of its
+    // own clock.  The counting rule (a delivery is identified by its
+    // sequence number *and* its timestamp; the rate comes from the
+    // sequence span, so a frame the device dropped at its own bounded
+    // queue still counts) lives in `engine_capture_cadence.hpp`, next
+    // to the unit test that pins it.
+    CaptureCadence capture_cadence;
+
+    /** Record one delivered frame (its timestamp and its sequence). */
+    void note_captured_frame(std::int64_t capture_ts_us,
+                             std::uint32_t frame_seq) noexcept {
+        capture_cadence.note(capture_ts_us, frame_seq);
+    }
+
+    /** The device's frame rate, in frames per second (0 when unknown). */
+    [[nodiscard]] double capture_fps() const noexcept {
+        return capture_cadence.fps();
+    }
+
+    /** How many frames the device *produced* (the frames it dropped at
+     *  its own bounded queue included). */
+    [[nodiscard]] std::uint64_t capture_frames_produced() const noexcept {
+        return capture_cadence.produced();
+    }
+
+    /** How many deliveries the pump actually saw. */
+    [[nodiscard]] std::uint64_t capture_frames_seen_count() const noexcept {
+        return capture_cadence.frames;
+    }
 
     // ---- The incremental (dirty-rect) encode mechanism (plan B9) --------
     //

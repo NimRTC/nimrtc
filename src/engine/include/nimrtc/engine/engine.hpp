@@ -2322,6 +2322,110 @@ struct NIMRTC_API_STABLE DataChannelStats {
 };
 
 // ---------------------------------------------------------------------------
+// The remote-desktop pipeline breakdown (v1.2 plan Track S / S7)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Where the remote-desktop pipeline's time went.
+ *
+ * The QoE block (`plugins::QoeSnapshot`) measures what the operator
+ * *felt* — freezes, latency, sharpness.  This block answers the
+ * operator's follow-up question: **why**.  It is the pipeline broken
+ * into its stages, each reported in the unit a human reasons about:
+ *
+ *   - **capture** — how often the device produced a frame, and how long
+ *     the device handoff took;
+ *   - **encode** — how long the codec's encode call took, and how many
+ *     frames it processed;
+ *   - **decode** — the receive side's counterpart.
+ *
+ * ## Where the numbers come from
+ *
+ * Everything here is **derived** from the per-stage instrumentation
+ * (`Stats::video_stage_capture` / `video_stage_encode` /
+ * `video_stage_decode`) and from the capture timestamp the pipeline
+ * already carries.  Nothing is timed a second time, so this block can
+ * never disagree with the stage timings it summarises — and adding it
+ * cost no work on the frame path.
+ *
+ * ## The frame rates
+ *
+ * `capture_fps` is the rate the *device* delivered frames, measured as
+ * `(frames - 1) / (last capture timestamp - first capture timestamp)`.
+ * It uses the device's own capture timestamps, not the engine's wall
+ * clock, so a device that stamps with its own clock still yields the
+ * rate *it* ran at.  `encode_fps` and `decode_fps` are the rates the
+ * respective stage *ran at*, measured over the engine's monotonic
+ * clock across the stage's whole life — they describe the stage's
+ * throughput, which is what a "can this machine encode 1080p60?"
+ * question is really asking.
+ *
+ * All three are 0 until there are at least two samples and a positive
+ * interval; 0 means "not measurable yet", not "zero frames per second".
+ *
+ * ## The frame counts
+ *
+ * `frames_captured` is the device's frame count (`capture_ts_us`
+ * advances once per device frame), `frames_encoded` and
+ * `frames_decoded` are the stage sample counts.  The *difference*
+ * between them is the drop — a frame that was captured but never
+ * reached the encoder, or an encoded frame never decoded — so the
+ * block carries the differences explicitly rather than making every
+ * host subtract two numbers (and get the sign wrong).
+ *
+ * @see Stats::remote_desktop
+ * @see Stats::video_stage_capture / video_stage_encode / video_stage_decode
+ */
+struct NIMRTC_API_STABLE RemoteDesktopStats {
+    /** The frame rate the capture device delivered, in frames per
+     *  second (0 when not measurable yet). */
+    double capture_fps = 0.0;
+
+    /** The mean cost of the capture device handoff, in milliseconds. */
+    double capture_ms = 0.0;
+
+    /** The frame rate the encoder ran at, in frames per second
+     *  (0 when the encoder never ran). */
+    double encode_fps = 0.0;
+
+    /** The mean cost of the codec's encode call, in milliseconds. */
+    double encode_ms = 0.0;
+
+    /** The p95 cost of the codec's encode call, in milliseconds — the
+     *  number a stutter shows up in.  A good mean with a terrible p95
+     *  is a session that hiccups. */
+    double encode_p95_ms = 0.0;
+
+    /** The frame rate the decoder ran at, in frames per second
+     *  (0 when the decoder never ran). */
+    double decode_fps = 0.0;
+
+    /** The mean cost of the codec's decode call, in milliseconds. */
+    double decode_ms = 0.0;
+
+    /** The p95 cost of the codec's decode call, in milliseconds. */
+    double decode_p95_ms = 0.0;
+
+    /** The frames the capture device delivered. */
+    std::uint64_t frames_captured = 0;
+
+    /** The frames the encoder processed. */
+    std::uint64_t frames_encoded = 0;
+
+    /** The frames the decoder processed. */
+    std::uint64_t frames_decoded = 0;
+
+    /** The frames captured but never handed to the encoder
+     *  (`max(0, frames_captured - frames_encoded)`). */
+    std::uint64_t frames_dropped_before_encode = 0;
+
+    /** The frames decoded (receive side) that were never encoded
+     *  locally — this is informational only and is **not** an error
+     *  counter: a receive-only session has an empty encode stage and a
+     *  busy decode stage.  Kept out of the drop accounting on purpose. */
+    std::uint64_t frames_decoded_without_local_encode = 0;
+};
+// ---------------------------------------------------------------------------
 // NimRTCEngine
 // ---------------------------------------------------------------------------
 
@@ -3965,6 +4069,10 @@ public:
         /** The reading's sequence number; increases by one per reading. */
         std::uint64_t snapshot_seq = 0;
 
+        /** The legacy SRTP drop counter: every SRTP auth-tag mismatch
+         *  since open().  The v1.2 transport block (`Stats::transport`)
+         *  carries the same figure alongside the rest of the SRTP plane;
+         *  this one stays because hosts read it. */
         int srtp_drops = 0;
         // ---- Video counters (v1.1 V1, additive) -------------------------
         // All cumulative since open().  Wired to the already-existing
@@ -4048,7 +4156,10 @@ public:
         // `video_zero_copy_fallbacks` counts the frames that carried a
         // GPU handle but fell back to the CPU path (the codec does not
         // support the zero-copy entry point, or it failed).
+        /** Frames that took the GPU path (no CPU staging). */
         std::uint64_t video_zero_copy_frames    = 0;
+
+        /** Frames that carried a GPU handle but fell back to the CPU. */
         std::uint64_t video_zero_copy_fallbacks = 0;
         // ---- Video receive-side delivery path (remote-desktop plan E1) ---
         //
@@ -4444,7 +4555,10 @@ public:
         // the transport entry has the complete picture.
         //
         // @see TransportStats
+
+        /** The ICE / DTLS / SRTP path the session runs over. */
         TransportStats transport;
+
         // ---- The per-channel data-channel entries (v1.2 plan Track S / S6)
         //
         // One entry per **data channel the host opened** with
@@ -4559,6 +4673,23 @@ public:
          * the latency percentile?" when it was not measured.
          */
         plugins::QoeSnapshot qoe{};
+
+        /**
+         * @brief The remote-desktop pipeline breakdown (v1.2 plan **S7**).
+         *
+         * The QoE block above answers "how did the session *feel*"; this
+         * block answers "**where did the time go**".  It is a
+         * remote-desktop-shaped view of the per-stage instrumentation
+         * (`video_stage_*`): the capture / encode / decode means in
+         * milliseconds, the frame rates they imply, and the count of
+         * frames that were captured but never encoded (the gap between
+         * two stages is a frame that was dropped in between).
+         *
+         * Every value here is **derived** from a measurement that
+         * already exists — nothing is timed a second time.  The
+         * definitions are in `RemoteDesktopStats` above.
+         */
+        RemoteDesktopStats remote_desktop{};
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *

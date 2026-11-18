@@ -81,19 +81,19 @@ test('四个套件的写集边界用例共用同一份判据实现（标准 4）
 });
 
 // ---------------------------------------------------------------------------
-// 验收标准 1 落点：真实仓库里四片产物可从提交历史取到，且全部落在写集内
+// 验收标准 1 落点：真实仓库里四片产物「在树上」，且改动全部落在写集内
 // ---------------------------------------------------------------------------
-test('真实仓库：四片产物从提交历史取到且全部落在写集内（标准 1 落点）', () => {
+test('真实仓库：四片产物在树上且改动全部落在写集内（标准 1 落点）', () => {
     for (const id of FOUR_SLICES) {
         const v = ws.evaluateSliceWriteSet({ root: ROOT, sliceId: id });
-        assert.ok(v.sliceCommits.length >= 1,
-            `${id} 在提交历史里找不到本片自己的提交（写集边界断言无法成立）`);
+        // 产物检查用**状态判据**（`git ls-files`）—— 与提交历史无关，
+        // 所以 squash 合并进主干后照样成立（ADR-075）。
+        assert.deepEqual(v.missing, [],
+            `${id} 写集内必要产物不在树上：${v.missing.join(', ')}`);
+        assert.ok(v.onTree.length >= 1,
+            `${id} 产物必须在树上（已追踪文件）：${v.required.join(', ')}`);
         assert.deepEqual(v.violations, [],
             `${id} 改动超出写集：${v.violations.join(', ')}`);
-        assert.deepEqual(v.missing, [],
-            `${id} 写集内必要产物缺失：${v.missing.join(', ')}`);
-        assert.ok(v.changed.length >= 1,
-            `${id} 改动并集为空（提交历史 ∪ 工作区 ∪ 未跟踪）`);
     }
 });
 
@@ -229,7 +229,8 @@ test('本片改动仅限验收范围（tests/acceptance/** 与本片规格）（
         `本片改动超出验收范围：${v.violations.join(', ')}`);
     assert.deepEqual(v.missing, [],
         `本片必要产物缺失：${v.missing.join(', ')}`);
-    assert.ok(v.changed.length >= 1, '本片改动必须非空');
+    assert.ok(v.onTree.length >= 1,
+        `本片产物必须在树上（已追踪文件）：${v.required.join(', ')}`);
 });
 
 // ---------------------------------------------------------------------------

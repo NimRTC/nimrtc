@@ -204,14 +204,21 @@ test('无卡机器不静默降级：硬件后端在无卡机上硬失败，软�
 // ---------------------------------------------------------------------------
 test('本片不改输入绑定与质量评估与引擎时间线接口；验证方式：本片改动仅限视频源模块', () => {
     // 写集边界判据（v5-writeset-acceptance/writeset-boundary.cjs，四个套件共用）：
-    // 三源并集 —— 工作区未提交差异 ∪ 本片提交差异 ∪ 未跟踪文件。断言从
-    // 「读工作区差异」改为「读提交历史」后，在已提交的干净树上同样成立（D-68），
-    // 越界检测不削弱：并集里任何落在写集外的路径仍判 failed。
+    //
+    // 判据分两半，各用各的形态：
+    //   ① 越界检查 —— 「本片改了哪些文件」（工作区差异 ∪ 本片提交差异 ∪ 未跟踪文件），
+    //      任何落在写集外的路径仍判 failed，越界检测不削弱；
+    //   ② 产物检查 —— 「本片该有的产物在不在树上」（`git ls-files`，状态判据）。
+    //
+    // ② 为什么不用改动清单（ADR-075）：改动清单的来源 2 依赖提交历史 ——
+    // 切片被 squash 合并进主干后认不出本片提交 → 产物检查全部落空 →
+    // 干净已提交树上必红。而规格验收标准 1 要求的就是「干净已提交树上全部通过」。
+    // 「产物在树上」是状态判据，与合并策略无关。
     const verdict = ws.evaluateSliceWriteSet({ root: ROOT, sliceId: 'v1-video-processing' });
     assert.deepEqual(verdict.violations, [],
         `改动超出本片范围（写集仅限 video_source 模块）：${verdict.violations.join(', ')}`);
     assert.deepEqual(verdict.missing, [],
-        `本片产物缺失（写集内必须存在改动）：${verdict.missing.join(', ')}`);
-    assert.ok(verdict.changed.length >= 1,
-        '本片改动必须非空（工作区差异 ∪ 提交历史 ∪ 未跟踪文件的并集）');
+        `本片产物缺失（产物必须在树上）：${verdict.missing.join(', ')}`);
+    assert.ok(verdict.onTree.length >= 1,
+        `本片产物必须在树上（已追踪文件）：${verdict.required.join(', ')}`);
 });

@@ -11,16 +11,35 @@
 //   2. 本片自己的提交（提交历史里带 `Refs-Slice: <id>` trailer 或
 //      `feat(<id>): slice approved` 标题的提交，逐个算
 //      `git diff --name-only <commit>^..<commit>`）
-//      覆盖切片已提交、签收之后的产物 —— 已提交的干净树上只有这个来源非空；
+//      覆盖切片已提交、签收之后的产物；
 //   3. 未跟踪文件（`git ls-files --others --exclude-standard`）
 //      覆盖 agent 新建还没 add 的文件。
 //
-// 与 zelto 运行时写集审计同一口径：都从提交历史回答「本片改了哪些文件」，
-// 验收测试与运行时审计不会各说各话。
+// ── 但「产物在不在」用**另一个形态**判 ────────────────────────────
+//
+// 上面三个来源回答的是「本片改了哪些文件」（**越界检查**用这个）。
+// 而「本片该有的产物在不在」用的是**状态**判据：
+// `git ls-files` —— 产物在树上就在树上（**产物检查**用这个）。
+//
+// 为什么产物检查不能也用改动清单：
+// 改动清单的来源 2 依赖提交历史 —— 切片被 squash 合并进主干后
+// （PR #91 那种），主干历史里没有 `feat(<id>): slice approved` 提交
+// → 认不出本片 → 来源 2 为空 → 产物检查**全部落空**
+// → **干净已提交树上必红**。
+//
+// 而本片规格的验收标准 1 要求的恰恰是「干净已提交树上全部通过」——
+// 也就是说只用改动清单的实现**做不到规格要求的那一条**
+// （实测：v5 worktree 里四个套件的 missing 是 1/3/3/4，ok 全 false）。
+//
+// 「产物在树上」是状态判据：合并策略（squash / rebase / merge commit）
+// 都不影响它 —— 主干上的干净树与 worktree 里的进行中状态**判定一致**
+// （规格验收标准 2 要的也是这个）。
 //
 // 基点（baseCommit）的约定：优先取本片记录里的 `baseCommit`；本片记录不可得
 // 时（本仓库没有 M1-M4 的记录），按 `feat(<id>): slice approved` 提交的父提交
 // 推导 —— 该提交就是本片签收的产物，其父提交即本片开始时的树。
+//
+// 基点只影响**越界检查**的改动清单范围；产物检查不依赖基点。
 'use strict';
 
 const { spawnSync } = require('node:child_process');
@@ -240,11 +259,18 @@ function isAllowed(p, allow) {
  * 纯写集检查（不碰 git）：changed 里的路径必须都在 allow 内（越界 → violations），
  * required 里的路径必须出现在 changed 里（缺 → missing）。
  *
+ * @param {string[]} required 本片必须有的产物
+ * @param {string[]} [present] 已知「在树上」的路径（状态判据，ADR-075）。
+ *   给了它 → required 判成「present 里有」（与提交历史无关）。
+ *   不给 → 回退到「changed 里有」（历史判据，仅供纯函数单测用）。
  * @returns {{ ok: boolean, violations: string[], missing: string[] }}
  */
-function evaluateChanged({ changed, allow, required }) {
+function evaluateChanged({ changed, allow, required = [], present = null }) {
     const violations = changed.filter(p => !isAllowed(p, allow));
-    const missing = required.filter(p => !changed.includes(p));
+    const presentSet = present === null ? null : new Set(present);
+    const missing = required.filter(p =>
+        presentSet === null ? !changed.includes(p) : !presentSet.has(p),
+    );
     return {
         ok: violations.length === 0 && missing.length === 0,
         violations,
@@ -253,19 +279,70 @@ function evaluateChanged({ changed, allow, required }) {
 }
 
 /**
+ * 「产物在树上」—— 状态判据，不依赖提交历史（ADR-075）。
+ *
+ * 判据：`git ls-files -- <path>` 能列出该路径 → 它是**已追踪**的文件，
+ * 也就是「产物确实在树上」。
+ *
+ * ── 为什么不能从「本片的改动清单」里找 required ──────────────────
+ *
+ * 原来的实现把 required 判成「required 出现在 changed 里」。
+ * changed 的三个来源里，**两个依赖提交历史**（本片的提交、基点推导）。
+ * 于是：
+ *
+ *   切片被 squash 合并进主干（PR #91 那种）→ 提交历史里没有
+ *   `feat(<id>): slice approved` 提交 → 认不出本片的提交
+ *   → changed 的来源 2 是空的 → required 全部落空
+ *   → **干净已提交树上必红**。
+ *
+ * 而本片规格的验收标准 1 要求的恰恰是「**干净已提交树上全部通过**」。
+ * 也就是说原来的实现**做不到规格要求的那一条**（实测：v5 worktree 里
+ * 四个套件的 missing 分别为 1 / 3 / 3 / 4，ok 全是 false）。
+ *
+ * 「产物在树上」是**状态**判据：合并策略（squash / rebase / merge commit）
+ * 都不影响它 —— 文件在树上就在树上。这是 ADR-075 的形态。
+ *
+ * 顺带解决的另一个问题：required 判成「在树上」之后，
+ * 判据就**不再依赖基点**，也就不会因为基点算错而误报。
+ *
+ * @param {string} root 仓库根目录
+ * @param {string[]} paths 要查的路径
+ * @returns {string[]} 已在树上的路径
+ */
+function trackedOnTree(root, paths) {
+    if (!paths.length) return [];
+    const out = runGit(root, ['ls-files', '--', ...paths]);
+    const set = new Set(out);
+    return paths.filter(p => set.has(p));
+}
+
+/**
  * 判写集边界：所有收集到的改动必须在写集内（越界 → violations），
- * 且写集内的必要产物必须出现（缺 → missing）。
+ * 且写集内的必要产物必须**在树上**（缺 → missing）。
+ *
+ * 第 2 条是状态判据（ADR-075）：`git ls-files` 认得出就是「在树上」。
+ * 它与提交历史无关 —— 合并策略（squash / rebase / merge commit）
+ * 都不影响判定，主干上的干净树与 worktree 里的进行中状态**判定一致**。
  *
  * @returns {{ ok: boolean, changed: string[], sliceCommits: string[],
- *             violations: string[], missing: string[], required: string[] }}
+ *             violations: string[], missing: string[], required: string[],
+ *             onTree: string[] }}
  */
 function evaluateSliceWriteSet({ root, sliceId, baseCommit = null, headRef = 'HEAD' }) {
     const spec = WRITE_SETS[sliceId];
     if (!spec) throw new Error(`evaluateSliceWriteSet: unknown sliceId '${sliceId}'`);
     const { changed, sliceCommits } = collectSliceChanges({ root, sliceId, baseCommit, headRef });
+
+    // 第 1 条：越界检查（改动是否落在写集内）
+    // 第 2 条：产物检查 —— 状态判据（`git ls-files`），与提交历史无关
+    const onTree = trackedOnTree(root, spec.required);
     const { ok, violations, missing } = evaluateChanged({
-        changed, allow: spec.allow, required: spec.required,
+        changed,
+        allow: spec.allow,
+        required: spec.required,
+        present: onTree,
     });
+
     return {
         ok,
         changed,
@@ -273,6 +350,7 @@ function evaluateSliceWriteSet({ root, sliceId, baseCommit = null, headRef = 'HE
         violations,
         missing,
         required: [...spec.required],
+        onTree,
     };
 }
 
@@ -281,6 +359,7 @@ module.exports = {
     collectSliceChanges,
     evaluateChanged,
     evaluateSliceWriteSet,
+    trackedOnTree,
     findSliceApprovedCommit,
     findSliceCommits,
     isAllowed,

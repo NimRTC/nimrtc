@@ -25,11 +25,13 @@ const BUILD = path.join(ROOT, 'build');
 const HPP = path.join(ROOT, 'examples/demo-agent-realtime/ai_teammate.hpp');
 const CPP = path.join(ROOT, 'examples/demo-agent-realtime/demo-agent-teammate.cpp');
 
+// 写集边界判据：四个套件共用同一份实现（v5-writeset-acceptance/）。
+const ws = require('../v5-writeset-acceptance/writeset-boundary.cjs');
+
 // ---------------------------------------------------------------------------
 // 帮助函数
 // ---------------------------------------------------------------------------
 function readText(p) { return fs.readFileSync(p, 'utf8'); }
-function exists(p)   { return fs.existsSync(p); }
 
 /** 跑 ctest 用例（锚定精确名称），返回退出码 + 完整输出。惰性：只跑一次。 */
 let _selfTest = null;
@@ -195,38 +197,24 @@ test('决策输入是帧语义（帧上有什么），不是用户话语', () =>
 // 写集边界：本片只改 examples/demo-agent-realtime/** 与 v4 验收目录
 // ---------------------------------------------------------------------------
 test('本片改动仅限写集（examples/demo-agent-realtime/** 与 tests/acceptance/v4-ai-teammate/）', () => {
-    const HPP_PATH = 'examples/demo-agent-realtime/ai_teammate.hpp';
-    const CPP_PATH = 'examples/demo-agent-realtime/demo-agent-teammate.cpp';
-
-    // 追踪文件改动：只允许 examples/demo-agent-realtime/ 下的文件。
-    const diff = spawnSync('git', ['diff', '--name-only'], { cwd: ROOT, encoding: 'utf8' });
-    assert.equal(diff.status, 0, 'git diff --name-only 失败');
-    const changed = (diff.stdout || '').split(/\r?\n/).filter(Boolean);
-    assert.ok(changed.length >= 1, '写集内必须存在已追踪文件的改动（CMakeLists.txt）');
-    for (const p of changed) {
-        assert.ok(p.startsWith('examples/demo-agent-realtime/'),
-            `追踪文件改动超出写集：${p}`);
-    }
-    assert.ok(changed.includes('examples/demo-agent-realtime/CMakeLists.txt'),
-        '本片必须注册 demo-agent-teammate（CMakeLists.txt 应有改动）');
-
-    // 未追踪文件：切片规格 + v4 新源码 + v4 验收目录。
-    const status = spawnSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
-    assert.equal(status.status, 0, 'git status --porcelain 失败');
-    const untracked = (status.stdout || '')
-        .split(/\r?\n/).filter(Boolean)
-        .filter(l => l.startsWith('?? '))
-        .map(l => l.slice(3));
-    for (const p of untracked) {
-        const ok = p === 'specs/slices/v4-ai-teammate.md' ||
-                   p.startsWith('examples/demo-agent-realtime/') ||
-                   p.startsWith('tests/acceptance/v4-ai-teammate/');
-        assert.ok(ok, `出现意外的未追踪文件：${p}`);
-    }
-    assert.ok(untracked.includes(HPP_PATH), `${HPP_PATH} 必须作为本片工件存在`);
-    assert.ok(untracked.includes(CPP_PATH), `${CPP_PATH} 必须作为本片工件存在`);
-    assert.ok(exists(path.join(ROOT, HPP_PATH)), `${HPP_PATH} 缺失`);
-    assert.ok(exists(path.join(ROOT, CPP_PATH)), `${CPP_PATH} 缺失`);
+    // 写集边界判据（v5-writeset-acceptance/writeset-boundary.cjs，四个套件共用）：
+    //
+    // 判据分两半，各用各的形态：
+    //   ① 越界检查 —— 「本片改了哪些文件」（工作区差异 ∪ 本片提交差异 ∪ 未跟踪文件），
+    //      任何落在写集外的路径仍判 failed，越界检测不削弱；
+    //   ② 产物检查 —— 「本片该有的产物在不在树上」（`git ls-files`，状态判据）。
+    //
+    // ② 为什么不用改动清单（ADR-075）：改动清单的来源 2 依赖提交历史 ——
+    // 切片被 squash 合并进主干后认不出本片提交 → 产物检查全部落空 →
+    // 干净已提交树上必红。而规格验收标准 1 要求的就是「干净已提交树上全部通过」。
+    // 「产物在树上」是状态判据，与合并策略无关。
+    const verdict = ws.evaluateSliceWriteSet({ root: ROOT, sliceId: 'v4-ai-teammate' });
+    assert.deepEqual(verdict.violations, [],
+        `改动超出写集：${verdict.violations.join(', ')}`);
+    assert.deepEqual(verdict.missing, [],
+        `本片产物缺失（产物必须在树上）：${verdict.missing.join(', ')}`);
+    assert.ok(verdict.onTree.length >= 1,
+        `本片产物必须在树上（已追踪文件）：${verdict.required.join(', ')}`);
 });
 
 // ---------------------------------------------------------------------------

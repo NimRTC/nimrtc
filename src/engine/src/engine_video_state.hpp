@@ -44,6 +44,7 @@
 #include "audio_routing.hpp"
 #include "engine_capture_cadence.hpp"
 #include "engine_gpu_mailbox.hpp"
+#include "engine_rate_window.hpp"
 #include "engine_ref_frame_table.hpp"
 #include "engine_render_state.hpp"
 #include "engine_stage_timing.hpp"
@@ -442,6 +443,26 @@ struct VideoState {
     /** The format the capture device most recently delivered. */
     plugins::VideoPixelFormat video_format_source =
         plugins::VideoPixelFormat::kUnknown;
+
+    // ---- The windowed outbound rate (v1.2 plan Track E / E6) -----------
+    //
+    // The rate controller's second input.  `on_bandwidth_estimate()`
+    // says what the *link* can carry; `on_measured_bitrate()` says what
+    // the *encoder* is actually putting on the wire.  The controller
+    // compares the two and applies a multiplicative decrease when the
+    // encoder overruns the estimate — but only if something feeds it
+    // the measurement, and until this collaborator existed nothing
+    // did.  The engine had the byte counter; the controller had the
+    // seam; the two were never joined.
+    //
+    // The rule (a one-second closed window, and what a broken counter
+    // means) lives in `engine_rate_window.hpp`, next to the unit test
+    // that pins it.
+    //
+    // The *default* stream's measurement is here; each extra stream
+    // keeps its own, next to its own byte counter (see
+    // `video_stream_set.hpp`).
+    detail::RateWindow video_rate_window;
 
     // ---- The backend preference (remote-desktop plan B2) ----------------
     //

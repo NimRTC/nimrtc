@@ -162,6 +162,74 @@ TEST(VideoStats, FreezeDetectedViaIdleTick) {
 }
 
 // -----------------------------------------------------------------------------
+// 5c. The freeze callback tells the *other* module about the freeze
+// -----------------------------------------------------------------------------
+//
+// The sink owns the *definition* of a freeze; the QoE collector owns
+// the *accounting* of it.  The callback is the seam between them: the
+// engine installs it, and without it the QoE snapshot's freeze metrics
+// stay at zero even though the sink counted the freeze.
+//
+// Both detection paths must report: the render gap and the idle tick.
+TEST(VideoStats, TheFreezeCallbackFiresOnARenderGap) {
+    vs::StatsConfig cfg;
+    cfg.freeze_threshold_ms = 150;
+    auto sink = vs::create_stats_sink(cfg);
+
+    std::vector<std::int64_t> reported;
+    sink->set_freeze_callback(
+        [&reported](std::int64_t duration_ms) {
+            reported.push_back(duration_ms);
+        });
+
+    sink->on_frame_rendered(0);
+    sink->on_frame_rendered(1'000'000);   // a 1-second gap
+
+    ASSERT_EQ(reported.size(), 1u)
+        << "the render gap must be reported to the listener";
+    EXPECT_GE(reported[0], 999)
+        << "the reported duration is the gap in milliseconds";
+}
+
+TEST(VideoStats, TheFreezeCallbackFiresOnAnIdleTick) {
+    vs::StatsConfig cfg;
+    cfg.freeze_threshold_ms = 150;
+    auto sink = vs::create_stats_sink(cfg);
+
+    std::vector<std::int64_t> reported;
+    sink->set_freeze_callback(
+        [&reported](std::int64_t duration_ms) {
+            reported.push_back(duration_ms);
+        });
+
+    sink->on_frame_rendered(0);
+    // The first tick establishes the baseline ("how many frames had been
+    // rendered when we last looked"); the idle detection compares
+    // against it, so a single tick cannot detect anything.
+    sink->tick(100'000);
+    sink->tick(2'000'000);   // 2 s of idleness
+
+    ASSERT_EQ(reported.size(), 1u)
+        << "the idle tick must be reported to the listener";
+    EXPECT_GE(reported[0], 1500);
+}
+
+TEST(VideoStats, TheFreezeCallbackIsSilentWithoutAFreeze) {
+    auto sink = vs::create_stats_sink({});
+
+    std::atomic<int> calls{0};
+    sink->set_freeze_callback([&calls](std::int64_t) { ++calls; });
+
+    // Frames a few milliseconds apart — no gap crosses the threshold.
+    sink->on_frame_rendered(0);
+    sink->on_frame_rendered(33'000);
+    sink->on_frame_rendered(66'000);
+
+    EXPECT_EQ(calls.load(), 0)
+        << "the callback reports freezes, not frames";
+}
+
+// -----------------------------------------------------------------------------
 // 6. Current bitrate ≈ total_bytes * 8 over a 1-second window
 // -----------------------------------------------------------------------------
 TEST(VideoStats, CurrentBitrateApproximation) {

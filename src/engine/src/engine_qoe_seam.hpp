@@ -156,6 +156,20 @@ public:
     void note_frame_dropped(std::uint64_t count = 1) noexcept;
 
     /**
+     * @brief Report a freeze.
+     *
+     * The engine does **not** decide what a freeze is: the `video_stats`
+     * module owns that definition (it owns the freeze threshold and the
+     * idle detection), and the QoE module owns the accounting of the
+     * metric.  The engine is the courier between the two -- it is the
+     * only party that sees both.
+     *
+     * @param duration_ms  how long the picture stood still, in
+     *                     milliseconds.  Negative values are ignored.
+     */
+    void note_freeze(std::int64_t duration_ms) noexcept;
+
+    /**
      * @brief Report an input event that went out on the control plane.
      *
      * @param ts_us     the moment the event went out, on the host's
@@ -166,7 +180,19 @@ public:
      */
     void note_input_event(std::int64_t ts_us, std::uint64_t event_id) noexcept;
 
-    /** Report the sharpness of a presented picture. */
+    /** Report the sharpness of a presented picture.
+     *
+     *  Feeds the QoE collector's sharpness proxy (plan item J3).  The
+     *  *computation* is the collector's — the engine only carries the
+     *  pixels to it, because the engine is the only party that holds
+     *  the decoded luma plane.
+     *
+     *  @param luma    the luma plane's first pixel.
+     *  @param stride  the row stride in bytes.
+     *  @param width   the picture width.
+     *  @param height  the picture height.
+     *  @return the sharpness that was computed (0 when not measured).
+     */
     double note_sharpness(const std::uint8_t* luma,
                           std::size_t stride,
                           std::size_t width,

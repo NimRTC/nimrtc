@@ -34,6 +34,7 @@
 #include <nimrtc/core/api_version.hpp>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 namespace nimrtc::video_stats {
@@ -159,6 +160,25 @@ public:
     /** Drive timers: freeze detection, bitrate window management.
      *  Call once per second from the caller's timer thread. */
     virtual void tick(std::int64_t now_us) = 0;
+
+    /**
+     * @brief Install a callback that is told about every freeze.
+     *
+     * The sink owns the **definition** of a freeze (the threshold and
+     * the idle detection); this callback is how the *finding* reaches
+     * the party that keeps the QoE accounting.  Without it the freeze
+     * metric is a number nobody downstream can act on: the sink counts
+     * the freezes, and the QoE collector -- which is what a host reads
+     * -- never hears about them.
+     *
+     * The callback is invoked on whichever thread detected the freeze
+     * (the render path or the tick path), so it must be cheap and
+     * thread-safe.
+     *
+     * @param cb  the callback, or nullptr to remove it.
+     */
+    virtual void set_freeze_callback(
+        std::function<void(std::int64_t /*duration_ms*/)> cb) = 0;
 
     /** Return a consistent snapshot of all counters. */
     virtual VideoStreamStats snapshot() const = 0;

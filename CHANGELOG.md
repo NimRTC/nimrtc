@@ -40,7 +40,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > - **S4** -- the RTCP feedback, broken down by type, and the per-audio-stream statistics.
 > - **S5** -- the transport plane: ICE state + the nominated candidate pair + RTT, DTLS state / role / fingerprint, the SRTP counters.
 > - **S6** -- the data-channel plane.
-> - **S7** -- the remote-desktop breakdown: capture fps, encode / decode ms + p95, encode / decode fps, and the clamped drop accounting.
+> - **S7** -- the remote-desktop breakdown, shaped like the pipeline: `capture` / `encode` / `decode`, each with its fps, its ms (and p95 on the two codec stages) and its frame count, plus the clamped cross-stage drop accounting.
 > - **S8** -- the **stable field set**: a field is not renamed, retyped or removed in a minor release, its meaning does not change, and growth is additive.  The 145-field table is *derived*, not hand-maintained -- `tools/dump_stats_fields.py` parses `struct Stats` out of `engine.hpp` and CI fails when the header and `docs/api/stats_field_reference.md` disagree.
 
 > **Known limitations carried into this release** (none of them is a regression):
@@ -88,22 +88,31 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of the answer, and the answer was still **incomplete**: there was no
   capture frame rate at all, and no decode-side cost that was reachable
   without reaching into the private stage timings.
-  The entry carries:
-  - **capture** -- `capture_fps` (the rate the device delivered frames,
+  The entry is shaped like the **pipeline**, so a host compares the
+  halves instead of guessing which prefix carries which half:
+  - **capture** -- `capture.fps` (the rate the device delivered frames,
     measured on the **device's own capture timestamps**, so a device that
-    stamps frames itself still yields the rate it actually ran at) and
-    `capture_ms` (the mean cost of the device handoff);
-  - **encode** -- `encode_fps` (the stage's throughput), `encode_ms`
-    (the mean cost of the codec's `encode()` call) and `encode_p95_ms`
+    stamps frames itself still yields the rate it actually ran at),
+    `capture.ms` (the mean cost of the device handoff) and
+    `capture.frames`;
+  - **encode** -- `encode.fps` (the stage's throughput), `encode.ms`
+    (the mean cost of the codec's `encode()` call), `encode.p95_ms`
     (**the number a stutter shows up in** -- a good mean with a terrible
-    p95 is a session that hiccups);
-  - **decode** -- `decode_fps`, `decode_ms` and `decode_p95_ms`;
-  - **the counts** -- `frames_captured` / `frames_encoded` /
-    `frames_decoded`, plus the clamped `frames_dropped_before_encode`
-    (captured but never encoded) and
-    `frames_decoded_without_local_encode` (informational only -- a
-    receive-only session has an empty encode stage and a busy decode
-    stage, so it is deliberately kept out of the drop accounting).
+    p95 is a session that hiccups) and `encode.frames`;
+  - **decode** -- `decode.fps`, `decode.ms`, `decode.p95_ms` and
+    `decode.frames`;
+  - **the cross-stage counters** -- `frames_dropped_before_encode`
+    (captured but never encoded) and `frames_decoded_without_local_encode`
+    (informational only -- a receive-only session has an empty encode
+    stage and a busy decode stage, so it is deliberately kept out of the
+    drop accounting).  These two stay at the **top level** of
+    `RemoteDesktopStats`, because they describe the gap *between* two
+    stages and belong to neither.
+
+  The three stage blocks are their own public types --
+  `RemoteDesktopCaptureStats`, `RemoteDesktopEncodeStats` and
+  `RemoteDesktopDecodeStats` -- each carrying `fps` / `ms` / `frames`
+  (plus `p95_ms` on the two codec stages).
 
   Two design decisions are worth stating outright.
   **Everything is derived, never measured twice.**  The costs come from
@@ -3101,6 +3110,45 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`RemoteDesktopStats` is now shaped like the pipeline it reports
+  (v1.2 plan item `S7`).**
+  The block used to carry one flat field per measurement, each with the
+  stage's name as a prefix (`capture_fps`, `capture_ms`, `encode_fps`,
+  `encode_ms`, `encode_p95_ms`, `decode_fps`, `decode_ms`,
+  `decode_p95_ms`, `frames_captured`, `frames_encoded`,
+  `frames_decoded`).  It now carries three stage blocks instead --
+  `capture`, `encode` and `decode` -- each with its own `fps`, `ms`,
+  `frames` (and `p95_ms` on the two codec stages).
+
+  The **measurements are unchanged**: `capture.fps` is exactly what
+  `capture_fps` was, down to the nanosecond.  What changed is the
+  *shape*.  The flat list gave every stage a prefix and left the host to
+  know which prefix carried which half -- and comparing the halves is
+  the whole point ("the capture ran at 30 fps and the encoder only at
+  24" is the diagnosis).  The nested form puts each stage's rate, cost
+  and count together, so the comparison is a field access rather than a
+  lookup.
+
+  The two cross-stage counters -- `frames_dropped_before_encode` and
+  `frames_decoded_without_local_encode` -- stay at the **top level**:
+  they describe the gap *between* two stages and belong to neither.
+
+  **This is a breaking change, and it is safe only because it landed
+  before the release was published.**  `v1.2.0` was tagged, but its
+  GitHub Release was still a **draft** -- no released artifact carried
+  the old shape, so no downstream host could have compiled against it.
+  The rule this sets: **a reshape is allowed before a release is
+  published, and never after.**  From v1.2.0's publication onward the
+  stable-field-set promise (`docs/api/engine_api.md` §13.8) holds
+  without exception.
+
+  The three stage types are new public symbols:
+  `RemoteDesktopCaptureStats`, `RemoteDesktopEncodeStats` and
+  `RemoteDesktopDecodeStats` (all `NIMRTC_API_STABLE`).
+
+  Covered by `tests/test_engine_remote_desktop_stats.cpp`, whose cases
+  read the nested fields.
+
 - **`EngineConfig::qoe_collector_name` now defaults to the built-in
   `"rd-qoe"` collector (v1.2 plan item `S7` / plan `J3`).**
   Before this the field defaulted to the empty string, which meant "no
@@ -3124,6 +3172,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     factory to resolve.  That is a property of the *build*, not a mistake
     by the host, so the engine degrades gracefully -- a warning, no
     collector, and `open()` still succeeds.
+
+- **`EngineConfig::qoe_collector_enabled` is the explicit off switch.**
+  The *name* is a poor switch for a host that builds its configuration
+  from a profile file: emptying a string to mean "off" is easy to get
+  wrong, while a boolean is not.  The new switch is the unambiguous
+  way to say "do not measure the QoE metrics".
+
+  It **wins over the name**: a host that sets it to false gets no
+  collector, whatever `qoe_collector_name` says -- the metrics are not
+  measured and `Stats::qoe` carries only the frame counters (the
+  presented / dropped counts, which the engine keeps anyway).
+
+  It is **on by default**, for the same reason the name's default is
+  the built-in collector: a remote-desktop session is judged on exactly
+  these metrics, and a host should not have to name a plugin to learn
+  them.
 
 - **The freeze findings now reach the QoE collector.**
   The *definition* of a freeze lives in the `video_stats` module (the

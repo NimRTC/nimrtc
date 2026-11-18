@@ -377,6 +377,24 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  names a module that is optional by construction. */
     std::string qoe_collector_name = "rd-qoe";
 
+    /** Whether the QoE collector is resolved at all (plan J3 / J6).
+     *
+     *  The switch is the **explicit** way to turn the metrics off.  It
+     *  wins over the name: a host that sets it to false gets no
+     *  collector, whatever `qoe_collector_name` says -- the metrics
+     *  are not measured and `Stats::qoe` carries only the frame
+     *  counters (the presented / dropped counts, which the engine
+     *  keeps anyway).
+     *
+     *  It exists because the *name* is a poor switch for a program that
+     *  builds its configuration from a profile file: emptying a string
+     *  to mean "off" is easy to get wrong, while a boolean is not.
+     *
+     *  **On by default.**  A remote-desktop session is judged on
+     *  exactly these metrics, and a host should not have to name a
+     *  plugin to learn them. */
+    bool qoe_collector_enabled = true;
+
     /** The collector's configuration (plan J3 / J6).
      *
      *  The reservoir sizes are the collector's **memory bound**: the
@@ -2354,6 +2372,100 @@ struct NIMRTC_API_STABLE DataChannelStats {
 // ---------------------------------------------------------------------------
 
 /**
+ * @brief The capture stage's half of the remote-desktop breakdown.
+ *
+ * One stage, one plane: how often the device produced a frame, how
+ * long the device handoff took, and how many frames the device
+ * delivered.
+ *
+ * @see RemoteDesktopStats
+ */
+struct NIMRTC_API_STABLE RemoteDesktopCaptureStats {
+    /** The frame rate the capture device delivered, in frames per
+     *  second (0 when not measurable yet).
+     *
+     *  Measured on the **device's own capture timestamps**, over the
+     *  device's *sequence span* (`last_seq - first_seq` over
+     *  `last_ts - first_ts`), so a device that stamps frames with its
+     *  own clock still yields the rate *it* ran at — and a device whose
+     *  queue overflowed (the pump fell behind and the device dropped
+     *  frames) is still counted, because a delivery is identified by
+     *  its **sequence number**, not by its timestamp.
+     *
+     *  0 means "not measurable yet" (fewer than two frames, or a span
+     *  that moved backwards), not "zero frames per second". */
+    double fps = 0.0;
+
+    /** The mean cost of the capture device handoff, in milliseconds. */
+    double ms = 0.0;
+
+    /** The frames the capture device delivered.
+     *
+     *  A delivery is identified by its **sequence number**, not its
+     *  timestamp: a bounded device queue drops the oldest frame when
+     *  the pump falls behind, and such a frame's successor may carry a
+     *  timestamp that is not greater than the last one the pump saw.
+     *  Those frames are still deliveries and are counted; only a
+     *  repeated sequence number (the same frame handed over twice) is
+     *  not. */
+    std::uint64_t frames = 0;
+};
+
+/**
+ * @brief The encode stage's half of the remote-desktop breakdown.
+ *
+ * The codec's `encode()` call is the stage a remote-desktop session is
+ * most often judged on: it is where a "the video is choppy" complaint
+ * usually comes from.
+ *
+ * @see RemoteDesktopStats
+ */
+struct NIMRTC_API_STABLE RemoteDesktopEncodeStats {
+    /** The rate the encoder ran at, in frames per second — the stage's
+     *  *throughput*, over the stage's whole life (0 when the encoder
+     *  never ran).
+     *
+     *  This is the number a "can this machine encode 1080p60?"
+     *  question is really asking. */
+    double fps = 0.0;
+
+    /** The mean cost of the codec's encode call, in milliseconds. */
+    double ms = 0.0;
+
+    /** The p95 cost of the codec's encode call, in milliseconds — the
+     *  number a stutter shows up in.  A good mean with a terrible p95
+     *  is a session that hiccups. */
+    double p95_ms = 0.0;
+
+    /** The frames the encoder processed. */
+    std::uint64_t frames = 0;
+};
+
+/**
+ * @brief The decode stage's half of the remote-desktop breakdown.
+ *
+ * The receive side's counterpart of the encode plane: what the
+ * *peer's* decoder cost, which is the half a viewer's session is
+ * judged on.
+ *
+ * @see RemoteDesktopStats
+ */
+struct NIMRTC_API_STABLE RemoteDesktopDecodeStats {
+    /** The rate the decoder ran at, in frames per second (0 when the
+     *  decoder never ran). */
+    double fps = 0.0;
+
+    /** The mean cost of the codec's decode call, in milliseconds. */
+    double ms = 0.0;
+
+    /** The p95 cost of the codec's decode call, in milliseconds. */
+    double p95_ms = 0.0;
+
+    /** The frames the decoder processed. */
+    std::uint64_t frames = 0;
+};
+
+/**
  * @brief Where the remote-desktop pipeline's time went.
  *
  * The QoE block (`plugins::QoeSnapshot`) measures what the operator
@@ -2367,6 +2479,23 @@ struct NIMRTC_API_STABLE DataChannelStats {
  *     frames it processed;
  *   - **decode** — the receive side's counterpart.
  *
+ * ## Why the stages are nested
+ *
+ * A screen-share session has three stages that matter, and each one
+ * fails in its own way: the **capture** is not grabbing the desktop
+ * fast enough, the **encoder** cannot keep up with the capture cadence,
+ * or the **decoder** on the peer cannot keep up with what we send.  A
+ * host that has to know which *prefix* carries which half cannot
+ * compare the halves — and comparing them is the whole point ("the
+ * capture ran at 30 fps and the encoder only at 24" is the diagnosis).
+ *
+ * So the shape follows the pipeline: `capture`, `encode`, `decode`,
+ * each with its own rate, cost and count.  The two cross-stage
+ * counters (`frames_dropped_before_encode` /
+ * `frames_decoded_without_local_encode`) stay at the top level,
+ * because they are about the *gap between two stages* and belong to
+ * neither.
+ *
  * ## Where the numbers come from
  *
  * Everything here is **derived** from the per-stage instrumentation
@@ -2378,73 +2507,37 @@ struct NIMRTC_API_STABLE DataChannelStats {
  *
  * ## The frame rates
  *
- * `capture_fps` is the rate the *device* delivered frames, measured as
- * `(frames - 1) / (last capture timestamp - first capture timestamp)`.
- * It uses the device's own capture timestamps, not the engine's wall
- * clock, so a device that stamps with its own clock still yields the
- * rate *it* ran at.  `encode_fps` and `decode_fps` are the rates the
- * respective stage *ran at*, measured over the engine's monotonic
- * clock across the stage's whole life — they describe the stage's
- * throughput, which is what a "can this machine encode 1080p60?"
- * question is really asking.
+ * `capture.fps` is the rate the *device* delivered frames, measured
+ * over the device's own capture timestamps and its sequence span.  It
+ * uses the device's own clock, not the engine's wall clock, so a
+ * device that stamps with its own clock still yields the rate *it* ran
+ * at.  `encode.fps` and `decode.fps` are the rates the respective
+ * stage *ran at*, measured over the engine's monotonic clock across
+ * the stage's whole life — they describe the stage's throughput.
  *
  * All three are 0 until there are at least two samples and a positive
  * interval; 0 means "not measurable yet", not "zero frames per second".
- *
- * ## The frame counts
- *
- * `frames_captured` is the device's frame count (`capture_ts_us`
- * advances once per device frame), `frames_encoded` and
- * `frames_decoded` are the stage sample counts.  The *difference*
- * between them is the drop — a frame that was captured but never
- * reached the encoder, or an encoded frame never decoded — so the
- * block carries the differences explicitly rather than making every
- * host subtract two numbers (and get the sign wrong).
  *
  * @see Stats::remote_desktop
  * @see Stats::video_stage_capture / video_stage_encode / video_stage_decode
  */
 struct NIMRTC_API_STABLE RemoteDesktopStats {
-    /** The frame rate the capture device delivered, in frames per
-     *  second (0 when not measurable yet). */
-    double capture_fps = 0.0;
+    /** The capture stage: the device's rate, its handoff cost and its
+     *  frame count. */
+    RemoteDesktopCaptureStats capture{};
 
-    /** The mean cost of the capture device handoff, in milliseconds. */
-    double capture_ms = 0.0;
+    /** The encode stage: the codec's rate, its mean and p95 cost and
+     *  its frame count. */
+    RemoteDesktopEncodeStats encode{};
 
-    /** The frame rate the encoder ran at, in frames per second
-     *  (0 when the encoder never ran). */
-    double encode_fps = 0.0;
-
-    /** The mean cost of the codec's encode call, in milliseconds. */
-    double encode_ms = 0.0;
-
-    /** The p95 cost of the codec's encode call, in milliseconds — the
-     *  number a stutter shows up in.  A good mean with a terrible p95
-     *  is a session that hiccups. */
-    double encode_p95_ms = 0.0;
-
-    /** The frame rate the decoder ran at, in frames per second
-     *  (0 when the decoder never ran). */
-    double decode_fps = 0.0;
-
-    /** The mean cost of the codec's decode call, in milliseconds. */
-    double decode_ms = 0.0;
-
-    /** The p95 cost of the codec's decode call, in milliseconds. */
-    double decode_p95_ms = 0.0;
-
-    /** The frames the capture device delivered. */
-    std::uint64_t frames_captured = 0;
-
-    /** The frames the encoder processed. */
-    std::uint64_t frames_encoded = 0;
-
-    /** The frames the decoder processed. */
-    std::uint64_t frames_decoded = 0;
+    /** The decode stage: the receive side's counterpart. */
+    RemoteDesktopDecodeStats decode{};
 
     /** The frames captured but never handed to the encoder
-     *  (`max(0, frames_captured - frames_encoded)`). */
+     *  (`max(0, capture.frames - encode.frames)`).
+     *
+     *  This is the **gap between two stages**, so it lives at the top
+     *  level rather than inside either of them. */
     std::uint64_t frames_dropped_before_encode = 0;
 
     /** The frames decoded (receive side) that were never encoded
@@ -4695,7 +4788,9 @@ public:
          *
          * The metrics are measured whenever a QoE collector is
          * resolved -- which, by default, is the built-in `"rd-qoe"` (see
-         * `EngineConfig::qoe_collector_name`).  Without one this
+         * `EngineConfig::qoe_collector_name`).  A host that turns the
+         * metrics off says so with `EngineConfig::qoe_collector_enabled`
+         * (or with an empty name).  Without a collector this
          * snapshot carries the **frame counters** -- the presented and
          * dropped frame counts, which the engine keeps anyway -- and
          * zeroes for the metrics, which is the honest answer to "what was
@@ -4713,6 +4808,12 @@ public:
          * milliseconds, the frame rates they imply, and the count of
          * frames that were captured but never encoded (the gap between
          * two stages is a frame that was dropped in between).
+         *
+         * The shape follows the pipeline: `capture`, `encode` and
+         * `decode`, each with its own rate, cost and count — so a host
+         * compares the halves ("the capture ran at 30 fps and the
+         * encoder only at 24") instead of guessing which prefix carries
+         * which half.
          *
          * Every value here is **derived** from a measurement that
          * already exists — nothing is timed a second time.  The

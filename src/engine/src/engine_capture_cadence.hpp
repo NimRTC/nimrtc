@@ -6,7 +6,7 @@
  *
  * The tally the video pump keeps of the frames the *capture device*
  * delivered: how many, and over what span of the device's own clock.
- * `Stats::remote_desktop.capture_fps` is read from it.
+ * `Stats::remote_desktop.capture.fps` is read from it.
  *
  * It is a separate header, with no dependence on the engine, on the
  * plugins or on the core library, for one reason: the counting rule is

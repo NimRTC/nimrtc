@@ -15,16 +15,16 @@
  * properties of it:
  *
  *   1. **It is wired.**  Driving the outbound pipeline moves
- *      `encode_ms`, `encode_fps` and `frames_encoded`; driving the
- *      inbound pipeline moves `decode_ms`, `decode_fps` and
- *      `frames_decoded`.
+ *      `encode.ms`, `encode.fps` and `encode.frames`; driving the
+ *      inbound pipeline moves `decode.ms`, `decode.fps` and
+ *      `decode.frames`.
  *
- *   2. **It agrees with the stage timings.**  `encode_ms` is
+ *   2. **It agrees with the stage timings.**  `encode.ms` is
  *      `video_stage_encode.mean_ns / 1e6` — the summary cannot drift
  *      from the table it summarises.
  *
  *   3. **It separates the directions.**  The drop accounting
- *      (`frames_captured - frames_encoded`) is clamped at zero and is
+ *      (`capture.frames - encode.frames`) is clamped at zero and is
  *      not polluted by an empty local encode stage.
  *
  * The engine is driven exactly the way `test_engine_capture_pump.cpp`
@@ -411,15 +411,15 @@ TEST_F(EngineRemoteDesktopStats, FreshEngineReportsNoBreakdown) {
     ASSERT_EQ(engine.open(), 0u);
 
     const auto s = engine.stats();
-    EXPECT_EQ(s.remote_desktop.frames_captured, 0u);
-    EXPECT_EQ(s.remote_desktop.frames_encoded, 0u);
-    EXPECT_EQ(s.remote_desktop.frames_decoded, 0u);
+    EXPECT_EQ(s.remote_desktop.capture.frames, 0u);
+    EXPECT_EQ(s.remote_desktop.encode.frames, 0u);
+    EXPECT_EQ(s.remote_desktop.decode.frames, 0u);
     EXPECT_EQ(s.remote_desktop.frames_dropped_before_encode, 0u);
-    EXPECT_EQ(s.remote_desktop.capture_fps, 0.0);
-    EXPECT_EQ(s.remote_desktop.encode_fps, 0.0);
-    EXPECT_EQ(s.remote_desktop.decode_fps, 0.0);
-    EXPECT_EQ(s.remote_desktop.encode_ms, 0.0);
-    EXPECT_EQ(s.remote_desktop.decode_ms, 0.0);
+    EXPECT_EQ(s.remote_desktop.capture.fps, 0.0);
+    EXPECT_EQ(s.remote_desktop.encode.fps, 0.0);
+    EXPECT_EQ(s.remote_desktop.decode.fps, 0.0);
+    EXPECT_EQ(s.remote_desktop.encode.ms, 0.0);
+    EXPECT_EQ(s.remote_desktop.decode.ms, 0.0);
 
     engine.close();
 }
@@ -436,15 +436,15 @@ TEST_F(EngineRemoteDesktopStats, OutboundPipelineFillsCaptureAndEncode) {
     for (int i = 0; i < 400; ++i) {
         engine.tick();
         std::this_thread::sleep_for(5ms);
-        if (engine.stats().remote_desktop.frames_encoded >= 5u) break;
+        if (engine.stats().remote_desktop.encode.frames >= 5u) break;
     }
 
     const auto s = engine.stats();
     const auto& rd = s.remote_desktop;
 
-    EXPECT_GE(rd.frames_encoded, 5u)
+    EXPECT_GE(rd.encode.frames, 5u)
         << "the pump must have driven the encoder";
-    EXPECT_GE(rd.frames_captured, 5u)
+    EXPECT_GE(rd.capture.frames, 5u)
         << "the capture cadence must be recorded from the device's timestamps";
 
     // The rate, from the device's own timestamps: the device's clock
@@ -460,28 +460,28 @@ TEST_F(EngineRemoteDesktopStats, OutboundPipelineFillsCaptureAndEncode) {
     // the failure mode this test was written for: giving up and
     // reporting 0 because a *new* frame arrived with an older
     // timestamp than the last one seen.
-    ASSERT_GT(rd.capture_fps, 0.0)
+    ASSERT_GT(rd.capture.fps, 0.0)
         << "capture rate must follow the device's timestamps";
-    EXPECT_NEAR(rd.capture_fps, 30.0, 10.0)
+    EXPECT_NEAR(rd.capture.fps, 30.0, 10.0)
         << "capture rate must follow the device's timestamps";
-    EXPECT_GT(rd.capture_fps, 20.0)
+    EXPECT_GT(rd.capture.fps, 20.0)
         << "a rate below half the device's clock would mean the "
            "endpoint was taken from a lost frame";
 
     // The encode rate is a rate of *stage runs* over wall-clock time.
-    EXPECT_GT(rd.encode_fps, 0.0);
+    EXPECT_GT(rd.encode.fps, 0.0);
 
     // The encode cost is a real measurement (non-negative; a zero would
     // mean the stage was never timed).
-    EXPECT_GE(rd.encode_ms, 0.0);
-    EXPECT_GE(rd.encode_p95_ms, rd.encode_ms)
+    EXPECT_GE(rd.encode.ms, 0.0);
+    EXPECT_GE(rd.encode.p95_ms, rd.encode.ms)
         << "the p95 cannot be below the mean -- the mean and the p95 are "
            "read in the same nanosecond unit precisely so that a rounding "
            "artefact cannot invert them";
 
     // The receive side stayed empty.
-    EXPECT_EQ(rd.frames_decoded, 0u);
-    EXPECT_EQ(rd.decode_fps, 0.0);
+    EXPECT_EQ(rd.decode.frames, 0u);
+    EXPECT_EQ(rd.decode.fps, 0.0);
 
     engine.close();
 }
@@ -502,15 +502,15 @@ TEST_F(EngineRemoteDesktopStats, InboundPipelineFillsDecode) {
     feed_video(engine, pt, /*seq=*/110, /*rtp_ts=*/93'000, /*frame_seq=*/2);
 
     const auto& rd = engine.stats().remote_desktop;
-    EXPECT_EQ(rd.frames_decoded, 2u)
+    EXPECT_EQ(rd.decode.frames, 2u)
         << "both inbound frames must reach the decoder";
-    EXPECT_GT(rd.decode_fps, 0.0)
+    EXPECT_GT(rd.decode.fps, 0.0)
         << "two decode runs on distinct instants give a measurable rate";
-    EXPECT_GE(rd.decode_ms, 0.0);
+    EXPECT_GE(rd.decode.ms, 0.0);
 
     // Nothing was captured locally.
-    EXPECT_EQ(rd.frames_captured, 0u);
-    EXPECT_EQ(rd.frames_encoded, 0u);
+    EXPECT_EQ(rd.capture.frames, 0u);
+    EXPECT_EQ(rd.encode.frames, 0u);
     // A receive-only session must not look like two "drops".
     EXPECT_EQ(rd.frames_dropped_before_encode, 0u)
         << "a receive-only session captures nothing, so nothing was dropped";
@@ -532,26 +532,26 @@ TEST_F(EngineRemoteDesktopStats, BreakdownAgreesWithStageTimings) {
     for (int i = 0; i < 400; ++i) {
         engine.tick();
         std::this_thread::sleep_for(5ms);
-        if (engine.stats().remote_desktop.frames_encoded >= 3u) break;
+        if (engine.stats().remote_desktop.encode.frames >= 3u) break;
     }
 
     const auto s = engine.stats();
-    EXPECT_GT(s.remote_desktop.frames_encoded, 0u);
+    EXPECT_GT(s.remote_desktop.encode.frames, 0u);
 
-    EXPECT_EQ(s.remote_desktop.frames_encoded,
+    EXPECT_EQ(s.remote_desktop.encode.frames,
               s.video_stage_encode.samples)
         << "the same table feeds both views";
-    EXPECT_NEAR(s.remote_desktop.encode_ms,
+    EXPECT_NEAR(s.remote_desktop.encode.ms,
                 static_cast<double>(s.video_stage_encode.mean_ns) / 1'000'000.0,
                 1e-9)
-        << "encode_ms must be mean_ns / 1e6 — no independent rounding";
-    EXPECT_NEAR(s.remote_desktop.capture_ms,
+        << "encode.ms must be mean_ns / 1e6 — no independent rounding";
+    EXPECT_NEAR(s.remote_desktop.capture.ms,
                 static_cast<double>(s.video_stage_capture.mean_ns) / 1'000'000.0,
                 1e-9);
 
     // The p95 is read in the same nanosecond unit as the mean, so the
     // two cannot be inverted by a rounding artefact.
-    EXPECT_GE(s.remote_desktop.encode_p95_ms, s.remote_desktop.encode_ms)
+    EXPECT_GE(s.remote_desktop.encode.p95_ms, s.remote_desktop.encode.ms)
         << "a p95 below the mean would be a number no host can interpret";
 
     engine.close();
@@ -573,8 +573,8 @@ TEST_F(EngineRemoteDesktopStats, DropAccountingIsClamped) {
     feed_video(engine, pt, /*seq=*/200, /*rtp_ts=*/90'000, /*frame_seq=*/1);
 
     const auto& rd = engine.stats().remote_desktop;
-    EXPECT_EQ(rd.frames_captured, 0u);
-    EXPECT_EQ(rd.frames_encoded, 0u);
+    EXPECT_EQ(rd.capture.frames, 0u);
+    EXPECT_EQ(rd.encode.frames, 0u);
     EXPECT_EQ(rd.frames_dropped_before_encode, 0u)
         << "captured - encoded must clamp at 0, never wrap to 2^64-1";
 

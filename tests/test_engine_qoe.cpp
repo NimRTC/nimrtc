@@ -674,6 +674,33 @@ TEST_F(EngineQoe, TheDefaultCollectorIsTheBuiltInOne) {
     EXPECT_EQ(defaults.qoe_collector_name,
               nimrtc::engine::kDefaultQoeCollectorId)
         << "the default and the published constant must not drift apart";
+    EXPECT_TRUE(defaults.qoe_collector_enabled)
+        << "the collector is on by default — the metrics a session is "
+           "judged on should not need a name to be measured";
+}
+
+TEST_F(EngineQoe, TheSwitchTurnsTheCollectorOff) {
+    // The switch wins over the name: a host that turned the metrics off
+    // gets no collector, whatever the name says.
+    EngineConfig cfg = make_config("rd-qoe");
+    cfg.qoe_collector_enabled = false;
+
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u) << "turning the metrics off is not an error";
+
+    negotiate_video(engine, cfg);
+
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+    feed_video(engine, pt, /*seq=*/100, /*rtp_ts=*/90'000, /*frame_seq=*/1);
+    feed_video(engine, pt, /*seq=*/200, /*rtp_ts=*/93'000, /*frame_seq=*/2);
+
+    const auto stats = engine.stats();
+
+    EXPECT_EQ(stats.qoe.frames_presented, 2u)
+        << "the frame counters do not depend on a collector";
+    EXPECT_DOUBLE_EQ(stats.qoe.presented_fps, 0.0)
+        << "the switch must silence the metrics — the name is not the "
+           "only way to turn them off";
 }
 
 TEST_F(EngineQoe, TheDefaultCollectorResolvesAndMeasures) {

@@ -50,6 +50,10 @@ std::int64_t now_us() noexcept {
 // ---------------------------------------------------------------------------
 
 uint32_t NimRTCEngine::resolve_qoe_collector() noexcept {
+    // The explicit switch wins over everything: a host that turned the
+    // metrics off gets no collector, whatever the name says.
+    if (!config_.qoe_collector_enabled) return 0;
+
     // An empty id is the **explicit opt-out**: the host asked for no
     // QoE collector, so the engine resolves nothing and `Stats::qoe`
     // carries only the frame counters (the presented / dropped counts,

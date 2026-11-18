@@ -81,6 +81,7 @@
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_source.hpp>
 
+#include "engine_rate_window.hpp"
 #include "video_codec_config.hpp"
 
 namespace nimrtc::engine::detail {
@@ -221,6 +222,14 @@ struct VideoStream {
 
     /** Frames this stream's encoder produced. */
     std::uint64_t frames_encoded = 0;
+
+    /** The windowed outbound rate of this stream (v1.2 plan E6).
+     *
+     *  Each stream owns its own measurement: the streams share the
+     *  session's bandwidth budget, but each one has its own byte
+     *  counter and its own controller, so each one is measured on its
+     *  own.  The rule lives in `engine_rate_window.hpp`. */
+    detail::RateWindow rate_window;
 
     // ---- The stream's scratch buffers -----------------------------------
 

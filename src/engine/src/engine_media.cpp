@@ -3401,6 +3401,45 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.video_stage_total_p95_us =
             out.video_stage_capture.p95_us + out.video_stage_convert.p95_us +
             out.video_stage_encode.p95_us + out.video_stage_packetize.p95_us;
+
+        // ---- The remote-desktop breakdown (plan S7) ----------------------
+        //
+        // Derived from the same table, in the units a human reasons
+        // about (milliseconds, frames per second).  Nothing here is a
+        // second measurement: every number is `value / 1e6` (the mean
+        // and the percentile read in the **same** nanosecond unit, so a
+        // p95 can never read below the mean through a rounding
+        // artefact), a sample count, or a rate over the stage's own
+        // wall-clock span.
+        auto& rd = out.remote_desktop;
+        const auto ms_from_ns = [](double ns) { return ns / 1'000'000.0; };
+
+        rd.capture_ms  = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kCapture)));
+        rd.capture_fps = impl_->video_state.capture_fps();
+        rd.frames_captured = impl_->video_state.capture_frames_seen;
+
+        rd.encode_ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kEncode)));
+        rd.encode_p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kEncode, 95)));
+        rd.encode_fps    = t.rate_hz(Stage::kEncode);
+        rd.frames_encoded = t.samples(Stage::kEncode);
+
+        rd.decode_ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kDecode)));
+        rd.decode_p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kDecode, 95)));
+        rd.decode_fps    = t.rate_hz(Stage::kDecode);
+        rd.frames_decoded = t.samples(Stage::kDecode);
+
+        // The drops: frames the device produced that the encoder never
+        // saw.  Only meaningful once both stages have run; a session
+        // that has captured but not yet encoded has "dropped" nothing
+        // yet, so the difference is clamped at 0 rather than wrapping.
+        rd.frames_dropped_before_encode =
+            rd.frames_captured > rd.frames_encoded
+                ? rd.frames_captured - rd.frames_encoded
+                : 0;
+        rd.frames_decoded_without_local_encode =
+            rd.frames_decoded > rd.frames_encoded
+                ? rd.frames_decoded - rd.frames_encoded
+                : 0;
     }
 
     // ---- The render clock (remote-desktop plan E5) -----------------------

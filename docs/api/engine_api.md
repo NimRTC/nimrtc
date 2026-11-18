@@ -1371,6 +1371,73 @@ context, and the round-trip time by the network-feedback collector.  The
 surface republishes each of them; it keeps no second copy that could go
 stale or disagree.
 
+### 13.6 The remote-desktop pipeline breakdown (v1.2.0, plan Track S / S7)
+
+The QoE block (`Stats::qoe`) measures what the operator **felt** — freezes,
+latency, sharpness.  `Stats::remote_desktop` answers the operator's
+follow-up question: **why**.  It is the video pipeline broken into its
+stages, each reported in the unit a human reasons about.
+
+A screen-share session has three stages that matter, and each one fails
+in its own way: the **capture** is not grabbing the desktop fast enough,
+the **encoder** cannot keep up with the capture cadence, or the **decoder**
+on the peer cannot keep up with what we send.  Before S7 the answers were
+scattered across a dozen prefixes (`video_stage_encode.mean_us`,
+`video_capture_frames`, `video_frames_decoded`, …) and the host had to
+know which prefix carried which half — and still could not answer the
+question, because there was **no capture frame rate** and **no
+decode-side cost** anywhere on the surface.
+
+```cpp
+struct Stats {
+    // ---- The remote-desktop breakdown (v1.2.0, plan Track S / S7) ----
+    RemoteDesktopStats remote_desktop;
+};
+```
+
+#### `RemoteDesktopStats`
+
+| Field | Meaning |
+|---|---|
+| `capture_fps` | The rate the capture device delivered frames, in frames per second.  Measured on the **device's own capture timestamps** (`(frames - 1) / (last_ts - first_ts)`), so a device that stamps frames itself still yields the rate it actually ran at.  0 when fewer than two frames were seen — "not measurable yet", not "zero frames per second". |
+| `capture_ms` | The mean cost of the capture device handoff, in milliseconds. |
+| `encode_fps` | The rate the encoder ran at, in frames per second — the stage's *throughput*, over the stage's whole life. |
+| `encode_ms` | The mean cost of the codec's `encode()` call, in milliseconds. |
+| `encode_p95_ms` | The p95 of the encode cost, in milliseconds — **the number a stutter shows up in**.  A good mean with a terrible p95 is a session that hiccups. |
+| `decode_fps` | The rate the decoder ran at, in frames per second. |
+| `decode_ms` | The mean cost of the codec's `decode()` call, in milliseconds. |
+| `decode_p95_ms` | The p95 of the decode cost, in milliseconds. |
+| `frames_captured` | The frames the capture device delivered. |
+| `frames_encoded` | The frames the encoder processed. |
+| `frames_decoded` | The frames the decoder processed. |
+| `frames_dropped_before_encode` | `max(0, frames_captured - frames_encoded)` — the frames that were captured but never reached the encoder. |
+| `frames_decoded_without_local_encode` | `max(0, frames_decoded - frames_encoded)` — **informational only**, not an error counter.  A receive-only session has an empty encode stage and a busy decode stage, so this is deliberately kept out of the drop accounting. |
+
+#### Everything here is *derived*, never measured twice
+
+Each value is read from a measurement that **already exists**:
+
+- The **costs** come from the per-stage instrumentation
+  (`Stats::video_stage_capture` / `video_stage_encode` /
+  `video_stage_decode`) — the same table the flat fields expose.  The
+  breakdown converts its units (nanoseconds → milliseconds) and adds
+  nothing, so the two views **cannot drift apart**.
+- The **rates** come from two sources that the stage table does not
+  carry: the capture rate from the device's own capture timestamps, and
+  the encode / decode rates from each stage's wall-clock span (the time
+  between its first and its latest sample).
+
+That is why adding this block cost **no work on the frame path**: the
+stage instrumentation already bracketed every stage, and the capture
+timestamps already travelled with every frame.
+
+#### The zero reading
+
+Every field is 0 until the thing it describes has actually happened.  A
+host that does not configure a capture device has no capture stage, and a
+session that never received a video frame has no decode stage — the
+zeros are the **correct** reading, not a missing value.
+
 ---
 
 ## 14. Lifecycle diagram

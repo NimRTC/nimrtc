@@ -9,6 +9,58 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The remote-desktop pipeline has a statistics breakdown (v1.2 plan item
+  `S7`).**
+  `NimRTCEngine::Stats` carries a new `RemoteDesktopStats remote_desktop`
+  -- the video pipeline broken into the three stages a screen-share
+  session is judged by, each in the unit a human reasons about.
+  Before this the numbers existed but were **scattered**: the capture
+  counters sat under `video_capture_*`, the codec telemetry under
+  `video_codec_*`, the per-stage timings under `video_stage_*`, and the
+  decode counters under `video_frames_decoded`.  A host asking the
+  remote-desktop question -- *"is the picture slow because the **capture**
+  is slow, or because the **encoder** is slow, or because the **decoder**
+  is slow?"* -- had to know which of a dozen prefixes carried which half
+  of the answer, and the answer was still **incomplete**: there was no
+  capture frame rate at all, and no decode-side cost that was reachable
+  without reaching into the private stage timings.
+  The entry carries:
+  - **capture** -- `capture_fps` (the rate the device delivered frames,
+    measured on the **device's own capture timestamps**, so a device that
+    stamps frames itself still yields the rate it actually ran at) and
+    `capture_ms` (the mean cost of the device handoff);
+  - **encode** -- `encode_fps` (the stage's throughput), `encode_ms`
+    (the mean cost of the codec's `encode()` call) and `encode_p95_ms`
+    (**the number a stutter shows up in** -- a good mean with a terrible
+    p95 is a session that hiccups);
+  - **decode** -- `decode_fps`, `decode_ms` and `decode_p95_ms`;
+  - **the counts** -- `frames_captured` / `frames_encoded` /
+    `frames_decoded`, plus the clamped `frames_dropped_before_encode`
+    (captured but never encoded) and
+    `frames_decoded_without_local_encode` (informational only -- a
+    receive-only session has an empty encode stage and a busy decode
+    stage, so it is deliberately kept out of the drop accounting).
+
+  Two design decisions are worth stating outright.
+  **Everything is derived, never measured twice.**  The costs come from
+  the per-stage instrumentation the engine already runs
+  (`Stats::video_stage_capture` / `video_stage_encode` /
+  `video_stage_decode`); the capture rate comes from the capture
+  timestamps that already travelled with every frame; the encode / decode
+  rates come from each stage's wall-clock span.  The block therefore
+  **cannot drift** from the table it summarises, and it added **no work
+  on the frame path** -- no new clock read, no new counter, no new lock.
+  **The units are the host's, not the engine's.**  The stage table
+  reports microseconds (and nanoseconds, for the sub-microsecond
+  stages); the breakdown reports **milliseconds** and **frames per
+  second**, because "the encode costs 4.2 ms" is a number an operator
+  reads without a division.
+
+  The surface is documented in `docs/api/engine_api.md` §13.6 and pinned
+  by `tests/test_engine_remote_desktop_stats.cpp` (5 cases: the baseline,
+  the outbound half, the inbound half, the agreement with the stage
+  table, and the clamped drop accounting).
+
 - **The transport plane has statistics (v1.2 plan item `S5`).**
   `NimRTCEngine::Stats` carries a new `TransportStats transport` -- the
   **path the media travels over**: ICE (RFC 8445) -> DTLS (RFC 6347) ->

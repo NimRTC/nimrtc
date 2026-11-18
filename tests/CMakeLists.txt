@@ -1155,6 +1155,27 @@ nimrtc_add_engine_video_stats_test(test_engine_video_stats
                                     test_engine_video_stats.cpp)
 endif()
 
+# ----------------------------------------------------------------------------
+# v1.2 Track S / S7 — the remote-desktop (capture / encode / decode)
+# statistics breakdown.
+#
+# The test drives the *pump* (a fake capture device on its own thread)
+# for the outbound half and `feed_media_inbound()` for the receive half,
+# so it needs the capture module and a codec, like the pump test.  The
+# pump test's registration block above documents why the msquic copy is
+# needed (the engine links the WebTransport seam).
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_SOURCE
+   AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_STATS)
+nimrtc_add_engine_video_stats_test(test_engine_remote_desktop_stats
+                                    test_engine_remote_desktop_stats.cpp)
+target_link_libraries(test_engine_remote_desktop_stats PRIVATE
+    nimrtc::video_capture
+    nimrtc::h264)
+nimrtc_copy_msquic_dll(test_engine_remote_desktop_stats)
+endif()
+
 # R3-Batch validation: video codec pipeline — encode/decode round-trip.
 function(nimrtc_add_engine_codec_test name source)
     add_executable(${name} ${source})

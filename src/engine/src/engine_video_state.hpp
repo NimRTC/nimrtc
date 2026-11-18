@@ -458,6 +458,40 @@ struct VideoState {
      *  at. */
     std::uint32_t capture_rtp_base_ts = 0;
 
+    // ---- The capture cadence (v1.2 plan Track S / S7) -------------------
+    //
+    // The first and last *device* capture timestamps the pump saw, and
+    // how many frames the device delivered.  The capture rate is
+    // `(count - 1) / (last - first)`: it is measured on the device's own
+    // timestamps rather than on the engine's clock, so a device that
+    // stamps frames itself still yields the rate it actually ran at.
+    //
+    // A frame whose timestamp is not strictly greater than the last one
+    // is not a new delivery (a device that repeats a timestamp delivered
+    // nothing new) and is not counted.
+    std::int64_t  capture_first_ts_us = 0;
+    std::int64_t  capture_last_ts_us = 0;
+    std::uint64_t capture_frames_seen = 0;
+
+    /** Record one delivered frame's capture timestamp. */
+    void note_captured_frame(std::int64_t capture_ts_us) noexcept {
+        if (capture_frames_seen != 0 && capture_ts_us <= capture_last_ts_us) {
+            return;
+        }
+        if (capture_frames_seen == 0) capture_first_ts_us = capture_ts_us;
+        capture_last_ts_us = capture_ts_us;
+        ++capture_frames_seen;
+    }
+
+    /** The device's frame rate, in frames per second (0 when unknown). */
+    [[nodiscard]] double capture_fps() const noexcept {
+        if (capture_frames_seen < 2) return 0.0;
+        const auto span_us = capture_last_ts_us - capture_first_ts_us;
+        if (span_us <= 0) return 0.0;
+        return static_cast<double>(capture_frames_seen - 1) * 1'000'000.0 /
+               static_cast<double>(span_us);
+    }
+
     // ---- The incremental (dirty-rect) encode mechanism (plan B9) --------
     //
     // The dirty rectangles the capture device reported for the frame the

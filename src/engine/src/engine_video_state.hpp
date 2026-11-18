@@ -276,6 +276,61 @@ struct VideoState {
      *  locally configured payload type. */
     std::atomic<std::uint8_t> negotiated_video_pt{0};
 
+    // ---- The RFC 4588 retransmission stream (v1.3 plan Q3) ------------
+    //
+    // RTX is *negotiated*, so it is optional: a peer that offers no RTX
+    // payload type keeps working exactly as before (the sender re-sends
+    // the original packet; the receiver never unwraps anything).
+    //
+    // The fields below describe the retransmission stream:
+    //
+    //   * `rtx_payload_type` — the payload type the retransmissions
+    //     travel on.  RFC 4588 §4.1 requires it to differ from the
+    //     media one, and the `apt=` parameter names the media one.
+    //   * `rtx_ssrc` — the retransmission stream's own SSRC.  RFC 4588
+    //     §5.2 wants it distinct from the media SSRC, and the SDP
+    //     declares the pair through `a=ssrc-group:FID`.
+    //   * `rtx_negotiated` — whether the peer actually agreed to the
+    //     retransmission stream.
+
+    /** The negotiated retransmission payload type, or 0 when RTX was
+     *  not negotiated.
+     *
+     *  One number serves **both** directions: RFC 8843 (Unified Plan)
+     *  gives an m-section a single payload-type list, so the
+     *  retransmission payload type is a property of the m-section, not
+     *  of a direction.  The `apt=` parameter then says which payload
+     *  type *within* the section the retransmission protects. */
+    std::uint8_t  rtx_payload_type = 0;
+
+    /** Our own retransmission SSRC, or 0 when RTX was not negotiated.
+     *
+     *  This is the SSRC *we* put on the wire; the peer's retransmission
+     *  SSRC is a different number and is learned from the peer's
+     *  `a=ssrc-group:FID` line. */
+    std::uint32_t rtx_ssrc = 0;
+
+    /** True once the peer agreed to the retransmission stream. */
+    bool rtx_negotiated = false;
+
+    /** The peer's retransmission SSRC — the one the peer retransmits
+     *  *its* media on, learned from the peer's `a=ssrc-group:FID` line
+     *  (RFC 5576 §4.2).  0 when the peer advertised no such line.
+     *
+     *  It is not needed to unwrap a retransmission (the OSN carries the
+     *  original's sequence number), but it *is* needed to recognise the
+     *  peer's retransmission packets: they arrive on this SSRC, and the
+     *  inbound path routes them by payload type *and* by SSRC so that a
+     *  peer that reuses a payload type across streams cannot smuggle a
+     *  retransmission into the wrong one. */
+    std::uint32_t remote_rtx_ssrc = 0;
+
+    /** Retransmission packets we put on the wire. */
+    std::uint64_t rtx_packets_sent = 0;
+
+    /** Retransmission packets we received and unwrapped. */
+    std::uint64_t rtx_packets_received = 0;
+
     /** The video codec family this session uses.
      *
      *  Resolved once when the video plugins are created (see

@@ -81,6 +81,7 @@ set(_nimrtc_module_shorts
   video_source
   video_stats
   video_rtcp_feedback
+  rtx
   video_pipeline
   video_sink
   sctp

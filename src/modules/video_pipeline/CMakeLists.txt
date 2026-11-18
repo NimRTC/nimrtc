@@ -8,6 +8,7 @@
 #   - video_payload : H.264/VP8/VP9 depacketizers + packetizers
 #   - video_jb      : IVideoJitterBuffer (frame-level reorder/timeout)
 #   - rtp           : PacketView (parsed RTP header)
+#   - rtx           : the RFC 4588 retransmission payload format (OSN framing)
 #   - video_rtcp_feedback : NACK/PLI/FIR wire format (v1.1 Q3 feedback bridge)
 #
 # No vendor libraries; pure C++.
@@ -29,6 +30,7 @@ target_link_libraries(nimrtc_video_pipeline
         nimrtc::video_payload
         nimrtc::video_jb
         nimrtc::rtp
+        nimrtc::rtx
         nimrtc::video_rtcp_feedback
     )
 

@@ -179,6 +179,11 @@ option(NIMRTC_MODULE_VIDEO_STATS
        "Build video stats module (per-stream statistics)" ON)
 option(NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK
        "Build video RTCP feedback module (PLI/FIR/SLI generation & parsing)" ON)
+# v1.3 Q3 (video plan T1): the RFC 4588 retransmission payload format.
+# A small, self-contained module -- the OSN framing and the `apt=`
+# SDP parameter -- that both ends of a retransmission use.
+option(NIMRTC_MODULE_RTX
+       "Build RTX module (RFC 4588 retransmission payload format)" ON)
 option(NIMRTC_MODULE_VIDEO_PIPELINE
        "Build video pipeline module (VideoReceiver/VideoSender glue)" ON)
 option(NIMRTC_MODULE_VIDEO_SINK

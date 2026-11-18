@@ -297,6 +297,71 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     bool route_to_video = false;
     bool route_to_audio = false;
 
+    // ---- The RFC 4588 retransmission stream (v1.3 plan Q3) ------------
+    //
+    // A retransmission arrives on the *retransmission* payload type,
+    // with the retransmission stream's own sequence number, and its
+    // payload is the two-octet OSN header followed by the original
+    // packet's payload (RFC 4588 §4.1).
+    //
+    // It must NOT reach the decoder: the decoder expects a codec
+    // payload, and an OSN header in front of it would decode to
+    // garbage.  It must reach the *unwrapper*, which restores the
+    // original's sequence number and puts the payload back where it
+    // belongs.
+    //
+    // The branch sits *before* the routing table check, because the
+    // retransmission payload type is a payload type the peer declared
+    // on the video m-line — the table has it, but the *meaning* of a
+    // packet on it is different.
+    //
+    // Two conditions have to hold:
+    //
+    //   * the payload type is the negotiated retransmission one; and
+    //   * the SSRC is the peer's retransmission SSRC — when the peer
+    //     advertised one (RFC 5576 §4.2).  A peer that multiplexes its
+    //     retransmissions onto the media SSRC sends them on the media
+    //     SSRC, and then the payload type alone decides.
+    if (impl_->video_state.rtx_negotiated &&
+        impl_->video_state.rtx_payload_type != 0 &&
+        pv.payload_type == impl_->video_state.rtx_payload_type &&
+        video_receiver_ && !impl_->video_state.video_rx_disabled) {
+        const std::uint32_t remote_rtx_ssrc = impl_->video_state.remote_rtx_ssrc;
+        const bool ssrc_ok = (remote_rtx_ssrc == 0) || (pv.ssrc == remote_rtx_ssrc);
+
+        if (ssrc_ok) {
+            plugins::VideoRtpPacket vp;
+            vp.ssrc          = pv.ssrc;
+            vp.seq           = pv.seq;
+            vp.rtp_timestamp = pv.timestamp;
+            vp.payload_type  = pv.payload_type;
+            vp.marker        = pv.marker;
+            vp.recv_ts_us    = plugins::TimestampUs{
+                static_cast<std::int64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        core::SteadyClock::now().time_since_epoch()).count())};
+            vp.payload       = pv.payload;
+
+            const plugins::Status rc =
+                video_receiver_->push_rtp_rtx(vp, vp.recv_ts_us);
+            if (rc == plugins::kOk) {
+                ++impl_->video_state.rtx_packets_received;
+                // The retransmission lands in the frame it belongs to, so
+                // the tick has to run — the frame may now be complete.
+                video_receiver_->tick(vp.recv_ts_us);
+                return;
+            }
+            // A malformed retransmission (a payload too short to carry
+            // the OSN header) is counted by the receiver and dropped
+            // here.  It is NOT an unknown payload type: the payload type
+            // is one we negotiated, so the "unknown" bookkeeping below
+            // would be a lie.
+            core::log::Logger::instance().warn(
+                "engine[rtx]: a retransmission packet could not be unwrapped");
+            return;
+        }
+    }
+
     if (impl_->audio_state.pt_routing_active) {
         route_to_audio = impl_->audio_state.negotiated_audio_pt != 0 &&
                          pv.payload_type == impl_->audio_state.negotiated_audio_pt;

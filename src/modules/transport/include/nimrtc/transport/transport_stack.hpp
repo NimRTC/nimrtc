@@ -103,6 +103,17 @@ struct NIMRTC_API_STABLE StackConfig {
     std::string rtp_id   = "webrtc";
     std::string raw_id;                // raw_udp factory id (Slice 6);
                                        // empty = do not enable raw_control()
+
+    // ---- The control plane's own socket --------------------------------
+    //
+    // The raw-UDP control stack opens its **own** UDP socket, so the
+    // control plane has its own 5-tuple — the remote-desktop plan's G2
+    // acceptance criterion ("the two stacks carry independent traffic on
+    // different 5-tuples").  These two fields are how the engine tells
+    // the stack where to bind it; 0 = let the OS pick (which is what
+    // makes the 5-tuple distinct from the media stack's).
+    std::string raw_local_host;        // "" = "0.0.0.0" (any IPv4)
+    std::uint16_t raw_local_port = 0;  // 0 = OS picks
 };
 
 // ---------------------------------------------------------------------------
@@ -182,6 +193,44 @@ public:
     }
 
     virtual void on_control(plugins::OnDatagramCb cb) noexcept { (void)cb; }
+
+    // ---- The control plane's address book (remote-desktop plan G2) -----
+    //
+    // A control session is symmetric: both sides have to know where to
+    // send.  The address travels in the SDP exchange
+    // (`a=x-nimrtc-control:<host:port>`), and these two virtuals are
+    // how the engine carries it across the seam — the engine may not
+    // include the `raw_udp` module's header (ADR-025), so it cannot
+    // read the endpoint off the datagram itself.
+    //
+    // `control_local_endpoint()` is the stack's own address, formatted
+    // as "host:port".  It is empty when the stack has no control path.
+    virtual std::string control_local_endpoint() const noexcept { return {}; }
+
+    /**
+     * @brief Point the control path at the peer's control endpoint.
+     *
+     * @param endpoint The peer's address, formatted as "host:port".
+     * @return kOk when the endpoint was accepted; kErrUnsupported when
+     *         the stack has no control path.
+     */
+    virtual plugins::Status set_control_peer(std::string_view endpoint) noexcept {
+        (void)endpoint;
+        return plugins::kErrUnsupported;
+    }
+
+    /**
+     * @brief Drain the control path's receive queue.
+     *
+     * The ARQ session delivers the datagrams it accepted into a queue
+     * and fires the receive callback when that queue is drained.  The
+     * engine therefore has to **pump** it on its own tick — without
+     * this, the control plane's inbound path is dead code and every
+     * control message is lost.
+     *
+     * @return The number of datagrams dispatched (0 = nothing pending).
+     */
+    virtual int pump_control() noexcept { return 0; }
 
     // ---- Weak-ref DTLS accessor (v0.13.0, replaces raw-pointer capture)
     //

@@ -199,7 +199,28 @@ void RawUdpArqStack::start() noexcept {
                          "(cfg.raw_id='" << cfg_.raw_id << "', fallback 'arq' missing)");
         return;
     }
-    raw_control_ = f->create();
+
+    // The control plane needs a **real** socket: the whole point of
+    // the separate control stack (plan G2) is that the control traffic
+    // travels on its own 5-tuple, at its own congestion-control
+    // domain, independently of the media path.
+    //
+    // The factory's default config had `enable_real_socket == false`
+    // (the slice-6 in-process test path), so the control stack used
+    // to come up with **no socket at all** — the control plane was
+    // structurally present and behaviourally dead.  The per-stack
+    // config turns the real socket on and gives it its own bind
+    // address / port.
+    raw_udp::RawUdpConfig rcfg;
+    rcfg.enable_real_socket = true;
+    rcfg.local_host = cfg_.raw_local_host;
+    rcfg.local_port = cfg_.raw_local_port;
+
+    raw_control_ = f->create(rcfg);
+    if (!raw_control_) {
+        NIMRTC_LOG_ERROR("transport: RawUdpArqStack: the ARQ factory returned null");
+        return;
+    }
     if (auto st = raw_control_->open(); st != plugins::kOk) {
         NIMRTC_LOG_ERROR("transport: RawUdpArqStack: ARQ open failed: "
                          << plugins::status_string(st));
@@ -207,7 +228,8 @@ void RawUdpArqStack::start() noexcept {
         return;
     }
     NIMRTC_LOG_INFO("transport: RawUdpArqStack('" << id()
-                    << "') started. ARQ factory: " << f->id());
+                    << "') started. ARQ factory: " << f->id()
+                    << " local=" << control_local_endpoint());
 }
 
 void RawUdpArqStack::close() noexcept {

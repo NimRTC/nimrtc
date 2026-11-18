@@ -9,6 +9,147 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.2.0`.
 
+- **The control plane now rides a real socket, and the G2 criterion is
+  measured instead of asserted (remote-desktop plan `G2`, v1.2 plan item
+  `E6`).**
+  The remote-desktop plan's `G2` row says the control plane must have *its
+  own* transport — its own socket, its own congestion-control domain, its own
+  5-tuple — and that the criterion is **measured**: "under a saturated video
+  path the control path's p99 stays within its declared budget; the two
+  stacks carry independent traffic and the control stack's packets are
+  observed on a different 5-tuple".
+
+  The stack was *structurally* there and *behaviourally* dead, and it took
+  four separate defects to find out.  Each one is worth naming, because each
+  was a plausible-looking implementation of a correct-looking interface:
+
+  - **The control stack came up with no socket at all.**  The raw-UDP
+    factory's default config had `enable_real_socket == false` (the slice-6
+    in-process test path), and `RawUdpArqStack::start()` used that default
+    verbatim.  The control plane therefore had no transport, and every
+    control message went nowhere.  The stack now builds its own config with
+    the real socket on and its own bind address, so the control plane's
+    socket is a *different* socket from the media plane's — which is the
+    whole point of the separate stack.
+  - **The engine never pumped the control path's receive queue.**  The ARQ
+    session accepts datagrams into a queue and fires its receive callback
+    when that queue is drained, and nothing drained it: the ARQ session has
+    no consumer thread of its own.  So the inbound half of the control plane
+    was dead code and every inbound control message was lost.  The engine's
+    `tick()` now calls `pump_control()` on the control stack.
+  - **The control address never reached the peer.**  The control plane rides
+    its own transport, so the media SDP does not describe it, and the
+    control session could only ever be half-open: the side that *answers*
+    learned the peer from the first inbound datagram, but the side that
+    *offers* had nobody to send to.  The address now travels in the session
+    description as `a=x-nimrtc-control:<host:port>`, and
+    `process_remote_sdp()` points the control path at it.  The attribute is
+    consulted at session level and at media level, so a peer that puts it in
+    an m-line also works.
+  - **A wildcard bind advertised an address that cannot be sent to.**  A
+    socket bound to "0.0.0.0" comes back from `getsockname()` as
+    "0.0.0.0", and `sendto("0.0.0.0:port")` fails with
+    `WSAEADDRNOTAVAIL` / `EADDRNOTAVAIL` — the wildcard means "any *source*
+    address", never "the destination".  Since the control path advertises
+    its own address to its peer, the advertised address has to be a concrete
+    routable one: `UdpSocket::local_endpoint()` now resolves a wildcard bind
+    to the host's first non-loopback IPv4 address (falling back to the
+    loopback on a host that has no other), keeping the kernel's port.
+
+  The ARQ session also gained **peer discovery**: the first datagram it ever
+  receives identifies the peer, so a control session is symmetric even
+  without the out-of-band address.  An *explicitly configured* peer always
+  wins — the SDP-carried address is authoritative and a stray datagram must
+  not redirect the session.
+
+  `tests/bench/bench_control_saturation.cpp` is the measurement.  It drives
+  **two real engines** over **two real sockets**: the media plane through a
+  token-bucket bottleneck that **drops** the datagrams arriving when the
+  bucket is empty (exactly as a bottleneck router's queue overflows), and
+  the control plane on the G2 shape — a separate `raw-udp-arq` stack with
+  its own ARQ session and its own 5-tuple.
+
+  The control producer, the media producer and the engine tick each run on
+  their **own** thread, and that is the point rather than a convenience:
+  driving both planes from one loop would put the software H.264 encode on
+  the control plane's critical path, and the measurement would report the
+  *encoder's* latency instead of the transport's.
+
+  `tools/benchmark_control_saturation.py` asserts five invariants as
+  *properties* rather than as thresholds against a reference number: the
+  saturation was real, the control plane reached the profile's rate, its p99
+  stayed inside the profile's declared `max_p99_ms`, **every** control
+  message arrived (a dropped operator click is not a slow click), and the
+  two stacks rode different 5-tuples.  A **negative control** — the same rig
+  with the video path disabled — runs alongside, so a passing saturated run
+  cannot be an artefact of the video path having been switched off by
+  accident.  The committed sample is
+  `docs/benchmarks/control_saturation_windows_x86_64.json`.
+
+  **The measurement is 197.2 Hz against the profile's 200 Hz with a p99 of
+  4.23 ms against the profile's 50 ms budget**, while the media link drops
+  6,472 datagrams; the negative control runs at 195.5 Hz with a p99 of
+  3.77 ms.
+
+  Two wrapper guarantees are worth naming, because both close a way the
+  measurement could silently lie.  The **rate the binary runs at** and the
+  **rate the invariant is checked against** are the same number: both
+  come from the profile unless the command line overrides them, and the
+  defaults are *unset* rather than the profile's values, because a
+  default that **equals** the profile's value cannot be told apart from
+  an explicit override — so a profile change would leave the binary on
+  the old rate while the assertion moved to the new one, and the rate
+  invariant would compare the run against a target the run was never
+  asked to meet.  And the rate invariant is **skipped rather than
+  failed** on a host without the high-resolution deadline: the rate is
+  produced by a thread waiting on a deadline, so without the 100 ns
+  deadline the run measures the *host's timer* rather than the
+  transport, and a rate that missed the target would say nothing about
+  the control plane.  The binary reports whether it had the deadline
+  (`high_resolution_wait`), and the artifact records it — so the
+  artifact cannot claim a precision the run did not have.
+
+  And **both** scenarios are now retried when the *host* was too busy to
+  produce a usable measurement: the saturated one when the link was
+  never brought to capacity, and the negative control when the control
+  plane missed the rate.  The negative control's rate is the case worth
+  naming: it carries **no video at all**, so its control plane has
+  nothing to compete with, and a rate below the target there can only
+  be the host's scheduling — never the transport.  Without the retry
+  the benchmark would report a *transport* failure for what is really a
+  busy machine — the same mistake the saturated scenario had
+  already learned to avoid.
+
+  Getting those numbers to mean what they claim took **two defects in the
+  harness itself**, and both are recorded because both are plausible:
+
+  - **The timer.**  On Windows the producer's 5 ms period cannot be met by
+    `sleep_for`: the default ~15.6 ms system tick would cap the producer at
+    ~64 Hz, so the "measured rate" would describe the *host's timer* rather
+    than the transport.  The fix is a high-resolution waitable timer
+    (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`).  Two wrong turns are worth
+    recording: `SetWaitableTimerEx` is **not** the high-resolution arming
+    call — the SDK declares it with *seven* parameters (a `PREASON_CONTEXT`
+    and a `TolerableDelay` the plain form does not have) and it takes no
+    high-resolution flag at all, so a six-parameter prototype is a stack
+    corruption and an immediate `0xC0000005`; and the accurate arming call
+    is the *plain* `SetWaitableTimer` on a high-resolution handle.
+  - **The schedule.**  The producer's schedule must be **absolute**: a late
+    wake is absorbed by the next slot rather than by shifting every slot
+    that follows.  The obvious alternative — resetting the phase to "now +
+    period" to avoid a catch-up burst — makes the *measured* period the wake
+    error plus the configured period, so a 500 us wake error turns a 5 ms
+    period into a 5.5 ms one and the control plane reports ~182 Hz instead
+    of the profile's 200 Hz.  The catch-up a long preemption would
+  otherwise trigger is **bounded**, so the offered load stays at the
+  profile's rate without a burst polluting the very latency distribution
+  the benchmark measures.
+
+  A `Benchmark G2 control plane (plan E6)` step now runs in both the Windows
+  and the Linux CI legs, and the artifact is uploaded with them, because a
+  benchmark that only runs on one developer's machine is not a gate.
+
+
 ## [1.2.0] - 2026-11-18
 
 ### Status: Release candidate

@@ -267,6 +267,24 @@ void ArqRawUdp::recv_main() {
             static_cast<std::uint16_t>(buf[1])
             | (static_cast<std::uint16_t>(buf[2]) << 8));
 
+        // ---- Peer discovery -------------------------------------------
+        //
+        // The first datagram we ever receive identifies the peer.  The
+        // control plane is symmetric, so the side that speaks first
+        // teaches the other side where to send — without this, a
+        // control session could only ever be one-directional unless the
+        // address was carried out of band (the SDP exchange).
+        //
+        // An *explicitly configured* peer always wins: the SDP-carried
+        // address is authoritative, and a stray datagram must not
+        // redirect the ARQ session.
+        {
+            std::lock_guard<std::mutex> lk(peer_mu_);
+            if (peer_endpoint_.len == 0 && from.len != 0) {
+                peer_endpoint_ = from;
+            }
+        }
+
         if (t == FrameType::Ack) {
             if (static_cast<std::size_t>(n) < kAckTotalBytes) {
                 ++stat_packets_dropped_;

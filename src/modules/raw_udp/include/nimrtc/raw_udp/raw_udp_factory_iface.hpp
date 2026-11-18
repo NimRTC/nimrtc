@@ -40,13 +40,13 @@
  * publicly inherits `IRawUdpFactory` and overrides `id()`,
  * `display_name()`, and `create()` virtually.
  *
- * ## v0.11.0 follow-up (out of Slice 8 scope)
+ * ## v0.11.0 follow-up — LANDED
  *
- * Add a `RawUdpConfig` parameter to `create()` (currently no-arg) so
- * the Slice 7 Stack factory can pass per-stack tuning (local_port,
- * peer_endpoint hints) without going through the factory-level
- * default config. Slice 8 keeps the no-arg signature for source-
- * compatibility with the existing slice-6 factory.
+ * `RawUdpConfig` is now a parameter of `create()`: the Slice 7 Stack
+ * factory passes the per-stack tuning (local_host / local_port and the
+ * peer-endpoint hint) to the factory instead of mutating a
+ * factory-level default config.  The no-argument `create()` is kept
+ * for source compatibility with the existing slice-6 factory.
  */
 
 #ifndef NIMRTC_RAW_UDP_FACTORY_IFACE_HPP
@@ -113,8 +113,7 @@ public:
      * Each call returns a fresh datagram configured with the
      * factory's default `RawUdpConfig`. The caller owns the returned
      * pointer; pass it to the transport stack / engine as a
-     * `unique_ptr`. v0.11.0 will widen this signature with a
-     * per-stack `RawUdpConfig` argument (see file header).
+     * `unique_ptr`.
      *
      * `const`-qualified to match `dtls::IDtlsSessionFactory::create()`
      * — registries that hold a `const IRawUdpFactory*` can still call
@@ -124,6 +123,27 @@ public:
      *         factory.
      */
     virtual std::unique_ptr<IRawUdpDatagram> create() const = 0;
+
+    /**
+     * @brief Create a new IRawUdpDatagram with a per-stack config.
+     *
+     * This is the v0.11.0 follow-up the file header promised: the
+     * transport stack factory hands the *per-stack* tuning (the local
+     * bind address / port and the peer-endpoint hint) to the factory
+     * instead of mutating a factory-level default.
+     *
+     * The default implementation falls back to the no-argument
+     * `create()`, so an out-of-tree factory that only implements the
+     * Slice-8 contract keeps working — it just ignores the config.
+     * A factory that *can* honour the config overrides this.
+     *
+     * @return A new IRawUdpDatagram; never nullptr on a well-formed
+     *         factory.
+     */
+    virtual std::unique_ptr<IRawUdpDatagram> create(const RawUdpConfig& cfg) const {
+        (void)cfg;
+        return create();
+    }
 };
 
 } // namespace nimrtc::raw_udp

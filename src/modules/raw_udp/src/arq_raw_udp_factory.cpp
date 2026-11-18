@@ -24,4 +24,9 @@ std::unique_ptr<IRawUdpDatagram> ArqRawUdpFactory::create() const {
     return std::make_unique<ArqRawUdp>(default_config_);
 }
 
+std::unique_ptr<IRawUdpDatagram>
+ArqRawUdpFactory::create(const RawUdpConfig& cfg) const {
+    return std::make_unique<ArqRawUdp>(cfg);
+}
+
 } // namespace nimrtc::raw_udp

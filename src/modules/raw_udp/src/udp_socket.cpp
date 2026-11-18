@@ -30,6 +30,7 @@ using socklen_t_ = int;
 #  include <netinet/in.h>
 #  include <sys/socket.h>
 #  include <netdb.h>      // addrinfo, getaddrinfo, freeaddrinfo (POSIX)
+#  include <ifaddrs.h>   // getifaddrs, freeifaddrs (POSIX)
 #  include <sys/types.h>
 #  include <unistd.h>
 #  include <fcntl.h>
@@ -108,6 +109,69 @@ std::string format_endpoint_v4(const sockaddr_in& sa) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%s:%u", ip, ntohs(sa.sin_port));
     return std::string(buf);
+}
+
+// ---------------------------------------------------------------------------
+// The routable local address.
+//
+// A socket bound to the wildcard ("0.0.0.0") accepts datagrams on every
+// local interface, but "0.0.0.0" is **not an address a peer can send
+// to**: `sendto("0.0.0.0:port")` fails with EADDRNOTAVAIL /
+// WSAEADDRNOTAVAIL, because the wildcard means "any source address",
+// never "the destination".
+//
+// The raw-UDP control path advertises its own address to its peer (the
+// SDP exchange carries it), so the advertised address has to be a
+// concrete, routable one.  This helper finds it: the host's first
+// non-loopback IPv4 address, falling back to the loopback when the host
+// has no other address (a machine with only `127.0.0.1`).
+//
+// The *port* is the kernel's, so the peer can still reach the socket.
+// ---------------------------------------------------------------------------
+std::string find_routable_local_ipv4() {
+    // Enumerate the host's interfaces for a non-loopback IPv4 address.
+    // This is the address a peer on another machine would reach us on.
+#ifdef _WIN32
+    char host[256] = {0};
+    if (::gethostname(host, sizeof(host)) == 0) {
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        addrinfo* res = nullptr;
+        if (::getaddrinfo(host, nullptr, &hints, &res) == 0 && res) {
+            for (addrinfo* p = res; p; p = p->ai_next) {
+                const auto* sa = reinterpret_cast<const sockaddr_in*>(p->ai_addr);
+                const std::uint32_t ip = ntohl(sa->sin_addr.s_addr);
+                if (ip == 0) continue;                       // 0.0.0.0
+                if ((ip & 0xFF000000u) == 0x7F000000u) continue;  // 127/8
+                char buf[INET_ADDRSTRLEN] = {0};
+                ::inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf));
+                ::freeaddrinfo(res);
+                return std::string(buf);
+            }
+            ::freeaddrinfo(res);
+        }
+    }
+#else
+    ifaddrs* ifs = nullptr;
+    if (::getifaddrs(&ifs) == 0) {
+        for (ifaddrs* p = ifs; p; p = p->ifa_next) {
+            if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+            const auto* sa = reinterpret_cast<const sockaddr_in*>(p->ifa_addr);
+            const std::uint32_t ip = ntohl(sa->sin_addr.s_addr);
+            if (ip == 0) continue;
+            if ((ip & 0xFF000000u) == 0x7F000000u) continue;
+            char buf[INET_ADDRSTRLEN] = {0};
+            ::inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf));
+            ::freeifaddrs(ifs);
+            return std::string(buf);
+        }
+        ::freeifaddrs(ifs);
+    }
+#endif
+
+    // No other address: the loopback is the only one that works, and
+    // for a same-host peer it is the right one.
+    return "127.0.0.1";
 }
 
 #ifdef _WIN32
@@ -424,6 +488,31 @@ std::uint16_t UdpSocket::local_port() const noexcept {
     }
 #endif
     return ntohs(addr.sin_port);
+}
+
+std::string UdpSocket::local_endpoint() const noexcept {
+    const socket_t sock = sock_.load(std::memory_order_acquire);
+    if (sock == kInvalid) return {};
+    sockaddr_in addr{};
+    socklen_t_ addr_len = sizeof(addr);
+#ifdef _WIN32
+    if (::getsockname(static_cast<SOCKET>(sock),
+                      reinterpret_cast<sockaddr*>(&addr), &addr_len) < 0) {
+        return {};
+    }
+#else
+    if (::getsockname(sock,
+                      reinterpret_cast<sockaddr*>(&addr), &addr_len) < 0) {
+        return {};
+    }
+#endif
+    // A wildcard bind comes back as 0.0.0.0, which is not an address a
+    // peer can send to (see find_routable_local_ipv4 above).  Resolve it
+    // to a concrete routable one so the advertised endpoint works.
+    if (ntohl(addr.sin_addr.s_addr) == 0u) {
+        addr.sin_addr.s_addr = ::inet_addr(find_routable_local_ipv4().c_str());
+    }
+    return format_endpoint_v4(addr);
 }
 
 bool UdpSocket::is_open() const noexcept {

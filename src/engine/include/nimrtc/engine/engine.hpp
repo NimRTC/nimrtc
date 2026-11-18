@@ -377,6 +377,24 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  names a module that is optional by construction. */
     std::string qoe_collector_name = "rd-qoe";
 
+    /** Whether the QoE collector is resolved at all (plan J3 / J6).
+     *
+     *  The switch is the **explicit** way to turn the metrics off.  It
+     *  wins over the name: a host that sets it to false gets no
+     *  collector, whatever `qoe_collector_name` says -- the metrics
+     *  are not measured and `Stats::qoe` carries only the frame
+     *  counters (the presented / dropped counts, which the engine
+     *  keeps anyway).
+     *
+     *  It exists because the *name* is a poor switch for a program that
+     *  builds its configuration from a profile file: emptying a string
+     *  to mean "off" is easy to get wrong, while a boolean is not.
+     *
+     *  **On by default.**  A remote-desktop session is judged on
+     *  exactly these metrics, and a host should not have to name a
+     *  plugin to learn them. */
+    bool qoe_collector_enabled = true;
+
     /** The collector's configuration (plan J3 / J6).
      *
      *  The reservoir sizes are the collector's **memory bound**: the
@@ -4695,7 +4713,9 @@ public:
          *
          * The metrics are measured whenever a QoE collector is
          * resolved -- which, by default, is the built-in `"rd-qoe"` (see
-         * `EngineConfig::qoe_collector_name`).  Without one this
+         * `EngineConfig::qoe_collector_name`).  A host that turns the
+         * metrics off says so with `EngineConfig::qoe_collector_enabled`
+         * (or with an empty name).  Without a collector this
          * snapshot carries the **frame counters** -- the presented and
          * dropped frame counts, which the engine keeps anyway -- and
          * zeroes for the metrics, which is the honest answer to "what was

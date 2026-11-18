@@ -42,9 +42,16 @@ Additional requirements stated alongside D1–D4:
 
 | # | Requirement | Consequence |
 |---|---|---|
-| **R1** | The **encoder module** and the **capture module** must be pluggable, swappable at runtime. | C1/C2/C3 — new plugin seams in `src/plugins/`, implementations in `src/modules/<name>/`. `src/engine/` may only orchestrate (L4). |
-| **R2** | **Prefer hardware codecs** wherever available. | C12–C16 — a hardware probe + capability query + hardware-preferred selection with software fallback. **Refined by OD-2: hardware is the default, software is the fallback, and a `codec_backend` override exists.** |
-| **R3** | **H.265 and AV1 must both be supported.** | C4–C8 — payload format, SDP `fmtp`, codec seams, and negotiation for both. **Refined by OD-1: NimRTC ships the seams, payload, SDP and negotiation; the codec binary comes from the host or an out-of-tree plug-in.** |
+| **RQ1** | The **encoder module** and the **capture module** must be pluggable, swappable at runtime. | C1/C2/C3 — new plugin seams in `src/plugins/`, implementations in `src/modules/<name>/`. `src/engine/` may only orchestrate (L4). |
+| **RQ2** | **Prefer hardware codecs** wherever available. | C12–C16 — a hardware probe + capability query + hardware-preferred selection with software fallback. **Refined by OD-2: hardware is the default, software is the fallback, and a `codec_backend` override exists.** |
+| **RQ3** | **H.265 and AV1 must both be supported.** | C4–C8 — payload format, SDP `fmtp`, codec seams, and negotiation for both. **Refined by OD-1: NimRTC ships the seams, payload, SDP and negotiation; the codec binary comes from the host or an out-of-tree plug-in.** |
+
+**Naming note (2026-11-18).** These three are the **stated requirements**;
+they were previously labelled `R1`/`R2`/`R3`, which collided with the
+**work items** of the same names in §Track R and with the risk register's
+`R-1`…`R-6`. The `RQ` prefix is now used throughout this document so that
+"R2" unambiguously means *the decoder-side resolution switch* — the meaning
+`docs/plan/v1.3-plan.md` and the v1.2 plan's Track Q rely on.
 
 ### Constraint compliance (per AGENTS.md)
 
@@ -221,9 +228,9 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 
 | Release | Theme | Tracks | Headline claim |
 |---|---|---|---|
-| **v1.2.0** | **Adaptive quality closed loop** | F (all), P (P1–P3), B (all), R1, O1, O2, O5, G1, G2, G7, G8 | "Bandwidth-adaptive video: the target bitrate tracks the network, the ladder degrades predictably, and the encoder is told what to do." (The same release also carries the audio side's engine-internal A/V correction — audio plan WP-14 — which aligns the *audio playout* to this timeline; R3, the video render clock, stays on `v1.4.0`.) |
-| **v1.3.0** | **Codec breadth and hardware-first** | C (all), R2, O3, G3, G4, G5, G6 | "H.264 / H.265 / AV1 / VP8 / VP9 negotiate properly, and hardware codecs are used automatically when the machine has them." |
-| **v1.4.0** | **Device layer and receive experience** | C1 (device breadth), R3, R4, T1, T2, O4 | "A real camera in, a real renderer out, with A/V synchronisation and RTX-based recovery." |
+| **v1.2.0** | **Adaptive quality closed loop** | F (all), P (P1–P3), B (all), R1, O1, O2, O5, G1, G2, G7, G8 | "Bandwidth-adaptive video: the target bitrate tracks the network, the ladder degrades predictably, and the encoder is told what to do." (The same release also carries the audio side's engine-internal A/V correction — audio plan WP-14 — which aligns the *audio playout* to this timeline; R3, the video render clock, is scheduled as Q6 of `v1.3.0`.) |
+| **v1.3.0** | **Resilience and quality** | Track Q: R2, R4, T1, T2, R3, O-6, plus the long netem soak | "Under a hostile network the engine degrades gracefully: parameter sets switch mid-stream, memory stays bounded, loss is repaired by RTX not by PLI storms, and the video tracks the audio clock." |
+| **v1.4.0** | **Device layer and connectivity** | C1 (device breadth), O4, plus the v1.2 plan's Track C (TURN/TLS, ICE-over-TCP, ICE restart, diagnostics) | "A real camera in, a real renderer out, and peers that can find each other through a real NAT." |
 | **v1.5.0+** | Deferred items | O-2, O-5, O-1 | FEC, simulcast/SVC, SFU video. |
 
 Each release is independently shippable: **v1.2.0 is useful on its own**
@@ -251,7 +258,15 @@ benchmark artifact is committed; `docs/zh/architecture.md` §6 is rewritten;
 the ADR-018 / ADR-019 are accepted; the v1.2.0 release notes list the new
 public API with the ADR-015 stability markers.
 
-## B.3 v1.3.0 — internal milestone order
+## B.3 Codec-work milestone order (was "v1.3.0")
+
+**Superseded (2026-11-18).**  This table describes the codec-and-hardware
+ordering this document expected `v1.3.0` to have, before
+`docs/plan/v1.2-next-plan.md` re-cut the release.  The authoritative
+v1.3.0 plan is `docs/plan/v1.3-plan.md` (Track Q, items Q1–Q7).  The
+milestones below are retained only because the C-item dependencies they
+record are still real — they belong to the codec work's own timeline now,
+not to v1.3.0.
 
 | Milestone | Items | Ends when |
 |---|---|---|
@@ -265,10 +280,14 @@ public API with the ADR-015 stability markers.
 
 | Milestone | Items | Ends when |
 |---|---|---|
-| **Q1 — Receive-side** | R2, R4 | A mid-stream parameter-set change decodes cleanly; the receive buffer is bounded under overrun. |
-| **Q2 — A/V sync** | R3 | Measured skew drives an explicit align/drop decision, asserted in a test. |
-| **Q3 — RTX** | T1, T2 | A lost packet is recovered through a real RTX payload type; no IDR storm under sustained loss. |
-| **Q4 — Device breadth** | O-1 subset | A camera capture path exists behind the C1 seam. |
+| **V4-1 — Device breadth** | O-1 subset, O4 | A camera capture path exists behind the C1 seam, and the renderer takes it. |
+| **V4-2 — Connectivity** | The v1.2 plan's Track C: C1, C2, C3, C4, C5 | Peers behind a real NAT reach each other over TURN/TLS, and the candidate pairs are diagnosable. |
+
+**The receive-side milestones that used to be listed here (`Q1`–`Q3`,
+covering R2/R4/R3/T1/T2) moved to `v1.3.0` as Track Q's Q1–Q6.**  Their
+`Q`-prefixed labels were retired with them: two milestone "Q1"s in two
+releases is exactly the kind of ambiguity this reconciliation exists to
+remove.
 
 ## B.5 Cross-cutting work that is not milestone-bound
 
@@ -349,7 +368,7 @@ supports the requested configuration. Software is the **fallback**, not the
 default. An explicit per-engine / per-profile override is available to force
 the software path.
 
-**Why.** R2 states the requirement directly ("能用硬件编解码，尽量用硬件"),
+**Why.** RQ2 states the requirement directly ("能用硬件编解码，尽量用硬件"),
 and the fallback keeps the library usable on machines with no hardware
 codec without the caller having to know in advance.
 
@@ -449,10 +468,33 @@ Everything else in this plan is downstream of M1/M2/M3.
 | F — feedback / BWE | F1, F2, F3, F4, F5, F6, F7, F8 | v1.2.0 |
 | P — pacing / back-pressure | P1, P2, P3, P4 | v1.2.0 |
 | B — rate control | B1, B2, B3, B4, B5, B6, B7, B8, B9, B10 | v1.2.0 |
-| R — receive side | R1, R2, R3, R4 | R1 → v1.2.0; R2/R4 → v1.4.0; R3 → v1.4.0 |
-| C — codec / hardware | C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16 | v1.3.0 (C1 seam → v1.4.0 breadth) |
-| T — transport robustness | T1, T2 | v1.4.0 |
+| R — receive side | R1, R2, R3, R4 | R1 → v1.2.0; **R2/R3/R4 → v1.3.0** (Track Q; supersedes the earlier v1.4.0 mapping) |
+| C — codec / hardware | C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16 | unscheduled — **not** v1.3.0 (see the reconciliation below); C1 seam breadth → v1.4.0 |
+| T — transport robustness | T1, T2 | **v1.3.0** (Track Q; supersedes the earlier v1.4.0 mapping) |
 | O — observability / interop | O1, O2, O5 | v1.2.0; O3 → v1.3.0; O4 → continuous |
 | G — governance | G1, G2 | v1.2.0; G3 → v1.3.0; G4–G8 spread across both |
-| X — deferred | O-1, O-2, O-4, O-5, O-6 | v1.4.0+ / v1.5.0+ / — |
+| X — deferred | O-1, O-2, O-4, O-5 | v1.4.0+ / v1.5.0+ / — |
 | X — closed | O-3 | **closed by OD-1, as amended by ADR-021** — bundling is prohibited with a narrowed scope |
+| X — moved into v1.3.0 | O-6 | **v1.3.0**, as Q7 of `docs/plan/v1.3-plan.md` |
+
+### Release-map reconciliation (2026-11-18)
+
+The release map in §B.1 was written before `docs/plan/v1.2-next-plan.md`
+re-cut the versions.  When R2, R4, T1 and T2 were promoted into that
+plan's **Track Q** (v1.3.0), this document's map was not updated, leaving
+two authoritative-looking answers for the same item.
+
+**`docs/plan/v1.2-next-plan.md` §3 is the authority**; this map follows it:
+
+* **R2, R4, T1, T2** → `v1.3.0` (Track Q's Q1, Q2, Q3, Q4);
+* **R3** → `v1.3.0` as well (Q6).  The video half was left in v1.4.0 when
+  the audio half shipped in v1.2.0, which is the one arrangement that
+  cannot be defended: corrected audio against uncorrected video is a new
+  skew source, not a partial fix;
+* **O-6** → `v1.3.0` as **Q7** (it was already targeted there);
+* what remains for `v1.4.0` from *this* plan is **C1 device breadth and
+  O4**, alongside the v1.2 plan's Track C (connectivity).
+
+**C (codec / hardware) is no longer a standalone v1.3.0 theme.**  The
+codec-negotiation work landed through v1.1/v1.2; what is left of Track C
+here is the device-breadth seam, which belongs with the device layer.

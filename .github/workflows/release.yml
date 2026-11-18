@@ -895,20 +895,21 @@ jobs:
           export stripped
           # Build the release body with `tools/release_body.py`.
           #
-          # The body is a **digest** of the `## [X.Y.Z]` section, not a
-          # copy of it, and that is a correctness requirement rather
-          # than a nicety.  GitHub caps a release body at 125 000
-          # characters and *silently truncates* an over-long one -- so
-          # the `v1.2.0` cut produced a draft whose body stopped
-          # mid-sentence at 124 999 of 364 350 characters, and the
-          # publish step then died with `422 Validation Failed` on the
-          # PATCH that tried to refresh it.
+          # The body is the `## [X.Y.Z]` section of `CHANGELOG.md` --
+          # whole, when it fits.  That is a correctness requirement
+          # rather than a nicety.  GitHub caps a release body at
+          # 125 000 characters and *silently truncates* an over-long
+          # one -- so the `v1.2.0` cut produced a draft whose body
+          # stopped mid-sentence at 124 999 of 364 350 characters, and
+          # the publish step then died with `422 Validation Failed` on
+          # the PATCH that tried to refresh it.
           #
-          # The tool keeps the `### Status:` paragraph whole (it says
-          # what the release *is*), reduces every other entry to its
-          # bold headline, and points at `CHANGELOG.md` for the full
-          # text.  It **fails** rather than emitting a body GitHub would
-          # truncate, so this failure cannot recur quietly.
+          # When the section does *not* fit, the tool reduces it to a
+          # digest: the `### Status:` paragraph is kept whole (it says
+          # what the release *is*), every other entry is reduced to its
+          # bold headline, and a footer points at `CHANGELOG.md` for
+          # the full text.  It **fails** rather than emitting a body
+          # GitHub would truncate, so this failure cannot recur quietly.
           #
           # The earlier awk-based extraction is kept in the history of
           # this file for a reason worth remembering: its escape
@@ -928,10 +929,18 @@ jobs:
           # (the signing status and the per-platform 3A status).  The
           # tool already budgets for them; this check is what catches
           # a change to the footers that outgrows the margin.
-          body_chars=$(wc -c < dist/release_notes.md)
-          echo "release body: ${body_chars} bytes"
+          #
+          # The count is in **characters**, not bytes: GitHub's limit
+          # is on characters, and the body carries non-ASCII (arrows,
+          # em-dashes) that would make a byte count the wrong number
+          # to compare against it.
+          body_chars=$(python3 -c "
+          import pathlib, sys
+          print(len(pathlib.Path('dist/release_notes.md').read_text(encoding='utf-8')))
+          ")
+          echo "release body: ${body_chars} characters"
           if (( body_chars > 125000 )); then
-            echo "::error::The release body is ${body_chars} bytes, over GitHub's 125000-byte limit."
+            echo "::error::The release body is ${body_chars} characters, over GitHub's 125000-character limit."
             exit 1
           fi
           # Append signing-status footer based on what preflight saw.

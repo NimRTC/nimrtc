@@ -503,6 +503,34 @@ jobs:
       - name: Self-test the CI auto-retry classifier
         run: python tools/ci_retry_runner.py --self-test
 
+      # The release body is built by `tools/release_body.py`, which
+      # guards against GitHub's 125 000-character release-body limit.
+      # The limit was hit for real: the `v1.2.0` body was 364 350
+      # characters, GitHub silently truncated it to 124 999, and the
+      # publish step then died with `422 Validation Failed`.  A
+      # truncation is invisible in the artefact, so the tool's own rules
+      # -- the body fits, the `Status:` paragraph survives, no entry is
+      # dropped -- are pinned by a self-test.
+      - name: Self-test the release-body builder
+        run: python tools/release_body.py --self-test
+
+      # The real body for the version being cut must fit.  This is the
+      # check that would have caught the `v1.2.0` cut before it
+      # produced a broken draft.
+      - name: Check the release body fits GitHub's limit
+        run: |
+          version="$(python -c "
+          import re, pathlib
+          text = pathlib.Path('CMakeLists.txt').read_text(encoding='utf-8')
+          m = re.search(r'project\s*\(\s*nimrtc\s+VERSION\s+([0-9.]+)', text)
+          print(m.group(1) if m else '')
+          ")"
+          if [[ -n "$version" ]]; then
+            python tools/release_body.py --version "$version" --check > /dev/null
+          else
+            echo "::notice::Could not read the project version from CMakeLists.txt — skipping."
+          fi
+
       # ADR-026: a `.h` under `src/**/include/` is a promise that a C
       # host can include it.  `sched_c.h` is the first public header
       # that promise is made about, and nothing checked it -- so adding

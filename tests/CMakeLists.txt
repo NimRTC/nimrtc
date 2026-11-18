@@ -3260,3 +3260,31 @@ if(NIMRTC_BUILD_TESTS)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# The release-body guard.
+#
+# `tools/release_body.py` builds the GitHub release body and enforces
+# GitHub's 125 000-character limit on it.  The limit was hit for real:
+# the `v1.2.0` body was 364 350 characters, GitHub *silently* truncated
+# it to 124 999, and the publish step then died with `422 Validation
+# Failed`.  A silent truncation leaves an artefact that looks fine and
+# is not, so the tool's own rules are pinned by a self-test.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_release_body
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/release_body.py"
+                         --self-test)
+        set_tests_properties(test_release_body PROPERTIES
+            TIMEOUT 60
+            LABELS "release;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the release-body "
+            "guard (tools/release_body.py).  CI runs it as a dedicated "
+            "step.")
+    endif()
+endif()
+

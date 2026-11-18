@@ -156,7 +156,11 @@ public:
                         << "(local=" << cfg_.local_host
                         << ":" << (socket_snapshot() ? socket_snapshot()->local_port()
                                                      : cfg_.local_port)
-                        << " peer_set=" << (cfg_.peer_endpoint.len != 0)
+                        // The peer is read under the lock, not from
+                        // `cfg_`: the receive thread may already have
+                        // discovered it, and `cfg_` is the configuration
+                        // snapshot -- it is written once, at construction.
+                        << " peer_set=" << (peer_endpoint_snapshot().len != 0)
                         << " real_socket=" << cfg_.enable_real_socket
                         << " rto=" << cfg_.rto_base_ms << "ms"
                         << " window=" << cfg_.rx_window_packets
@@ -239,7 +243,6 @@ public:
         if (dst.len != 0) {
             std::lock_guard<std::mutex> lk(peer_mu_);
             peer_endpoint_ = dst;
-            cfg_.peer_endpoint = dst;
         } else {
             std::lock_guard<std::mutex> lk(peer_mu_);
             if (peer_endpoint_.len == 0) {
@@ -251,7 +254,6 @@ public:
                     return plugins::kErrNotReady;
                 }
             }
-            cfg_.peer_endpoint = peer_endpoint_;
         }
 
         std::uint16_t seq = next_tx_seq();
@@ -309,7 +311,6 @@ public:
         if (peer.len == 0) return plugins::kErrInvalidParam;
         std::lock_guard<std::mutex> lk(peer_mu_);
         peer_endpoint_ = peer;
-        cfg_.peer_endpoint = peer;
         return plugins::kOk;
     }
 
@@ -353,6 +354,19 @@ public:
     }
 
     plugins::Endpoint remote_endpoint() const noexcept override {
+        std::lock_guard<std::mutex> lk(peer_mu_);
+        return peer_endpoint_;
+    }
+
+    /** The current peer, read under the lock.
+     *
+     *  `peer_endpoint_` is the single authority on where this session
+     *  sends; `cfg_.peer_endpoint` is only the configuration snapshot
+     *  taken at construction.  A reader that wants the live value must
+     *  come through here -- reading `cfg_` would race with the receive
+     *  thread's peer discovery.
+     */
+    plugins::Endpoint peer_endpoint_snapshot() const noexcept {
         std::lock_guard<std::mutex> lk(peer_mu_);
         return peer_endpoint_;
     }

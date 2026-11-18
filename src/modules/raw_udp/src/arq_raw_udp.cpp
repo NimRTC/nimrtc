@@ -282,7 +282,6 @@ void ArqRawUdp::recv_main() {
             std::lock_guard<std::mutex> lk(peer_mu_);
             if (peer_endpoint_.len == 0 && from.len != 0) {
                 peer_endpoint_ = from;
-                cfg_.peer_endpoint = from;
             }
         }
 

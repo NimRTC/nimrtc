@@ -28,6 +28,9 @@ const CPP     = path.join(ROOT, 'examples/demo-agent-realtime/demo-agent-realtim
 const OPUS_H  = path.join(ROOT, 'src/modules/opus/include/nimrtc/opus/opus.hpp');
 const OPUS_CP = path.join(ROOT, 'src/modules/opus/src/opus.cpp');
 
+// 写集边界判据：四个套件共用同一份实现（v5-writeset-acceptance/）。
+const ws = require('../v5-writeset-acceptance/writeset-boundary.cjs');
+
 // ---------------------------------------------------------------------------
 // 帮助函数
 // ---------------------------------------------------------------------------
@@ -279,39 +282,15 @@ test('demo-agent-realtime_voice_self_test 整题通过（exit=0 + self-test PASS
 // 写集边界：本片只改写集内的路径
 // ---------------------------------------------------------------------------
 test('本片改动仅限写集（examples/demo-agent-realtime/**、src/modules/opus/**、本验收目录）', () => {
-    const diff = spawnSync('git', ['diff', '--name-only'], { cwd: ROOT, encoding: 'utf8' });
-    assert.equal(diff.status, 0, 'git diff --name-only 失败');
-    const changed = (diff.stdout || '').split(/\r?\n/).filter(Boolean);
-    const allowedPrefixes = [
-        'examples/demo-agent-realtime/',
-        'src/modules/opus/include/nimrtc/opus/opus.hpp',
-        'src/modules/opus/src/opus.cpp',
-    ];
-    for (const p of changed) {
-        const ok = allowedPrefixes.some(a => p === a || p.startsWith(a + '/') ||
-                                            p.startsWith(a));
-        assert.ok(ok, `改动超出写集：${p}`);
-    }
-    assert.ok(changed.some(p => p.startsWith('examples/demo-agent-realtime/')),
-        '本片必须改动 demo-agent-realtime（voice chain 落地处）');
-    assert.ok(changed.some(p => p === 'src/modules/opus/include/nimrtc/opus/opus.hpp' ||
-                                p === 'src/modules/opus/src/opus.cpp'),
-        '本片必须落地 Opus int16 编码路径（opus.hpp / opus.cpp）');
-
-    // 未追踪文件：切片规格 + 本验收目录 + demo 新文件（均为本切片自产工件）。
-    const status = spawnSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
-    assert.equal(status.status, 0, 'git status --porcelain 失败');
-    const untracked = (status.stdout || '')
-        .split(/\r?\n/).filter(Boolean)
-        .filter(l => l.startsWith('?? '))
-        .map(l => l.slice(3));
-    for (const p of untracked) {
-        assert.ok(p === 'specs/slices/v4-voice-agent.md' ||
-                  p.startsWith('examples/demo-agent-realtime/') ||
-                  p.startsWith('tests/acceptance/'),
-            `出现意外的未追踪文件：${p}`);
-    }
-    assert.ok(exists(VOICE), 'demo-agent-realtime/voice_agent.hpp 缺失');
-    assert.ok(exists(path.join(ROOT, 'tests/acceptance/v4-voice-agent/acceptance.test.cjs')),
-        '本验收文件缺失');
+    // 写集边界判据（v5-writeset-acceptance/writeset-boundary.cjs，四个套件共用）：
+    // 三源并集 —— 工作区未提交差异 ∪ 本片提交差异 ∪ 未跟踪文件。断言从
+    // 「读工作区差异」改为「读提交历史」后，在已提交的干净树上同样成立（D-68），
+    // 越界检测不削弱：并集里任何落在写集外的路径仍判 failed。
+    const verdict = ws.evaluateSliceWriteSet({ root: ROOT, sliceId: 'v4-voice-agent' });
+    assert.deepEqual(verdict.violations, [],
+        `改动超出写集：${verdict.violations.join(', ')}`);
+    assert.deepEqual(verdict.missing, [],
+        `本片产物缺失（写集内必须存在改动）：${verdict.missing.join(', ')}`);
+    assert.ok(verdict.changed.length >= 1,
+        '本片改动必须非空（工作区差异 ∪ 提交历史 ∪ 未跟踪文件的并集）');
 });

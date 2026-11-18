@@ -3521,31 +3521,31 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         auto& rd = out.remote_desktop;
         const auto ms_from_ns = [](double ns) { return ns / 1'000'000.0; };
 
-        rd.capture_ms  = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kCapture)));
-        rd.capture_fps = impl_->video_state.capture_fps();
-        rd.frames_captured = impl_->video_state.capture_frames_produced();
+        rd.capture.ms    = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kCapture)));
+        rd.capture.fps   = impl_->video_state.capture_fps();
+        rd.capture.frames = impl_->video_state.capture_frames_produced();
 
-        rd.encode_ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kEncode)));
-        rd.encode_p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kEncode, 95)));
-        rd.encode_fps    = t.rate_hz(Stage::kEncode);
-        rd.frames_encoded = t.samples(Stage::kEncode);
+        rd.encode.ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kEncode)));
+        rd.encode.p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kEncode, 95)));
+        rd.encode.fps    = t.rate_hz(Stage::kEncode);
+        rd.encode.frames = t.samples(Stage::kEncode);
 
-        rd.decode_ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kDecode)));
-        rd.decode_p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kDecode, 95)));
-        rd.decode_fps    = t.rate_hz(Stage::kDecode);
-        rd.frames_decoded = t.samples(Stage::kDecode);
+        rd.decode.ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kDecode)));
+        rd.decode.p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kDecode, 95)));
+        rd.decode.fps    = t.rate_hz(Stage::kDecode);
+        rd.decode.frames = t.samples(Stage::kDecode);
 
         // The drops: frames the device produced that the encoder never
         // saw.  Only meaningful once both stages have run; a session
         // that has captured but not yet encoded has "dropped" nothing
         // yet, so the difference is clamped at 0 rather than wrapping.
         rd.frames_dropped_before_encode =
-            rd.frames_captured > rd.frames_encoded
-                ? rd.frames_captured - rd.frames_encoded
+            rd.capture.frames > rd.encode.frames
+                ? rd.capture.frames - rd.encode.frames
                 : 0;
         rd.frames_decoded_without_local_encode =
-            rd.frames_decoded > rd.frames_encoded
-                ? rd.frames_decoded - rd.frames_encoded
+            rd.decode.frames > rd.encode.frames
+                ? rd.decode.frames - rd.encode.frames
                 : 0;
     }
 

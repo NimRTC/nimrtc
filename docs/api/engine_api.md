@@ -1397,21 +1397,59 @@ struct Stats {
 
 #### `RemoteDesktopStats`
 
+The shape follows the pipeline: three stage blocks, each with its own
+rate, cost and count, plus the two counters that describe the **gap
+between two stages**.
+
+```cpp
+struct RemoteDesktopStats {
+    RemoteDesktopCaptureStats capture{};
+    RemoteDesktopEncodeStats  encode{};
+    RemoteDesktopDecodeStats  decode{};
+
+    std::uint64_t frames_dropped_before_encode = 0;
+    std::uint64_t frames_decoded_without_local_encode = 0;
+};
+```
+
+A host compares the halves — "the capture ran at 30 fps and the encoder
+only at 24" — without knowing which prefix carries which half.
+
+##### `capture` — `RemoteDesktopCaptureStats`
+
 | Field | Meaning |
 |---|---|
-| `capture_fps` | The rate the capture device delivered frames, in frames per second.  Measured on the **device's own capture timestamps** (`(frames - 1) / (last_ts - first_ts)`), so a device that stamps frames itself still yields the rate it actually ran at.  0 when fewer than two frames were seen — "not measurable yet", not "zero frames per second".  0 also when the device's clock **moved backwards** during the session (a re-created source, a re-negotiated portal): the span then no longer describes the interval the count covers, so the rate is reported as unknown rather than as a plausible-looking wrong number. |
-| `capture_ms` | The mean cost of the capture device handoff, in milliseconds. |
-| `encode_fps` | The rate the encoder ran at, in frames per second — the stage's *throughput*, over the stage's whole life. |
-| `encode_ms` | The mean cost of the codec's `encode()` call, in milliseconds. |
-| `encode_p95_ms` | The p95 of the encode cost, in milliseconds — **the number a stutter shows up in**.  A good mean with a terrible p95 is a session that hiccups. |
-| `decode_fps` | The rate the decoder ran at, in frames per second. |
-| `decode_ms` | The mean cost of the codec's `decode()` call, in milliseconds. |
-| `decode_p95_ms` | The p95 of the decode cost, in milliseconds. |
-| `frames_captured` | The frames the capture device delivered.  A delivery is identified by its **sequence number**, not its timestamp: a bounded device queue drops the oldest frame when the pump falls behind, and such a frame's successor may carry a timestamp that is not greater than the last one the pump saw.  Those frames are still deliveries and are counted; only a repeated sequence number (the same frame handed over twice) is not. |
-| `frames_encoded` | The frames the encoder processed. |
-| `frames_decoded` | The frames the decoder processed. |
-| `frames_dropped_before_encode` | `max(0, frames_captured - frames_encoded)` — the frames that were captured but never reached the encoder. |
-| `frames_decoded_without_local_encode` | `max(0, frames_decoded - frames_encoded)` — **informational only**, not an error counter.  A receive-only session has an empty encode stage and a busy decode stage, so this is deliberately kept out of the drop accounting. |
+| `capture.fps` | The rate the capture device delivered frames, in frames per second.  Measured on the **device's own capture timestamps**, over the device's *sequence span* (`last_seq - first_seq` over `last_ts - first_ts`), so a device that stamps frames itself still yields the rate it actually ran at — and a device whose queue overflowed (the pump fell behind and the device dropped frames) is still counted, because a delivery is identified by its **sequence number**, not by its timestamp.  0 when fewer than two frames were seen — "not measurable yet", not "zero frames per second".  0 also when the device's clock **moved backwards** during the session (a re-created source, a re-negotiated portal): the span then no longer describes the interval the count covers, so the rate is reported as unknown rather than as a plausible-looking wrong number. |
+| `capture.ms` | The mean cost of the capture device handoff, in milliseconds. |
+| `capture.frames` | The frames the capture device delivered.  A delivery is identified by its **sequence number**, not its timestamp: a bounded device queue drops the oldest frame when the pump falls behind, and such a frame's successor may carry a timestamp that is not greater than the last one the pump saw.  Those frames are still deliveries and are counted; only a repeated sequence number (the same frame handed over twice) is not. |
+
+##### `encode` — `RemoteDesktopEncodeStats`
+
+| Field | Meaning |
+|---|---|
+| `encode.fps` | The rate the encoder ran at, in frames per second — the stage's *throughput*, over the stage's whole life.  This is the number a "can this machine encode 1080p60?" question is really asking. |
+| `encode.ms` | The mean cost of the codec's `encode()` call, in milliseconds. |
+| `encode.p95_ms` | The p95 of the encode cost, in milliseconds — **the number a stutter shows up in**.  A good mean with a terrible p95 is a session that hiccups. |
+| `encode.frames` | The frames the encoder processed. |
+
+##### `decode` — `RemoteDesktopDecodeStats`
+
+| Field | Meaning |
+|---|---|
+| `decode.fps` | The rate the decoder ran at, in frames per second. |
+| `decode.ms` | The mean cost of the codec's `decode()` call, in milliseconds. |
+| `decode.p95_ms` | The p95 of the decode cost, in milliseconds. |
+| `decode.frames` | The frames the decoder processed. |
+
+##### The cross-stage counters
+
+These stay at the **top level** of `RemoteDesktopStats`, because they
+are about the gap *between* two stages and belong to neither.
+
+| Field | Meaning |
+|---|---|
+| `frames_dropped_before_encode` | `max(0, capture.frames - encode.frames)` — the frames that were captured but never reached the encoder. |
+| `frames_decoded_without_local_encode` | `max(0, decode.frames - encode.frames)` — **informational only**, not an error counter.  A receive-only session has an empty encode stage and a busy decode stage, so this is deliberately kept out of the drop accounting. |
 
 #### Everything here is *derived*, never measured twice
 
@@ -1483,9 +1521,9 @@ go stale, and a field added to the header is visible here the same day.
 
 - **It stays.**  A field is not renamed, retyped, or removed in a minor
   release.  If a measurement is wrong, it is fixed in place.
-- **Its meaning does not change.**  `capture_ms` is the mean cost of the
+- **Its meaning does not change.**  `capture.ms` is the mean cost of the
   device handoff; it is not quietly redefined later.  When a field's
-  *scope* needs to grow (the S7 `capture_fps` fix), it grows in the way
+  *scope* needs to grow (the S7 `capture.fps` fix), it grows in the way
   the field always meant — not by reinterpreting the number.
 - **It only grows.**  A new block is a *new* field (or a nested type
   such as `RemoteDesktopStats`), never a reuse of an old one — which is
@@ -1496,6 +1534,47 @@ not an ABI type, and a host reads it through the header it compiled
 against.  The layout and the exported symbols are
 `scripts/check_api_manifest.py`'s business; this table is the field
 set's.
+
+#### The one exception: the S7 block's own reshape
+
+`RemoteDesktopStats` was **reshaped** rather than grown, and it is the
+only time the promise above did not hold.  It shipped with the v1.2.0
+**draft** release — a tag that was pushed but whose GitHub Release was
+never published — so no released artifact ever carried the old shape
+and no downstream host could have compiled against it.
+
+| Before (the draft's flat shape) | After (the published shape) |
+|---|---|
+| `capture_fps` | `capture.fps` |
+| `capture_ms` | `capture.ms` |
+| `frames_captured` | `capture.frames` |
+| `encode_fps` | `encode.fps` |
+| `encode_ms` | `encode.ms` |
+| `encode_p95_ms` | `encode.p95_ms` |
+| `frames_encoded` | `encode.frames` |
+| `decode_fps` | `decode.fps` |
+| `decode_ms` | `decode.ms` |
+| `decode_p95_ms` | `decode.p95_ms` |
+| `frames_decoded` | `decode.frames` |
+| `frames_dropped_before_encode` | *unchanged* (top level) |
+| `frames_decoded_without_local_encode` | *unchanged* (top level) |
+
+The **measurements** are identical — the reshape moved names, not
+semantics; `capture.fps` is exactly what `capture_fps` was.  What
+changed is the *shape*: the flat list gave every stage a prefix and
+left the host to know which prefix carried which half, while the
+nested form puts each stage's rate, cost and count together — so a host
+compares the halves ("the capture ran at 30 fps and the encoder only at
+24") instead of guessing.
+
+The two cross-stage counters (`frames_dropped_before_encode` /
+`frames_decoded_without_local_encode`) stayed at the top level on
+purpose: they describe the gap *between* two stages and belong to
+neither.
+
+The rule this sets: **a reshape is allowed before a release is
+published, and never after.**  From v1.2.0's publication onward the
+promise above holds without exception.
 
 #### The sample apps read the same fields
 
@@ -1562,6 +1641,13 @@ unprotected RTP + RTCP counters, `srtp_auth_failures`, `srtp_drops`).
 `last_skew_ms` (positive = video behind).
 
 **`RemoteDesktopStats`** — the pipeline breakdown, documented in §13.6.
+Its shape is three stage blocks — `capture` (`RemoteDesktopCaptureStats`),
+`encode` (`RemoteDesktopEncodeStats`) and `decode`
+(`RemoteDesktopDecodeStats`), each carrying `fps` / `ms` / `frames` (plus
+`p95_ms` on the two codec stages) — plus the two cross-stage counters
+`frames_dropped_before_encode` and
+`frames_decoded_without_local_encode`, which stay at the top level
+because they describe the gap *between* two stages.
 
 #### The field-set table
 
@@ -1724,7 +1810,7 @@ header; its section note above it is the definition.
 | 142 | `video_stage_total_us` | `std::uint64_t` | The summed cost of the outbound path, in microseconds. This is the number §B.6's budget is written against: the capture → convert → encode → packetize chain. It is the sum of the four stage means above, so a host can compare it with the budget directly: ``` const auto s = engine.stats(); const auto frame_cost_us = s.video_stage_capture.mean_us + s.video_stage_convert.mean_us + s.video_stage_encode.mean_us + s.video_stage_packetize.mean_us; ``` The p95 variant (`video_stage_total_p95_us`) sums the p95s instead — an upper bound on the *typical* worst frame, which is the number to compare with the frame interval (33 333 µs at 30 fps). |
 | 143 | `video_stage_total_p95_us` | `std::uint64_t` | The summed p95 of the four outbound stages, in microseconds. |
 | 144 | `qoe` | `plugins::QoeSnapshot` | The quality-of-experience metrics (plan J3 / J6). The freeze count, the end-to-end latency percentiles, the viewer's frame rate, the sharpness proxy and the input-to-photon latency. The metrics are measured whenever a QoE collector is resolved — which, by default, is the built-in `"rd-qoe"` (see `EngineConfig::qoe_collector_name`); a host that turns the metrics off says so with `EngineConfig::qoe_collector_enabled` (or with an empty name). Without a collector this snapshot carries the **frame counters** — the presented and dropped frame counts, which the engine keeps anyway — and zeroes for the metrics, which is the honest answer to "what was the latency percentile?" when it was not measured. |
-| 145 | `remote_desktop` | `RemoteDesktopStats` | The remote-desktop pipeline breakdown (v1.2 plan **S7**). The QoE block above answers "how did the session *feel*"; this block answers "**where did the time go**". It is a remote-desktop-shaped view of the per-stage instrumentation (`video_stage_*`): the capture / encode / decode means in milliseconds, the frame rates they imply, and the count of frames that were captured but never encoded (the gap between two stages is a frame that was dropped in between). Every value here is **derived** from a measurement that already exists — nothing is timed a second time. The definitions are in `RemoteDesktopStats` above. |
+| 145 | `remote_desktop` | `RemoteDesktopStats` | The remote-desktop pipeline breakdown (v1.2 plan **S7**). The QoE block above answers "how did the session *feel*"; this block answers "**where did the time go**". It is a remote-desktop-shaped view of the per-stage instrumentation (`video_stage_*`), shaped like the pipeline itself: `capture` / `encode` / `decode`, each with its rate (`fps`), its cost (`ms`, and `p95_ms` on the two codec stages) and its frame count (`frames`), plus the cross-stage `frames_dropped_before_encode` / `frames_decoded_without_local_encode`. Every value here is **derived** from a measurement that already exists — nothing is timed a second time. The definitions are in `RemoteDesktopStats` above. |
 
 **145 fields.**
 

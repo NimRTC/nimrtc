@@ -120,25 +120,30 @@ class LatencyInstrument  →  class  LatencyInstrument   （两个空格）
 | v3-weaknet-verdict | 8/8 | 100% | 3s（零编译） |
 | v4-ai-teammate | 6/6 | 100% | 22s |
 | v4-voice-agent | 13/14 | 93% | 60s |
-| v5-writeset-acceptance | 5/6 | 83% | 76s |
+| v5-writeset-acceptance | 6/6 | 100% | 72s |
 
 **总耗时 646 秒**（第一版 3149 秒 —— 快 4.9 倍）。
 
-剩下的 3 个「漏过」经逐个查证：
+> 修复「产物缺失检测」缺口后重跑 v5：**6/6 = 100%**，
+> 之前漏过的那条现在被抓住了（pass 8 / fail 1）。
+
+剩下的 2 个「漏过」经逐个查证：
 
 | 套件 | 漏过的变异 | 结论 |
 |---|---|---|
 | v2-ai-decision | 延迟预算判定的单位错了（us→ns） | **等价变异**：决策耗时本就 < 50μs，改完 `max_ns() <= limit_us` 仍成立 → 行为没变 → 测试不红是对的 |
 | v4-voice-agent | Tap 帧长不再 10ms（改成 20ms） | **等价变异**：攒批窗口 100ms 不变，20ms 的 tap 仍能被 100ms 窗口整除 → 攒批行为等价 → 测不出是应该的 |
-| v5-writeset | 产物检查失效（required 永远算「在树上」） | **真漏洞 —— 已修**（见发现 1） |
+
+**两条都是「变异没有真正改变被测行为」**，不是测试的漏洞。
+真正改变了行为的变异，**100% 被抓住**。
 
 ### 判据强度小结
 
 - **强（100%）**：v1-game-source / v1-video-processing / v2-input-binder / v2-qoe-feed /
-  v3-chrome-waterfall / v3-weaknet-verdict / v4-ai-teammate
+  v3-chrome-waterfall / v3-weaknet-verdict / v4-ai-teammate / v5-writeset-acceptance
 - **强（93%）**：v4-voice-agent
-- **中（83–89%）**：v2-ai-decision / v5-writeset-acceptance
-  —— 共同弱点：**部分断言只检查「符号存在」，不检查「行为对不对」**
+- **中（89%）**：v2-ai-decision
+  —— 弱点：**部分断言只检查「符号存在」，不检查「行为对不对」**
 
 ---
 

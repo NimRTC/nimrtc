@@ -1438,7 +1438,38 @@ host that does not configure a capture device has no capture stage, and a
 session that never received a video frame has no decode stage — the
 zeros are the **correct** reading, not a missing value.
 
-### 13.7 The stable field set (v1.2.0, plan Track S / S8)
+### 13.7 The GPU delivery path (v1.2.0, plan Track E / E5)
+
+`VideoSinkStats` (the sink-side counters, not the engine `Stats`) carries
+three counters that say **which route a decoded frame took to the
+display**:
+
+| Field | Meaning |
+|---|---|
+| `gpu_device_copies` | GPU surfaces copied **device-to-device** into the present target.  The picture never entered host memory between decode and present — this is the zero-copy hand-off, confirmed. |
+| `gpu_staging_fallbacks` | GPU surfaces that could not go device-to-device and had to be **staged through host memory**.  The D3D11 sink counts here when a surface is not BGRA8: it presents from the surface's CPU mirror if there is one, and otherwise refuses it so the engine decodes to host pixels. |
+| `gpu_surfaces_refused` | Surfaces refused outright: a foreign backend (a Metal IOSurface on Windows), a null handle, or a zero-size surface.  A non-zero value here is a **configuration error**, not a fallback. |
+
+The split is the point.  On a healthy DXGI loop the first counter grows
+and the other two stay at zero.  A host that sees
+`gpu_staging_fallbacks` move is looking at a decoder or driver
+configuration that is not zero-copy **all the way to the display** — the
+capture → encode leg may still be zero-copy while the decoded NV12
+surface is converted on the CPU.  The engine's render-path rule
+(`video_render_path.hpp`) decides the *route* (GPU surface vs CPU
+staging) once at `open()`; these counters describe what actually
+happened per frame afterwards.
+
+The GPU copy itself is performed on the sink's **presenter thread**, not
+on the caller's: a GPU frame handed to `render(const GpuBuffer&)` costs
+the producer a reference-count bump, and the device-to-device copy
+happens on the presentation clock, exactly like a CPU frame.  That is
+what keeps a sink that receives a mix of GPU and CPU frames from
+presenting twice per tick or skewing `frames_dropped_present`.
+
+---
+
+### 13.8 The stable field set (v1.2.0, plan Track S / S8)
 
 `Stats` grew one additive block at a time (S1 – S7 above).  This section
 is where that growth is written down as a **contract**: every field

@@ -5802,6 +5802,57 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exercised: T2 asserts the timer *does* fire when the peer stops and T3
   asserts the re-arm window.
 
+### Fixed
+
+- **The D3D11 sink's GPU path bypassed the presentation clock and the
+  latest-wins mailbox (v1.2 plan item `E5`).**
+  device-to-device copy and the `Present()` **on the caller's thread**,
+  outside the presenter's deadline wait and outside the single-slot
+  mailbox.  Two consequences, both silent:
+  - a producer that pushed GPU frames faster than the display could show
+    them was blocked on the GPU, and every GPU frame was presented — the
+    "latest-wins" back-pressure did not apply to the GPU path at all, so
+    its `frames_dropped_present` and `present_fps` ignored GPU traffic;
+  - a sink fed a **mix** of GPU and CPU frames (a decode path that falls
+    back per frame) presented twice per tick: once from the caller's
+    thread and once from the presenter's — the picture could tear and the
+    frame rate doubled.
+
+  The GPU frame now goes into the same mailbox as a CPU frame, carrying a
+  reference to the `GpuBuffer` so the texture outlives the borrowed
+  `render()` call, and the **presenter thread** does the copy on the
+  presentation clock.
+
+- **The D3D11 GPU path could copy a non-BGRA8 texture into a BGRA8
+  present target.**
+  `CopyResource` requires both textures to agree on format and geometry;
+  the old code called it unconditionally, so an NV12 / P010 decoder
+  output (or any surface of a different size) produced a D3D11 validation
+  error and presented an unchanged or garbage frame.  The copy is now
+  `CopyResource` only for a BGRA8 surface in the offscreen mode and a
+  clipped `CopySubresourceRegion` otherwise, and a surface that cannot be
+  presented without a format conversion takes the **documented fallback**:
+  it is presented from its CPU mirror, or refused with `kErrUnsupported`
+  so the engine's render-path rule decodes to host pixels — never copied
+  as garbage.  The fallback is documented in `docs/api/engine_api.md`
+  §13.8 and in the renderer's header.
+
+### Added
+
+- **`VideoSinkStats` reports which route a frame took to the display
+  (v1.2 plan item `E5`).**
+  Three new counters:
+  - `gpu_device_copies` — GPU surfaces copied device-to-device into the
+    present target (the zero-copy hand-off, confirmed);
+  - `gpu_staging_fallbacks` — GPU surfaces that had to go through host
+    memory to be shown (a decoder or driver configuration that is not
+    zero-copy all the way to the display);
+  - `gpu_surfaces_refused` — surfaces refused outright (a foreign
+    backend, an unusable handle) — a configuration error, not a fallback.
+
+  On a healthy DXGI loop only the first one grows.  Deciding which GPUs
+  take which path is now a **reading**, not an experiment.
+
 ## [1.1.0] - 2026-11-07
 
 ### Status: Release candidate

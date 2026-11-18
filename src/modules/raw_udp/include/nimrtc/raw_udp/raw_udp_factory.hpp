@@ -62,6 +62,17 @@ public:
     /** Create a fresh IRawUdpDatagram. Caller owns the returned pointer. */
     std::unique_ptr<IRawUdpDatagram> create() const override;
 
+    /**
+     * @brief Create a fresh IRawUdpDatagram with a per-stack config.
+     *
+     * The transport stack factory uses this to hand the control stack
+     * its own bind address / port and the peer-endpoint hint, so two
+     * stacks in the same process get two *different* sockets (and
+     * therefore two different 5-tuples — the remote-desktop plan's G2
+     * acceptance criterion).
+     */
+    std::unique_ptr<IRawUdpDatagram> create(const RawUdpConfig& cfg) const override;
+
 private:
     RawUdpConfig default_config_;
 };

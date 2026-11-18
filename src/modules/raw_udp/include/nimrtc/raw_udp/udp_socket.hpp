@@ -112,6 +112,30 @@ public:
     /** Local port after open(); 0 before open() / on error. */
     std::uint16_t local_port() const noexcept;
 
+    /**
+     * @brief The socket's own bound address, as "ip:port".
+     *
+     * This is the address the *kernel* has, which is not always the
+     * address that was asked for: a wildcard bind ("0.0.0.0" / "")
+     * comes back as "0.0.0.0:<port>".
+     *
+     * The raw-UDP module advertises this string to its peer, so it has
+     * to be **routable**.  "0.0.0.0" is not: it is the "any local
+     * address" wildcard, and a peer that tries to `sendto()` it gets
+     * `WSAEADDRNOTAVAIL` (Windows) / `EADDRNOTAVAIL` (Linux) — the
+     * datagram never leaves the host.
+     *
+     * So a wildcard bind is **resolved to a concrete local address**
+     * before it is reported: the first non-loopback IPv4 address the
+     * host has (falling back to the loopback when the host has no
+     * other address).  The port is the kernel's, so the peer can still
+     * reach the socket.
+     *
+     * @return The address, or an empty string when the socket is not
+     *         open.
+     */
+    std::string local_endpoint() const noexcept;
+
     /** True iff open() succeeded and the socket is usable. */
     bool is_open() const noexcept;
 

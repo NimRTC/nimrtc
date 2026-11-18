@@ -240,6 +240,25 @@ jobs:
           cmake --build --preset debug.msvc --target bench_saturation -j 2
           python tools/benchmark_saturation.py --build-dir build --out build/e2e/bench_saturation.json
 
+      # The G2 half of E6: the control plane's latency under a
+      # saturated video path.  The invariants are what matter — the
+      # media path really was saturated, the control plane reached the
+      # profile's rate, its p99 stayed inside the profile's declared
+      # budget, every control message arrived, and the two stacks rode
+      # different 5-tuples — and the wrapper exits non-zero when one of
+      # them fails.
+      #
+      # The rate invariant is **skipped** on a host without the
+      # high-resolution deadline (the binary reports whether it had
+      # one): the measured rate is produced by a thread waiting on a
+      # deadline, so without it the run would measure the host's timer
+      # rather than the transport.  A skip is reported, not hidden.
+      - name: Benchmark G2 control plane (plan E6)
+        shell: pwsh
+        run: |
+          cmake --build --preset debug.msvc --target bench_control_saturation -j 2
+          python tools/benchmark_control_saturation.py --build-dir build --out build/e2e/bench_control_saturation.json
+
       - name: Upload bench artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -249,6 +268,7 @@ jobs:
             build/e2e/bench_dc.json
             build/e2e/bench_weaknet.json
             build/e2e/bench_saturation.json
+            build/e2e/bench_control_saturation.json
           retention-days: 14
 
   # ---------------------------------------------------------------------------
@@ -815,6 +835,24 @@ jobs:
           cmake --build --preset debug --target bench_saturation -j 2
           python3 tools/benchmark_saturation.py --build-dir build --out build/e2e/bench_saturation.json
 
+      # The G2 half of E6: the control plane's latency under a
+      # saturated video path.  The invariants are what matter — the
+      # media path really was saturated, the control plane reached the
+      # profile's rate, its p99 stayed inside the profile's declared
+      # budget, every control message arrived, and the two stacks rode
+      # different 5-tuples — and the wrapper exits non-zero when one of
+      # them fails.
+      #
+      # The rate invariant is **skipped** on a host without the
+      # high-resolution deadline (the binary reports whether it had
+      # one): the measured rate is produced by a thread waiting on a
+      # deadline, so without it the run would measure the host's timer
+      # rather than the transport.  A skip is reported, not hidden.
+      - name: Benchmark G2 control plane (plan E6)
+        run: |
+          cmake --build --preset debug --target bench_control_saturation -j 2
+          python3 tools/benchmark_control_saturation.py --build-dir build --out build/e2e/bench_control_saturation.json
+
       - name: Upload bench artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -825,6 +863,7 @@ jobs:
             build/e2e/bench_weaknet.json
             build/e2e/bench_weaknet_netem.json
             build/e2e/bench_saturation.json
+            build/e2e/bench_control_saturation.json
           retention-days: 14
 
       # E2 — leaf compile proof (docs/plan/v1.2-next-plan.md §3 Track E).

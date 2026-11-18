@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "benchmark": "control_saturation",
-  "generated_at": "2026-11-18T05:54:55Z",
+  "generated_at": "2026-11-18T07:58:31Z",
   "plan": "docs/plan/v1.2-next-plan.md",
   "plan_item": "E6",
   "evidence_row": "Remote desktop is zero-copy / the G2 control plane is not starved by a saturated video path",
@@ -65,65 +65,66 @@
         "with_video": true
       },
       "summary": {
-        "control_messages_sent": 3913,
-        "control_messages_received": 3913,
+        "control_messages_sent": 3973,
+        "control_messages_received": 3973,
         "control_messages_dropped": 0,
         "control_malformed_received": 0,
-        "control_p50_ms": 0.528,
-        "control_p90_ms": 1.724,
-        "control_p99_ms": 2.502,
-        "control_p999_ms": 11.921,
-        "control_max_ms": 21.701,
-        "control_mean_ms": 0.719798,
-        "control_rate_hz": 195.65,
-        "media_sent_datagrams": 10652,
-        "media_received_datagrams": 1219,
-        "media_admitted_datagrams": 1219,
-        "media_dropped_datagrams": 9433,
-        "media_sent_bytes": 12598899,
-        "media_admitted_bytes": 1253416,
-        "video_frames_sent": 305,
-        "video_frames_received": 184,
+        "control_p50_ms": 0.527,
+        "control_p90_ms": 1.551,
+        "control_p99_ms": 2.358,
+        "control_p999_ms": 11.549,
+        "control_max_ms": 18.148,
+        "control_mean_ms": 0.710267,
+        "control_rate_hz": 198.65,
+        "media_sent_datagrams": 10945,
+        "media_received_datagrams": 1226,
+        "media_admitted_datagrams": 1226,
+        "media_dropped_datagrams": 9719,
+        "media_sent_bytes": 12933548,
+        "media_admitted_bytes": 1250904,
+        "video_frames_sent": 313,
+        "video_frames_received": 196,
         "video_frames_decoded": 0,
-        "video_frames_pushed": 305,
+        "video_frames_pushed": 313,
         "video_frames_rejected": 0,
         "five_tuples_distinct": true,
+        "high_resolution_wait": true,
         "ok": true
       },
       "endpoints": {
-        "media_tx_local": "127.0.0.1:52783",
-        "media_rx_local": "127.0.0.1:52785",
-        "media_rx_observed_source": "127.0.0.1:52783",
-        "control_tx_local": "127.0.0.1:52782",
-        "control_rx_local": "127.0.0.1:52784"
+        "media_tx_local": "127.0.0.1:53976",
+        "media_rx_local": "127.0.0.1:53978",
+        "media_rx_observed_source": "127.0.0.1:53976",
+        "control_tx_local": "127.0.0.1:53975",
+        "control_rx_local": "127.0.0.1:53977"
       },
       "invariants": [
         {
           "invariant": "saturation_was_real",
           "ok": true,
-          "measured": 9433,
+          "measured": 9719,
           "limit": "> 0",
-          "detail": "the media link dropped 9433 of 10652 datagrams, so it was genuinely at capacity"
+          "detail": "the media link dropped 9719 of 10945 datagrams, so it was genuinely at capacity"
         },
         {
           "invariant": "control_reached_the_profile_rate",
           "ok": true,
-          "measured": 195.7,
+          "measured": 198.7,
           "limit": ">= 180.0",
-          "detail": "the control plane ran at 195.7 Hz against the profile's 200 Hz"
+          "detail": "the control plane ran at 198.7 Hz against the profile's 200 Hz"
         },
         {
           "invariant": "control_p99_stayed_within_budget",
           "ok": true,
-          "measured": 2.502,
+          "measured": 2.358,
           "limit": "< 50.0",
           "detail": "the control plane's p99 stayed inside the profile's budget while the video path was saturated"
         },
         {
           "invariant": "control_path_was_not_starved",
           "ok": true,
-          "measured": "3913/3913",
-          "limit": "3913/3913",
+          "measured": "3973/3973",
+          "limit": "3973/3973",
           "detail": "every control message arrived (0 dropped by the control channel's own queue)"
         },
         {
@@ -137,143 +138,143 @@
       "latency_curve": [
         {
           "bucket": 0,
-          "samples": 195,
-          "p50_ms": 0.075,
-          "p99_ms": 0.081,
-          "max_ms": 0.081
+          "samples": 198,
+          "p50_ms": 0.069,
+          "p99_ms": 0.077,
+          "max_ms": 0.078
         },
         {
           "bucket": 1,
-          "samples": 195,
-          "p50_ms": 0.086,
-          "p99_ms": 0.09,
-          "max_ms": 0.091
+          "samples": 198,
+          "p50_ms": 0.087,
+          "p99_ms": 0.093,
+          "max_ms": 0.093
         },
         {
           "bucket": 2,
-          "samples": 195,
-          "p50_ms": 0.095,
-          "p99_ms": 0.1,
-          "max_ms": 0.1
+          "samples": 198,
+          "p50_ms": 0.098,
+          "p99_ms": 0.103,
+          "max_ms": 0.103
         },
         {
           "bucket": 3,
-          "samples": 195,
-          "p50_ms": 0.104,
-          "p99_ms": 0.109,
-          "max_ms": 0.109
+          "samples": 198,
+          "p50_ms": 0.108,
+          "p99_ms": 0.112,
+          "max_ms": 0.112
         },
         {
           "bucket": 4,
-          "samples": 195,
-          "p50_ms": 0.113,
-          "p99_ms": 0.117,
-          "max_ms": 0.117
+          "samples": 198,
+          "p50_ms": 0.117,
+          "p99_ms": 0.122,
+          "max_ms": 0.122
         },
         {
           "bucket": 5,
-          "samples": 195,
-          "p50_ms": 0.122,
-          "p99_ms": 0.127,
-          "max_ms": 0.127
+          "samples": 198,
+          "p50_ms": 0.126,
+          "p99_ms": 0.131,
+          "max_ms": 0.131
         },
         {
           "bucket": 6,
-          "samples": 195,
-          "p50_ms": 0.133,
-          "p99_ms": 0.14,
-          "max_ms": 0.14
+          "samples": 198,
+          "p50_ms": 0.137,
+          "p99_ms": 0.144,
+          "max_ms": 0.144
         },
         {
           "bucket": 7,
-          "samples": 195,
-          "p50_ms": 0.149,
-          "p99_ms": 0.165,
-          "max_ms": 0.165
+          "samples": 198,
+          "p50_ms": 0.151,
+          "p99_ms": 0.164,
+          "max_ms": 0.164
         },
         {
           "bucket": 8,
-          "samples": 195,
-          "p50_ms": 0.207,
-          "p99_ms": 0.373,
-          "max_ms": 0.377
+          "samples": 198,
+          "p50_ms": 0.189,
+          "p99_ms": 0.255,
+          "max_ms": 0.256
         },
         {
           "bucket": 9,
-          "samples": 195,
-          "p50_ms": 0.506,
-          "p99_ms": 0.527,
+          "samples": 198,
+          "p50_ms": 0.447,
+          "p99_ms": 0.526,
           "max_ms": 0.527
         },
         {
           "bucket": 10,
-          "samples": 195,
-          "p50_ms": 0.533,
-          "p99_ms": 0.539,
-          "max_ms": 0.539
+          "samples": 198,
+          "p50_ms": 0.534,
+          "p99_ms": 0.542,
+          "max_ms": 0.542
         },
         {
           "bucket": 11,
-          "samples": 195,
-          "p50_ms": 0.546,
-          "p99_ms": 0.561,
-          "max_ms": 0.561
+          "samples": 198,
+          "p50_ms": 0.551,
+          "p99_ms": 0.57,
+          "max_ms": 0.571
         },
         {
           "bucket": 12,
-          "samples": 195,
-          "p50_ms": 0.927,
-          "p99_ms": 1.064,
-          "max_ms": 1.064
+          "samples": 198,
+          "p50_ms": 0.797,
+          "p99_ms": 1.063,
+          "max_ms": 1.063
         },
         {
           "bucket": 13,
-          "samples": 195,
-          "p50_ms": 1.091,
-          "p99_ms": 1.109,
-          "max_ms": 1.11
+          "samples": 198,
+          "p50_ms": 1.097,
+          "p99_ms": 1.123,
+          "max_ms": 1.124
         },
         {
           "bucket": 14,
-          "samples": 195,
-          "p50_ms": 1.13,
-          "p99_ms": 1.156,
-          "max_ms": 1.156
+          "samples": 198,
+          "p50_ms": 1.151,
+          "p99_ms": 1.175,
+          "max_ms": 1.175
         },
         {
           "bucket": 15,
-          "samples": 195,
-          "p50_ms": 1.192,
-          "p99_ms": 1.235,
-          "max_ms": 1.236
+          "samples": 198,
+          "p50_ms": 1.199,
+          "p99_ms": 1.238,
+          "max_ms": 1.239
         },
         {
           "bucket": 16,
-          "samples": 195,
-          "p50_ms": 1.3,
-          "p99_ms": 1.38,
-          "max_ms": 1.38
+          "samples": 198,
+          "p50_ms": 1.278,
+          "p99_ms": 1.338,
+          "max_ms": 1.34
         },
         {
           "bucket": 17,
-          "samples": 195,
-          "p50_ms": 1.465,
-          "p99_ms": 1.685,
-          "max_ms": 1.686
+          "samples": 198,
+          "p50_ms": 1.425,
+          "p99_ms": 1.53,
+          "max_ms": 1.533
         },
         {
           "bucket": 18,
-          "samples": 195,
-          "p50_ms": 1.907,
-          "p99_ms": 1.979,
-          "max_ms": 1.979
+          "samples": 198,
+          "p50_ms": 1.836,
+          "p99_ms": 1.966,
+          "max_ms": 1.967
         },
         {
           "bucket": 19,
-          "samples": 208,
-          "p50_ms": 2.025,
-          "p99_ms": 16.08,
-          "max_ms": 21.701
+          "samples": 211,
+          "p50_ms": 2.026,
+          "p99_ms": 12.451,
+          "max_ms": 18.148
         }
       ]
     },
@@ -302,11 +303,11 @@
         "control_messages_dropped": 0,
         "control_malformed_received": 0,
         "control_p50_ms": 0.52,
-        "control_p90_ms": 1.48,
-        "control_p99_ms": 2.055,
-        "control_p999_ms": 6.491,
-        "control_max_ms": 17.308,
-        "control_mean_ms": 0.672165,
+        "control_p90_ms": 1.465,
+        "control_p99_ms": 2.064,
+        "control_p999_ms": 11.06,
+        "control_max_ms": 26.576,
+        "control_mean_ms": 0.661459,
         "control_rate_hz": 199.05,
         "media_sent_datagrams": 0,
         "media_received_datagrams": 0,
@@ -320,14 +321,15 @@
         "video_frames_pushed": 0,
         "video_frames_rejected": 0,
         "five_tuples_distinct": true,
+        "high_resolution_wait": true,
         "ok": true
       },
       "endpoints": {
-        "media_tx_local": "127.0.0.1:52878",
-        "media_rx_local": "127.0.0.1:52880",
+        "media_tx_local": "127.0.0.1:53980",
+        "media_rx_local": "127.0.0.1:53982",
         "media_rx_observed_source": "",
-        "control_tx_local": "127.0.0.1:52877",
-        "control_rx_local": "127.0.0.1:52879"
+        "control_tx_local": "127.0.0.1:53979",
+        "control_rx_local": "127.0.0.1:53981"
       },
       "invariants": [
         {
@@ -347,7 +349,7 @@
         {
           "invariant": "control_p99_stayed_within_budget",
           "ok": true,
-          "measured": 2.055,
+          "measured": 2.064,
           "limit": "< 50.0",
           "detail": "the control plane's p99 stayed inside the profile's budget while the video path was saturated"
         },
@@ -370,149 +372,150 @@
         {
           "bucket": 0,
           "samples": 199,
-          "p50_ms": 0.071,
-          "p99_ms": 0.078,
-          "max_ms": 0.078
+          "p50_ms": 0.088,
+          "p99_ms": 0.098,
+          "max_ms": 0.098
         },
         {
           "bucket": 1,
           "samples": 199,
-          "p50_ms": 0.082,
-          "p99_ms": 0.086,
-          "max_ms": 0.086
+          "p50_ms": 0.107,
+          "p99_ms": 0.114,
+          "max_ms": 0.114
         },
         {
           "bucket": 2,
           "samples": 199,
-          "p50_ms": 0.089,
-          "p99_ms": 0.092,
-          "max_ms": 0.093
+          "p50_ms": 0.119,
+          "p99_ms": 0.125,
+          "max_ms": 0.125
         },
         {
           "bucket": 3,
           "samples": 199,
-          "p50_ms": 0.096,
-          "p99_ms": 0.1,
-          "max_ms": 0.1
+          "p50_ms": 0.13,
+          "p99_ms": 0.134,
+          "max_ms": 0.134
         },
         {
           "bucket": 4,
           "samples": 199,
-          "p50_ms": 0.103,
-          "p99_ms": 0.106,
-          "max_ms": 0.106
+          "p50_ms": 0.139,
+          "p99_ms": 0.144,
+          "max_ms": 0.144
         },
         {
           "bucket": 5,
           "samples": 199,
-          "p50_ms": 0.109,
-          "p99_ms": 0.113,
-          "max_ms": 0.113
+          "p50_ms": 0.148,
+          "p99_ms": 0.155,
+          "max_ms": 0.155
         },
         {
           "bucket": 6,
           "samples": 199,
-          "p50_ms": 0.118,
-          "p99_ms": 0.122,
-          "max_ms": 0.122
+          "p50_ms": 0.161,
+          "p99_ms": 0.168,
+          "max_ms": 0.168
         },
         {
           "bucket": 7,
           "samples": 199,
-          "p50_ms": 0.127,
-          "p99_ms": 0.135,
-          "max_ms": 0.135
+          "p50_ms": 0.177,
+          "p99_ms": 0.189,
+          "max_ms": 0.189
         },
         {
           "bucket": 8,
           "samples": 199,
-          "p50_ms": 0.147,
-          "p99_ms": 0.171,
-          "max_ms": 0.171
+          "p50_ms": 0.205,
+          "p99_ms": 0.233,
+          "max_ms": 0.233
         },
         {
           "bucket": 9,
           "samples": 199,
-          "p50_ms": 0.312,
-          "p99_ms": 0.519,
-          "max_ms": 0.519
+          "p50_ms": 0.434,
+          "p99_ms": 0.52,
+          "max_ms": 0.52
         },
         {
           "bucket": 10,
           "samples": 199,
-          "p50_ms": 0.53,
-          "p99_ms": 0.536,
-          "max_ms": 0.536
+          "p50_ms": 0.528,
+          "p99_ms": 0.534,
+          "max_ms": 0.534
         },
         {
           "bucket": 11,
           "samples": 199,
-          "p50_ms": 0.544,
-          "p99_ms": 0.558,
-          "max_ms": 0.558
+          "p50_ms": 0.539,
+          "p99_ms": 0.543,
+          "max_ms": 0.543
         },
         {
           "bucket": 12,
           "samples": 199,
-          "p50_ms": 1.05,
-          "p99_ms": 1.074,
-          "max_ms": 1.074
+          "p50_ms": 0.548,
+          "p99_ms": 0.557,
+          "max_ms": 0.557
         },
         {
           "bucket": 13,
           "samples": 199,
-          "p50_ms": 1.093,
-          "p99_ms": 1.112,
-          "max_ms": 1.112
+          "p50_ms": 0.588,
+          "p99_ms": 1.077,
+          "max_ms": 1.077
         },
         {
           "bucket": 14,
           "samples": 199,
-          "p50_ms": 1.135,
-          "p99_ms": 1.16,
-          "max_ms": 1.161
+          "p50_ms": 1.112,
+          "p99_ms": 1.148,
+          "max_ms": 1.148
         },
         {
           "bucket": 15,
           "samples": 199,
-          "p50_ms": 1.194,
-          "p99_ms": 1.23,
-          "max_ms": 1.231
+          "p50_ms": 1.179,
+          "p99_ms": 1.212,
+          "max_ms": 1.212
         },
         {
           "bucket": 16,
           "samples": 199,
-          "p50_ms": 1.281,
-          "p99_ms": 1.351,
-          "max_ms": 1.351
+          "p50_ms": 1.247,
+          "p99_ms": 1.302,
+          "max_ms": 1.302
         },
         {
           "bucket": 17,
           "samples": 199,
-          "p50_ms": 1.413,
-          "p99_ms": 1.478,
-          "max_ms": 1.479
+          "p50_ms": 1.37,
+          "p99_ms": 1.463,
+          "max_ms": 1.463
         },
         {
           "bucket": 18,
           "samples": 199,
-          "p50_ms": 1.781,
-          "p99_ms": 1.959,
-          "max_ms": 1.959
+          "p50_ms": 1.702,
+          "p99_ms": 1.951,
+          "max_ms": 1.952
         },
         {
           "bucket": 19,
           "samples": 200,
-          "p50_ms": 2.002,
-          "p99_ms": 8.316,
-          "max_ms": 17.308
+          "p50_ms": 2.005,
+          "p99_ms": 16.088,
+          "max_ms": 26.576
         }
       ]
     }
   ],
   "verdict": {
     "all_invariants_hold": true,
-    "failures": []
+    "failures": [],
+    "skips": []
   },
   "notes": [
     "The two planes are the shipped components: the engine, the SDP machinery, the control channel's framing, the raw-UDP ARQ session and the H.264 software encoder. The datagrams travel over real UDP sockets.",
@@ -521,6 +524,8 @@
     "The control producer, the media producer and the engine tick each run on their own thread. That is the point of G2, not a convenience: driving both planes from one loop would put the software H.264 encode on the control plane's critical path, and the measurement would report the encoder's latency rather than the transport's.",
     "The numbers are machine-dependent (the host's real scheduling jitter, the loopback's real RTT), so the committed artifact is one local sample, not a pass/fail threshold. What must hold on every machine are the invariants, and they are asserted by tools/benchmark_control_saturation.py and recorded in the artifact.",
     "The 'negative_control' scenario runs the same rig with the video path disabled: it proves that a passing saturated run is not an artefact of the video path having been switched off by accident, and that the control path delivers every message on an idle link too.",
-    "The control producer's schedule is absolute: a late wake is absorbed by the next slot rather than by shifting every slot that follows. The obvious alternative \u2014 resetting the phase to 'now + period' \u2014 makes the measured period the wake error plus the configured period, so a 500 us wake error turns a 5 ms period into a 5.5 ms one and the control plane reports ~182 Hz instead of the profile's 200 Hz. On Windows the wait is a high-resolution waitable timer (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION), because the default ~15.6 ms system tick would cap the producer at ~64 Hz and the measured rate would describe the host's timer rather than the transport."
+    "The control producer's schedule is absolute: a late wake is absorbed by the next slot rather than by shifting every slot that follows. The obvious alternative \u2014 resetting the phase to 'now + period' \u2014 makes the measured period the wake error plus the configured period, so a 500 us wake error turns a 5 ms period into a 5.5 ms one and the control plane reports ~182 Hz instead of the profile's 200 Hz. On Windows the wait is a high-resolution waitable timer (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION), because the default ~15.6 ms system tick would cap the producer at ~64 Hz and the measured rate would describe the host's timer rather than the transport.",
+    "The rate the binary runs at and the rate the invariants are checked against are the same number, taken from the profile unless the command line overrides it. They cannot drift apart: the defaults are 'unset' rather than the profile's values, because a default that *equals* the profile's value cannot be told apart from an explicit override, and a profile change would then leave the binary on the old rate while the assertion moved to the new one.",
+    "The binary reports whether its wait path had the high-resolution deadline ('high_resolution_wait'). The rate invariant is **skipped** when it did not: the measured rate is produced by a thread waiting on a deadline, so without the 100 ns deadline the run measures the host's timer rather than the transport, and a rate that missed the target would say nothing about the control plane. It is skipped rather than failed because it is *unknown*, not wrong. The verdict's 'skips' array lists every such property, so a green verdict cannot hide an unchecked one."
   ]
 }

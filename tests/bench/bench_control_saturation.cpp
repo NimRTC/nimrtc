@@ -1051,7 +1051,12 @@ public:
         handle_ = ::CreateWaitableTimerExW(
             nullptr, nullptr,
             CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        if (handle_ == nullptr) {
+        if (handle_ != nullptr) {
+            // The high-resolution flag was accepted.  The handle is
+            // armed with the *plain* `SetWaitableTimer`, and that is
+            // what gives the 100 ns deadline.
+            high_resolution_ = true;
+        } else {
             // The high-resolution flag is only honoured on Windows 10
             // version 1803 and newer.  Fall back to the ordinary
             // waitable timer, which is still far better than
@@ -1099,6 +1104,9 @@ public:
         }
     }
 
+    /** True iff the handle has the high-resolution deadline. */
+    bool high_resolution() const noexcept { return high_resolution_; }
+
 private:
     /** The portable fallback: sleep coarsely, then in fine slices. */
     static void coarse_fine_wait_until(Clock::time_point deadline) noexcept {
@@ -1118,6 +1126,7 @@ private:
     }
 
     HANDLE handle_ = nullptr;
+    bool high_resolution_ = false;
 };
 #endif
 
@@ -1151,6 +1160,27 @@ void wait_until(Clock::time_point deadline) noexcept {
             std::min<Clock::duration>(remaining,
                                       std::chrono::microseconds(300)));
     }
+#endif
+}
+
+/**
+ * @brief Whether the wait path has the high-resolution deadline.
+ *
+ * The measurement's *rate* is only worth what the timer can deliver:
+ * on Windows the producer's 5 ms period needs the 100 ns deadline of a
+ * high-resolution waitable timer, and without it the reported rate
+ * would describe the host's timer rather than the transport.  The
+ * artifact records this so a reader can tell a run that had the
+ * precision from one that did not.
+ */
+bool wait_has_high_resolution() noexcept {
+#if defined(_WIN32)
+    static thread_local HighResTimer probe;
+    return probe.high_resolution();
+#else
+    // POSIX has no equivalent portable primitive: the fallback is a
+    // sleep-and-slice loop, whose precision is the host's scheduler.
+    return false;
 #endif
 }
 
@@ -1250,6 +1280,15 @@ struct RunResult {
     // ---- The run's own state ---------------------------------------------
     bool ok = false;
     std::string error;
+
+    /** True iff the wait path had the high-resolution deadline.
+     *
+     *  The measured *rate* is only worth what the timer can deliver:
+     *  without the 100 ns deadline the reported rate would describe the
+     *  host's timer rather than the transport.  The artifact records
+     *  this so a reader can tell a run that had the precision from one
+     *  that did not. */
+    bool high_resolution_wait = false;
 };
 
 /** The percentile of a *sorted* sample vector, by index. */
@@ -1755,6 +1794,10 @@ RunResult run_scenario(const Options& opt) {
         return result;
     }
 
+    // Record whether the wait path had the high-resolution deadline,
+    // so the artifact cannot claim a precision the run did not have.
+    result.high_resolution_wait = wait_has_high_resolution();
+
     result.ok = true;
     return result;
 }
@@ -1865,6 +1908,7 @@ int main(int argc, char** argv) {
     j.field("video_frames_pushed", static_cast<unsigned long long>(r.video_frames_pushed));
     j.field("video_frames_rejected", static_cast<unsigned long long>(r.video_frames_rejected));
     j.field("five_tuples_distinct", r.five_tuples_distinct);
+    j.field("high_resolution_wait", r.high_resolution_wait);
     j.field("ok", r.ok);
     if (!r.error.empty()) j.field("error", r.error);
     j.end_object();

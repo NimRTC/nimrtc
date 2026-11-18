@@ -347,7 +347,10 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   property, so a green run cannot hide an unchecked one.
 
   A `Benchmark saturated link (plan E6)` step now runs in both the Windows
-  and the Linux CI legs, and the artifact is uploaded with them.
+  and the Linux CI legs, and the artifact is uploaded with them.  So does
+  a `Benchmark G2 control plane (plan E6)` step: the G2 measurement runs
+  in both legs too, because a benchmark that only runs on one developer's
+  machine is not a gate.
 
 - **The control plane now rides a real socket, and the G2 criterion is
   measured instead of asserted (remote-desktop plan `G2`, v1.2 plan item
@@ -426,10 +429,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   accident.  The committed sample is
   `docs/benchmarks/control_saturation_windows_x86_64.json`.
 
-  **The measurement is 195.7 Hz against the profile's 200 Hz with a p99 of
-  2.50 ms against the profile's 50 ms budget**, while the media link drops
-  9,433 of 10,652 datagrams; the negative control runs at 199.1 Hz with a
-  p99 of 2.06 ms.
+  **The measurement is 198.7 Hz against the profile's 200 Hz with a p99 of
+  2.36 ms against the profile's 50 ms budget**, while the media link drops
+  9,719 datagrams; the negative control runs at 199.1 Hz with a p99 of
+  2.06 ms.
+
+  Two wrapper guarantees are worth naming, because both close a way the
+  measurement could silently lie.  The **rate the binary runs at** and the
+  **rate the invariant is checked against** are the same number: both
+  come from the profile unless the command line overrides them, and the
+  defaults are *unset* rather than the profile's values, because a
+  default that **equals** the profile's value cannot be told apart from
+  an explicit override — so a profile change would leave the binary on
+  the old rate while the assertion moved to the new one, and the rate
+  invariant would compare the run against a target the run was never
+  asked to meet.  And the rate invariant is **skipped rather than
+  failed** on a host without the high-resolution deadline: the rate is
+  produced by a thread waiting on a deadline, so without the 100 ns
+  deadline the run measures the *host's timer* rather than the
+  transport, and a rate that missed the target would say nothing about
+  the control plane.  The binary reports whether it had the deadline
+  (`high_resolution_wait`), and the artifact records it — so the
+  artifact cannot claim a precision the run did not have.
 
   Getting those numbers to mean what they claim took **two defects in the
   harness itself**, and both are recorded because both are plausible:

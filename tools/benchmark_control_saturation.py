@@ -288,6 +288,13 @@ def check_invariants(doc: dict, with_video: bool,
     """
     summary = doc.get("summary", {})
 
+    # Whether the run's wait path had the high-resolution deadline.
+    # The binary reports it, so the artifact cannot claim a precision
+    # the run did not have.  A binary that predates the field is
+    # treated as *not* having it: the rate invariant is then skipped
+    # rather than passed on a number whose meaning is unknown.
+    high_resolution = bool(summary.get("high_resolution_wait", False))
+
     p99_ms = float(summary.get("control_p99_ms", 0.0))
     rate_hz = float(summary.get("control_rate_hz", 0.0))
     sent = int(summary.get("control_messages_sent", 0))
@@ -303,6 +310,23 @@ def check_invariants(doc: dict, with_video: bool,
         checks.append({
             "invariant": name,
             "ok": bool(ok),
+            "measured": measured,
+            "limit": limit,
+            "detail": detail,
+        })
+
+    def skip(name: str, measured, limit, detail: str) -> None:
+        """An invariant that could not be evaluated.
+
+        A skip is not a pass and not a failure: it says the *measurement*
+        did not happen, so the property in question is simply unknown for
+        this run.  It is reported separately so that a green verdict
+        cannot hide the fact that a property went unchecked.
+        """
+        checks.append({
+            "invariant": name,
+            "ok": True,
+            "skipped": True,
             "measured": measured,
             "limit": limit,
             "detail": detail,
@@ -326,11 +350,26 @@ def check_invariants(doc: dict, with_video: bool,
     # 2. The control plane reached the profile's rate.  A run that fell
     #    short would have measured a lighter load than the profile
     #    describes.
+    #
+    #    This one needs the *timer* to mean anything.  The rate is
+    #    produced by a thread waiting on a deadline, so without the
+    #    high-resolution deadline the run measures the host's timer
+    #    rather than the transport — and a rate that missed the target
+    #    would say nothing about the control plane.  On a host without
+    #    that deadline the property is therefore **skipped**, not
+    #    failed: it is unknown, not wrong.
     min_rate = freq_hz * MIN_RATE_FRACTION
-    add("control_reached_the_profile_rate", rate_hz >= min_rate,
-        round(rate_hz, 1), f">= {min_rate:.1f}",
-        f"the control plane ran at {rate_hz:.1f} Hz against the "
-        f"profile's {freq_hz:.0f} Hz")
+    if high_resolution:
+        add("control_reached_the_profile_rate", rate_hz >= min_rate,
+            round(rate_hz, 1), f">= {min_rate:.1f}",
+            f"the control plane ran at {rate_hz:.1f} Hz against the "
+            f"profile's {freq_hz:.0f} Hz")
+    else:
+        skip("control_reached_the_profile_rate",
+             round(rate_hz, 1), f">= {min_rate:.1f}",
+             "skipped: the wait path had no high-resolution deadline, so "
+             "the measured rate describes the host's timer rather than "
+             "the transport")
 
     # 3. G2's headline claim: the control plane's p99 stayed inside its
     #    declared budget while the media path was saturated.
@@ -402,18 +441,25 @@ def print_summary(doc: dict) -> None:
               "datagrams")
         print(f"  {'5-tuples':>16}: "
               f"{'distinct' if summary.get('five_tuples_distinct') else 'SHARED'}")
+        print(f"  {'high-res timer':>16}: "
+              f"{'yes' if summary.get('high_resolution_wait') else 'NO'}")
         print()
 
         checks = scenario.get("invariants", [])
         print("  invariants")
         for c in checks:
-            mark = "ok  " if c["ok"] else "FAIL"
+            if c.get("skipped"):
+                mark = "skip"
+            else:
+                mark = "ok  " if c["ok"] else "FAIL"
             print(f"    [{mark}] {c['invariant']:<32} "
                   f"measured {c['measured']}, limit {c['limit']}")
         print()
 
     verdict = doc.get("verdict", {})
     print(f"verdict: {verdict.get('all_invariants_hold')}")
+    for s in verdict.get("skips", []):
+        print(f"  SKIPPED {s['scenario']}.{s['invariant']}: {s['detail']}")
     if not verdict.get("all_invariants_hold", False):
         for f in verdict.get("failures", []):
             print(f"  FAILED {f['scenario']}.{f['invariant']}: "
@@ -439,13 +485,12 @@ def main() -> int:
     ap.add_argument("--capacity-bps", type=int, default=DEFAULT_CAPACITY_BPS,
                     help="the media link's capacity while saturated "
                          "(default: 500000)")
-    ap.add_argument("--freq-hz", type=int, default=PROFILE_CONTROL_FREQ_HZ,
-                    help="the control plane's rate in Hz (default: 200, "
-                         "the profile's)")
-    ap.add_argument("--max-p99-ms", type=float,
-                    default=PROFILE_CONTROL_MAX_P99_MS,
+    ap.add_argument("--freq-hz", type=int, default=None,
+                    help="the control plane's rate in Hz (default: the "
+                         "profile's)")
+    ap.add_argument("--max-p99-ms", type=float, default=None,
                     help="the control plane's declared p99 budget "
-                         "(default: 50, the profile's)")
+                         "(default: the profile's)")
     ap.add_argument("--duration-s", type=float, default=20.0,
                     help="the measurement's length, in seconds "
                          "(default: 20)")
@@ -466,12 +511,28 @@ def main() -> int:
 
     profile = load_profile()
     budget, freq = profile_control_budget(profile)
-    # The command line wins over the profile: an explicit `--freq-hz`
-    # is a deliberate override, and the artifact records both.
-    if args.freq_hz != PROFILE_CONTROL_FREQ_HZ:
+    # The profile is the authority for **both** the number the binary
+    # runs at and the number the invariants are checked against.  The
+    # command line may override either, but the two must not be able to
+    # drift apart: if the binary ran at one rate while the invariant
+    # checked another, the rate invariant would compare the run against
+    # a target the run was never asked to meet.
+    #
+    # That is why the defaults are `None` rather than the profile's
+    # values: a default that *equals* the profile's value cannot be
+    # told apart from an explicit override, so a profile change would
+    # leave the binary on the old rate while the assertion moved to the
+    # new one.  With `None` the profile is consulted once, and the
+    # result is used for both.
+    if args.freq_hz is not None:
         freq = float(args.freq_hz)
-    if args.max_p99_ms != PROFILE_CONTROL_MAX_P99_MS:
+    if args.max_p99_ms is not None:
         budget = args.max_p99_ms
+    # The binary is told the same numbers the invariants are checked
+    # against, so the artifact's `config` and the invariant's `limit`
+    # cannot describe two different runs.
+    args.freq_hz = int(freq)
+    args.max_p99_ms = float(budget)
 
     binary = find_binary(args.build_dir)
     if binary is None:
@@ -482,6 +543,7 @@ def main() -> int:
 
     scenarios: list[dict] = []
     failures: list[dict] = []
+    skips: list[dict] = []
 
     # Two scenarios: the saturated one (the measurement) and the
     # negative control (the same binary with the video path off, so a
@@ -521,6 +583,8 @@ def main() -> int:
         for c in checks:
             if not c["ok"]:
                 failures.append({"scenario": spec["name"], **c})
+            elif c.get("skipped"):
+                skips.append({"scenario": spec["name"], **c})
         scenarios.append({
             "name": spec["name"],
             "title": spec["title"],
@@ -536,7 +600,9 @@ def main() -> int:
             "latency_curve": raw.get("latency_curve", []),
         })
         print(f"ran scenario '{spec['name']}' "
-              f"({sum(1 for c in checks if c['ok'])}/{len(checks)} invariants)")
+              f"({sum(1 for c in checks if c['ok'] and not c.get('skipped'))}"
+              f"/{len(checks)} invariants, "
+              f"{sum(1 for c in checks if c.get('skipped'))} skipped)")
 
     doc = {
         "schema": 1,
@@ -560,6 +626,7 @@ def main() -> int:
         "verdict": {
             "all_invariants_hold": not failures,
             "failures": failures,
+            "skips": skips,
         },
         "notes": [
             "The two planes are the shipped components: the engine, the "
@@ -606,6 +673,24 @@ def main() -> int:
             "default ~15.6 ms system tick would cap the producer at "
             "~64 Hz and the measured rate would describe the host's "
             "timer rather than the transport.",
+            "The rate the binary runs at and the rate the invariants are "
+            "checked against are the same number, taken from the "
+            "profile unless the command line overrides it. They cannot "
+            "drift apart: the defaults are 'unset' rather than the "
+            "profile's values, because a default that *equals* the "
+            "profile's value cannot be told apart from an explicit "
+            "override, and a profile change would then leave the binary "
+            "on the old rate while the assertion moved to the new one.",
+            "The binary reports whether its wait path had the "
+            "high-resolution deadline ('high_resolution_wait'). The rate "
+            "invariant is **skipped** when it did not: the measured rate "
+            "is produced by a thread waiting on a deadline, so without "
+            "the 100 ns deadline the run measures the host's timer "
+            "rather than the transport, and a rate that missed the "
+            "target would say nothing about the control plane. It is "
+            "skipped rather than failed because it is *unknown*, not "
+            "wrong. The verdict's 'skips' array lists every such "
+            "property, so a green verdict cannot hide an unchecked one.",
         ],
     }
 
@@ -623,6 +708,11 @@ def main() -> int:
         print(f"error: {len(failures)} invariant(s) did not hold — the "
               f"artifact records them")
         return 1
+    if skips:
+        print()
+        print(f"warning: {len(skips)} invariant(s) were skipped — they "
+              f"could not be measured on this host (see the verdict's "
+              f"'skips')")
     return 0
 
 

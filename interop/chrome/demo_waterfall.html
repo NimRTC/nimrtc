@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<!--
+  @file interop/chrome/demo_waterfall.html
+  @brief Chrome WebTransport waterfall page for NimRTC (M2 control group).
+
+  This is the browser-side "处刑台对照组" (execution-platform control group)
+  for the NimRTC demo: a page that connects to a NimRTC WebTransport
+  server with `new WebTransport(url)` — deliberately the WebTransport
+  data plane, NOT the WebRTC data-channel API (docs/plan/ai-game-demo-plan.md
+  §8 M2) — receives one video stream, and draws a waterfall of "frame
+  received" moments so the input-to-photon latency is readable in the
+  browser itself.
+
+  ## What the page does
+
+    1. Connect: `new WebTransport(url)`.  The URL comes from the `url`
+       query parameter, or is built as
+       `https://localhost:<wtport>/webtransport` (wtport default 9443).
+    2. Receive: every inbound datagram (and every chunk on a peer bidi
+       stream) is counted as one received frame and drawn on the
+       waterfall.  If the payload looks like an H.264 Annex-B access
+       unit and WebCodecs is available, the frame is decoded and
+       presented on a <canvas>; otherwise the frame is still counted and
+       waterfalled (the current slice guarantees "can connect and show",
+       protocol details are reported as-is — see the slice risk notes).
+    3. Send input: keyboard and mouse events are serialised as JSON and
+       sent over the WebTransport datagram plane.  Each input is also
+       marked on the waterfall, and the latency from an input to the
+       next received frame (input-to-photon) is measured and shown as
+       p50 / p95.
+    4. Expose results: connection state, frame count, waterfall stats
+       and the run verdict are shown directly on the page — no need to
+       dig through logs.
+
+  The verdict channel has two entries, so the page works both as a
+  standalone display and as a harness-driven scoreboard:
+
+    - over the WebTransport data plane: a datagram whose JSON has
+      `{"type": "verdict", ...}` is rendered in the verdict box;
+    - over the browser channel: the harness sets `window._rdVerdict`
+      and calls `window._showVerdict(obj)` (tools/rd_lan.py --viewer-url
+      pushes the LAN-run verdict this way).
+
+  ## Query parameters
+
+    url=<wt-url>      Full WebTransport URL (default: built from wtport).
+    wtport=<port>     WebTransport server UDP port (default 9443).
+    timeout=<ms>      Overall page budget in milliseconds (default 30000).
+
+  ## Notes
+
+  - WebTransport is only constructible from a secure context.  When the
+    page is opened from file:// (or over plain http:// to an http origin
+    without the secure-context exemption), Chrome refuses to construct a
+    WebTransport session; the page shows a clear "需要 http(s) 服务"
+    error instead of a silent blank waterfall.
+  - The page never uses the WebRTC data-channel API — its whole point is
+    the WebTransport plane.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>NimRTC WebTransport waterfall</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, sans-serif; margin: 0; padding: 1em;
+           background: #101418; color: #e8eaed; }
+    h1 { font-size: 16pt; margin: 0 0 0.4em 0; }
+    code, .mono { font-family: Consolas, 'Cascadia Mono', monospace; }
+
+    #status { font-weight: bold; color: #222; padding: 0.5em;
+              background: #f3f3f3; border: 1px solid #ddd;
+              font-family: Consolas, monospace; }
+    #status.connected { background: #e8f5e9; color: #1b5e20; }
+    #status.failed    { background: #ffebee; color: #b71c1c; }
+
+    #error { background: #b71c1c; color: #fff; padding: 0.6em 0.8em;
+             border-radius: 4px; margin: 0.6em 0; font-family: Consolas, monospace;
+             white-space: pre-wrap; }
+    #error[hidden] { display: none; }
+
+    .stats { display: flex; flex-wrap: wrap; gap: 1.5em; margin: 0.8em 0;
+             padding: 0.6em 0.8em; background: #1b2027; border-radius: 4px; }
+    .stat b { color: #ffd54f; font-family: Consolas, monospace; font-size: 11pt; }
+
+    #verdict { background: #263238; border: 1px solid #455a64; border-radius: 4px;
+               padding: 0.6em 0.8em; margin: 0.8em 0; white-space: pre-wrap;
+               font-family: Consolas, monospace; font-size: 10pt; }
+    #verdict[hidden] { display: none; }
+
+    #videoCanvas { max-width: 100%; max-height: 240px; background: #000;
+                   border: 1px solid #455a64; margin: 0.6em 0; }
+
+    /* The waterfall: one row per frame / input, monospace labels and
+       generous row spacing so frame numbers stay readable on 4K panels
+       (slice risk #3). */
+    #waterfall { background: #14181e; border: 1px solid #2a323c; border-radius: 4px;
+                 padding: 0.4em 0.6em; max-height: 60vh; overflow: auto;
+                 font-family: Consolas, 'Cascadia Mono', monospace; font-size: 11pt;
+                 line-height: 1.7; }
+    .wf-row { display: flex; align-items: baseline; gap: 0.5em;
+              border-bottom: 1px dotted #232a33; }
+    .wf-t   { color: #7f8c9d; min-width: 11em; text-align: right;
+              font-family: Consolas, monospace; }
+    .wf-label { color: #e8eaed; min-width: 9em; }
+    .wf-frame { color: #4fc3f7; }
+    .wf-input { color: #ffb74d; }
+    .wf-bar   { display: inline-block; height: 0.9em; border-radius: 2px;
+                background: #4fc3f7; min-width: 4px; }
+    .wf-bar.input { background: #ffb74d; }
+
+    pre#log { background: #1e1e1e; color: #d4d4d4; padding: 0.8em;
+              font-family: Consolas, monospace; font-size: 10pt;
+              max-height: 14em; overflow: auto; white-space: pre-wrap; }
+    .ok  { color: #2e7d32; }
+    .err { color: #c62828; }
+  </style>
+</head>
+<body>
+  <h1>NimRTC WebTransport waterfall <span class="mono" style="font-size:9pt">(M2 browser control group)</span></h1>
+  <div id="status">Loading…</div>
+  <div id="error" hidden></div>
+
+  <div class="stats">
+    <span class="stat">conn state: <b id="connState">idle</b></span>
+    <span class="stat">frames received: <b id="frameCount">0</b></span>
+    <span class="stat">inputs sent: <b id="inputCount">0</b></span>
+    <span class="stat">input→photon p50: <b id="i2pP50">—</b></span>
+    <span class="stat">input→photon p95: <b id="i2pP95">—</b></span>
+    <span class="stat">waterfall entries: <b id="wfCount">0</b></span>
+  </div>
+
+  <div id="verdict" hidden></div>
+
+  <canvas id="videoCanvas" width="640" height="360" hidden></canvas>
+
+  <div id="waterfall">
+    <div class="wf-row"><span class="wf-t">── t(ms)</span><span class="wf-label">event</span></div>
+  </div>
+
+  <pre id="log"></pre>
+
+<script>
+"use strict";
+
+// ----- Query parameters ------------------------------------------------------
+
+const PARAMS     = new URLSearchParams(window.location.search);
+const WT_PORT    = parseInt(PARAMS.get("wtport") || "9443", 10);
+const TIMEOUT_MS = parseInt(PARAMS.get("timeout") || "30000", 10);
+const WT_URL     = PARAMS.get("url") ||
+                   ("https://localhost:" + WT_PORT + "/webtransport");
+
+// ----- Page state -----------------------------------------------------------
+
+const state = {
+    session:      null,
+    connected:    false,
+    frames:       0,
+    inputs:       0,
+    startedAt:    performance.now(),
+    lastFrameAt:  null,
+    // Every input whose photon has not yet arrived.  Paired FIFO with the
+    // next received frame to measure input-to-photon in the browser.
+    pendingInputs: [],
+    i2pSamples:   [],
+    wfEntries:    0,
+    decoder:      null,
+};
+
+// ----- Logging / status / error helpers -------------------------------------
+
+function log(tag, msg) {
+    const line = "[" + new Date().toISOString() + "] [" + tag + "] " + msg;
+    console.log(line);
+    const el = document.getElementById("log");
+    if (el) {
+        el.textContent += line + "\n";
+        el.scrollTop = el.scrollHeight;
+    }
+}
+
+function setStatus(s, cls) {
+    const el = document.getElementById("status");
+    if (!el) return;
+    el.textContent = s;
+    el.className = cls || "";
+}
+
+// The clear error path: never a silent blank waterfall.  Used for the
+// file:// non-secure-context case (WebTransport needs a secure context)
+// and for any connection / signalling failure.
+function showError(msg) {
+    const el = document.getElementById("error");
+    if (!el) return;
+    el.textContent = String(msg);
+    el.hidden = false;
+    setStatus("Error", "failed");
+    log("ERROR", String(msg));
+}
+
+// ----- Waterfall -------------------------------------------------------------
+
+// Each received frame (and each input) becomes one waterfall row:
+//   <relative ms> <label> <bar>
+// The relative time is wall-clock since page load; the label is the frame
+// sequence number or the input kind; the bar width is proportional to the
+// gap since the previous entry so gaps are visually comparable.
+
+function addWaterfallEntry(kind, label, tMs, gapMs) {
+    const wf = document.getElementById("waterfall");
+    if (!wf) return;
+    const rel = (tMs - state.startedAt).toFixed(1).padStart(9, " ") + " ms";
+    const row = document.createElement("div");
+    row.className = "wf-row";
+
+    const t = document.createElement("span");
+    t.className = "wf-t";
+    t.textContent = rel;
+
+    const lb = document.createElement("span");
+    lb.className = "wf-label " + (kind === "input" ? "wf-input" : "wf-frame");
+    lb.textContent = label;
+
+    const bar = document.createElement("span");
+    bar.className = "wf-bar" + (kind === "input" ? " input" : "");
+    const w = Math.max(4, Math.min(240, (gapMs == null ? 8 : gapMs) / 2));
+    bar.style.width = w.toFixed(0) + "px";
+
+    row.appendChild(t);
+    row.appendChild(lb);
+    row.appendChild(bar);
+    wf.appendChild(row);
+
+    state.wfEntries++;
+    const cnt = document.getElementById("wfCount");
+    if (cnt) cnt.textContent = String(state.wfEntries);
+    wf.scrollTop = wf.scrollHeight;
+}
+
+function markInputOnWaterfall(kind, tMs) {
+    const prev = state.lastFrameAt != null ? state.lastFrameAt : state.startedAt;
+    addWaterfallEntry("input", kind, tMs, tMs - prev);
+}
+
+function markFrameOnWaterfall(seq, tMs) {
+    const prev = state.lastFrameAt != null ? state.lastFrameAt : state.startedAt;
+    addWaterfallEntry("frame", "frame #" + seq, tMs, tMs - prev);
+    state.lastFrameAt = tMs;
+}
+
+// ----- Input-to-photon stats --------------------------------------------------
+
+// On every received frame we pair the oldest input whose photon has not
+// arrived yet: the frame is that input's photon.  The sample is
+// (frame received time) - (input sent time), i.e. the browser-side
+// input-to-photon latency.  p50 / p95 are computed from the sample set.
+
+function percentile(sorted, p) {
+    if (sorted.length === 0) return null;
+    const idx = Math.min(sorted.length - 1,
+                         Math.max(0, Math.ceil(p * sorted.length) - 1));
+    return sorted[idx];
+}
+
+function updateI2pStats() {
+    const el50 = document.getElementById("i2pP50");
+    const el95 = document.getElementById("i2pP95");
+    if (state.i2pSamples.length === 0) {
+        if (el50) el50.textContent = "—";
+        if (el95) el95.textContent = "—";
+        return;
+    }
+    const sorted = state.i2pSamples.slice().sort((a, b) => a - b);
+    if (el50) el50.textContent = percentile(sorted, 0.50).toFixed(1) + " ms";
+    if (el95) el95.textContent = percentile(sorted, 0.95).toFixed(1) + " ms";
+}
+
+function onFrameReceived(tMs) {
+    state.frames++;
+    const fc = document.getElementById("frameCount");
+    if (fc) fc.textContent = String(state.frames);
+    markFrameOnWaterfall(state.frames, tMs);
+
+    // Pair the oldest pending input with this frame (its photon).
+    if (state.pendingInputs.length > 0) {
+        const input = state.pendingInputs.shift();
+        const latency = tMs - input.t;
+        if (latency >= 0) {
+            state.i2pSamples.push(latency);
+            updateI2pStats();
+        }
+    }
+}
+
+// ----- Frame presentation (best-effort WebCodecs) -----------------------------
+
+// The waterfall is the primary presentation; the <canvas> is a bonus when
+// the incoming datagram carries an H.264 Annex-B access unit and the
+// browser has WebCodecs.  Failure to decode is not an error of the page —
+// the frame is still counted and waterfalled (see slice risk notes).
+
+const START_CODES = [0x00, 0x00, 0x00, 0x01];
+
+function looksLikeAnnexB(bytes) {
+    if (bytes.length < 4) return false;
+    for (let i = 0; i < 4; i++) {
+        if (bytes[i] !== START_CODES[i]) return false;
+    }
+    return true;
+}
+
+function ensureDecoder() {
+    if (state.decoder) return state.decoder;
+    if (typeof window.VideoDecoder !== "function") return null;
+    const canvas = document.getElementById("videoCanvas");
+    if (!canvas) return null;
+    const ctx = canvas.getContext("2d");
+    try {
+        state.decoder = new VideoDecoder({
+            output: (frame) => {
+                canvas.hidden = false;
+                canvas.width = frame.displayWidth;
+                canvas.height = frame.displayHeight;
+                ctx.drawImage(frame, 0, 0, frame.displayWidth, frame.displayHeight);
+                frame.close();
+            },
+            error: (e) => {
+                log("DECODE", "VideoDecoder error: " + e);
+            },
+        });
+        state.decoder.configure({
+            codec: "avc1.42001f",
+            avc: { format: "annexb" },
+        });
+    } catch (e) {
+        log("DECODE", "could not initialise VideoDecoder: " + e);
+        state.decoder = null;
+    }
+    return state.decoder;
+}
+
+function tryPresentVideo(bytes) {
+    const decoder = ensureDecoder();
+    if (!decoder || !looksLikeAnnexB(bytes)) return;
+    try {
+        decoder.decode(new EncodedVideoChunk({
+            type: "key",
+            timestamp: 0,
+            data: bytes,
+        }));
+    } catch (e) {
+        log("DECODE", "decode rejected: " + e);
+    }
+}
+
+// ----- Control-plane messages on the WebTransport channel ---------------------
+
+// The page's verdict channel: a datagram / stream chunk whose payload is
+// JSON with `type: "verdict"` is the verdict of the run that sent it.
+// tools/rd_lan.py --viewer-url pushes the LAN-run verdict through the
+// browser channel (window._showVerdict); a future integration can also
+// forward it over the WebTransport data plane.
+
+function showVerdict(obj) {
+    const el = document.getElementById("verdict");
+    if (!el) return;
+    el.hidden = false;
+    el.textContent = "=== verdict ===" +
+        "\npass:     " + (obj.pass === true ? "PASS" : "FAIL") +
+        "\ndecoded:  " + (obj.decoded != null ? obj.decoded : "—") +
+        "\nrendered: " + (obj.rendered != null ? obj.rendered : "—") +
+        "\ndropped:  " + (obj.dropped != null ? obj.dropped : "—") +
+        "\nframes:   " + (obj.frames != null ? obj.frames : "—") +
+        "\n" + (obj.note ? "note:     " + obj.note : "");
+    log("VERDICT", JSON.stringify(obj));
+}
+
+// The harness sets window._rdVerdict and calls window._showVerdict() to
+// push the LAN-run verdict into the page (rd_lan.py --viewer-url).
+window._rdVerdict = null;
+window._showVerdict = function (obj) {
+    window._rdVerdict = obj;
+    showVerdict(obj);
+};
+
+function handleControlMessage(obj) {
+    if (!obj || typeof obj.type !== "string") return false;
+    if (obj.type === "verdict") {
+        showVerdict(obj);
+        return true;
+    }
+    return false;
+}
+
+// ----- Input events -----------------------------------------------------------
+
+// Keyboard and mouse events are serialised as JSON and sent over the
+// WebTransport datagram plane; the same event is marked on the waterfall
+// so the input moment and the following frame's photon are visually
+// adjacent — input-to-photon readable in the browser.
+
+async function sendInput(kind, detail) {
+    if (!state.session || !state.connected) {
+        log("INPUT", "input ignored — not connected: " + kind);
+        return;
+    }
+    const t = performance.now();
+    const msg = { "type": "input", "kind": kind, "t": t, "detail": detail };
+    const bytes = new TextEncoder().encode(JSON.stringify(msg));
+    state.pendingInputs.push({ t: t, kind: kind });
+    state.inputs++;
+    const ic = document.getElementById("inputCount");
+    if (ic) ic.textContent = String(state.inputs);
+    markInputOnWaterfall(kind, t);
+    try {
+        const w = state.session.datagrams.writable.getWriter();
+        await w.write(bytes);
+        try { w.releaseLock(); } catch (_) { /* noop */ }
+        log("INPUT", ">> " + JSON.stringify({ kind: kind, detail: detail }));
+    } catch (e) {
+        log("INPUT", "datagram send failed: " + e);
+    }
+}
+
+window.addEventListener("keydown", (e) => {
+    if (e.key === "F12") return;           // devtools; not a game input
+    sendInput("keydown", { key: e.key, code: e.code });
+}, { passive: true });
+
+window.addEventListener("mousedown", (e) => {
+    sendInput("mousedown", { x: e.clientX, y: e.clientY, button: e.button });
+}, { passive: true });
+
+// ----- WebTransport receive paths ---------------------------------------------
+
+function wireDatagramReader(session) {
+    const dt = session.datagrams;
+    const incomingDatagrams = (dt && dt.readable) ? dt.readable
+        : (dt && dt.incoming) ? dt.incoming
+        : dt;
+    if (!incomingDatagrams || typeof incomingDatagrams.getReader !== "function") {
+        showError("datagrams.readable is not available in this Chrome build");
+        return;
+    }
+    const reader = incomingDatagrams.getReader();
+    const pump = async () => {
+        try {
+            for (;;) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                const t = performance.now();
+                if (!value || value.byteLength === 0) continue;
+                // JSON control messages (verdict, …) are not frames.
+                if (value.byteLength < 512) {
+                    let text = null;
+                    try {
+                        text = new TextDecoder().decode(value);
+                    } catch (_) { /* not text */ }
+                    if (text) {
+                        try {
+                            const obj = JSON.parse(text);
+                            if (handleControlMessage(obj)) continue;
+                        } catch (_) { /* not JSON — falls through as a frame */ }
+                    }
+                }
+                onFrameReceived(t);
+                tryPresentVideo(new Uint8Array(value));
+            }
+        } catch (e) {
+            log("DGRAM", "datagram reader error: " + e);
+        }
+    };
+    pump();
+}
+
+function wireStreamReader(session) {
+    if (!session.incomingBidirectionalStreams) return;
+    const reader = session.incomingBidirectionalStreams.getReader();
+    const pump = async () => {
+        try {
+            for (;;) {
+                const { value: stream, done } = await reader.read();
+                if (done) break;
+                if (!stream) continue;
+                const chunkReader = stream.readable.getReader();
+                for (;;) {
+                    const { value, done: chunkDone } = await chunkReader.read();
+                    if (chunkDone || !value) break;
+                    const t = performance.now();
+                    if (value.byteLength === 0) continue;
+                    let text = null;
+                    try {
+                        text = new TextDecoder().decode(value);
+                    } catch (_) { /* not text */ }
+                    if (text) {
+                        try {
+                            const obj = JSON.parse(text);
+                            if (handleControlMessage(obj)) continue;
+                        } catch (_) { /* not JSON */ }
+                    }
+                    onFrameReceived(t);
+                    tryPresentVideo(new Uint8Array(value));
+                }
+            }
+        } catch (e) {
+            log("STREAM", "bidi stream reader error: " + e);
+        }
+    };
+    pump();
+}
+
+// ----- Boot / connect ---------------------------------------------------------
+
+async function run() {
+    log("INIT", "WT_URL=" + WT_URL + " TIMEOUT_MS=" + TIMEOUT_MS);
+
+    // ---- 0. Secure-context guard -------------------------------------------
+    // WebTransport is only constructible from a secure context.  Opening
+    // this page from file:// (or from an http:// origin Chrome does not
+    // treat as trustworthy) makes `new WebTransport` throw before any
+    // connection attempt — so say so up front instead of a blank page.
+    if (window.location.protocol === "file:") {
+        showError("WebTransport 需要 http(s) 安全上下文 —— 请用 http(s) 服务打开本页"
+                + "（例如 python -m http.server），不要从 file:// 打开。\n"
+                + "(WebTransport requires a secure context: serve this page over "
+                + "http(s), not file://.)");
+        return;
+    }
+    if (typeof WebTransport !== "function") {
+        showError("WebTransport API is not available in this browser build.");
+        return;
+    }
+
+    setStatus("Connecting…", "");
+    const elState = document.getElementById("connState");
+    if (elState) elState.textContent = "connecting";
+
+    // ---- 1. Construct the session ------------------------------------------
+    let session;
+    try {
+        session = new WebTransport(WT_URL);
+    } catch (e) {
+        showError("new WebTransport(" + WT_URL + ") threw: " + e
+                + "\n—— no signalling reachable; start the WebTransport server "
+                + "and retry.");
+        return;
+    }
+    state.session = session;
+    window.wtSession = session;
+
+    // ---- 2. Wire the receive paths before waiting on ready -----------------
+    // So the first datagram after the handshake is not missed.
+    wireDatagramReader(session);
+    wireStreamReader(session);
+
+    // ---- 3. ready -----------------------------------------------------------
+    try {
+        await Promise.race([
+            session.ready,
+            new Promise((_, reject) => setTimeout(
+                () => reject(new Error("connect timeout after " + TIMEOUT_MS + "ms")),
+                TIMEOUT_MS)),
+        ]);
+        state.connected = true;
+        if (elState) elState.textContent = "connected";
+        setStatus("WebTransport connected — receiving on "
+                + WT_URL, "connected");
+        log("WT", "session.ready resolved — CONNECTED ✓");
+    } catch (e) {
+        showError("无法建连（no signalling）: session.ready rejected: " + e
+                + "\n—— start the NimRTC WebTransport server (e.g. demo-wtserver) "
+                + "and reload.");
+        return;
+    }
+
+    // ---- 4. Shutdown on close -----------------------------------------------
+    session.closed.then(() => {
+        if (elState) elState.textContent = "closed";
+        log("WT", "session closed");
+    }).catch((e) => {
+        if (elState) elState.textContent = "closed (error)";
+        log("WT", "session closed with error: " + e);
+    });
+}
+
+window.addEventListener("load", () => {
+    run().catch((e) => {
+        showError("unexpected harness failure: " + e);
+    });
+});
+</script>
+</body>
+</html>

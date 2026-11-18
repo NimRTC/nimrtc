@@ -36,6 +36,8 @@
  * ```
  *   rd_device                       # answer on stdin/stdout
  *   rd_device --capture windows-wgc # pick the capture backend
+ *   rd_device --game-source         # capture from the synthetic game source
+ *   rd_device --game-source --game-fps 30   # ... at 30 fps instead of 60
  *   rd_device --codec av1           # pick the codec
  *   rd_device --backend software    # force the software codec
  *   rd_device --duration 120        # stop after two minutes
@@ -65,6 +67,7 @@
 
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/plugins/control_channel.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
@@ -76,6 +79,7 @@
 #include <nimrtc/rd_input_inject/input_injector.hpp>
 #include <nimrtc/rd_session/session_guard.hpp>
 
+#include "game_source.hpp"
 #include "rd_signalling.hpp"
 
 namespace {
@@ -94,6 +98,15 @@ namespace rds = nimrtc::rd_session;
 struct Options {
     /** The capture backend's plugin id ("" = the platform's default). */
     std::string capture_name;
+    /**
+     * Whether to capture from the synthetic whack-a-mole game source
+     * instead of the real screen (slice v1-game-source).  Off by
+     * default: the device keeps capturing the real screen unless this
+     * flag is passed explicitly.
+     */
+    bool game_source = false;
+    /** The game source's frame rate (slice v1-game-source). */
+    std::uint32_t game_fps = 60;
     /** The codec's plugin id. */
     std::string codec_name = "h264";
     /** The codec backend class: "auto" / "hardware" / "software". */
@@ -138,6 +151,8 @@ void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Usage: %s [options]\n"
         "  --capture <id>        Capture backend (default: %s)\n"
+        "  --game-source         Capture from the synthetic whack-a-mole game source\n"
+        "  --game-fps <n>        The game source frame rate (default: 60)\n"
         "  --codec <id>          Video codec (default: h264; also: av1, h265)\n"
         "  --backend <class>     Codec backend: auto | hardware | software\n"
         "  --width <px>          Capture width (default: the device's best)\n"
@@ -242,6 +257,19 @@ private:
     std::uint64_t events_injected_ = 0;
     std::uint64_t events_denied_ = 0;
     std::uint64_t events_refused_ = 0;
+
+    // The most recent frame binding seen on an inbound event
+    // (v2-input-binder): the `ref_frame` id the event named, plus the
+    // capture instant and the frame age the device resolved it to.  The
+    // has_* flags are the honest report — an id the frame table no
+    // longer knows is shown as unknown, never guessed (spec risks 1
+    // and 2).
+    bool          has_binding_ref_frame_   = false;
+    std::uint64_t binding_ref_frame_id_    = 0;
+    bool          has_binding_capture_ts_  = false;
+    std::int64_t  binding_capture_ts_us_   = 0;
+    bool          has_binding_age_us_      = false;
+    std::int64_t  binding_age_us_          = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -255,13 +283,43 @@ bool DeviceSession::start() {
     // the frames from the device's bounded queue **on the tick thread**
     // and drives them through the encoder, so this program never calls
     // `send_video()`.
-    cfg.video_capture_name = opts_.capture_name.empty()
-                                 ? default_capture_name()
-                                 : opts_.capture_name;
     cfg.video_capture_pump  = true;
-    if (opts_.width != 0 || opts_.height != 0) {
-        cfg.video_capture_config.format.width  = opts_.width;
-        cfg.video_capture_config.format.height = opts_.height;
+
+    if (opts_.game_source) {
+        // ---- The synthetic game source (slice v1-game-source) ---------------
+        //
+        // A *memory-frame* capture device: it synthesises a whack-a-mole
+        // picture on its own thread and fills the same bounded capture
+        // queue the screen backends use, so the capture pump drives it to
+        // the encoder with zero changes to the pump itself.  It is an
+        // explicit opt-in — the default path below stays the real screen
+        // capture.
+        static nimrtc::rd::GameSourceFactory game_factory;
+        nimrtc::core::PluginRegistry::instance().register_video_capture(
+            game_factory.id(), &game_factory);
+        cfg.video_capture_name = std::string(game_factory.id());
+        // The slice's "720p floor": the demo picture is readable at the
+        // default size, and both the size and the frame rate are
+        // configurable (`--width` / `--height` / `--game-fps`).
+        cfg.video_capture_config.format.width  = opts_.width  != 0
+                                                     ? opts_.width  : 1280;
+        cfg.video_capture_config.format.height = opts_.height != 0
+                                                     ? opts_.height : 720;
+        cfg.video_capture_config.format.fps    = opts_.game_fps;
+        cfg.video_width  = cfg.video_capture_config.format.width;
+        cfg.video_height = cfg.video_capture_config.format.height;
+        cfg.video_fps    = opts_.game_fps;
+    } else {
+        cfg.video_capture_name = opts_.capture_name.empty()
+                                     ? default_capture_name()
+                                     : opts_.capture_name;
+        if (opts_.width != 0 || opts_.height != 0) {
+            cfg.video_capture_config.format.width  = opts_.width;
+            cfg.video_capture_config.format.height = opts_.height;
+        }
+        cfg.video_width  = opts_.width  != 0 ? opts_.width  : 1280;
+        cfg.video_height = opts_.height != 0 ? opts_.height : 720;
+        cfg.video_fps    = 30;
     }
     // The device wants the pointer composited into the picture when the
     // backend can do it (the capability check in the engine reports the
@@ -276,9 +334,6 @@ bool DeviceSession::start() {
     cfg.video_codec_name    = opts_.codec_name;
     cfg.video_codec_backend = opts_.codec_backend;
     cfg.video_content_hint  = np::VideoEncoderParams::ContentHint::kDetail;
-    cfg.video_width         = opts_.width != 0 ? opts_.width : 1280;
-    cfg.video_height        = opts_.height != 0 ? opts_.height : 720;
-    cfg.video_fps           = 30;
 
     // ---- The control plane (plan G1) ---------------------------------------
     if (!opts_.control_channel_name.empty()) {
@@ -469,6 +524,22 @@ void DeviceSession::handle_control_message(
 }
 
 void DeviceSession::apply_event(const rdi::InputEvent& event) {
+    // The frame binding (v2-input-binder): an event that names a frame
+    // gets its id resolved to the capture instant and the frame age —
+    // the "the click happened on the frame the operator was looking at"
+    // check (plan G5).  A lookup that misses is reported as unknown,
+    // never guessed (spec risks 1 and 2).
+    if (event.ref_frame.has_value()) {
+        has_binding_ref_frame_  = true;
+        binding_ref_frame_id_   = *event.ref_frame;
+        const auto capture_ts   = engine_->ref_frame_to_capture_ts(*event.ref_frame);
+        const auto age_us       = engine_->data_message_frame_age_us(*event.ref_frame);
+        has_binding_capture_ts_ = capture_ts.has_value();
+        if (capture_ts.has_value()) binding_capture_ts_us_ = *capture_ts;
+        has_binding_age_us_     = age_us.has_value();
+        if (age_us.has_value()) binding_age_us_ = *age_us;
+    }
+
     // The watchdog sees *every* event: any activity counts as liveness,
     // and a release of the dead-man button enters the safe state.
     watchdog_->observe(event, now_us());
@@ -578,16 +649,38 @@ int DeviceSession::run() {
             last_report_us = t;
             const auto stats = engine_->stats();
             const auto control = engine_->control_channel_stats();
+            // The frame binding (v2-input-binder): the `ref_frame` id the
+            // most recent input event named, and the capture instant /
+            // frame age the device resolved it to (spec req 4).  "none"
+            // and "n/a" are the honest reports for a frame the table does
+            // not know — the device never guesses a capture instant
+            // (spec risks 1 and 2).
+            std::string ref_frame_repr = "none";
+            if (has_binding_ref_frame_) {
+                ref_frame_repr = std::to_string(binding_ref_frame_id_);
+            }
+            std::string capture_ts_repr = "n/a";
+            if (has_binding_capture_ts_) {
+                capture_ts_repr = std::to_string(binding_capture_ts_us_);
+            }
+            std::string age_us_repr = "n/a";
+            if (has_binding_age_us_) {
+                age_us_repr = std::to_string(binding_age_us_);
+            }
             std::fprintf(stderr,
                          "[rd_device] capture=%llu pumped=%llu ctrl_in=%llu "
-                         "ctrl_sent=%llu injected=%llu denied=%llu refused=%llu\n",
+                         "ctrl_sent=%llu injected=%llu denied=%llu refused=%llu "
+                         "ref_frame=%s capture_ts_us=%s age_us=%s\n",
                          static_cast<unsigned long long>(stats.video_capture_device_frames_captured),
                          static_cast<unsigned long long>(stats.video_capture_pumped_frames),
                          static_cast<unsigned long long>(control.messages_received),
                          static_cast<unsigned long long>(control.messages_sent),
                          static_cast<unsigned long long>(events_injected_),
                          static_cast<unsigned long long>(events_denied_),
-                         static_cast<unsigned long long>(events_refused_));
+                         static_cast<unsigned long long>(events_refused_),
+                         ref_frame_repr.c_str(),
+                         capture_ts_repr.c_str(),
+                         age_us_repr.c_str());
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -623,6 +716,10 @@ int main(int argc, char** argv) {
         const bool has_next = (i + 1 < argc);
         if (arg == "--capture" && has_next) {
             opts.capture_name = argv[++i];
+        } else if (arg == "--game-source") {
+            opts.game_source = true;
+        } else if (arg == "--game-fps" && has_next) {
+            opts.game_fps = static_cast<std::uint32_t>(std::atoi(argv[++i]));
         } else if (arg == "--codec" && has_next) {
             opts.codec_name = argv[++i];
         } else if (arg == "--backend" && has_next) {

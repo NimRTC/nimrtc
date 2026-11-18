@@ -112,6 +112,24 @@ rules:
     action: deny
     basis: "policy.yaml#protect-agents"
     reason: "Project instructions are read-only"
+  - id: allow-write-demo-agent
+    match: { path: "demo-agent-realtime/**", operation: "write" }
+    action: allow
+    basis: "policy.yaml#allow-write-demo-agent"
+    description: "AI决策模块目录 — agents may write"
 
-anchors:
-  policy: "sha256:init"
+
+# 策略哈希锚点不在这里 —— 它独立存放在 policy/lock.json（C5）。
+# 锚点写在策略文件里是自证：改策略的人顺手把哈希也改掉，事后就看不出
+# 「当时按什么标准拦的」被换过。改策略不改锚点 = 可检出的失配。
+
+arch:
+  - kind: missing_dependency
+    action: ask
+    basis: "policy.yaml#prototype-phase"
+    guidance: "原型期：设计先声明依赖、实现按切片推进，未落地的依赖只提示不拦；交付前收紧为 deny"
+
+  - kind: undeclared_dependency
+    action: ask
+    basis: "policy.yaml#prototype-phase"
+    guidance: "原型期：C++ include 跨模块耦合先暴露不拦，交付前收紧为 deny"

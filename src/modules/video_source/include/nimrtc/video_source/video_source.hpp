@@ -63,15 +63,29 @@ enum class NIMRTC_API_STABLE Pattern : std::uint8_t {
     kFrameCount = 3,   ///< Animated gradient + frame counter overlay
 };
 
+/** Default source geometry for the M1 game-source (Demo plan §4.1 / §8 M1):
+ *  a 720p floor (1280×720) at 60 fps composite picture.  The whack-a-mole
+ *  game that M1 feeds through the memory frame source starts from this
+ *  posture so a default-constructed `MemoryVideoSource` is ready to drive
+ *  the encoder without any further tuning.
+ *
+ *  `start_frame_seq` is the per-SSRC frame-sequence start and stays
+ *  configurable (default 0) so a game can resume numbering after a
+ *  restart instead of re-emitting seq 0. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDefaultSourceWidth    = 1280;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDefaultSourceHeight   = 720;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDefaultSourceFps      = 60;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDefaultStartFrameSeq  = 0;
+
 struct NIMRTC_API_STABLE SourceConfig {
-    std::uint32_t width  = 640;
-    std::uint32_t height = 480;
+    std::uint32_t width  = kDefaultSourceWidth;
+    std::uint32_t height = kDefaultSourceHeight;
 
     /** Pixel format emitted (currently I420 supported; others are 0-filled). */
     video_frame::PixelFormat format = video_frame::PixelFormat::kI420;
 
     /** Target frame rate (frames per second). */
-    std::uint32_t fps = 30;
+    std::uint32_t fps = kDefaultSourceFps;
 
     /** SSRC of the produced RTP stream. */
     std::uint32_t ssrc = 0x12345678;
@@ -88,7 +102,7 @@ struct NIMRTC_API_STABLE SourceConfig {
     std::int64_t  start_capture_ts_us = 0;
 
     /** Per-SSRC frame sequence number start. */
-    std::uint32_t start_frame_seq = 0;
+    std::uint32_t start_frame_seq = kDefaultStartFrameSeq;
 };
 
 // ---------------------------------------------------------------------------

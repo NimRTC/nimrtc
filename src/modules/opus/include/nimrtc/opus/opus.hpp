@@ -158,6 +158,25 @@ public:
                              std::size_t output_capacity,
                              bool force_dtx = false) noexcept;
 
+    /** Encode int16 PCM samples to Opus (the native `opus_encode` path).
+     *
+     *  This is the int16 twin of `encode()`: TTS synthesizers and ASR
+     *  feature front-ends emit signed 16-bit PCM, and the voice-agent TTS
+     *  return path (slice v4-voice-agent) feeds exactly that into the
+     *  encoder without a float round-trip.  The same frame-size rules as
+     *  `encode()` apply (2.5 / 5 / 10 / 20 / 40 / 60 ms).
+     *
+     *  @param pcm  Interleaved PCM samples in signed int16
+     *              (num_samples × channels).
+     *  @param num_samples  Number of samples per channel.
+     *  @param output  Output buffer for encoded Opus packets.
+     *  @param output_capacity  Capacity of the output buffer in bytes.
+     *  @return Number of encoded bytes, or 0 on error / DTX silence. */
+    std::size_t encode_int16(const std::int16_t* pcm,
+                             std::size_t num_samples,
+                             std::uint8_t* output,
+                             std::size_t output_capacity) noexcept;
+
     /** Packet loss concealment: generate a PLC frame.
      *  Fills output with a synthetic frame derived from the last decoded audio. */
     std::size_t encode_plc(std::uint8_t* output,

@@ -214,8 +214,26 @@ struct NIMRTC_API_STABLE NetFeedbackSnapshot {
     std::uint32_t cumulative_packets_lost = 0;
 
     /** Round-trip time, measured from the LSR / DLSR pair of a Receiver
-     *  Report against our own last Sender Report. */
+     *  Report against our own last Sender Report.
+     *
+     *  **Only meaningful when `has_rtt` is true.**  A Receiver Report
+     *  carries the LSR / DLSR pair, but the pair only yields a round-trip
+     *  time when the LSR names a Sender Report *we actually sent* — and
+     *  until the engine has sent one, a peer's report cannot be turned
+     *  into a round trip at all.  `has_rtt` is the flag that says the
+     *  number was measured; the number itself is 0 before that, which is
+     *  indistinguishable from a genuinely zero round trip without it. */
     core::Milliseconds rtt{0};
+
+    /** True once a round-trip time has been **measured**.
+     *
+     *  This is narrower than `has_loss_rtt`, which is true as soon as
+     *  *any* Receiver Report has been seen.  A report whose LSR does not
+     *  match our own Sender Report carries loss and jitter but no
+     *  round trip, so the two facts are genuinely different: a host
+     *  asking "how far away is the peer?" needs to know whether the
+     *  figure was measured at all, not merely that a report arrived. */
+    bool has_rtt = false;
 
     /** Inter-arrival jitter in milliseconds (0 when the RTP clock rate of
      *  the described stream is unknown). */

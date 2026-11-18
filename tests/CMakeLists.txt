@@ -2428,6 +2428,72 @@ nimrtc_add_engine_test(test_engine_audio_stream_stats test_engine_audio_stream_s
 nimrtc_add_engine_test(test_engine_datachannel_stats test_engine_datachannel_stats.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.2.0 (plan Track S / S5) -- the transport-plane statistics: the ICE
+# agent's state and nominated candidate pair, the DTLS session's state
+# and role, the SRTP counters and the round-trip time the feedback path
+# measured.
+#
+# The engine is driven through a fake ICE transport and a fake
+# network-feedback collector, so every number on the surface is one the
+# test placed there -- no handshake, no probe.
+#
+# The test also reaches the projection's *vocabulary* directly
+# (`src/engine/src/engine_transport_stats.hpp`), because the property
+# worth pinning down is that the DTLS state names are derived from the
+# DTLS module's own names rather than copied from a second table.  That
+# header is engine-private; including it here does not make it public.
+# ---------------------------------------------------------------------------
+add_executable(test_engine_transport_stats test_engine_transport_stats.cpp)
+if(WIN32)
+    target_link_libraries(test_engine_transport_stats PRIVATE ws2_32)
+elseif(APPLE)
+    target_link_libraries(test_engine_transport_stats PRIVATE c++ pthread)
+else()
+    target_link_libraries(test_engine_transport_stats PRIVATE atomic)
+endif()
+target_link_libraries(test_engine_transport_stats PRIVATE
+    nimrtc::engine
+    nimrtc::ice
+    nimrtc::rtp
+    nimrtc::sdp
+    nimrtc::jb
+    nimrtc::audio3a
+    nimrtc::dtls_seam
+    nimrtc::sctp
+    nimrtc::raw_udp
+    nimrtc::transport
+    nimrtc::datachannel
+    nimrtc::net_feedback
+    nimrtc::web_transport
+    nimrtc::session
+    # The DTLS module's *concrete* library -- the test calls
+    # `DtlsSession::state_name()` to prove the projection derives its
+    # names from the module's own spelling.  `nimrtc::dtls_seam` carries
+    # the seam headers; the concrete library carries the symbol.
+    nimrtc::dtls
+    GTest::gtest_main)
+target_include_directories(test_engine_transport_stats PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_engine_transport_stats PRIVATE _WIN32_WINNT=0x0601)
+endif()
+set_target_properties(test_engine_transport_stats PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+nimrtc_apply_options(test_engine_transport_stats LENIENT)
+add_test(NAME test_engine_transport_stats
+    COMMAND $<TARGET_FILE:test_engine_transport_stats>)
+set_tests_properties(test_engine_transport_stats PROPERTIES TIMEOUT 90)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_transport_stats
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 60)
+endif()
+nimrtc_copy_wolfssl_certs(test_engine_transport_stats)
+
+# ---------------------------------------------------------------------------
 # v1.2.0 audio pipeline WP-9 — the cross-end capture timestamp of an
 # inbound audio frame (spec B-17).
 #

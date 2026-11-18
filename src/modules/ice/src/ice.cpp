@@ -1311,6 +1311,80 @@ std::optional<Candidate> IceTransport::selected_remote() const noexcept {
     return parse_candidate(buf);
 }
 
+// ---------------------------------------------------------------------------
+// selected_pair — the seam's view of the nominated pair
+// ---------------------------------------------------------------------------
+//
+// The projection is deliberately *lossy*: the seam carries the address,
+// the port, the protocol and the candidate type, and drops the priority,
+// the foundation and the related address.  Those three are what a
+// connectivity diagnosis needs, and the full candidate is still
+// available through the concrete `selected_local()` / `selected_remote()`
+// accessors.
+//
+// The pair is read in ONE `juice_get_selected_candidates()` call rather
+// than two, because the two calls are not atomic: an ICE restart between
+// them would hand back the local end of the *old* pair and the remote
+// end of the *new* one.  libjuice fills both buffers from one snapshot
+// of the agent's selected entry, so a single call cannot straddle it.
+// ---------------------------------------------------------------------------
+namespace {
+
+/** Project a concrete candidate onto the seam's shape. */
+plugins::IceCandidate to_seam_candidate(const Candidate& c) {
+    plugins::IceCandidate out;
+    out.address  = c.host;
+    out.port     = c.port;
+
+    // The candidate's transport is "UDP" / "TCP" in SDP; the seam
+    // publishes it lower-cased so a host can compare it against a
+    // lower-cased string without a case-insensitive compare.
+    std::string proto = c.transport;
+    for (auto& ch : proto) {
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    out.protocol = proto.empty() ? std::string("udp") : proto;
+
+    switch (c.type) {
+        case CandidateType::Host:  out.type = "host";  break;
+        case CandidateType::Srflx: out.type = "srflx"; break;
+        case CandidateType::Prflx: out.type = "prflx"; break;
+        case CandidateType::Relay: out.type = "relay"; break;
+    }
+    return out;
+}
+
+}  // namespace
+
+std::optional<plugins::IceCandidatePair>
+IceTransport::selected_pair() const noexcept {
+    if (!impl_->agent) return std::nullopt;
+
+    char local_buf[JUICE_MAX_CANDIDATE_SDP_STRING_LEN] = {0};
+    char remote_buf[JUICE_MAX_CANDIDATE_SDP_STRING_LEN] = {0};
+    if (juice_get_selected_candidates(impl_->agent,
+                                      local_buf, sizeof(local_buf),
+                                      remote_buf, sizeof(remote_buf))
+        != JUICE_ERR_SUCCESS) {
+        return std::nullopt;
+    }
+
+    // libjuice reports the *remote* end of the pair as a candidate that
+    // was learned from the peer, so it parses with the same grammar as
+    // the local one.  Either end failing to parse means the pair is not
+    // describable, and a half-described pair is worse than none: a host
+    // would report a selected path whose far end it cannot name.
+    const auto local = parse_candidate(local_buf);
+    if (!local) return std::nullopt;
+    const auto remote = parse_candidate(remote_buf);
+    if (!remote) return std::nullopt;
+
+    plugins::IceCandidatePair pair;
+    pair.local  = to_seam_candidate(*local);
+    pair.remote = to_seam_candidate(*remote);
+    return pair;
+}
+
 plugins::Status IceTransport::gather_candidates() noexcept {
     if (!impl_->agent) return plugins::kErrNotReady;
     return juice_gather_candidates(impl_->agent) == JUICE_ERR_SUCCESS

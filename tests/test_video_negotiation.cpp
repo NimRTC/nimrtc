@@ -140,14 +140,39 @@ protected:
         return sdp;
     }
 
-    /** Rewrite the offer so that the video m-line offers VP8 as well. */
+    /** Rewrite the offer so that the video m-line offers VP8 as well.
+     *
+     *  The VP8 payload type must be one the offer does **not** already
+     *  use.  The engine reserves the first free dynamic payload type for
+     *  the RFC 4588 retransmission stream, and in the default
+     *  configuration that is 96 — so the codec under test has to use
+     *  another number, or the two would collide and the offer would be
+     *  malformed.
+     *
+     *  The payload type is *added* to the format list rather than
+     *  replacing it: the list already carries the retransmission payload
+     *  type, and dropping it would leave the `a=rtpmap:` / `a=fmtp:`
+     *  lines describing a payload type the m-line no longer names — a
+     *  malformed offer that no peer would send. */
     static std::string with_vp8_offered(std::string offer,
                                          const EngineConfig& cfg) {
         const std::string pt = video_pt(cfg);
-        offer = set_video_formats(offer, "96 " + pt);
+        const std::string vp8_pt = "98";
+        offer = insert_payload_type(offer, vp8_pt);
         offer = insert_line_after(offer, "a=rtpmap:" + pt + " H264/90000",
-                                  "a=rtpmap:96 VP8/90000");
+                                  "a=rtpmap:" + vp8_pt + " VP8/90000");
         return offer;
+    }
+
+    /** Add @p pt to the video m-line's format list. */
+    static std::string insert_payload_type(std::string sdp,
+                                           const std::string& pt) {
+        const std::size_t pos = sdp.find("m=video ");
+        if (pos == std::string::npos) return {};
+        const std::size_t eol = sdp.find("\r\n", pos);
+        if (eol == std::string::npos) return {};
+        sdp.insert(eol, " " + pt);
+        return sdp;
     }
 
     /** Rewrite the offer so that the video codec is one NimRTC cannot
@@ -191,11 +216,11 @@ TEST_F(VideoNegotiation, AnswerNamesOnlyTheNegotiatedPayloadType) {
     NimRTCEngine rx(cfg);
     ASSERT_EQ(rx.open(), 0u);
 
-    // The peer offers VP8 (96) AND H.264 (102).  NimRTC implements only
-    // H.264, so the answer must name 102 — and only 102.
+    // The peer offers VP8 (98) AND H.264 (102).  NimRTC implements only
+    // H.264, so the answer must name 102 — and not 98.
     const std::string offer = with_vp8_offered(peer_offer(cfg), cfg);
     ASSERT_FALSE(offer.empty()) << "the peer must produce an offer";
-    ASSERT_NE(video_media_line(offer).find(" 96"), std::string::npos)
+    ASSERT_NE(video_media_line(offer).find(" 98"), std::string::npos)
         << "the rewritten offer must offer two video payload types:\n"
         << offer;
 
@@ -204,13 +229,26 @@ TEST_F(VideoNegotiation, AnswerNamesOnlyTheNegotiatedPayloadType) {
 
     const std::string m_line = video_media_line(*answer);
     ASSERT_FALSE(m_line.empty()) << "the answer must carry a video m-line";
-    EXPECT_EQ(m_line, "m=video 9 UDP/TLS/RTP/SAVPF 102")
-        << "the answer must name exactly the negotiated payload type";
+    // The answer names the negotiated media payload type, and — because
+    // the peer *did* offer the RFC 4588 retransmission stream — the
+    // retransmission payload type next to it (RFC 4588 §8, RFC 3264
+    // §6.1).  The media type comes first: it is the one the packet path
+    // stamps.
+    EXPECT_EQ(m_line, "m=video 9 UDP/TLS/RTP/SAVPF 102 96")
+        << "the answer must name the negotiated payload type and the "
+           "negotiated retransmission payload type";
 
     EXPECT_NE(answer->find("a=rtpmap:102 H264/90000"), std::string::npos)
         << "the negotiated codec's own rtpmap must survive into the answer";
-    EXPECT_EQ(answer->find("a=rtpmap:96"), std::string::npos)
+    EXPECT_EQ(answer->find("a=rtpmap:98 VP8/90000"), std::string::npos)
         << "the answer must not advertise a codec that was not negotiated";
+    // The retransmission payload type *is* negotiated, and it carries the
+    // RFC 4588 encoding — not a codec (RFC 4588 §8).
+    EXPECT_NE(answer->find("a=rtpmap:96 rtx/90000"), std::string::npos)
+        << "the answer must name the negotiated retransmission payload type";
+    EXPECT_NE(answer->find("a=fmtp:96 apt=102"), std::string::npos)
+        << "the retransmission payload type must name the payload type it "
+           "protects (RFC 4588 §8.1)";
 
     rx.close();
 }
@@ -235,11 +273,11 @@ TEST_F(VideoNegotiation, UnnegotiatedPayloadTypeIsDropped) {
 
     // ---- A packet on the OFFERED-BUT-NOT-NEGOTIATED payload type --------
     //
-    // The peer declared 96 on its video m-line, so the old routing rule
+    // The peer declared 98 on its video m-line, so the old routing rule
     // ("anything the peer declared on the video m-line is video") would
     // have pushed it into the H.264 pipeline.  It must not.
     {
-        const auto pkt = make_rtp(0x11223344u, /*pt=*/96, /*seq=*/1000,
+        const auto pkt = make_rtp(0x11223344u, /*pt=*/98, /*seq=*/1000,
                                   /*rtp_ts=*/90000);
         ASSERT_FALSE(pkt.empty());
         rx.feed_media_inbound(pkt.data(), pkt.size());
@@ -311,7 +349,11 @@ TEST_F(VideoNegotiation, PeerAnswerSelectsTheNegotiatedPayloadType) {
     auto* receiver = tx.video_receiver();
     ASSERT_NE(receiver, nullptr);
 
-    const auto wrong = make_rtp(0x55667788u, /*pt=*/96, /*seq=*/2000,
+    // The retransmission payload type (96) is *negotiated* now, so it is
+    // not the "wrong" one any more — it is the RFC 4588 stream.  A
+    // payload type that was neither negotiated for media nor for
+    // retransmission must still be dropped.
+    const auto wrong = make_rtp(0x55667788u, /*pt=*/99, /*seq=*/2000,
                                 /*rtp_ts=*/90000);
     ASSERT_FALSE(wrong.empty());
     tx.feed_media_inbound(wrong.data(), wrong.size());
@@ -395,8 +437,9 @@ TEST_F(VideoNegotiation, OfferNamesTheSenderPayloadType) {
     const std::string offer = tx.create_offer();
     ASSERT_FALSE(offer.empty());
 
-    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 120")
-        << "the offer must name the sender's payload type";
+    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 120 96")
+        << "the offer must name the sender's payload type and the "
+           "retransmission payload type";
     EXPECT_NE(offer.find("a=rtpmap:120 H264/90000"), std::string::npos);
     // Match the *SDP line forms* of the receiver's payload type, not the
     // bare digits: the DTLS fingerprint is colon-separated hex, so a chunk
@@ -429,7 +472,7 @@ TEST_F(VideoNegotiation, H265OfferNamesTheRfc7798EncodingAndFmtp) {
     // 90000 (the video clock, as for every video codec).
     EXPECT_NE(offer.find("a=rtpmap:116 H265/90000"), std::string::npos)
         << "the H.265 offer must name the H265 encoding on payload type 116";
-    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 116")
+    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 116 96")
         << "the H.265 offer must name the H.265 payload type";
 
     // RFC 7798 §4.4: the format parameters.  `tx-mode` is a *string*
@@ -461,7 +504,7 @@ TEST_F(VideoNegotiation, Av1OfferNamesTheUnifiedPlanEncodingAndFmtp) {
     // name is "AV1" on payload type 45.
     EXPECT_NE(offer.find("a=rtpmap:45 AV1/90000"), std::string::npos)
         << "the AV1 offer must name the AV1 encoding on payload type 45";
-    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 45");
+    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 45 96");
 
     EXPECT_NE(offer.find("a=fmtp:45 profile=0"), std::string::npos);
     EXPECT_NE(offer.find("level-idx=5"), std::string::npos);
@@ -487,7 +530,7 @@ TEST_F(VideoNegotiation, H265PeerOfferIsAnsweredWithH265) {
     const auto answer = rx.process_remote_sdp(offer);
     ASSERT_TRUE(answer.has_value()) << "an H.265 offer must be answerable";
 
-    EXPECT_EQ(video_media_line(*answer), "m=video 9 UDP/TLS/RTP/SAVPF 116")
+    EXPECT_EQ(video_media_line(*answer), "m=video 9 UDP/TLS/RTP/SAVPF 116 96")
         << "the answer must keep the negotiated H.265 payload type";
     EXPECT_NE(answer->find("a=rtpmap:116 H265/90000"), std::string::npos);
     EXPECT_EQ(answer->find("H264"), std::string::npos)
@@ -512,7 +555,7 @@ TEST_F(VideoNegotiation, Av1PeerOfferIsAnsweredWithAv1) {
     const auto answer = rx.process_remote_sdp(offer);
     ASSERT_TRUE(answer.has_value()) << "an AV1 offer must be answerable";
 
-    EXPECT_EQ(video_media_line(*answer), "m=video 9 UDP/TLS/RTP/SAVPF 45");
+    EXPECT_EQ(video_media_line(*answer), "m=video 9 UDP/TLS/RTP/SAVPF 45 96");
     EXPECT_NE(answer->find("a=rtpmap:45 AV1/90000"), std::string::npos);
     EXPECT_EQ(answer->find("H264"), std::string::npos);
 
@@ -560,7 +603,7 @@ TEST_F(VideoNegotiation, H265PinnedPayloadTypeIsHonoured) {
 
     const std::string offer = tx.create_offer();
     ASSERT_FALSE(offer.empty());
-    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 120");
+    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 120 96");
     EXPECT_NE(offer.find("a=rtpmap:120 H265/90000"), std::string::npos);
 
     tx.close();

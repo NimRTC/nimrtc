@@ -90,6 +90,9 @@ public:
                                           nimrtc::core::MutableByteSpan out) const noexcept override;
     plugins::Status   push_rtp(const plugins::VideoRtpPacket& packet,
                                plugins::TimestampUs now_us) noexcept override;
+    void              set_rtx_payload_type(std::uint8_t rtx_pt) noexcept override;
+    plugins::Status   push_rtp_rtx(const plugins::VideoRtpPacket& packet,
+                                   plugins::TimestampUs now_us) noexcept override;
     std::vector<std::uint16_t> pop_nack_entries() noexcept override;
     plugins::Status   tick(plugins::TimestampUs now_us) noexcept override;
     void              reset() noexcept override;
@@ -137,6 +140,10 @@ public:
 
     // ---- plugins::IVideoSender --------------------------------------------
     void              set_packet_callback(plugins::VideoSenderPacketCallback cb) noexcept override;
+    void              set_rtx_packet_callback(
+                            plugins::VideoSenderRtxCallback cb) noexcept override;
+    void              set_rtx_enabled(bool enabled) noexcept override;
+    bool              rtx_enabled() const noexcept override;
     plugins::Status   push_frame(const plugins::EncodedVideoFrame& frame,
                                  std::uint32_t rtp_timestamp) noexcept override;
     void              force_keyframe() noexcept override;
@@ -205,6 +212,7 @@ public:
 private:
     std::unique_ptr<VideoSender>                       concrete_;
     plugins::VideoSenderPacketCallback                 user_pkt_cb_;
+    plugins::VideoSenderRtxCallback                    user_rtx_cb_;
     /** Key-frame requests seen since the last `take_keyframe_requests()`
      *  (PLI / FIR arrivals). */
     std::uint32_t                                      keyframe_requests_ = 0;

@@ -49,6 +49,7 @@
 #include <nimrtc/video_payload/vp9.hpp>
 
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/rtx/rtx.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -324,6 +325,25 @@ struct VideoReceiver::Impl {
     }
 
     // ---------------------------------------------------------------------
+    // RFC 4588: a retransmission has arrived, so the packet is no longer
+    // missing.  Erase it from the pending-NACK list.
+    //
+    // Without this the receiver would keep NACKing a packet it already
+    // has — the peer would keep retransmitting it, and the loop would
+    // run until the packet fell out of the retransmission cache.  This
+    // is the "the restored number must be used *everywhere* the
+    // original would have been" requirement of the plan.
+    // ---------------------------------------------------------------------
+    void erase_pending_nack(std::uint16_t seq) noexcept {
+        for (auto it = pending_nacks.begin(); it != pending_nacks.end(); ++it) {
+            if (*it == seq) {
+                pending_nacks.erase(it);
+                return;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Flush the current FU-A buffer as a single NALU into the JB.
     // Called when we see the E bit on the last fragment.
     // ---------------------------------------------------------------------
@@ -405,10 +425,18 @@ struct VideoReceiver::Impl {
 
     // ---------------------------------------------------------------------
     // Handle a single RTP packet (after seq tracking).
+    //
+    // `seq` is the *effective* sequence number — the one the packet is
+    // accounted under.  For an ordinary packet that is its own sequence
+    // number; for a retransmission (RFC 4588) it is the **restored
+    // original** number, because everything downstream (the jitter
+    // buffer's frame assembly, the NACK bookkeeping) is keyed on the
+    // original's sequence space.
     // ---------------------------------------------------------------------
     void handle_payload(core::ByteSpan payload,
                         bool          marker,
                         std::uint32_t rtp_ts,
+                        std::uint16_t seq,
                         std::int64_t  arrival_us) noexcept {
         if (cfg.codec == video_frame::CodecKind::kH264) {
             const NaluType nt = peek_nalu_type(payload);
@@ -426,7 +454,7 @@ struct VideoReceiver::Impl {
                     fua_nalu_type   = inner;
                     fua_nri         = nri;
                     fua_rtp_ts      = rtp_ts;
-                    fua_start_seq   = highest_seq;
+                    fua_start_seq   = seq;
                     fua_buf.clear();
                     fua_end_marker  = marker;
                 }
@@ -464,7 +492,7 @@ struct VideoReceiver::Impl {
                 }
                 video_jb::InboundPacket pkt{};
                 pkt.ssrc          = cfg.ssrc;
-                pkt.seq           = highest_seq;
+                pkt.seq           = seq;
                 pkt.rtp_timestamp = rtp_ts;
                 pkt.arrival_us    = arrival_us;
                 pkt.marker        = marker;
@@ -499,7 +527,7 @@ struct VideoReceiver::Impl {
                     fu_h265_layer_id    = hdr->layer_id;
                     fu_h265_tid         = hdr->tid;
                     fu_h265_rtp_ts      = rtp_ts;
-                    fu_h265_start_seq   = highest_seq;
+                    fu_h265_start_seq   = seq;
                     fu_h265_buf.clear();
                 }
                 if (!fu_h265_in_progress) {
@@ -531,7 +559,7 @@ struct VideoReceiver::Impl {
                 }
                 video_jb::InboundPacket pkt{};
                 pkt.ssrc          = cfg.ssrc;
-                pkt.seq           = highest_seq;
+                pkt.seq           = seq;
                 pkt.rtp_timestamp = rtp_ts;
                 pkt.arrival_us    = arrival_us;
                 pkt.marker        = marker;
@@ -556,7 +584,7 @@ struct VideoReceiver::Impl {
 
             video_jb::InboundPacket pkt{};
             pkt.ssrc          = cfg.ssrc;
-            pkt.seq           = highest_seq;
+            pkt.seq           = seq;
             pkt.rtp_timestamp = rtp_ts;
             pkt.arrival_us    = arrival_us;
             pkt.marker        = marker;
@@ -599,7 +627,7 @@ struct VideoReceiver::Impl {
 
             video_jb::InboundPacket pkt{};
             pkt.ssrc          = cfg.ssrc;
-            pkt.seq           = highest_seq;
+            pkt.seq           = seq;
             pkt.rtp_timestamp = rtp_ts;
             pkt.arrival_us    = arrival_us;
             pkt.marker        = marker;
@@ -616,7 +644,7 @@ struct VideoReceiver::Impl {
         // VP8 / VP9: the raw payload, no NAL framing.
         video_jb::InboundPacket pkt{};
         pkt.ssrc          = cfg.ssrc;
-        pkt.seq           = highest_seq;
+        pkt.seq           = seq;
         pkt.rtp_timestamp = rtp_ts;
         pkt.arrival_us    = arrival_us;
         pkt.marker        = marker;
@@ -690,7 +718,68 @@ bool VideoReceiver::push_rtp(const rtp::PacketView& packet,
     // with now_us; for fragments it stays at now_us — close enough for
     // the JB's purpose.
     s.handle_payload(packet.payload, packet.marker,
-                     packet.timestamp, now_us);
+                     packet.timestamp, packet.seq, now_us);
+
+    s.drain_frames(now_us);
+    return true;
+}
+
+void VideoReceiver::set_rtx_payload_type(std::uint8_t rtx_pt) noexcept {
+    impl_->cfg.rtx_payload_type = rtx_pt;
+}
+
+bool VideoReceiver::push_rtp_rtx(const rtp::PacketView& packet,
+                                 std::int64_t now_us) noexcept {
+    auto& s = *impl_;
+
+    // The RTX path is only live when a retransmission payload type was
+    // negotiated.  Without one, a packet arriving on an unknown payload
+    // type is not ours to unwrap.
+    if (s.cfg.rtx_payload_type == 0) return false;
+
+    // RFC 4588 §4.1: the retransmission payload is the two-octet OSN
+    // header followed by the original packet's payload.  The header is
+    // exactly two octets — there is no marker byte in front of it (see
+    // the module's header comment), so a peer that sent a marker would
+    // have its sequence number restored 0x9000 too large.
+    const auto parsed = rtx::parse_payload(packet.payload);
+    if (!parsed.ok()) {
+        s.stats.rtx_packets_malformed++;
+        return false;
+    }
+
+    const std::uint16_t osn = parsed.value().osn;
+    const core::ByteSpan original = parsed.value().original;
+
+    s.stats.rtx_packets_received++;
+    s.stats.packets_pushed++;
+
+    // ---- The restored sequence number is what everything else sees ----
+    //
+    // The retransmission stream has its own sequence space (RFC 4588
+    // §4), so `packet.seq` is *not* the number the payload belongs
+    // under.  The OSN is.  Everything downstream is keyed on the
+    // original's sequence space:
+    //
+    //   * the jitter buffer's frame assembly (a frame's packets are
+    //     grouped by RTP timestamp, and the *sequence* decides which
+    //     packet of the frame this is);
+    //   * the NACK bookkeeping — the retransmitted packet must be
+    //     *erased* from the pending-NACK list, or the receiver will ask
+    //     for it again, and again, and again.
+    //
+    // The retransmission is a *late* arrival, so it must NOT go through
+    // `track_seq()`: the gap detector would see an old sequence number
+    // and ignore it (correct), but the erasure of the pending NACK is
+    // the part that matters and it is done explicitly below.
+
+    // Erase the restored sequence number from the pending NACK list:
+    // the packet has arrived, so it is no longer missing.
+    s.erase_pending_nack(osn);
+
+    // The frame's RTP timestamp and marker are the *original's*
+    // (RFC 4588 §4.1), so the payload lands in the frame it belongs to.
+    s.handle_payload(original, packet.marker, packet.timestamp, osn, now_us);
 
     s.drain_frames(now_us);
     return true;
@@ -794,6 +883,27 @@ struct VideoSender::Impl {
     std::vector<CachedPacket>  rtx_cache;   // ring buffer, oldest first
     std::size_t               rtx_head = 0; // next slot to overwrite
 
+    // ---- The RFC 4588 retransmission stream (the sender side) ----------
+    //
+    // With RTX negotiated, a NACK is answered by sending the original
+    // packet's payload on the *retransmission* payload type, behind the
+    // two-octet OSN header (RFC 4588 §4.1).  Without it, the sender
+    // re-sends the original packet as-is — the pre-RTX behaviour.
+    //
+    // The RTX stream has its own sequence space (RFC 4588 §4): a
+    // retransmission does NOT reuse the original's sequence number, so
+    // the sender keeps a separate counter for it.
+    SenderRtxCallback         rtx_cb;
+    bool                      rtx_enabled = false;
+
+    /// The next sequence number of the retransmission stream.
+    std::uint16_t             rtx_next_seq = 0;
+
+    /// The scratch buffer the OSN header and the original payload are
+    /// assembled in.  Pre-sized to the MTU + the header, so answering a
+    /// NACK performs no allocation.
+    std::vector<std::uint8_t> rtx_scratch;
+
     // ---- Reusable packetization scratch (Phase 3 / C-class) ---------------
     //
     // The sender used to build a fresh set of vectors for every frame:
@@ -860,6 +970,9 @@ struct VideoSender::Impl {
         use_fua.reserve(kMaxScratchNalus);
         ap_group.reserve(kMaxScratchNalus);
         scratch.reserve(cfg.mtu);
+        // The RTX scratch holds the two-octet OSN header plus a whole
+        // original payload, so it is a little larger than the MTU.
+        rtx_scratch.reserve(cfg.mtu + rtx::kHeaderSize);
     }
 
     void emit(core::ByteSpan payload,
@@ -1465,8 +1578,56 @@ bool VideoSender::retransmit(std::uint16_t seq) noexcept {
         s.stats.packets_retransmit_missed++;
         return false;
     }
+
+    // ---- The RFC 4588 path ---------------------------------------------
+    //
+    // With RTX negotiated the retransmission travels on the
+    // *retransmission* payload type, wrapped in the two-octet OSN
+    // header (RFC 4588 §4.1), so the receiver can tell it apart from
+    // the original and restore the original's sequence number.
+    //
+    // The RTP header of the retransmission is the original's except for
+    // the sequence number (RFC 4588 §4.1) — so the *timestamp* and the
+    // *marker bit* are the original's, and the payload is the OSN
+    // header followed by the original's payload.
+    if (s.rtx_enabled && s.rtx_cb) {
+        const std::size_t needed =
+            rtx::payload_size_for(core::ByteSpan{p->payload.data(),
+                                                 p->payload.size()});
+        if (s.rtx_scratch.size() < needed) s.rtx_scratch.resize(needed);
+        const std::size_t wrote = rtx::build_payload(
+            core::MutableByteSpan{s.rtx_scratch.data(), s.rtx_scratch.size()},
+            p->seq,
+            core::ByteSpan{p->payload.data(), p->payload.size()});
+        if (wrote == 0) {
+            s.stats.packets_retransmit_missed++;
+            return false;
+        }
+
+        SenderRtxPacket out;
+        out.payload       = core::ByteSpan{s.rtx_scratch.data(), wrote};
+        out.rtp_timestamp = p->rtp_ts;
+        out.marker        = p->marker;
+        out.original_seq  = p->seq;
+        // RFC 4588 §4: the retransmission stream has its own sequence
+        // number space, so the packet does not reuse the original's
+        // number on the wire.
+        out.rtx_seq       = s.rtx_next_seq;
+        s.rtx_next_seq    = static_cast<std::uint16_t>(s.rtx_next_seq + 1);
+        s.rtx_cb(out);
+
+        s.stats.rtx_packets_emitted++;
+        s.stats.packets_retransmitted++;
+        return true;
+    }
+
+    // ---- The pre-RTX path -----------------------------------------------
+    //
     // Re-emit with the ORIGINAL sequence number / timestamp / marker so
-    // the receiver can splice the packet back into the frame it belongs to.
+    // the receiver can splice the packet back into the frame it belongs
+    // to.  RFC 4588 §4.1 says this is *not* RTX — the packet keeps its
+    // own payload type, so a receiver that multiplexes by payload type
+    // cannot tell it from the original.
     if (s.packet_cb) {
         s.packet_cb(core::ByteSpan{p->payload.data(), p->payload.size()},
                     p->rtp_ts, p->seq, p->marker);
@@ -1482,6 +1643,18 @@ std::size_t VideoSender::cached_packet_count() const noexcept {
         if (!p.payload.empty()) ++n;
     }
     return n;
+}
+
+void VideoSender::set_rtx_packet_callback(SenderRtxCallback cb) noexcept {
+    impl_->rtx_cb = std::move(cb);
+}
+
+void VideoSender::set_rtx_enabled(bool enabled) noexcept {
+    impl_->rtx_enabled = enabled;
+}
+
+bool VideoSender::rtx_enabled() const noexcept {
+    return impl_->rtx_enabled;
 }
 
 SenderStats VideoSender::stats() const noexcept {

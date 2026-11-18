@@ -3221,6 +3221,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_feedback_applied  = impl_->video_state.video_feedback_applied;
     out.video_keyframes_applied = impl_->video_state.video_keyframes_applied;
 
+    // The RFC 4588 retransmission counters (v1.3 plan Q3).  They are
+    // separate from the media counters because a retransmission is *not*
+    // new media: it is a re-send of a packet that was already counted,
+    // and a session whose media bitrate looked inflated by its own
+    // retransmissions would misreport its own load.
+    out.video_rtx_packets_sent     = impl_->video_state.rtx_packets_sent;
+    out.video_rtx_packets_received = impl_->video_state.rtx_packets_received;
+
     // Plan Track S / S4: the same feedback, broken down by type, so a
     // host can tell *what the peer is asking for* rather than only that
     // something arrived.  `video_feedback_applied` stays as the total.
@@ -3787,119 +3795,232 @@ void NimRTCEngine::wire_default_sender() noexcept {
                     : config_.video_sender_tuning.payload_type;
             const std::uint8_t pt = negotiated_pt != 0 ? negotiated_pt : local_pt;
 
-            detail::RtpPacketSpec spec;
-            spec.ssrc         = config_.video_sender_tuning.ssrc;
-            spec.seq          = seq;
-            spec.timestamp    = rtp_ts;
-            spec.payload_type = pt;
-            spec.marker       = marker;
-
-            // ---- Cross-end timeline: stamp abs-send-time (ADR-017) --------
-            // Same contract as the audio path: only when the seam is
-            // on *and* the extension id was negotiated (the id is set
-            // by create_offer() / set_remote_description()).  The
-            // monotonic reading is taken once and serves both the
-            // abs-send-time encoder and the Sender Report's
-            // instant-vs-timestamp pairing.
-            if (config_.timeline_enabled) {
-                const std::int64_t steady_us =
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        core::SteadyClock::now().time_since_epoch()).count();
-                impl_->video_state.video_last_send_unix_us =
-                    impl_->timeline.boot_epoch_offset_us + steady_us;
-                if (impl_->timeline.local_abs_send_time_id != 0) {
-                    spec.abs_send_time_ext_id = impl_->timeline.local_abs_send_time_id;
-                    spec.abs_send_time_24mhz = detail::RtpPacketizer::encode_abs_send_time_24(
-                        std::chrono::microseconds{steady_us},
-                        impl_->timeline.boot_epoch_offset_us);
-                }
-            }
-
-            spec.payload = core::ByteSpan(payload.data(), payload.size());
-
-            // ---- Serialise into the reusable scratch (Phase 3 / C4) ------
-            //
-            // Same reasoning as the audio path: `pb.build()` would
-            // allocate a fresh buffer per video packet.  The scratch is
-            // read immediately below — the bytes are copied into the
-            // scheduler's pooled outbound buffer — so it never escapes
-            // this callback.
-            const std::size_t built_size = detail::RtpPacketizer::compute_size(spec);
-            if (impl_->scratch.video_rtp_scratch.size() < built_size) {
-                impl_->scratch.video_rtp_scratch.resize(built_size);
-            }
-            const std::size_t built_written =
-                detail::RtpPacketizer::build_into(spec,
-                    impl_->scratch.video_rtp_scratch.data(),
-                    impl_->scratch.video_rtp_scratch.size());
-            if (built_written == 0) {
-                if (on_error_) {
-                    on_error_(core::kVideoEncodeFailed,
-                              "video send: the RTP packet could not be built");
-                }
-                return;
-            }
-
-            // ---- Assemble full RTP packet ----------------------------------
-            // The buffer comes from the scheduler's packet pool (P1
-            // hardening, 2026-11-09): it is handed back to the pool
-            // once the packet has been drained and dispatched, so the
-            // steady-state send path performs no heap allocation.
-            //
-            // Phase 3: when there is NO scheduler (the "transport"
-            // profile, where the engine writes straight to ICE) the
-            // packet used to be built in a fresh local vector — one
-            // heap allocation per packet, forever.  The transport
-            // `send()` is a synchronous write (the bytes do not
-            // escape the call), so the engine's own scratch buffer
-            // can hold it.
-            std::vector<std::uint8_t>& rtp_pkt = scheduler_
-                ? impl_->scratch.video_pkt_pooled
-                : impl_->scratch.video_pkt_scratch;
-            if (scheduler_) {
-                rtp_pkt = scheduler_->acquire_packet_buffer(
-                    built_written + kSrtpAuthTagBytes);
-            }
-            rtp_pkt.assign(impl_->scratch.video_rtp_scratch.begin(),
-                           impl_->scratch.video_rtp_scratch.begin() +
-                               static_cast<std::ptrdiff_t>(built_written));
-
-            // ---- SRTP protect (if DTLS is connected) ----------------------
-            if (impl_->security.srtp_installed && impl_->srtp) {
-                auto* sess = impl_->srtp->get_session(
-                    config_.video_sender_tuning.ssrc, /*outgoing=*/true);
-                if (!sess) {
-                    // SRTP not ready — drop this packet silently.
-                    return;
-                }
-                core::ByteSpan span(rtp_pkt.data(), rtp_pkt.size());
-                auto enc = sess->protect_rtp(span,
-                    config_.video_sender_tuning.ssrc, rtp_ts);
-                if (!enc) return;
-                rtp_pkt.assign(enc.value().data(),
-                               enc.value().data() + enc.value().size());
-            }
-
-            // ---- Enqueue to scheduler (move, P0#3) or send directly -------
+            // The priority: a key frame is worth more than a delta frame,
+            // so it takes the scheduler's higher-priority slot.
             plugins::Priority prio = plugins::Priority::kVideo;
-            if (marker && impl_->video_state.video_keyframe_pending_.load(std::memory_order_acquire)) {
+            if (marker &&
+                impl_->video_state.video_keyframe_pending_.load(std::memory_order_acquire)) {
                 prio = plugins::Priority::kVideoKeyframe;
-                impl_->video_state.video_keyframe_pending_.store(false, std::memory_order_release);
+                impl_->video_state.video_keyframe_pending_.store(false,
+                                                                 std::memory_order_release);
             }
 
-            // v1.1 V1: count emitted RTP packets/bytes (post-protect size).
-            ++impl_->video_state.video_packets_sent;
-            impl_->video_state.video_bytes_sent += rtp_pkt.size();
-
-            if (scheduler_) {
-                scheduler_->enqueue_owned(prio,
-                                          std::move(rtp_pkt),
-                                          plugins::Addr{});
-            } else if (ice_t_) {
-                plugins::BufferView bv{rtp_pkt.data(), rtp_pkt.size()};
-                ice_t_->send(bv, {});
-            }
+            send_video_rtp_packet(payload, rtp_ts, seq, marker, pt,
+                                  config_.video_sender_tuning.ssrc, prio,
+                                  /*count_bytes=*/true);
         });
+}
+
+// ---------------------------------------------------------------------------
+// The shared outbound video packet path
+// ---------------------------------------------------------------------------
+//
+// The default stream's packet callback and the RFC 4588 retransmission
+// callback both end up here: build the RTP header, protect it with
+// SRTP, hand it to the scheduler.
+//
+// They *must* end up in the same place.  A retransmission that differs
+// from the original in any way the peer does not expect — a different
+// extension, a different sequence space, a different SSRC handling —
+// is a retransmission the peer drops, and the loss the retransmission
+// was meant to repair stays unrepaired.
+void NimRTCEngine::send_video_rtp_packet(plugins::BufferView payload,
+                                          std::uint32_t rtp_ts,
+                                          std::uint16_t seq,
+                                          bool marker,
+                                          std::uint8_t payload_type,
+                                          std::uint32_t ssrc,
+                                          plugins::Priority prio,
+                                          bool count_bytes) noexcept {
+    if (impl_ == nullptr) return;
+
+    detail::RtpPacketSpec spec;
+    spec.ssrc         = ssrc;
+    spec.seq          = seq;
+    spec.timestamp    = rtp_ts;
+    spec.payload_type = payload_type;
+    spec.marker       = marker;
+
+    // ---- Cross-end timeline: stamp abs-send-time (ADR-017) ------------
+    // Same contract as the audio path: only when the seam is on *and*
+    // the extension id was negotiated (the id is set by create_offer() /
+    // set_remote_description()).  The monotonic reading is taken once and
+    // serves both the abs-send-time encoder and the Sender Report's
+    // instant-vs-timestamp pairing.
+    if (config_.timeline_enabled) {
+        const std::int64_t steady_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                core::SteadyClock::now().time_since_epoch()).count();
+        impl_->video_state.video_last_send_unix_us =
+            impl_->timeline.boot_epoch_offset_us + steady_us;
+        if (impl_->timeline.local_abs_send_time_id != 0) {
+            spec.abs_send_time_ext_id = impl_->timeline.local_abs_send_time_id;
+            spec.abs_send_time_24mhz = detail::RtpPacketizer::encode_abs_send_time_24(
+                std::chrono::microseconds{steady_us},
+                impl_->timeline.boot_epoch_offset_us);
+        }
+    }
+
+    spec.payload = core::ByteSpan(payload.data(), payload.size());
+
+    // ---- Serialise into the reusable scratch (Phase 3 / C4) ----------
+    //
+    // Same reasoning as the audio path: `pb.build()` would allocate a
+    // fresh buffer per video packet.  The scratch is read immediately
+    // below — the bytes are copied into the scheduler's pooled outbound
+    // buffer — so it never escapes this call.
+    const std::size_t built_size = detail::RtpPacketizer::compute_size(spec);
+    if (impl_->scratch.video_rtp_scratch.size() < built_size) {
+        impl_->scratch.video_rtp_scratch.resize(built_size);
+    }
+    const std::size_t built_written =
+        detail::RtpPacketizer::build_into(spec,
+            impl_->scratch.video_rtp_scratch.data(),
+            impl_->scratch.video_rtp_scratch.size());
+    if (built_written == 0) {
+        if (on_error_) {
+            on_error_(core::kVideoEncodeFailed,
+                      "video send: the RTP packet could not be built");
+        }
+        return;
+    }
+
+    // ---- Assemble full RTP packet --------------------------------------
+    // The buffer comes from the scheduler's packet pool (P1 hardening,
+    // 2026-11-09): it is handed back to the pool once the packet has
+    // been drained and dispatched, so the steady-state send path
+    // performs no heap allocation.
+    //
+    // Phase 3: when there is NO scheduler (the "transport" profile,
+    // where the engine writes straight to ICE) the packet used to be
+    // built in a fresh local vector — one heap allocation per packet,
+    // forever.  The transport `send()` is a synchronous write (the bytes
+    // do not escape the call), so the engine's own scratch buffer can
+    // hold it.
+    std::vector<std::uint8_t>& rtp_pkt = scheduler_
+        ? impl_->scratch.video_pkt_pooled
+        : impl_->scratch.video_pkt_scratch;
+    if (scheduler_) {
+        rtp_pkt = scheduler_->acquire_packet_buffer(
+            built_written + kSrtpAuthTagBytes);
+    }
+    rtp_pkt.assign(impl_->scratch.video_rtp_scratch.begin(),
+                   impl_->scratch.video_rtp_scratch.begin() +
+                       static_cast<std::ptrdiff_t>(built_written));
+
+    // ---- SRTP protect (if DTLS is connected) ---------------------------
+    //
+    // The session is the one for *this* packet's SSRC.  The SRTP context
+    // installs its sessions with the wildcard policy (RFC 3711 §3.1:
+    // the context is per-(SSRC, direction)), so the retransmission
+    // stream's own SSRC gets its own session on the first packet — no
+    // key derivation change is needed for the second SSRC.
+    if (impl_->security.srtp_installed && impl_->srtp) {
+        auto* sess = impl_->srtp->get_session(ssrc, /*outgoing=*/true);
+        if (!sess) {
+            // SRTP not ready — drop this packet silently.
+            return;
+        }
+        core::ByteSpan span(rtp_pkt.data(), rtp_pkt.size());
+        auto enc = sess->protect_rtp(span, ssrc, rtp_ts);
+        if (!enc) return;
+        rtp_pkt.assign(enc.value().data(),
+                       enc.value().data() + enc.value().size());
+    }
+
+    // ---- Enqueue to scheduler (move, P0#3) or send directly ------------
+    if (count_bytes) {
+        // v1.1 V1: count emitted RTP packets/bytes (post-protect size).
+        ++impl_->video_state.video_packets_sent;
+        impl_->video_state.video_bytes_sent += rtp_pkt.size();
+    }
+
+    if (scheduler_) {
+        scheduler_->enqueue_owned(prio, std::move(rtp_pkt), plugins::Addr{});
+    } else if (ice_t_) {
+        plugins::BufferView bv{rtp_pkt.data(), rtp_pkt.size()};
+        ice_t_->send(bv, {});
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The RFC 4588 retransmission path (v1.3 plan Q3)
+// ---------------------------------------------------------------------------
+//
+// With RTX negotiated, a NACK is answered by sending the original
+// packet's payload on the *retransmission* payload type, behind the
+// two-octet OSN header (RFC 4588 §4.1).
+//
+// The sender plugin does the framing — it owns the retransmission
+// cache and knows the original's payload — and hands the framed payload
+// here.  This side owns the RTP header, and RFC 4588 §4.1 is explicit
+// about what it must carry:
+//
+//   * the **timestamp** is the original's (a retransmission belongs to
+//     the frame it came from);
+//   * the **marker bit** is the original's;
+//   * the **sequence number** is the retransmission stream's *own*
+//     number — the original's number is inside the OSN header, not in
+//     the RTP header (RFC 4588 §4: the retransmission stream has its
+//     own sequence number space);
+//   * the **payload type** is the retransmission payload type;
+//   * the **SSRC** is the retransmission stream's own SSRC (RFC 4588
+//     §5.2).
+void NimRTCEngine::wire_rtx_sender() noexcept {
+    if (!video_sender_) return;
+
+    video_sender_->set_rtx_packet_callback(
+        [this](const plugins::VideoSenderRtxPacket& p) {
+            const std::uint8_t rtx_pt = impl_->video_state.rtx_payload_type;
+            if (rtx_pt == 0) return;   // not negotiated — nothing to send on
+
+            const std::uint32_t rtx_ssrc = impl_->video_state.rtx_ssrc;
+            if (rtx_ssrc == 0) return;
+
+            ++impl_->video_state.rtx_packets_sent;
+
+            send_video_rtp_packet(p.payload, p.rtp_timestamp, p.rtx_seq,
+                                  p.marker, rtx_pt, rtx_ssrc,
+                                  plugins::Priority::kVideo,
+                                  /*count_bytes=*/false);
+        });
+
+    // The sender only takes the RFC 4588 path when the engine says the
+    // retransmission stream was negotiated — otherwise it re-sends the
+    // original packet (the pre-RTX behaviour).
+    video_sender_->set_rtx_enabled(impl_->video_state.rtx_negotiated);
+}
+
+// ---------------------------------------------------------------------------
+// Applying the negotiated retransmission stream
+// ---------------------------------------------------------------------------
+//
+// RTX is negotiated, so the plugins have to be told about it *after*
+// every description exchange — and told again when the negotiation
+// changes, including when it changes to "no RTX at all".
+void NimRTCEngine::apply_negotiated_video_rtx() noexcept {
+    // ---- The receiver: which payload type carries retransmissions ------
+    //
+    // The receiver unwraps the OSN header and restores the original's
+    // sequence number.  It must not do that for a payload type that is
+    // not the negotiated retransmission one — the OSN of an ordinary
+    // packet would be garbage, and the restored sequence number would
+    // be nonsense.
+    if (video_receiver_) {
+        video_receiver_->set_rtx_payload_type(
+            impl_->video_state.rtx_negotiated
+                ? impl_->video_state.rtx_payload_type
+                : 0);
+    }
+
+    // ---- The sender: the RFC 4588 path and its outbound callback -------
+    //
+    // The callback is wired unconditionally (so a *later* negotiation
+    // can turn the feature on without rebuilding the sender), but the
+    // sender only *takes* the RFC 4588 path when it is enabled.
+    if (video_sender_) {
+        wire_rtx_sender();
+    }
 }
 
 // ---------------------------------------------------------------------------

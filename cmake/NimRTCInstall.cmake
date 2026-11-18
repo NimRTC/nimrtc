@@ -70,6 +70,7 @@ set(_nimrtc_install_headers
   "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_stats/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_rtcp_feedback/include"
+  "${CMAKE_SOURCE_DIR}/src/modules/rtx/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
   "${CMAKE_SOURCE_DIR}/src/modules/audio_device/include"
@@ -120,6 +121,7 @@ set(_nimrtc_install_shorts
   video_source
   video_stats
   video_rtcp_feedback
+  rtx
   video_pipeline
   video_sink
   audio_device

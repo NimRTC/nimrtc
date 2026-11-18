@@ -27,6 +27,11 @@
 // concrete `rtp::` type.
 #include "rtp_packetizer.hpp"
 
+// The QoE collector's sharpness proxy reads a **luma plane**, so the
+// engine has to know which decoded layouts actually have one (the
+// planar YUV 4:2:0 family does; BGRA / RGB24 do not).
+#include <nimrtc/video_frame/frame.hpp>
+
 namespace nimrtc::engine {
 
 // The staging step's names are used unqualified below; they come from
@@ -436,6 +441,20 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // that never touches video does not pay for it, and so a re-open()
     // starts from a clean slate.
     impl_->video_state.video_stats.ensure_created();
+
+    // Plan J6 / S7: the freeze *finding* and the freeze *accounting* live
+    // in two different modules -- the `video_stats` sink owns the
+    // definition of a freeze (the threshold and the idle detection),
+    // and the `rd_qoe` collector owns the metric a host reads in
+    // `Stats::qoe`.  The engine is the only party that sees both, so it
+    // is the courier between them.
+    //
+    // Without this wiring the sink counted the freezes and the QoE
+    // snapshot's `freeze_count` / `freeze_total_ms` / `freeze_ratio`
+    // stayed at zero -- a metric that is measured and then never
+    // published.
+    impl_->video_state.video_stats.set_freeze_callback(
+        [this](std::int64_t duration_ms) { note_freeze(duration_ms); });
 
     // Remote-desktop plan H1: the video stream set's clock starts with
     // the session, so the per-stream rates (H4) are measured against a
@@ -1450,6 +1469,22 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                         static_cast<std::int64_t>(enc.info.capture_ts_us),
                         enc.info.frame_seq,
                         static_cast<double>(config_.video_fps));
+                    // Plan J3: the sharpness proxy.  The luma plane is
+                    // right here — the decoded frame's own pixels — and
+                    // the collector is the only party that knows how to
+                    // turn a picture into a sharpness number, so the
+                    // engine carries the pixels over.
+                    //
+                    // Only the **planar YUV** layouts have a luma plane
+                    // the collector can read (it computes a 3x3
+                    // Laplacian over the luma).  A BGRA frame has no
+                    // luma at all, and converting one would cost more
+                    // than the metric is worth — so the proxy simply is
+                    // not measured for those frames, and the snapshot
+                    // says so by staying at zero.
+                    if (is_planar_yuv_420(layout.format) && planes[0] != nullptr) {
+                        note_sharpness(planes[0], stride_y, w, h);
+                    }
                 } else {
                     impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kDecoderError);

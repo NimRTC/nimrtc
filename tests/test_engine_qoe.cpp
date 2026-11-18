@@ -648,6 +648,152 @@ TEST_F(EngineQoe, AnUnknownCollectorIdIsAConfigurationError) {
 }
 
 // ---------------------------------------------------------------------------
+// The default collector
+// ---------------------------------------------------------------------------
+//
+// The default is what a host gets when it says nothing: `rd-qoe`, the
+// built-in collector, under the id the `rd_qoe` module registers.
+// Three rules follow from it, and each has a failure mode worth
+// pinning:
+//
+//   - the **default** is the built-in collector, so a session that
+//     never mentions QoE still gets the metrics it is judged by;
+//   - an **empty** name is the explicit opt-out, so a session that
+//     does not want to pay for the reservoir can say so;
+//   - the default id in a build **without** the optional `rd_qoe`
+//     module degrades gracefully -- the build's shape is not the
+//     host's mistake, so `open()` must still succeed.
+
+TEST_F(EngineQoe, TheDefaultCollectorIsTheBuiltInOne) {
+    // A default-constructed config says nothing about QoE.
+    const EngineConfig defaults{};
+
+    EXPECT_EQ(defaults.qoe_collector_name, "rd-qoe")
+        << "the built-in collector is the default — a remote-desktop "
+           "session is judged on exactly these metrics";
+    EXPECT_EQ(defaults.qoe_collector_name,
+              nimrtc::engine::kDefaultQoeCollectorId)
+        << "the default and the published constant must not drift apart";
+}
+
+TEST_F(EngineQoe, TheDefaultCollectorResolvesAndMeasures) {
+    // The same configuration the default gives, minus the plugins the
+    // fixture has to install.  The QoE id is left at its default.
+    EngineConfig cfg = make_config("rd-qoe");
+    cfg.qoe_collector_name = EngineConfig{}.qoe_collector_name;
+
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u) << "the engine must open with the default";
+
+    negotiate_video(engine, cfg);
+
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+    feed_video(engine, pt, /*seq=*/100, /*rtp_ts=*/90'000, /*frame_seq=*/1);
+    feed_video(engine, pt, /*seq=*/200, /*rtp_ts=*/93'000, /*frame_seq=*/2);
+
+    const auto stats = engine.stats();
+
+    EXPECT_GT(stats.qoe.presented_fps, 0.0)
+        << "the default collector must actually measure — the default is "
+           "not a name that resolves to nothing";
+}
+
+TEST_F(EngineQoe, AnEmptyNameOptsOutOfTheCollector) {
+    // The empty name is the *explicit* opt-out: the host asked for no
+    // collector, so the metrics are not measured.
+    EngineConfig cfg = make_config("");
+    EXPECT_TRUE(cfg.qoe_collector_name.empty());
+
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u) << "the opt-out must not be an error";
+
+    negotiate_video(engine, cfg);
+
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+    feed_video(engine, pt, /*seq=*/100, /*rtp_ts=*/90'000, /*frame_seq=*/1);
+
+    const auto stats = engine.stats();
+
+    EXPECT_EQ(stats.qoe.frames_presented, 1u)
+        << "the frame counters do not depend on a collector";
+    EXPECT_DOUBLE_EQ(stats.qoe.presented_fps, 0.0)
+        << "the opt-out must not measure the metrics";
+}
+
+// ---------------------------------------------------------------------------
+// The freeze metric — the seam between two modules
+// ---------------------------------------------------------------------------
+//
+// The *definition* of a freeze lives in the `video_stats` module (the
+// threshold and the idle detection); the *accounting* lives in the
+// `rd_qoe` collector (the numbers a host reads).  The engine is the
+// courier, and this test is the proof that the courier runs: the sink
+// counted the freeze, so the QoE snapshot must show it.
+//
+// Without this test the freeze metric is a number nobody can act on —
+// measured inside the sink and never published.
+
+TEST_F(EngineQoe, TheFreezeReachesTheQoeSnapshot) {
+    EngineConfig cfg = make_config("rd-qoe");
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u) << "the engine must open";
+
+    negotiate_video(engine, cfg);
+
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+
+    // The freeze detector measures the gap between two *rendered* frames
+    // on the local timeline (the inbound frame's timestamp is its arrival
+    // instant), so the two frames have to be separated in **wall-clock
+    // time** -- not just in their sequence numbers.
+    feed_video(engine, pt, /*seq=*/100, /*rtp_ts=*/90'000, /*frame_seq=*/1);
+
+    // Well past the sink's 150 ms freeze threshold.
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    feed_video(engine, pt, /*seq=*/200, /*rtp_ts=*/90'000 + 60000,
+               /*frame_seq=*/200);
+
+    const auto stats = engine.stats();
+
+    EXPECT_GT(stats.video_freeze_count, 0u)
+        << "the sink must have counted the freeze -- otherwise the "
+           "collector was never asked";
+    EXPECT_GT(stats.qoe.freeze_count, 0u)
+        << "the freeze was detected by the sink — the engine must have "
+           "carried it to the collector";
+    EXPECT_GT(stats.qoe.freeze_total_ms, 0)
+        << "the freeze's duration must be published, not just its count";
+    EXPECT_GT(stats.qoe.freeze_longest_ms, 0);
+}
+
+TEST_F(EngineQoe, TheFreezeIsNotMeasuredWithoutACollector) {
+    // The opt-out must also silence the freeze metric: the sink still
+    // counts the freeze (that is its own business), but there is no
+    // collector to publish it to, so the snapshot stays zero -- the
+    // honest answer to "how long was the picture still?" when it was
+    // not measured.
+    EngineConfig cfg = make_config("");
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    negotiate_video(engine, cfg);
+
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+    feed_video(engine, pt, /*seq=*/100, /*rtp_ts=*/90'000, /*frame_seq=*/1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    feed_video(engine, pt, /*seq=*/200, /*rtp_ts=*/90'000 + 60000,
+               /*frame_seq=*/200);
+
+    const auto stats = engine.stats();
+
+    EXPECT_EQ(stats.qoe.freeze_count, 0u)
+        << "without a collector the freeze was NOT measured -- reporting a "
+           "number here would be a lie";
+    EXPECT_EQ(stats.qoe.freeze_total_ms, 0);
+}
+
+// ---------------------------------------------------------------------------
 // J6 — the input-to-photon latency
 // ---------------------------------------------------------------------------
 
@@ -746,6 +892,59 @@ TEST_F(EngineQoe, TheInputEventIsRejectedWhenThePayloadIsEmpty) {
 
     EXPECT_EQ(engine.send_input_event(std::span<const std::uint8_t>{}, 1u),
               np::kErrInvalidParam);
+}
+
+// ---------------------------------------------------------------------------
+// J3 — the freeze findings
+// ---------------------------------------------------------------------------
+
+// The *detection* of a freeze lives in the `video_stats` module and the
+// *accounting* lives in the `rd_qoe` collector; the engine is the only
+// party that sees both, so it is the courier between them.
+//
+// This test covers the **idle** detection path: the picture simply
+// stops arriving, and the engine's tick notices the idleness.  The
+// other path — a *gap* between two rendered frames — is covered by
+// `TheFreezeReachesTheQoeSnapshot` above.
+//
+// Both paths must reach the collector: a session whose picture freezes
+// because the peer stopped sending is exactly the case the metric
+// exists for, and it is detected by the tick rather than by a render.
+TEST_F(EngineQoe, TheIdleFreezeReachesTheCollector) {
+    EngineConfig cfg = make_config("rd-qoe");
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u) << "the engine must open";
+
+    negotiate_video(engine, cfg);
+
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+    feed_video(engine, pt, /*seq=*/100, /*rtp_ts=*/90'000, /*frame_seq=*/1);
+
+    ASSERT_EQ(engine.stats().qoe.frames_presented, 1u)
+        << "the frame must reach the viewer for the freeze detector to "
+           "have an anchor";
+
+    // The picture stops.  The freeze threshold is 150 ms by default, so
+    // a couple of hundred milliseconds of idleness is a freeze.
+    //
+    // The engine's tick drives the sink's idle detection: it is the
+    // only party that knows the passage of time.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    while (std::chrono::steady_clock::now() < deadline) {
+        engine.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    const auto stats = engine.stats();
+
+    EXPECT_GT(stats.qoe.freeze_count, 0u)
+        << "the freeze the sink detected must reach the collector -- "
+           "otherwise the QoE snapshot's freeze metrics are always zero";
+    EXPECT_GE(stats.qoe.freeze_total_ms, 150u)
+        << "the reported freeze duration is the idle window in "
+           "milliseconds";
+    EXPECT_GT(stats.qoe.freeze_longest_ms, 0);
 }
 
 }  // namespace

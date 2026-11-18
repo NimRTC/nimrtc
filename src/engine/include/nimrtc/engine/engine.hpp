@@ -163,6 +163,20 @@ struct VideoStream;
 
 namespace nimrtc::engine {
 
+/** The plugin id of the built-in QoE collector (plan J3 / J6).
+ *
+ *  The `rd_qoe` module registers its factory under this id.  It is the
+ *  default value of `EngineConfig::qoe_collector_name`, so a session
+ *  that says nothing about QoE still gets the metrics a remote-desktop
+ *  session is judged by.
+ *
+ *  The module is **optional**: a build without it has no factory under
+ *  this id, and the engine degrades gracefully instead of failing
+ *  `open()`.  A host that wants to be explicit about the degradation
+ *  can check `core::PluginRegistry::get_qoe_collector(...)` before
+ *  opening the engine. */
+inline constexpr std::string_view kDefaultQoeCollectorId = "rd-qoe";
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -329,25 +343,38 @@ struct NIMRTC_API_STABLE EngineConfig {
     // never includes a concrete module's header (Layout Invariant 4 /
     // ADR-025).
     //
-    // The collector is **off by default**: a session that does not ask
-    // for the metrics does not pay for the reservoir, and the engine
-    // still publishes the frame counts (the presented / dropped
-    // counters are free).
+    // The collector is **on by default**: a remote-desktop session is
+    // judged on exactly these metrics (the freeze count, the latency
+    // percentiles, the input-to-photon latency), and a host should not
+    // have to name a plugin to learn them.  The default costs one
+    // bounded reservoir (see `qoe_config` below), and a build without
+    // the `rd_qoe` module simply does without it.
 
     /** The QoE-collector plugin id (plan J3 / J6).
      *
      *  The id names the *factory* the engine resolves through
      *  `core::PluginRegistry::get_qoe_collector(...)`.  The built-in
-     *  implementation registers under `"rd-qoe"`.
+     *  implementation registers under `"rd-qoe"`, which is therefore
+     *  the **default**: a session that says nothing gets the built-in
+     *  collector.
      *
-     *  Empty means "no QoE collector": the metrics are not measured and
-     *  `Stats::qoe` carries only the frame counters.  It is empty by
-     *  default.
+     *  **Empty means "no QoE collector"**: the metrics are not measured
+     *  and `Stats::qoe` carries only the frame counters.  That is the
+     *  explicit way to opt out — a session that measures the latency
+     *  percentiles does not want to pay for the reservoir, and the
+     *  name is the only place that says so.
      *
-     *  An unknown id is a hard error at `open()` time — the engine does
-     *  not silently fall back (a typo'd id would otherwise mask an
-     *  integrator error). */
-    std::string qoe_collector_name;
+     *  A **named** id that does not resolve is a hard error at
+     *  `open()` time — the engine does not silently fall back (a typo'd
+     *  id would otherwise mask an integrator error).
+     *
+     *  The one exception is the default id itself: when the `rd_qoe`
+     *  module is not in the build there is no factory to resolve, and
+     *  that is *not* an error — the metrics are simply not measured.
+     *  A host that named `"rd-qoe"` explicitly in a build without the
+     *  module gets the same graceful degradation, because the id
+     *  names a module that is optional by construction. */
+    std::string qoe_collector_name = "rd-qoe";
 
     /** The collector's configuration (plan J3 / J6).
      *
@@ -4665,10 +4692,11 @@ public:
          * viewer's frame rate, the sharpness proxy and the
          * input-to-photon latency.
          *
-         * The metrics are only measured when a QoE collector is
-         * configured (`EngineConfig::qoe_collector_name`).  Without one
-         * this snapshot carries the **frame counters** — the presented
-         * and dropped frame counts, which the engine keeps anyway — and
+         * The metrics are measured whenever a QoE collector is
+         * resolved -- which, by default, is the built-in `"rd-qoe"` (see
+         * `EngineConfig::qoe_collector_name`).  Without one this
+         * snapshot carries the **frame counters** -- the presented and
+         * dropped frame counts, which the engine keeps anyway -- and
          * zeroes for the metrics, which is the honest answer to "what was
          * the latency percentile?" when it was not measured.
          */
@@ -5726,11 +5754,21 @@ private:
      * @brief Resolve the QoE collector through the registry seam.
      *
      *  Called from `init_modules_once()`.  Resolution is **not** fatal
-     *  when the collector is simply not configured (the default): the
+     *  when the collector is simply **not wanted**: an empty
+     *  `EngineConfig::qoe_collector_name` is the explicit opt-out, the
      *  metrics are then not measured and `Stats::qoe` carries only the
-     *  frame counters.  A *configured but unknown* id IS an error — the
-     *  engine does not silently fall back, because a typo'd id would
-     *  otherwise mask an integrator error.
+     *  frame counters.
+     *
+     *  It is also not fatal when the **default** id (`"rd-qoe"`) names
+     *  a module that is not in this build: the `rd_qoe` module is
+     *  optional by construction, and "this build has no QoE module" is
+     *  a property of the build, not a mistake by the host.  The engine
+     *  degrades gracefully (with a warning) instead of failing
+     *  `open()`.
+     *
+     *  A *named* id that does not resolve IS an error — the engine does
+     *  not silently fall back, because a typo'd id would otherwise mask
+     *  an integrator error.
      */
     uint32_t resolve_qoe_collector() noexcept;
 
@@ -5756,6 +5794,38 @@ private:
      *  Feeds the QoE collector's drop counter (plan item J3).
      */
     void note_frame_dropped(std::uint64_t count = 1) noexcept;
+
+    /**
+     * @brief Report that the picture stood still.
+     *
+     *  Feeds the QoE collector's freeze metric (plan item J6).  The
+     *  *detection* is owned by the `video_stats` module — the engine
+     *  only carries the finding to the collector, which is the only
+     *  party that can see both.
+     *
+     *  @param duration_ms  how long the picture stood still, in
+     *                      milliseconds.  Negative values are ignored.
+     */
+    void note_freeze(std::int64_t duration_ms) noexcept;
+
+    /**
+     * @brief Report the sharpness of a presented picture.
+     *
+     *  Feeds the QoE collector's sharpness proxy (plan item J3).  The
+     *  *computation* is the collector's — the engine only carries the
+     *  pixels to it, because the engine is the only party that holds
+     *  the decoded luma plane.
+     *
+     *  @param luma    the luma plane's first pixel.
+     *  @param stride  the row stride in bytes.
+     *  @param width   the picture width.
+     *  @param height  the picture height.
+     *  @return the sharpness that was computed (0 when not measured).
+     */
+    double note_sharpness(const std::uint8_t* luma,
+                          std::size_t stride,
+                          std::size_t width,
+                          std::size_t height) noexcept;
 
     /**
      * @brief Put the channel's queued messages on the wire.

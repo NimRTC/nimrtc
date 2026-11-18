@@ -1709,15 +1709,24 @@ header; its section note above it is the definition.
 | 127 | `video_sink_frames_presented` | `std::uint64_t` | -- |
 | 128 | `video_sink_render_errors` | `std::uint64_t` | -- |
 | 129 | `video_sink_present_fps` | `std::uint32_t` | -- |
-| 130 | `video_streams` | `std::vector<VideoStreamStats>` | -- |
-| 131 | `inbound_rtp_streams` | `std::vector<InboundRtpStats>` | -- |
-| 132 | `audio_streams` | `std::vector<AudioStreamStats>` | -- |
-| 133 | `transport` | `TransportStats` | The ICE / DTLS / SRTP path the session runs over. |
-| 134 | `data_channels` | `std::vector<DataChannelStats>` | ---- The per-channel data-channel entries (v1.2 plan Track S / S6) One entry per **data channel the host opened** with `create_data_channel()`, each with its own identity (the engine-assigned id and the label) and its own counters. The list is empty when the host never opened a channel, so a host that does not use the data plane sees no change in its telemetry. It is a list rather than a single struct so that the *shape* survives the arrival of a second channel — the alternative is to redraw the whole surface then, and every caller with it. |
-| 135 | `video_stage_total_us` | `std::uint64_t` | The summed cost of the outbound path, in microseconds. This is the number §B.6's budget is written against: the capture → convert → encode → packetize chain. It is the sum of the four stage means above, so a host can compare it with the budget directly: ``` const auto s = engine.stats(); const auto frame_cost_us = s.video_stage_capture.mean_us + s.video_stage_convert.mean_us + s.video_stage_encode.mean_us + s.video_stage_packetize.mean_us; ``` The p95 variant (`video_stage_total_p95_us`) sums the p95s instead — an upper bound on the *typical* worst frame, which is the number to compare with the frame interval (33 333 µs at 30 fps). |
-| 136 | `video_stage_total_p95_us` | `std::uint64_t` | The summed p95 of the four outbound stages, in microseconds. |
+| 130 | `video_sync` | `VideoSyncStats` | -- |
+| 131 | `video_streams` | `std::vector<VideoStreamStats>` | -- |
+| 132 | `inbound_rtp_streams` | `std::vector<InboundRtpStats>` | -- |
+| 133 | `audio_streams` | `std::vector<AudioStreamStats>` | -- |
+| 134 | `transport` | `TransportStats` | The ICE / DTLS / SRTP path the session runs over. |
+| 135 | `data_channels` | `std::vector<DataChannelStats>` | ---- The per-channel data-channel entries (v1.2 plan Track S / S6) One entry per **data channel the host opened** with `create_data_channel()`, each with its own identity (the engine-assigned id and the label) and its own counters. The list is empty when the host never opened a channel, so a host that does not use the data plane sees no change in its telemetry. It is a list rather than a single struct so that the *shape* survives the arrival of a second channel — the alternative is to redraw the whole surface then, and every caller with it. |
+| 136 | `video_stage_capture` | `StageTiming` | The time spent popping the frame from the capture device. |
+| 137 | `video_stage_convert` | `StageTiming` | The time spent converting the picture (colour / format / scale). |
+| 138 | `video_stage_encode` | `StageTiming` | The time spent inside the codec's encode call. |
+| 139 | `video_stage_packetize` | `StageTiming` | The time spent packetizing (RTP header, STAP-A / FU-A, SRTP). |
+| 140 | `video_stage_decode` | `StageTiming` | The time spent inside the codec's decode call. |
+| 141 | `video_stage_render` | `StageTiming` | The time spent in the sink's render call. |
+| 142 | `video_stage_total_us` | `std::uint64_t` | The summed cost of the outbound path, in microseconds. This is the number §B.6's budget is written against: the capture → convert → encode → packetize chain. It is the sum of the four stage means above, so a host can compare it with the budget directly: ``` const auto s = engine.stats(); const auto frame_cost_us = s.video_stage_capture.mean_us + s.video_stage_convert.mean_us + s.video_stage_encode.mean_us + s.video_stage_packetize.mean_us; ``` The p95 variant (`video_stage_total_p95_us`) sums the p95s instead — an upper bound on the *typical* worst frame, which is the number to compare with the frame interval (33 333 µs at 30 fps). |
+| 143 | `video_stage_total_p95_us` | `std::uint64_t` | The summed p95 of the four outbound stages, in microseconds. |
+| 144 | `qoe` | `plugins::QoeSnapshot` | The quality-of-experience metrics (plan J3 / J6). The freeze count, the end-to-end latency percentiles, the viewer's frame rate, the sharpness proxy and the input-to-photon latency. The metrics are measured whenever a QoE collector is resolved — which, by default, is the built-in `"rd-qoe"` (see `EngineConfig::qoe_collector_name`); an empty name is the explicit opt-out. Without a collector this snapshot carries the **frame counters** — the presented and dropped frame counts, which the engine keeps anyway — and zeroes for the metrics, which is the honest answer to "what was the latency percentile?" when it was not measured. |
+| 145 | `remote_desktop` | `RemoteDesktopStats` | The remote-desktop pipeline breakdown (v1.2 plan **S7**). The QoE block above answers "how did the session *feel*"; this block answers "**where did the time go**". It is a remote-desktop-shaped view of the per-stage instrumentation (`video_stage_*`): the capture / encode / decode means in milliseconds, the frame rates they imply, and the count of frames that were captured but never encoded (the gap between two stages is a frame that was dropped in between). Every value here is **derived** from a measurement that already exists — nothing is timed a second time. The definitions are in `RemoteDesktopStats` above. |
 
-**136 fields.**
+**145 fields.**
 
 ---
 ## 14. Lifecycle diagram

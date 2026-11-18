@@ -41,7 +41,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > - **S5** -- the transport plane: ICE state + the nominated candidate pair + RTT, DTLS state / role / fingerprint, the SRTP counters.
 > - **S6** -- the data-channel plane.
 > - **S7** -- the remote-desktop breakdown: capture fps, encode / decode ms + p95, encode / decode fps, and the clamped drop accounting.
-> - **S8** -- the **stable field set**: a field is not renamed, retyped or removed in a minor release, its meaning does not change, and growth is additive.  The 136-field table is *derived*, not hand-maintained -- `tools/dump_stats_fields.py` parses `struct Stats` out of `engine.hpp` and CI fails when the header and `docs/api/stats_field_reference.md` disagree.
+> - **S8** -- the **stable field set**: a field is not renamed, retyped or removed in a minor release, its meaning does not change, and growth is additive.  The 145-field table is *derived*, not hand-maintained -- `tools/dump_stats_fields.py` parses `struct Stats` out of `engine.hpp` and CI fails when the header and `docs/api/stats_field_reference.md` disagree.
 
 > **Known limitations carried into this release** (none of them is a regression):
 
@@ -57,7 +57,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plan item `S8`).**
   `docs/api/engine_api.md` §13.7 states the contract -- a field is not
   renamed, retyped or removed in a minor release, its meaning does not
-  change, and growth is additive -- and lists all **136** fields with their
+  change, and growth is additive -- and lists all **145** fields with their
   type and the definition the header gives them, plus the shape of every
   nested entry (`VideoStreamStats`, `InboundRtpStats`,
   `AudioStreamStats`, `DataChannelStats`, `TransportStats`,
@@ -3101,6 +3101,65 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`EngineConfig::qoe_collector_name` now defaults to the built-in
+  `"rd-qoe"` collector (v1.2 plan item `S7` / plan `J3`).**
+  Before this the field defaulted to the empty string, which meant "no
+  QoE metrics" -- so a remote-desktop session, which is judged on exactly
+  those metrics (the freeze count, the end-to-end latency percentiles,
+  the input-to-photon latency), had to know the name of a plugin to be
+  told how it felt.  The name is now the built-in collector's id, and the
+  rules around it are:
+  - the **default** is `"rd-qoe"`, the id the `rd_qoe` module registers
+    under (also published as `engine::kDefaultQoeCollectorId`);
+  - an **empty** name is the explicit opt-out: no collector is resolved,
+    the metrics are not measured, and `Stats::qoe` carries only the frame
+    counters (the presented / dropped counts, which the engine keeps
+    anyway) -- the honest answer to "what was the latency percentile?"
+    when it was not measured;
+  - a **named** id that does not resolve is a configuration error at
+    `open()` time.  The engine never silently falls back, because a
+    typo'd id would otherwise mask an integrator error;
+  - the **default** id is the one exception to that rule: the `rd_qoe`
+    module is optional by construction, so a build without it has no
+    factory to resolve.  That is a property of the *build*, not a mistake
+    by the host, so the engine degrades gracefully -- a warning, no
+    collector, and `open()` still succeeds.
+
+- **The freeze findings now reach the QoE collector.**
+  The *definition* of a freeze lives in the `video_stats` module (the
+  threshold and the idle detection) and the *accounting* lives in the
+  `rd_qoe` collector (the numbers a host reads in `Stats::qoe`), but
+  nothing connected the two: the sink counted the freezes and the QoE
+  snapshot's `freeze_count` / `freeze_total_ms` / `freeze_longest_ms`
+  stayed at zero -- a metric that was measured and then never published.
+  The engine is the only party that sees both, so it is the courier: the
+  sink gained a `set_freeze_callback()` seam, the engine installs it and
+  forwards each finding to the collector.
+
+  Both detection paths report: the **gap** between two rendered frames
+  and the **idle** window the tick notices when the picture stops
+  arriving.  A session whose peer simply stopped sending is exactly the
+  case the metric exists for, and it is detected by the tick rather than
+  by a render.
+
+  The seam is **additive** and **optional**: `IVideoStatsSink` gains a
+  defaulted callback, so a third-party sink keeps compiling, and the
+  engine installs the callback only when the video-statistics sink is
+  present.
+
+- **The QoE collector's sharpness proxy is now measured.**
+  `QoeSnapshot::sharpness_proxy` was defined and computed by the
+  `rd_qoe` module, but nothing ever handed it a picture: the engine
+  holds the decoded luma plane and the collector knows how to turn a
+  picture into a sharpness number, so the engine now carries the pixels
+  over on the render path.
+
+  Only the **planar YUV 4:2:0** layouts are measured -- those are the
+  ones that *have* a luma plane the collector can read.  A BGRA frame
+  has no luma at all, and converting one would cost more than the metric
+  is worth, so the proxy simply is not measured for those frames and the
+  snapshot says so by staying at zero.
+
 - **The engine's outbound RTP packing is now concentrated in one file
   (v1.4, architecture-remediation plan §4.5.1, ADR-025 Decision 4).**
   The engine is exempt from Layout Invariant 4 for the `rtp` module
@@ -3793,6 +3852,100 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `cmake/NimRTCConfig.cmake.in` no longer looks for `usrsctp`).
 
 ### Fixed
+
+- **The derived `Stats` field table was missing nine fields.**
+  `tools/dump_stats_fields.py` parsed `struct Stats` out of
+  `engine.hpp` to *derive* the field reference, and the CI gate
+  compared that derivation with the document on disk.  But the parser's
+  declaration pattern did not recognise two of the shapes the struct
+  actually uses -- a **namespace-qualified** type (`plugins::QoeSnapshot`)
+  and a **brace-initialised** member (`RemoteDesktopStats remote_desktop{}`)
+  -- so those members were silently dropped from the derivation.
+
+  The consequence is the worst kind of documentation drift: the gate
+  *passed*, because the document had been generated from the same
+  incomplete derivation.  The two blocks that a remote-desktop session
+  is judged on -- `Stats::qoe` and `Stats::remote_desktop` -- were
+  absent from the "stable field set" contract, along with the seven
+  earlier members the same pattern had swallowed.
+
+  The parser now accepts a qualified type and a brace initialiser, and
+  the table lists all **145** fields.  The gate can still be fooled by a
+  shape it does not know, but it no longer fails *silently* on the two
+  shapes the header uses today.
+
+- **`Stats::remote_desktop.capture_fps` no longer drops to zero when the
+  capture device's queue overflows.**
+  The cadence record treated a frame whose timestamp was not strictly
+  greater than the last one as "no new delivery" and refused to count it.
+  That is backwards for the case the number exists for: the device's
+  queue is bounded, so when the pump falls behind, the device drops the
+  oldest frame and the next handoff can carry a timestamp the pump has
+  already passed — exactly under load, the rate then collapsed to 0 (or
+  to whatever an earlier, quieter window measured).  A *delivery* is now
+  identified by its **sequence number**; the timestamp is only the span
+  endpoint, and a span that moves backwards is reported as **unknown**
+  (0 fps) rather than as a plausible-looking wrong number.  The counting
+  rule moved to its own header, `src/engine/src/engine_capture_cadence.hpp`,
+  so the unit test pins the same rule the pump uses.
+  (Regression caught by `macos-clang / arm64` on the S7 landing.)
+
+- **The bandwidth estimator no longer climbs back into a wall it is still
+  hitting — through either of its two raise paths.**
+  The AIMD front-end's additive increase was gated on the decrease
+  *cooldown* alone, and the cooldown expires on a **clock**, not on the
+  **state of the link**.  So while the link was *still* lossy — the loss
+  rate still above the threshold — the estimate resumed climbing and
+  walked back up to, and past, the rate that had just been throttled.  The
+  front-end behaved like a single-step correction: one halving, then a
+  slow climb back into the congestion, while a fifth of the packets were
+  still being dropped.
+
+  The Goog-CC front-end already carried the correct guard (`!is_lossy`), so
+  the two estimators disagreed under exactly the condition that matters.
+
+  The **REMB override** had the same defect in the same loop, one branch
+  over.  It was gated on `loss_event_pending_`, which is *edge-triggered*:
+  the latch is set when the loss rate crosses the threshold from below, and
+  cleared as soon as the multiplicative decrease has been applied.  So the
+  *second* still-lossy report arrived with the latch already down, and the
+  receiver's stale (higher) estimate was adopted — walking the sender back
+  into the wall it had just been throttled away from.  The latch is the
+  wrong guard for the same reason the cooldown was: it describes a
+  transient state, not the state of the link.
+
+  Both fixes are the same clause — `&& !is_loss_now` — and both gain a
+  regression test in `src/modules/bwe/tests/test_bwe.cpp`, each with the
+  counterpart that the raise still happens once the link *is* clean (so
+  neither guard becomes a ratchet that never recovers).
+
+  The defects were found by *measuring* rather than by reading: the
+  saturated-link benchmark (plan item E6) drives the shipped estimator
+  against a real UDP link whose capacity is a token bucket, and the
+  estimate's climb is visible in the recorded per-report trace.  The
+  benchmark's `estimate_did_not_climb_while_congested` invariant is now the
+  regression guard for both, and it is asserted in CI.
+
+- **The WebTransport certificate script no longer hangs on a CI runner.**
+  `scripts/generate_wtserver_cert.ps1` computes the certificate's SPKI
+  SHA-256 so that Chrome can be given an `--ignore-certificate-errors-spki-list`
+  entry.  It did that by reading `$cert.PublicKey.EncodedKeyValue`, which
+  opens the key through the platform crypto provider: on a **non-interactive**
+  runner that call never returns, so the script hung until the job's
+  30-minute timeout killed it.  Every Windows leg failed this way -- the log
+  showed `Certificate created` and then nothing for 27 minutes.
+
+  The SPKI is now read straight out of the certificate's own DER encoding,
+  which touches no provider at all.
+
+  This also fixes a latent correctness bug.  The old code rebuilt the SPKI
+  by hand with a hardcoded `rsaEncryption` AlgorithmIdentifier; for an RSA
+  key the result is byte-identical to the real SPKI, but for any other key
+  type it silently produced the **wrong** SPKI -- an EC certificate would
+  get an RSA AlgorithmIdentifier glued onto an EC key.  Taking the bytes out
+  of the certificate means the AlgorithmIdentifier is whatever the
+  certificate actually used.  Verified byte-for-byte against an independent
+  DER parse for both RSA (294-byte SPKI) and EC (91-byte SPKI) certificates.
 
 - **`Stats::remote_desktop.capture_fps` no longer drops to zero when the
   capture device's queue overflows.**

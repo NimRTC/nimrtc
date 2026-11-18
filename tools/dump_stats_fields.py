@@ -25,11 +25,22 @@ import sys
 HEADER = 'src/engine/include/nimrtc/engine/engine.hpp'
 
 SECTION_RE = re.compile(r'^\s*//\s*[-=]{2,}\s*(.*?)\s*[-=]{2,}\s*$')
+# The declaration of one member.
+#
+# The type may be namespace-qualified (`plugins::QoeSnapshot`) and the
+# initialiser may be a brace-init (`remote_desktop{}`) as well as a
+# plain `= 0`.  A pattern that only knows `= ...` silently *drops*
+# those fields: the derived table then claims the struct has fewer
+# members than it does, and the CI gate that is supposed to catch drift
+# instead ratifies the omission.  The type alternative therefore
+# accepts a qualified name, and the initialiser accepts both forms.
 DECL_RE = re.compile(
     r'^\s*(?:const\s+)?'
-    r'(std::(?:u?int\d+_t|size_t)|u?int\d+_t|int\d+_t|int|float|double|bool|'
+    r'((?:[A-Za-z_]\w*::)*'          # optional namespace qualifier
+    r'(?:std::(?:u?int\d+_t|size_t)|u?int\d+_t|int\d+_t|int|float|double|bool|'
     r'std::string|std::optional<[^>]+>|std::vector<[^>]+>|'
-    r'[A-Z][A-Za-z0-9_]*)\s+(\w+)\s*(?:=[^;]*)?;')
+    r'[A-Z][A-Za-z0-9_]*))'
+    r'\s+(\w+)\s*(?:=[^;]*|\{[^;]*\})?;')
 TRAILING_RE = re.compile(r'//\s*(.*)$')
 # A one-line Doxygen comment: `/** text */`.
 DOC_RE = re.compile(r'^/\*\*(.+?)\*/\s*$')

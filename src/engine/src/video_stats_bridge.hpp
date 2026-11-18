@@ -60,6 +60,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #ifdef NIMRTC_HAS_VIDEO_STATS
@@ -241,6 +242,25 @@ public:
     void tick(std::int64_t now_us) {
 #ifdef NIMRTC_HAS_VIDEO_STATS
         if (rx_) rx_->tick(now_us);
+#endif
+    }
+
+    /**
+     * @brief Install the callback that is told about every freeze.
+     *
+     * The sink owns the *definition* of a freeze; this is how the
+     * finding reaches the QoE collector, which is what a host reads in
+     * `Stats::qoe`.  Without it the freeze count exists only inside the
+     * sink and the QoE snapshot's freeze metrics stay at zero.
+     *
+     * Only the **inbound** sink can freeze: the freeze is a property of
+     * what the *viewer* saw, and the viewer is on the receive side.
+     */
+    void set_freeze_callback(std::function<void(std::int64_t)> cb) {
+#ifdef NIMRTC_HAS_VIDEO_STATS
+        if (rx_) rx_->set_freeze_callback(std::move(cb));
+#else
+        (void)cb;
 #endif
     }
 

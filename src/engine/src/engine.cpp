@@ -210,8 +210,9 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     // The collector is resolved through the registry's qoe-collector
     // slot (`EngineConfig::qoe_collector_name`), so the engine never
     // includes a concrete module's header (Layout Invariant 4).  It is
-    // off by default: a session that does not ask for the metrics does
-    // not pay for the reservoir.
+    // **on by default**: a remote-desktop session is judged on exactly
+    // these metrics, so a host should not have to name a plugin to get
+    // them.  The opt-out is an empty `qoe_collector_name`.
     if (const uint32_t rc = resolve_qoe_collector(); rc != 0) return rc;
 
     return 0;

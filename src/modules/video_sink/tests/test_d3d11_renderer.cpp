@@ -96,6 +96,27 @@ void sleep_ms(int ms) {
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
+/** Wait until @p cond holds, polling every millisecond, up to @p budget_ms.
+ *
+ *  A fixed `sleep_ms()` before an assertion encodes an assumption about
+ *  how fast the presenter thread gets scheduled.  On a loaded CI runner
+ *  the assumption is simply false: `GpuSurfaceIsCopiedDeviceSide`
+ *  asserted `frames_presented > 0` after a fixed 150 ms and failed on
+ *  `windows-2022` while passing locally.  Waiting for the *condition*
+ *  rather than for a duration tests the same property and cannot lose a
+ *  race with the scheduler.
+ *
+ *  @return whether the condition held before the budget ran out.
+ */
+template <typename Predicate>
+bool wait_until(Predicate cond, int budget_ms) {
+    for (int elapsed = 0; elapsed < budget_ms; ++elapsed) {
+        if (cond()) return true;
+        sleep_ms(1);
+    }
+    return cond();
+}
+
 // ---------------------------------------------------------------------------
 // The factory / the registry
 // ---------------------------------------------------------------------------
@@ -164,8 +185,10 @@ TEST(D3D11Renderer, PresentationClockPacesThePresenter) {
         sleep_ms(1);
     }
 
-    // Give the presenter a moment to drain what it already holds.
-    sleep_ms(120);
+    // Give the presenter a moment to drain what it already holds.  Wait
+    // for a present rather than for a fixed delay: the runner's
+    // scheduler is what decides when the thread wakes up.
+    wait_until([&] { return renderer.stats().frames_presented > 0; }, 5000);
 
     const np::VideoSinkStats st = renderer.stats();
     renderer.close();
@@ -388,12 +411,15 @@ TEST(D3D11Renderer, GpuSurfaceIsCopiedDeviceSide) {
     np::GpuBuffer surface = wrap(fx.texture, 64, 64, np::VideoPixelFormat::kBGRA);
     ASSERT_EQ(renderer.render(surface), np::kOk);
     // `render()` only posts to the mailbox; the copy happens on the
-    // presenter's next deadline.
-    sleep_ms(150);
+    // presenter's next deadline.  Wait for the copy, not for a fixed
+    // duration -- a loaded runner can take longer than any constant.
+    const bool copied = wait_until(
+        [&] { return renderer.stats().gpu_device_copies > 0; }, 5000);
 
     const np::VideoSinkStats st = renderer.stats();
     renderer.close();
 
+    ASSERT_TRUE(copied) << "the presenter never copied the surface";
     EXPECT_GT(st.gpu_device_copies, 0u);
     EXPECT_EQ(st.gpu_staging_fallbacks, 0u);
     EXPECT_EQ(st.gpu_surfaces_refused, 0u);
@@ -471,11 +497,22 @@ TEST(D3D11Renderer, NonBgraSurfaceWithCpuMirrorPresents) {
     ASSERT_EQ(rc, np::kOk);
 
     ASSERT_EQ(renderer.render(surface), np::kOk);
-    sleep_ms(150);
+    // The fallback counter and the present counter are two separate
+    // events on the presenter thread: the fallback is recorded when the
+    // surface is rejected, the present when the converted frame reaches
+    // the target.  Waiting for the fallback alone returns before the
+    // present, so wait for both.
+    const bool presented = wait_until(
+        [&] {
+            const np::VideoSinkStats s = renderer.stats();
+            return s.gpu_staging_fallbacks > 0 && s.frames_presented > 0;
+        },
+        5000);
 
     const np::VideoSinkStats st = renderer.stats();
     renderer.close();
 
+    ASSERT_TRUE(presented) << "the staging fallback never reached the display";
     EXPECT_GE(st.gpu_staging_fallbacks, 1u);
     // The mirror is planar I420, so the CPU path's I420 → BGRA
     // conversion ran; the frame reached the display from the mirror

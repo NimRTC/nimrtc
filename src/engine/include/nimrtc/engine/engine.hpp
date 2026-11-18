@@ -5124,6 +5124,18 @@ private:
      *  storm) and goes out through the same door the jitter buffer's
      *  own loss report uses. */
     void request_keyframe_on_decode_failure() noexcept;
+    /** Deliver the peer's key-frame request to the video rate
+     *  controller(s) (v1.2 plan Track E / E6).
+     *
+     *  A PLI (RFC 4585 §6.3.1) or a FIR (RFC 5104 §4.3.1) means the peer
+     *  cannot decode what we are sending.  The engine answers it by
+     *  forcing an IDR; the *rate controller* answers it by stepping the
+     *  resolution ladder down (video plan B7) — a smaller picture is
+     *  cheaper to send and cheaper to decode.
+     *
+     *  This is the controller's third input, and the only one that
+     *  arrives on the RTCP path rather than on the tick. */
+    void notify_video_keyframe_requested() noexcept;
     /** Encode the pending receiver feedback as RTCP and put it on the wire
      *  (v1.1 Q3).  The bytes are produced by the receiver plugin — the
      *  engine only protects them (SRTCP) and sends them. */
@@ -5239,6 +5251,27 @@ private:
      *
      *  @param estimate  The session budget in bits per second. */
     void compute_video_stream_shares(std::uint32_t estimate) noexcept;
+    /** Feed the video rate controllers their **measured** outbound rate
+     *  (v1.2 plan Track E / E6).
+     *
+     *  `on_bandwidth_estimate()` says what the *link* can carry;
+     *  `on_measured_bitrate()` says what the *encoder* is actually
+     *  putting on the wire.  The controller compares the two and applies
+     *  a multiplicative decrease when the encoder overruns the estimate
+     *  — but only if something feeds it the measurement, and until this
+     *  method existed **nothing did**: the engine had the byte counter
+     *  and the controller had the seam, and the two were never joined.
+     *  The saturation benchmark therefore measured a loop the product
+     *  did not run.
+     *
+     *  The measurement is a one-second window (see
+     *  `engine_rate_window.hpp`): a per-tick instantaneous rate would
+     *  be dominated by single-frame spikes, and a spike that reads as
+     *  "the encoder is overrunning the link" would trigger a
+     *  multiplicative decrease on a link that is perfectly healthy.
+     *
+     *  Called from `tick()`; a no-op when no controller is configured. */
+    void feed_video_measured_bitrate() noexcept;
     /** The configured audio encoder ceiling, in bits per second:
      *  `Config::audio_bitrate_bps` when set, otherwise the codec
      *  default for the channel count (32 kbps mono / 64 kbps stereo). */

@@ -893,35 +893,55 @@ jobs:
           version="${{ needs.preflight.outputs.release_tag }}"   # e.g. v1.0.0
           stripped="${version#v}"            # 1.0.0
           export stripped
-          # Match "## [X.Y.Z]" or "## [X.Y.Z-rc.N]" headings.
+          # Build the release body with `tools/release_body.py`.
           #
-          # NOTE on the awk pattern: GNU Awk 5.x warns that the escapes
-          # `\[`, `\.`, `\]` are implementation-defined and treats them
-          # as plain characters, which collapses `\[0\.14\.0\]` into
-          # the character class `[0.14.0]` (matches ANY of `0`, `.`,
-          # `1`, `4`).  That made every `## ` heading "match" the
-          # heading pattern and the `exit` branch was unreachable, so
-          # the entire CHANGELOG ended up in the release body (observed
-          # at v0.14.0 cut).  The fix is a `^## ` anchor + plain
-          # `index()` substring check that bypasses the regex engine
-          # entirely. `ENVIRON["stripped"]` reads the exported shell
-          # var into awk without going through -v (which would force a
-          # re-escape and reintroduce the same bug).
-          awk '
-            BEGIN { keep = 0 }
-            /^## / {
-              if (keep == 1)    { exit }
-              if (index($0, "## [" ENVIRON["stripped"] "]") > 0) {
-                keep = 1
-                print
-                next
-              }
-            }
-            keep == 1 { print }
-          ' CHANGELOG.md > dist/release_notes.md
+          # The body is the `## [X.Y.Z]` section of `CHANGELOG.md` --
+          # whole, when it fits.  That is a correctness requirement
+          # rather than a nicety.  GitHub caps a release body at
+          # 125 000 characters and *silently truncates* an over-long
+          # one -- so the `v1.2.0` cut produced a draft whose body
+          # stopped mid-sentence at 124 999 of 364 350 characters, and
+          # the publish step then died with `422 Validation Failed` on
+          # the PATCH that tried to refresh it.
+          #
+          # When the section does *not* fit, the tool reduces it to a
+          # digest: the `### Status:` paragraph is kept whole (it says
+          # what the release *is*), every other entry is reduced to its
+          # bold headline, and a footer points at `CHANGELOG.md` for
+          # the full text.  It **fails** rather than emitting a body
+          # GitHub would truncate, so this failure cannot recur quietly.
+          #
+          # The earlier awk-based extraction is kept in the history of
+          # this file for a reason worth remembering: its escape
+          # pattern `\[0\.14\.0\]` collapses under GNU Awk 5.x into the
+          # character class `[0.14.0]` (matching ANY of `0`, `.`, `1`,
+          # `4`), which made every `## ` heading "match" and put the
+          # *entire* CHANGELOG into the body at the v0.14.0 cut.
+          python3 tools/release_body.py \
+            --version "${stripped}" \
+            --out dist/release_notes.md
           if [[ ! -s dist/release_notes.md ]]; then
             echo "::warning::No CHANGELOG section found for $stripped — using fallback body."
             echo "Release $version of NimRTC." > dist/release_notes.md
+          fi
+          # A second, independent guard: the body that is about to be
+          # posted must fit, *including* the footers appended below
+          # (the signing status and the per-platform 3A status).  The
+          # tool already budgets for them; this check is what catches
+          # a change to the footers that outgrows the margin.
+          #
+          # The count is in **characters**, not bytes: GitHub's limit
+          # is on characters, and the body carries non-ASCII (arrows,
+          # em-dashes) that would make a byte count the wrong number
+          # to compare against it.
+          body_chars=$(python3 -c "
+          import pathlib, sys
+          print(len(pathlib.Path('dist/release_notes.md').read_text(encoding='utf-8')))
+          ")
+          echo "release body: ${body_chars} characters"
+          if (( body_chars > 125000 )); then
+            echo "::error::The release body is ${body_chars} characters, over GitHub's 125000-character limit."
+            exit 1
           fi
           # Append signing-status footer based on what preflight saw.
           if [[ "${{ needs.preflight.outputs.configured }}" != "true" ]]; then

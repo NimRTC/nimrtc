@@ -1387,8 +1387,59 @@ endfunction()
 
 if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
    AND NIMRTC_MODULE_H264 AND NIMRTC_MODULE_VIDEO_BITRATE_CONTROL)
-nimrtc_add_engine_video_bitrate_control_test(test_engine_video_bitrate_control
+  nimrtc_add_engine_video_bitrate_control_test(test_engine_video_bitrate_control
                                              test_engine_video_bitrate_control.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# v1.2 plan Track E / E6 — the rate-control seams are *called*.
+#
+# The built-in controller's policy is covered by the module's own tests, and
+# the *rule* the engine measures the outbound rate with is covered by
+# `tests/test_engine_rate_window.cpp` (which includes the engine's private
+# `engine_rate_window.hpp`).
+#
+# What is left is the wiring itself: does the engine actually hand the
+# controller what the encoder is putting on the wire
+# (`on_measured_bitrate()`), and does an inbound PLI / FIR reach
+# `on_keyframe_requested()`?  Until this work the answer was "no" for both,
+# so the controller's multiplicative decrease and its key-frame remedy were
+# unreachable in production.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264 AND NIMRTC_MODULE_VIDEO_BITRATE_CONTROL)
+  nimrtc_add_engine_video_bitrate_control_test(test_engine_video_rate_control_wiring
+                                             test_engine_video_rate_control_wiring.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# The windowed outbound rate measurement — the *rule*, on its own.
+#
+# The rule lives in the engine's private `engine_rate_window.hpp` (the same
+# header the engine's video state includes), so the test includes it
+# directly and pins the arithmetic deterministically: an injected timestamp,
+# no sleeping.
+# ----------------------------------------------------------------------------
+add_executable(test_engine_rate_window test_engine_rate_window.cpp)
+target_link_libraries(test_engine_rate_window PRIVATE
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main)
+target_include_directories(test_engine_rate_window PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_engine_rate_window PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_engine_rate_window LENIENT)
+add_test(NAME test_engine_rate_window
+    COMMAND $<TARGET_FILE:test_engine_rate_window>)
+set_tests_properties(test_engine_rate_window PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_rate_window
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
 endif()
 
 # ----------------------------------------------------------------------------
@@ -3257,6 +3308,34 @@ if(NIMRTC_BUILD_TESTS)
             "Python3 interpreter not found — skipping the engine-layering "
             "guard (tools/check_engine_layering.py).  CI runs it as a "
             "dedicated step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The release-body guard.
+#
+# `tools/release_body.py` builds the GitHub release body and enforces
+# GitHub's 125 000-character limit on it.  The limit was hit for real:
+# the `v1.2.0` body was 364 350 characters, GitHub *silently* truncated
+# it to 124 999, and the publish step then died with `422 Validation
+# Failed`.  A silent truncation leaves an artefact that looks fine and
+# is not, so the tool's own rules are pinned by a self-test.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_release_body
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/release_body.py"
+                         --self-test)
+        set_tests_properties(test_release_body PROPERTIES
+            TIMEOUT 60
+            LABELS "release;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the release-body "
+            "guard (tools/release_body.py).  CI runs it as a dedicated "
+            "step.")
     endif()
 endif()
 

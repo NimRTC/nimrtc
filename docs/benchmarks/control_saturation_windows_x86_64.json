@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "benchmark": "control_saturation",
-  "generated_at": "2026-11-18T07:58:31Z",
+  "generated_at": "2026-11-18T09:10:18Z",
   "plan": "docs/plan/v1.2-next-plan.md",
   "plan_item": "E6",
   "evidence_row": "Remote desktop is zero-copy / the G2 control plane is not starved by a saturated video path",
@@ -65,66 +65,66 @@
         "with_video": true
       },
       "summary": {
-        "control_messages_sent": 3973,
-        "control_messages_received": 3973,
+        "control_messages_sent": 3943,
+        "control_messages_received": 3943,
         "control_messages_dropped": 0,
         "control_malformed_received": 0,
-        "control_p50_ms": 0.527,
-        "control_p90_ms": 1.551,
-        "control_p99_ms": 2.358,
-        "control_p999_ms": 11.549,
-        "control_max_ms": 18.148,
-        "control_mean_ms": 0.710267,
-        "control_rate_hz": 198.65,
-        "media_sent_datagrams": 10945,
-        "media_received_datagrams": 1226,
-        "media_admitted_datagrams": 1226,
-        "media_dropped_datagrams": 9719,
-        "media_sent_bytes": 12933548,
-        "media_admitted_bytes": 1250904,
-        "video_frames_sent": 313,
-        "video_frames_received": 196,
+        "control_p50_ms": 1.148,
+        "control_p90_ms": 2.008,
+        "control_p99_ms": 4.227,
+        "control_p999_ms": 9.214,
+        "control_max_ms": 15.296,
+        "control_mean_ms": 1.13162,
+        "control_rate_hz": 197.15,
+        "media_sent_datagrams": 7653,
+        "media_received_datagrams": 1181,
+        "media_admitted_datagrams": 1181,
+        "media_dropped_datagrams": 6472,
+        "media_sent_bytes": 9013715,
+        "media_admitted_bytes": 1251352,
+        "video_frames_sent": 230,
+        "video_frames_received": 138,
         "video_frames_decoded": 0,
-        "video_frames_pushed": 313,
+        "video_frames_pushed": 230,
         "video_frames_rejected": 0,
         "five_tuples_distinct": true,
         "high_resolution_wait": true,
         "ok": true
       },
       "endpoints": {
-        "media_tx_local": "127.0.0.1:53976",
-        "media_rx_local": "127.0.0.1:53978",
-        "media_rx_observed_source": "127.0.0.1:53976",
-        "control_tx_local": "127.0.0.1:53975",
-        "control_rx_local": "127.0.0.1:53977"
+        "media_tx_local": "127.0.0.1:63358",
+        "media_rx_local": "127.0.0.1:63360",
+        "media_rx_observed_source": "127.0.0.1:63358",
+        "control_tx_local": "127.0.0.1:63357",
+        "control_rx_local": "127.0.0.1:63359"
       },
       "invariants": [
         {
           "invariant": "saturation_was_real",
           "ok": true,
-          "measured": 9719,
+          "measured": 6472,
           "limit": "> 0",
-          "detail": "the media link dropped 9719 of 10945 datagrams, so it was genuinely at capacity"
+          "detail": "the media link dropped 6472 of 7653 datagrams, so it was genuinely at capacity"
         },
         {
           "invariant": "control_reached_the_profile_rate",
           "ok": true,
-          "measured": 198.7,
+          "measured": 197.2,
           "limit": ">= 180.0",
-          "detail": "the control plane ran at 198.7 Hz against the profile's 200 Hz"
+          "detail": "the control plane ran at 197.2 Hz against the profile's 200 Hz"
         },
         {
           "invariant": "control_p99_stayed_within_budget",
           "ok": true,
-          "measured": 2.358,
+          "measured": 4.227,
           "limit": "< 50.0",
           "detail": "the control plane's p99 stayed inside the profile's budget while the video path was saturated"
         },
         {
           "invariant": "control_path_was_not_starved",
           "ok": true,
-          "measured": "3973/3973",
-          "limit": "3973/3973",
+          "measured": "3943/3943",
+          "limit": "3943/3943",
           "detail": "every control message arrived (0 dropped by the control channel's own queue)"
         },
         {
@@ -138,143 +138,143 @@
       "latency_curve": [
         {
           "bucket": 0,
-          "samples": 198,
-          "p50_ms": 0.069,
-          "p99_ms": 0.077,
-          "max_ms": 0.078
-        },
-        {
-          "bucket": 1,
-          "samples": 198,
-          "p50_ms": 0.087,
-          "p99_ms": 0.093,
-          "max_ms": 0.093
-        },
-        {
-          "bucket": 2,
-          "samples": 198,
-          "p50_ms": 0.098,
-          "p99_ms": 0.103,
-          "max_ms": 0.103
-        },
-        {
-          "bucket": 3,
-          "samples": 198,
-          "p50_ms": 0.108,
-          "p99_ms": 0.112,
-          "max_ms": 0.112
-        },
-        {
-          "bucket": 4,
-          "samples": 198,
-          "p50_ms": 0.117,
-          "p99_ms": 0.122,
-          "max_ms": 0.122
-        },
-        {
-          "bucket": 5,
-          "samples": 198,
-          "p50_ms": 0.126,
-          "p99_ms": 0.131,
-          "max_ms": 0.131
-        },
-        {
-          "bucket": 6,
-          "samples": 198,
-          "p50_ms": 0.137,
+          "samples": 197,
+          "p50_ms": 0.128,
           "p99_ms": 0.144,
           "max_ms": 0.144
         },
         {
+          "bucket": 1,
+          "samples": 197,
+          "p50_ms": 0.162,
+          "p99_ms": 0.175,
+          "max_ms": 0.175
+        },
+        {
+          "bucket": 2,
+          "samples": 197,
+          "p50_ms": 0.187,
+          "p99_ms": 0.2,
+          "max_ms": 0.201
+        },
+        {
+          "bucket": 3,
+          "samples": 197,
+          "p50_ms": 0.218,
+          "p99_ms": 0.251,
+          "max_ms": 0.251
+        },
+        {
+          "bucket": 4,
+          "samples": 197,
+          "p50_ms": 0.298,
+          "p99_ms": 0.371,
+          "max_ms": 0.371
+        },
+        {
+          "bucket": 5,
+          "samples": 197,
+          "p50_ms": 0.456,
+          "p99_ms": 0.529,
+          "max_ms": 0.529
+        },
+        {
+          "bucket": 6,
+          "samples": 197,
+          "p50_ms": 0.617,
+          "p99_ms": 0.748,
+          "max_ms": 0.752
+        },
+        {
           "bucket": 7,
-          "samples": 198,
-          "p50_ms": 0.151,
-          "p99_ms": 0.164,
-          "max_ms": 0.164
+          "samples": 197,
+          "p50_ms": 0.853,
+          "p99_ms": 0.934,
+          "max_ms": 0.934
         },
         {
           "bucket": 8,
-          "samples": 198,
-          "p50_ms": 0.189,
-          "p99_ms": 0.255,
-          "max_ms": 0.256
+          "samples": 197,
+          "p50_ms": 0.995,
+          "p99_ms": 1.046,
+          "max_ms": 1.047
         },
         {
           "bucket": 9,
-          "samples": 198,
-          "p50_ms": 0.447,
-          "p99_ms": 0.526,
-          "max_ms": 0.527
+          "samples": 197,
+          "p50_ms": 1.103,
+          "p99_ms": 1.147,
+          "max_ms": 1.147
         },
         {
           "bucket": 10,
-          "samples": 198,
-          "p50_ms": 0.534,
-          "p99_ms": 0.542,
-          "max_ms": 0.542
+          "samples": 197,
+          "p50_ms": 1.171,
+          "p99_ms": 1.181,
+          "max_ms": 1.182
         },
         {
           "bucket": 11,
-          "samples": 198,
-          "p50_ms": 0.551,
-          "p99_ms": 0.57,
-          "max_ms": 0.571
+          "samples": 197,
+          "p50_ms": 1.191,
+          "p99_ms": 1.202,
+          "max_ms": 1.202
         },
         {
           "bucket": 12,
-          "samples": 198,
-          "p50_ms": 0.797,
-          "p99_ms": 1.063,
-          "max_ms": 1.063
+          "samples": 197,
+          "p50_ms": 1.214,
+          "p99_ms": 1.237,
+          "max_ms": 1.237
         },
         {
           "bucket": 13,
-          "samples": 198,
-          "p50_ms": 1.097,
-          "p99_ms": 1.123,
-          "max_ms": 1.124
+          "samples": 197,
+          "p50_ms": 1.284,
+          "p99_ms": 1.363,
+          "max_ms": 1.364
         },
         {
           "bucket": 14,
-          "samples": 198,
-          "p50_ms": 1.151,
-          "p99_ms": 1.175,
-          "max_ms": 1.175
+          "samples": 197,
+          "p50_ms": 1.482,
+          "p99_ms": 1.683,
+          "max_ms": 1.684
         },
         {
           "bucket": 15,
-          "samples": 198,
-          "p50_ms": 1.199,
-          "p99_ms": 1.238,
-          "max_ms": 1.239
+          "samples": 197,
+          "p50_ms": 1.735,
+          "p99_ms": 1.802,
+          "max_ms": 1.803
         },
         {
           "bucket": 16,
-          "samples": 198,
-          "p50_ms": 1.278,
-          "p99_ms": 1.338,
-          "max_ms": 1.34
+          "samples": 197,
+          "p50_ms": 1.862,
+          "p99_ms": 1.91,
+          "max_ms": 1.911
         },
         {
           "bucket": 17,
-          "samples": 198,
-          "p50_ms": 1.425,
-          "p99_ms": 1.53,
-          "max_ms": 1.533
+          "samples": 197,
+          "p50_ms": 1.958,
+          "p99_ms": 2.006,
+          "max_ms": 2.006
         },
         {
           "bucket": 18,
-          "samples": 198,
-          "p50_ms": 1.836,
-          "p99_ms": 1.966,
-          "max_ms": 1.967
+          "samples": 197,
+          "p50_ms": 2.097,
+          "p99_ms": 2.342,
+          "max_ms": 2.344
         },
         {
           "bucket": 19,
-          "samples": 211,
-          "p50_ms": 2.026,
-          "p99_ms": 12.451,
-          "max_ms": 18.148
+          "samples": 200,
+          "p50_ms": 2.81,
+          "p99_ms": 9.908,
+          "max_ms": 15.296
         }
       ]
     },
@@ -298,17 +298,17 @@
         "with_video": false
       },
       "summary": {
-        "control_messages_sent": 3981,
-        "control_messages_received": 3981,
+        "control_messages_sent": 3910,
+        "control_messages_received": 3910,
         "control_messages_dropped": 0,
         "control_malformed_received": 0,
-        "control_p50_ms": 0.52,
-        "control_p90_ms": 1.465,
-        "control_p99_ms": 2.064,
-        "control_p999_ms": 11.06,
-        "control_max_ms": 26.576,
-        "control_mean_ms": 0.661459,
-        "control_rate_hz": 199.05,
+        "control_p50_ms": 0.554,
+        "control_p90_ms": 1.954,
+        "control_p99_ms": 3.773,
+        "control_p999_ms": 12.126,
+        "control_max_ms": 14.116,
+        "control_mean_ms": 0.898316,
+        "control_rate_hz": 195.5,
         "media_sent_datagrams": 0,
         "media_received_datagrams": 0,
         "media_admitted_datagrams": 0,
@@ -325,11 +325,11 @@
         "ok": true
       },
       "endpoints": {
-        "media_tx_local": "127.0.0.1:53980",
-        "media_rx_local": "127.0.0.1:53982",
+        "media_tx_local": "127.0.0.1:54192",
+        "media_rx_local": "127.0.0.1:54194",
         "media_rx_observed_source": "",
-        "control_tx_local": "127.0.0.1:53979",
-        "control_rx_local": "127.0.0.1:53981"
+        "control_tx_local": "127.0.0.1:54191",
+        "control_rx_local": "127.0.0.1:54193"
       },
       "invariants": [
         {
@@ -342,22 +342,22 @@
         {
           "invariant": "control_reached_the_profile_rate",
           "ok": true,
-          "measured": 199.1,
+          "measured": 195.5,
           "limit": ">= 180.0",
-          "detail": "the control plane ran at 199.1 Hz against the profile's 200 Hz"
+          "detail": "the control plane ran at 195.5 Hz against the profile's 200 Hz"
         },
         {
           "invariant": "control_p99_stayed_within_budget",
           "ok": true,
-          "measured": 2.064,
+          "measured": 3.773,
           "limit": "< 50.0",
           "detail": "the control plane's p99 stayed inside the profile's budget while the video path was saturated"
         },
         {
           "invariant": "control_path_was_not_starved",
           "ok": true,
-          "measured": "3981/3981",
-          "limit": "3981/3981",
+          "measured": "3910/3910",
+          "limit": "3910/3910",
           "detail": "every control message arrived (0 dropped by the control channel's own queue)"
         },
         {
@@ -371,143 +371,143 @@
       "latency_curve": [
         {
           "bucket": 0,
-          "samples": 199,
-          "p50_ms": 0.088,
-          "p99_ms": 0.098,
-          "max_ms": 0.098
+          "samples": 195,
+          "p50_ms": 0.118,
+          "p99_ms": 0.13,
+          "max_ms": 0.13
         },
         {
           "bucket": 1,
-          "samples": 199,
-          "p50_ms": 0.107,
-          "p99_ms": 0.114,
-          "max_ms": 0.114
+          "samples": 195,
+          "p50_ms": 0.135,
+          "p99_ms": 0.14,
+          "max_ms": 0.14
         },
         {
           "bucket": 2,
-          "samples": 199,
-          "p50_ms": 0.119,
-          "p99_ms": 0.125,
-          "max_ms": 0.125
+          "samples": 195,
+          "p50_ms": 0.145,
+          "p99_ms": 0.151,
+          "max_ms": 0.151
         },
         {
           "bucket": 3,
-          "samples": 199,
-          "p50_ms": 0.13,
-          "p99_ms": 0.134,
-          "max_ms": 0.134
-        },
-        {
-          "bucket": 4,
-          "samples": 199,
-          "p50_ms": 0.139,
-          "p99_ms": 0.144,
-          "max_ms": 0.144
-        },
-        {
-          "bucket": 5,
-          "samples": 199,
-          "p50_ms": 0.148,
-          "p99_ms": 0.155,
-          "max_ms": 0.155
-        },
-        {
-          "bucket": 6,
-          "samples": 199,
-          "p50_ms": 0.161,
+          "samples": 195,
+          "p50_ms": 0.157,
           "p99_ms": 0.168,
           "max_ms": 0.168
         },
         {
+          "bucket": 4,
+          "samples": 195,
+          "p50_ms": 0.178,
+          "p99_ms": 0.191,
+          "max_ms": 0.191
+        },
+        {
+          "bucket": 5,
+          "samples": 195,
+          "p50_ms": 0.211,
+          "p99_ms": 0.236,
+          "max_ms": 0.236
+        },
+        {
+          "bucket": 6,
+          "samples": 195,
+          "p50_ms": 0.286,
+          "p99_ms": 0.394,
+          "max_ms": 0.395
+        },
+        {
           "bucket": 7,
-          "samples": 199,
-          "p50_ms": 0.177,
-          "p99_ms": 0.189,
-          "max_ms": 0.189
+          "samples": 195,
+          "p50_ms": 0.47,
+          "p99_ms": 0.519,
+          "max_ms": 0.519
         },
         {
           "bucket": 8,
-          "samples": 199,
-          "p50_ms": 0.205,
-          "p99_ms": 0.233,
-          "max_ms": 0.233
+          "samples": 195,
+          "p50_ms": 0.538,
+          "p99_ms": 0.545,
+          "max_ms": 0.545
         },
         {
           "bucket": 9,
-          "samples": 199,
-          "p50_ms": 0.434,
-          "p99_ms": 0.52,
-          "max_ms": 0.52
+          "samples": 195,
+          "p50_ms": 0.55,
+          "p99_ms": 0.553,
+          "max_ms": 0.553
         },
         {
           "bucket": 10,
-          "samples": 199,
-          "p50_ms": 0.528,
-          "p99_ms": 0.534,
-          "max_ms": 0.534
+          "samples": 195,
+          "p50_ms": 0.558,
+          "p99_ms": 0.568,
+          "max_ms": 0.569
         },
         {
           "bucket": 11,
-          "samples": 199,
-          "p50_ms": 0.539,
-          "p99_ms": 0.543,
-          "max_ms": 0.543
+          "samples": 195,
+          "p50_ms": 0.69,
+          "p99_ms": 0.864,
+          "max_ms": 0.865
         },
         {
           "bucket": 12,
-          "samples": 199,
-          "p50_ms": 0.548,
-          "p99_ms": 0.557,
-          "max_ms": 0.557
+          "samples": 195,
+          "p50_ms": 1.009,
+          "p99_ms": 1.11,
+          "max_ms": 1.11
         },
         {
           "bucket": 13,
-          "samples": 199,
-          "p50_ms": 0.588,
-          "p99_ms": 1.077,
-          "max_ms": 1.077
+          "samples": 195,
+          "p50_ms": 1.173,
+          "p99_ms": 1.2,
+          "max_ms": 1.201
         },
         {
           "bucket": 14,
-          "samples": 199,
-          "p50_ms": 1.112,
-          "p99_ms": 1.148,
-          "max_ms": 1.148
+          "samples": 195,
+          "p50_ms": 1.223,
+          "p99_ms": 1.271,
+          "max_ms": 1.272
         },
         {
           "bucket": 15,
-          "samples": 199,
-          "p50_ms": 1.179,
-          "p99_ms": 1.212,
-          "max_ms": 1.212
+          "samples": 195,
+          "p50_ms": 1.406,
+          "p99_ms": 1.558,
+          "max_ms": 1.559
         },
         {
           "bucket": 16,
-          "samples": 199,
-          "p50_ms": 1.247,
-          "p99_ms": 1.302,
-          "max_ms": 1.302
+          "samples": 195,
+          "p50_ms": 1.755,
+          "p99_ms": 1.833,
+          "max_ms": 1.834
         },
         {
           "bucket": 17,
-          "samples": 199,
-          "p50_ms": 1.37,
-          "p99_ms": 1.463,
-          "max_ms": 1.463
+          "samples": 195,
+          "p50_ms": 1.899,
+          "p99_ms": 1.95,
+          "max_ms": 1.951
         },
         {
           "bucket": 18,
-          "samples": 199,
-          "p50_ms": 1.702,
-          "p99_ms": 1.951,
-          "max_ms": 1.952
+          "samples": 195,
+          "p50_ms": 1.991,
+          "p99_ms": 2.079,
+          "max_ms": 2.079
         },
         {
           "bucket": 19,
-          "samples": 200,
-          "p50_ms": 2.005,
-          "p99_ms": 16.088,
-          "max_ms": 26.576
+          "samples": 205,
+          "p50_ms": 2.564,
+          "p99_ms": 13.029,
+          "max_ms": 14.116
         }
       ]
     }
@@ -526,6 +526,7 @@
     "The 'negative_control' scenario runs the same rig with the video path disabled: it proves that a passing saturated run is not an artefact of the video path having been switched off by accident, and that the control path delivers every message on an idle link too.",
     "The control producer's schedule is absolute: a late wake is absorbed by the next slot rather than by shifting every slot that follows. The obvious alternative \u2014 resetting the phase to 'now + period' \u2014 makes the measured period the wake error plus the configured period, so a 500 us wake error turns a 5 ms period into a 5.5 ms one and the control plane reports ~182 Hz instead of the profile's 200 Hz. On Windows the wait is a high-resolution waitable timer (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION), because the default ~15.6 ms system tick would cap the producer at ~64 Hz and the measured rate would describe the host's timer rather than the transport.",
     "The rate the binary runs at and the rate the invariants are checked against are the same number, taken from the profile unless the command line overrides it. They cannot drift apart: the defaults are 'unset' rather than the profile's values, because a default that *equals* the profile's value cannot be told apart from an explicit override, and a profile change would then leave the binary on the old rate while the assertion moved to the new one.",
-    "The binary reports whether its wait path had the high-resolution deadline ('high_resolution_wait'). The rate invariant is **skipped** when it did not: the measured rate is produced by a thread waiting on a deadline, so without the 100 ns deadline the run measures the host's timer rather than the transport, and a rate that missed the target would say nothing about the control plane. It is skipped rather than failed because it is *unknown*, not wrong. The verdict's 'skips' array lists every such property, so a green verdict cannot hide an unchecked one."
+    "The binary reports whether its wait path had the high-resolution deadline ('high_resolution_wait'). The rate invariant is **skipped** when it did not: the measured rate is produced by a thread waiting on a deadline, so without the 100 ns deadline the run measures the host's timer rather than the transport, and a rate that missed the target would say nothing about the control plane. It is skipped rather than failed because it is *unknown*, not wrong. The verdict's 'skips' array lists every such property, so a green verdict cannot hide an unchecked one.",
+    "Both scenarios are retried when the *host* was too busy to produce a usable measurement: the saturated one when the link was never brought to capacity, the negative control when the control plane missed the rate. The negative control's rate is the interesting case: it carries no video at all, so its control plane has nothing to compete with, and a rate below the target there can only be the host's scheduling - never the transport. Without the retry the benchmark would report a transport failure for what is really a busy machine."
   ]
 }

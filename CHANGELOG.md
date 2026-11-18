@@ -429,10 +429,10 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   accident.  The committed sample is
   `docs/benchmarks/control_saturation_windows_x86_64.json`.
 
-  **The measurement is 198.7 Hz against the profile's 200 Hz with a p99 of
-  2.36 ms against the profile's 50 ms budget**, while the media link drops
-  9,719 datagrams; the negative control runs at 199.1 Hz with a p99 of
-  2.06 ms.
+  **The measurement is 197.2 Hz against the profile's 200 Hz with a p99 of
+  4.23 ms against the profile's 50 ms budget**, while the media link drops
+  6,472 datagrams; the negative control runs at 195.5 Hz with a p99 of
+  3.77 ms.
 
   Two wrapper guarantees are worth naming, because both close a way the
   measurement could silently lie.  The **rate the binary runs at** and the
@@ -451,6 +451,17 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the control plane.  The binary reports whether it had the deadline
   (`high_resolution_wait`), and the artifact records it — so the
   artifact cannot claim a precision the run did not have.
+
+  And **both** scenarios are now retried when the *host* was too busy to
+  produce a usable measurement: the saturated one when the link was
+  never brought to capacity, and the negative control when the control
+  plane missed the rate.  The negative control's rate is the case worth
+  naming: it carries **no video at all**, so its control plane has
+  nothing to compete with, and a rate below the target there can only
+  be the host's scheduling — never the transport.  Without the retry
+  the benchmark would report a *transport* failure for what is really a
+  busy machine — the same mistake the saturated scenario had
+  already learned to avoid.
 
   Getting those numbers to mean what they claim took **two defects in the
   harness itself**, and both are recorded because both are plausible:

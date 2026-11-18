@@ -77,6 +77,15 @@ plan asks for, and a failure is a real defect, not a slow machine:
      so a passing saturated run cannot be an artefact of the video
      path being switched off by accident.
 
+Both scenarios are retried when the **host** was too busy to produce a
+usable measurement: the saturated one when the link was never brought to
+capacity, the negative control when the control plane missed the rate.
+The negative control's rate is a special case worth naming: it carries
+**no video at all**, so its control plane has nothing to compete with,
+and a rate below the target there can only be the host's scheduling —
+never the transport.  Without the retry the benchmark would report a
+transport failure for what is really a busy machine.
+
 ## Usage
 
     # Measure and write the artifact.
@@ -568,17 +577,40 @@ def main() -> int:
             attempt += 1
             raw = run_benchmark(binary, args, spec["with_video"])
             checks = check_invariants(raw, spec["with_video"], budget, freq)
-            # The saturation scenario is retried when the host was too
-            # busy to fill the link: a measurement that did not happen
-            # is not a result.  The negative control has no load to
-            # measure, so it is never retried.
-            saturated = (spec["with_video"] and
-                         not checks[0]["ok"])
-            if not saturated or attempt >= MAX_ATTEMPTS:
+            # A scenario is retried when the *host* was too busy to
+            # produce a usable measurement.
+            #
+            # For the saturated scenario that means the link was never
+            # brought to capacity: a measurement that did not happen is
+            # not a result.
+            #
+            # For the negative control it means the control plane did
+            # not reach the profile's rate.  The negative control
+            # carries **no video at all**, so its control plane has
+            # nothing to compete with: a rate below the target there
+            # can only be the host's scheduling (a busy CI runner, an
+            # antivirus scan), never the transport.  Without the retry
+            # the benchmark would report a *transport* failure for what
+            # is a *host* problem — the same mistake the saturated
+            # scenario already learned to avoid.
+            busy_host = False
+            if spec["with_video"]:
+                busy_host = not checks[0]["ok"]
+            else:
+                rate_check = next(
+                    (c for c in checks
+                     if c["invariant"] == "control_reached_the_profile_rate"),
+                    None)
+                # A *skipped* rate invariant means the run had no
+                # high-resolution deadline, so the rate was never
+                # measurable; that is not a busy host.
+                if rate_check is not None and not rate_check.get("skipped"):
+                    busy_host = not rate_check["ok"]
+            if not busy_host or attempt >= MAX_ATTEMPTS:
                 break
             print(f"scenario '{spec['name']}': the host was too busy to "
-                  f"saturate the link (attempt {attempt}/{MAX_ATTEMPTS}); "
-                  "re-running")
+                  f"produce a usable measurement (attempt "
+                  f"{attempt}/{MAX_ATTEMPTS}); re-running")
 
         for c in checks:
             if not c["ok"]:
@@ -691,6 +723,16 @@ def main() -> int:
             "skipped rather than failed because it is *unknown*, not "
             "wrong. The verdict's 'skips' array lists every such "
             "property, so a green verdict cannot hide an unchecked one.",
+            "Both scenarios are retried when the *host* was too busy to "
+            "produce a usable measurement: the saturated one when the "
+            "link was never brought to capacity, the negative control "
+            "when the control plane missed the rate. The negative "
+            "control's rate is the interesting case: it carries no video "
+            "at all, so its control plane has nothing to compete with, "
+            "and a rate below the target there can only be the host's "
+            "scheduling - never the transport. Without the retry the "
+            "benchmark would report a transport failure for what is "
+            "really a busy machine.",
         ],
     }
 

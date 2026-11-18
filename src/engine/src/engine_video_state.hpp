@@ -42,6 +42,7 @@
 #include <nimrtc/plugins/video_pipeline.hpp>
 
 #include "audio_routing.hpp"
+#include "engine_capture_cadence.hpp"
 #include "engine_gpu_mailbox.hpp"
 #include "engine_ref_frame_table.hpp"
 #include "engine_render_state.hpp"
@@ -460,36 +461,26 @@ struct VideoState {
 
     // ---- The capture cadence (v1.2 plan Track S / S7) -------------------
     //
-    // The first and last *device* capture timestamps the pump saw, and
-    // how many frames the device delivered.  The capture rate is
-    // `(count - 1) / (last - first)`: it is measured on the device's own
-    // timestamps rather than on the engine's clock, so a device that
-    // stamps frames itself still yields the rate it actually ran at.
-    //
-    // A frame whose timestamp is not strictly greater than the last one
-    // is not a new delivery (a device that repeats a timestamp delivered
-    // nothing new) and is not counted.
-    std::int64_t  capture_first_ts_us = 0;
-    std::int64_t  capture_last_ts_us = 0;
-    std::uint64_t capture_frames_seen = 0;
+    // How many frames the *device* delivered and over what span of its
+    // own clock.  The counting rule (sequence numbers are the identity
+    // of a delivery, timestamps are not assumed monotonic) lives in
+    // `engine_capture_cadence.hpp`, next to the unit test that pins it.
+    CaptureCadence capture_cadence;
 
-    /** Record one delivered frame's capture timestamp. */
-    void note_captured_frame(std::int64_t capture_ts_us) noexcept {
-        if (capture_frames_seen != 0 && capture_ts_us <= capture_last_ts_us) {
-            return;
-        }
-        if (capture_frames_seen == 0) capture_first_ts_us = capture_ts_us;
-        capture_last_ts_us = capture_ts_us;
-        ++capture_frames_seen;
+    /** Record one delivered frame (its timestamp and its sequence). */
+    void note_captured_frame(std::int64_t capture_ts_us,
+                             std::uint32_t frame_seq) noexcept {
+        capture_cadence.note(capture_ts_us, frame_seq);
     }
 
     /** The device's frame rate, in frames per second (0 when unknown). */
     [[nodiscard]] double capture_fps() const noexcept {
-        if (capture_frames_seen < 2) return 0.0;
-        const auto span_us = capture_last_ts_us - capture_first_ts_us;
-        if (span_us <= 0) return 0.0;
-        return static_cast<double>(capture_frames_seen - 1) * 1'000'000.0 /
-               static_cast<double>(span_us);
+        return capture_cadence.fps();
+    }
+
+    /** How many frames the device delivered. */
+    [[nodiscard]] std::uint64_t capture_frames_seen_count() const noexcept {
+        return capture_cadence.frames;
     }
 
     // ---- The incremental (dirty-rect) encode mechanism (plan B9) --------

@@ -1173,6 +1173,12 @@ nimrtc_add_engine_video_stats_test(test_engine_remote_desktop_stats
 target_link_libraries(test_engine_remote_desktop_stats PRIVATE
     nimrtc::video_capture
     nimrtc::h264)
+# The cadence rule (S7) lives in the engine's internal state header.
+# The test includes it directly so the counting rule can be pinned
+# deterministically; the engine's implementation directory is the
+# include root for it (`src/engine/src`).
+target_include_directories(test_engine_remote_desktop_stats PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
 nimrtc_copy_msquic_dll(test_engine_remote_desktop_stats)
 endif()
 

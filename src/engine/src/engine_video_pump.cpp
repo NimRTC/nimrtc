@@ -123,7 +123,7 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     // delivers frames at needs the timestamps, which only the device
     // has.  Recorded here so a frames-dropped-before-encode figure can
     // be derived from it later.
-    vstate.note_captured_frame(captured.capture_ts_us);
+    vstate.note_captured_frame(captured.capture_ts_us, captured.frame_seq);
 
     // ---- The media clock ------------------------------------------------
     //
@@ -520,7 +520,7 @@ bool NimRTCEngine::pump_video_capture_gpu() noexcept {
 
     // Plan S7: the GPU path delivers frames too, so it feeds the same
     // cadence record as the CPU path.
-    vstate.note_captured_frame(frame.capture_ts_us);
+    vstate.note_captured_frame(frame.capture_ts_us, frame.frame_seq);
 
     // ---- The media clock ------------------------------------------------
     //

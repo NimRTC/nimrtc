@@ -56,6 +56,12 @@
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 
+// The cadence rule lives in its own header inside the engine's
+// implementation; it is included here so the counting rule can be
+// pinned deterministically, without driving a device through a
+// timing-sensitive stall.  The same header is what the pump uses.
+#include "engine_capture_cadence.hpp"
+
 namespace {
 
 namespace np = nimrtc::plugins;
@@ -90,6 +96,16 @@ struct RdCaptureState {
     std::atomic<std::int64_t> next_ts_us{0};
     std::uint32_t width  = 64;
     std::uint32_t height = 48;
+    /**
+     * The queue depth the device keeps.
+     *
+     * A real desktop device keeps a *bounded* queue and drops the
+     * oldest frame when the consumer falls behind -- during a stall of
+     * the tick thread, which is exactly when the capture rate matters.
+     * With a depth of 1 that happens on every slow tick, so the test
+     * exercises the lost-frame path instead of the happy path only.
+     */
+    std::size_t queue_depth = 1;
 };
 
 class RdCaptureDevice : public np::IVideoCapture {
@@ -129,6 +145,25 @@ public:
     bool is_open() const noexcept override { return open_; }
     np::CaptureConfig config() const noexcept override { return cfg_; }
 
+    /**
+     * Inject a single frame from the test thread.
+     *
+     * The device's producer is asynchronous, so a sequence that the
+     * test wants to exist (a rewound counter, a repeated timestamp)
+     * cannot be made to happen by the producer; it is pushed here.
+     */
+    void push_scripted(std::int64_t ts_us, std::uint32_t seq) noexcept {
+        const std::size_t bytes =
+            static_cast<std::size_t>(state_->width) * state_->height * 4u;
+        RdCaptureState::Frame f;
+        f.pixels.assign(bytes, 0x40u);
+        f.ts_us = ts_us;
+        f.seq   = seq;
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->frames.push_back(std::move(f));
+        ++state_->produced;
+    }
+
     np::Status pop_frame(np::CaptureFrame& out) noexcept override {
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (state_->frames.empty()) return np::kErrNotReady;
@@ -167,7 +202,9 @@ private:
             f.seq   = state_->next_seq.fetch_add(1);
             {
                 std::lock_guard<std::mutex> lock(state_->mutex);
-                if (state_->frames.size() >= 2) state_->frames.pop_front();
+                while (state_->frames.size() >= state_->queue_depth) {
+                    state_->frames.pop_front();   // the device's own drop
+                }
                 state_->frames.push_back(std::move(f));
             }
             ++state_->produced;
@@ -403,11 +440,26 @@ TEST_F(EngineRemoteDesktopStats, OutboundPipelineFillsCaptureAndEncode) {
     EXPECT_GE(rd.frames_captured, 5u)
         << "the capture cadence must be recorded from the device's timestamps";
 
-    // The rate, from the device's own timestamps: frames advance by
-    // 33 333 us, so the measured rate is 30 fps.
-    ASSERT_GT(rd.capture_fps, 0.0);
-    EXPECT_NEAR(rd.capture_fps, 30.0, 2.0)
+    // The rate, from the device's own timestamps: the device's clock
+    // advances by 33 333 us per capture, so once frames are not being
+    // lost the measured rate is 30 fps.
+    //
+    // The device's queue is minimal in this fixture, so a tick that
+    // spends time in the scheduler can lose a frame -- the *rate* the
+    // device ran at is still on its timestamps (a lost frame widens
+    // the span), which is the property being pinned.  The bound
+    // therefore allows the tolerances of a loaded CI host (a stall
+    // that drops a frame lowers the observed rate to ~24 fps) but not
+    // the failure mode this test was written for: giving up and
+    // reporting 0 because a *new* frame arrived with an older
+    // timestamp than the last one seen.
+    ASSERT_GT(rd.capture_fps, 0.0)
         << "capture rate must follow the device's timestamps";
+    EXPECT_NEAR(rd.capture_fps, 30.0, 10.0)
+        << "capture rate must follow the device's timestamps";
+    EXPECT_GT(rd.capture_fps, 20.0)
+        << "a rate below half the device's clock would mean the "
+           "endpoint was taken from a lost frame";
 
     // The encode rate is a rate of *stage runs* over wall-clock time.
     EXPECT_GT(rd.encode_fps, 0.0);
@@ -520,6 +572,67 @@ TEST_F(EngineRemoteDesktopStats, DropAccountingIsClamped) {
         << "captured - encoded must clamp at 0, never wrap to 2^64-1";
 
     engine.close();
+}
+
+// ---------------------------------------------------------------------------
+// 6. The cadence survives a device whose timestamps are not monotonic.
+//
+// This is the regression the macOS CI caught on the first landing: the
+// device's queue is bounded, so a pump that falls behind causes the
+// device to drop the oldest frame -- and the next frame it hands over
+// carries a timestamp *later* than the one lost, so the pump never sees
+// a backwards jump from a drop.  What it does see, when the device's
+// producer is faster than the queue, is frames arriving after a stall
+// whose timestamps are fine but whose *sequence numbers* skipped.  The
+// other shape is a source that restarts its clock (a monitor
+// hot-plugged, a portal re-negotiated): the timestamp jumps back.
+//
+// Neither shape may make a delivered frame disappear from the count,
+// and a broken timestamp span must report "unknown" (0), never a
+// plausible-looking wrong number.
+// ---------------------------------------------------------------------------
+
+TEST_F(EngineRemoteDesktopStats, CadenceSurvivesNonMonotonicDevice) {
+    // The counting rule, in isolation from the engine: a rewound
+    // timestamp on a *new* sequence is still a delivery.
+    nimrtc::engine::detail::CaptureCadence cadence;
+    cadence.note(0, 1);
+    cadence.note(33'333, 2);
+    cadence.note(66'666, 3);
+    EXPECT_EQ(cadence.frames, 3u);
+    // 33 333 us is 30.0003 fps -- the device's integer microsecond
+    // clock is what it is.
+    EXPECT_NEAR(cadence.fps(), 30.0, 0.01);
+
+    // A repeated sequence is the *same* delivery handed over twice.
+    cadence.note(66'666, 3);
+    EXPECT_EQ(cadence.frames, 3u)
+        << "the same frame popped twice is not a new delivery";
+
+    // A new sequence whose timestamp went backwards: counted, and the
+    // rate becomes unknown rather than wrong.
+    cadence.note(10'000, 4);
+    EXPECT_EQ(cadence.frames, 4u)
+        << "a rewound timestamp must not hide a delivered frame";
+    EXPECT_EQ(cadence.fps(), 0.0)
+        << "a broken span must report unknown, not a plausible number";
+
+    // Once broken, the span stays broken: a later frame with a *higher*
+    // timestamp is not enough, because the endpoint no longer describes
+    // the interval the count spans.
+    cadence.note(99'999, 5);
+    EXPECT_EQ(cadence.frames, 5u);
+    EXPECT_EQ(cadence.fps(), 0.0)
+        << "a session whose clock rewound cannot report a rate it did "
+           "not observe";
+
+    // The sequence wraps at 2^32; a wrapped counter is a new delivery,
+    // not a repeat of the last one.
+    nimrtc::engine::detail::CaptureCadence wrap;
+    wrap.note(0, 0xFFFFFFFEu);
+    wrap.note(33'333, 0xFFFFFFFFu);
+    wrap.note(66'666, 0u);
+    EXPECT_EQ(wrap.frames, 3u);
 }
 
 }  // namespace

@@ -1399,7 +1399,7 @@ struct Stats {
 
 | Field | Meaning |
 |---|---|
-| `capture_fps` | The rate the capture device delivered frames, in frames per second.  Measured on the **device's own capture timestamps** (`(frames - 1) / (last_ts - first_ts)`), so a device that stamps frames itself still yields the rate it actually ran at.  0 when fewer than two frames were seen — "not measurable yet", not "zero frames per second". |
+| `capture_fps` | The rate the capture device delivered frames, in frames per second.  Measured on the **device's own capture timestamps** (`(frames - 1) / (last_ts - first_ts)`), so a device that stamps frames itself still yields the rate it actually ran at.  0 when fewer than two frames were seen — "not measurable yet", not "zero frames per second".  0 also when the device's clock **moved backwards** during the session (a re-created source, a re-negotiated portal): the span then no longer describes the interval the count covers, so the rate is reported as unknown rather than as a plausible-looking wrong number. |
 | `capture_ms` | The mean cost of the capture device handoff, in milliseconds. |
 | `encode_fps` | The rate the encoder ran at, in frames per second — the stage's *throughput*, over the stage's whole life. |
 | `encode_ms` | The mean cost of the codec's `encode()` call, in milliseconds. |
@@ -1407,7 +1407,7 @@ struct Stats {
 | `decode_fps` | The rate the decoder ran at, in frames per second. |
 | `decode_ms` | The mean cost of the codec's `decode()` call, in milliseconds. |
 | `decode_p95_ms` | The p95 of the decode cost, in milliseconds. |
-| `frames_captured` | The frames the capture device delivered. |
+| `frames_captured` | The frames the capture device delivered.  A delivery is identified by its **sequence number**, not its timestamp: a bounded device queue drops the oldest frame when the pump falls behind, and such a frame's successor may carry a timestamp that is not greater than the last one the pump saw.  Those frames are still deliveries and are counted; only a repeated sequence number (the same frame handed over twice) is not. |
 | `frames_encoded` | The frames the encoder processed. |
 | `frames_decoded` | The frames the decoder processed. |
 | `frames_dropped_before_encode` | `max(0, frames_captured - frames_encoded)` — the frames that were captured but never reached the encoder. |

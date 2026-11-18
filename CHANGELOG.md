@@ -277,6 +277,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`Stats::remote_desktop.capture_fps` no longer drops to zero when the
+  capture device's queue overflows.**
+  The cadence record treated a frame whose timestamp was not strictly
+  greater than the last one as "no new delivery" and refused to count it.
+  That is backwards for the case the number exists for: the device's
+  queue is bounded, so when the pump falls behind, the device drops the
+  oldest frame and the next handoff can carry a timestamp the pump has
+  already passed — exactly under load, the rate then collapsed to 0 (or
+  to whatever an earlier, quieter window measured).  A *delivery* is now
+  identified by its **sequence number**; the timestamp is only the span
+  endpoint, and a span that moves backwards is reported as **unknown**
+  (0 fps) rather than as a plausible-looking wrong number.  The counting
+  rule moved to its own header, `src/engine/src/engine_capture_cadence.hpp`,
+  so the unit test pins the same rule the pump uses.
+  (Regression caught by `macos-clang / arm64` on the S7 landing.)
+
 - **The bandwidth estimator no longer climbs back into a wall it is still
   hitting — through either of its two raise paths.**
   The AIMD front-end's additive increase was gated on the decrease

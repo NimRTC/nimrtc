@@ -42,8 +42,34 @@ struct NIMRTC_API_STABLE Config {
      *  for narrowband telephony.  0 = default to 90000 (RFC default). */
     std::uint32_t      clock_rate_hz = 0;
 
-    // Hard cap on buffered packets (FIFO trim from oldest when exceeded).
+    /** Hard cap on buffered packets (FIFO trim from oldest when exceeded).
+     *
+     *  The cap is what makes the buffer's memory **bounded** (video plan
+     *  R4 / v1.3 plan Q2): a peer that sends packets the receiver never
+     *  drains — or a stream whose frames never become playable because
+     *  the timestamps keep moving forward — must not be able to grow the
+     *  buffer without limit.
+     *
+     *  The trim removes the **oldest** frame (the map is keyed by RTP
+     *  timestamp, so "oldest" is unambiguous), and it counts the dropped
+     *  packets in `Stats::packets_dropped`.
+     *
+     *  0 disables the cap (unbounded buffering). */
     std::size_t        max_packets   = 512;
+
+    /** Hard cap on the **bytes** the buffer holds.
+     *
+     *  A packet-count cap alone does not bound memory: the packets in a
+     *  stream can have wildly different sizes, so 512 packets of 1200
+     *  bytes and 512 packets of 20 bytes differ by two orders of
+     *  magnitude.  This cap closes that hole.
+     *
+     *  The trim is the same as `max_packets`' — the oldest frame goes
+     *  first — and both bounds are checked in the same loop, so the
+     *  buffer is inside *both* of them once the insert is done.
+     *
+     *  0 disables the cap (unbounded buffering). */
+    std::size_t        max_bytes     = 4 * 1024 * 1024;
 
     // Adaptive mode: target_delay tracks recent jitter estimate between
     // min_delay and max_delay. If false, target_delay == initial_delay.
@@ -75,6 +101,13 @@ struct NIMRTC_API_STABLE Stats {
     std::size_t          packets_dropped  = 0;
     core::Milliseconds   current_delay    = {};
     core::Milliseconds   current_jitter   = {};
+
+    /** The bytes the buffer currently holds (payload bytes of the
+     *  buffered packets).
+     *
+     *  This is the number that bounds the buffer's *memory*: a
+     *  packet-count cap alone does not (video plan R4 / v1.3 plan Q2). */
+    std::size_t          buffered_bytes   = 0;
 };
 
 // -----------------------------------------------------------------------------

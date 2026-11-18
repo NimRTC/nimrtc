@@ -165,6 +165,23 @@ public:
         std::uint64_t decode_errors = 0;
         std::uint32_t current_delay_ms = 0;
         std::uint32_t jitter_ms = 0;
+
+        /**
+         * @brief The packets the jitter buffer dropped to stay inside its
+         *        memory bound (video plan R4 / v1.3 plan Q2).
+         *
+         *  The jitter buffer's bound is what keeps the receiver's memory
+         *  bounded when a peer sends faster than the receiver drains, or
+         *  sends frames that never become playable.  A non-zero value is
+         *  the *report* of that bound firing — it says "the receiver
+         *  could not keep up", not "something failed".
+         *
+         *  It is the jitter buffer's own counter (the plugin's
+         *  `IJB::Stats::packets_dropped`), republished unchanged: the
+         *  pipeline does not re-count it, so there is no second copy of
+         *  the bookkeeping that could drift from what the buffer really
+         *  did. */
+        std::uint64_t packets_dropped = 0;
     };
 
     /** Snapshot of the receive-pipeline statistics. */

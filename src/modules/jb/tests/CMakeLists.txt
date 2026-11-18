@@ -5,3 +5,7 @@
 # =============================================================================
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_jb.cpp
     DEPS nimrtc::jb)
+
+# The plugin seam: the adapter the engine actually talks to.
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_jb_plugin.cpp
+    DEPS nimrtc::jb)

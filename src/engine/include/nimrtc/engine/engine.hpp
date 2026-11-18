@@ -1924,6 +1924,14 @@ struct NIMRTC_API_STABLE AudioStreamStats {
     /** The decode failures on this stream. */
     std::uint64_t decode_errors = 0;
 
+    /** The packets the jitter buffer dropped to stay inside its memory
+     *  bound (v1.3 plan Q2 / video plan R4).
+     *
+     *  A non-zero value says "the receiver could not keep up with the
+     *  sender" — it is the *report* of the bound firing, not an error
+     *  count.  It is the buffer's own counter, republished unchanged. */
+    std::uint64_t packets_dropped = 0;
+
     /** The stream's current interarrival jitter, in milliseconds. */
     std::uint32_t jitter_ms = 0;
 
@@ -4439,6 +4447,12 @@ public:
         std::uint64_t audio_fec_recovered_frames= 0;  // frames rebuilt from in-band FEC
         std::uint64_t audio_packets_lost        = 0;  // inbound packets inferred lost
         std::uint64_t audio_decode_errors       = 0;  // decoder errors
+        // The packets the receive jitter buffer dropped to stay inside its
+        // memory bound (v1.3 plan Q2 / video plan R4).  A non-zero value
+        // says "the receiver could not keep up with the sender"; it is not
+        // an error count.  It is the buffer's own counter, republished
+        // unchanged.
+        std::uint64_t audio_packets_dropped     = 0;  // packets the jitter buffer dropped to stay bounded
         std::uint32_t audio_jitter_ms           = 0;  // current interarrival jitter
         std::uint32_t audio_playout_delay_ms    = 0;  // current playout delay
         // ---- Adaptive audio bitrate (additive) -----------------------

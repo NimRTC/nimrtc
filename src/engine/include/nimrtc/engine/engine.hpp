@@ -175,7 +175,8 @@ namespace nimrtc::engine {
  *  `open()`.  A host that wants to be explicit about the degradation
  *  can check `core::PluginRegistry::get_qoe_collector(...)` before
  *  opening the engine. */
-inline constexpr std::string_view kDefaultQoeCollectorId = "rd-qoe";
+NIMRTC_API_STABLE inline constexpr std::string_view kDefaultQoeCollectorId =
+    "rd-qoe";
 
 // ---------------------------------------------------------------------------
 // Config

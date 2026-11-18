@@ -3125,6 +3125,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     by the host, so the engine degrades gracefully -- a warning, no
     collector, and `open()` still succeeds.
 
+- **`EngineConfig::qoe_collector_enabled` is the explicit off switch.**
+  The *name* is a poor switch for a host that builds its configuration
+  from a profile file: emptying a string to mean "off" is easy to get
+  wrong, while a boolean is not.  The new switch is the unambiguous
+  way to say "do not measure the QoE metrics".
+
+  It **wins over the name**: a host that sets it to false gets no
+  collector, whatever `qoe_collector_name` says -- the metrics are not
+  measured and `Stats::qoe` carries only the frame counters (the
+  presented / dropped counts, which the engine keeps anyway).
+
+  It is **on by default**, for the same reason the name's default is
+  the built-in collector: a remote-desktop session is judged on exactly
+  these metrics, and a host should not have to name a plugin to learn
+  them.
+
 - **The freeze findings now reach the QoE collector.**
   The *definition* of a freeze lives in the `video_stats` module (the
   threshold and the idle detection) and the *accounting* lives in the

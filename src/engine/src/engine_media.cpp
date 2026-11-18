@@ -2630,10 +2630,32 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                     // decode a *reference* frame, so everything after it
                     // is undecodable until the next IDR.
                     ++impl_->video_state.video_feedback_rx_pli;
+                    // The rate controller's third input (v1.2 plan E6).
+                    //
+                    // A peer that asks for a keyframe is a peer that
+                    // cannot decode what it is getting.  The usual
+                    // cause is a geometry change whose parameter sets
+                    // did not travel with the frame, and the remedy is
+                    // to give the peer a *smaller* picture — which is
+                    // exactly what `on_keyframe_requested()` does: it
+                    // steps the ladder down (video plan B7).
+                    //
+                    // This is the third of the controller's three
+                    // inputs, and the only one the engine never fed
+                    // it: `on_bandwidth_estimate()` (the link's
+                    // opinion) and `on_measured_bitrate()` (the
+                    // encoder's opinion) were the other two, and the
+                    // third was simply absent.
+                    notify_video_keyframe_requested();
                 } else if (blk.fmt == 4) {   // FIR — RFC 5104 §4.3.1
                     impl_->video_state.video_stats.on_rtcp_feedback_tx(
                         detail::VideoFeedbackKind::kFIR);
                     ++impl_->video_state.video_feedback_rx_fir;
+                    // A FIR says the same thing a PLI does, and more
+                    // insistently (it names the sequence number it
+                    // wants the IDR at).  The controller's remedy is
+                    // the same one.
+                    notify_video_keyframe_requested();
                 } else if (blk.fmt == 15) {
                     // A REMB (draft-alvestrand-rmcat-remb-03) is the
                     // peer's *bandwidth estimate*, not a complaint about a
@@ -2769,6 +2791,56 @@ void NimRTCEngine::request_keyframe_on_decode_failure() noexcept {
         "frame from the peer");
 
     queue_video_feedback(report);
+}
+
+
+// ---------------------------------------------------------------------------
+// The peer's key-frame request reaches the rate controller (v1.2 plan E6)
+// ---------------------------------------------------------------------------
+//
+// A PLI or a FIR from the peer means "I cannot decode what you are
+// sending".  The engine's answer today is to send an IDR — the
+// `video_sender_` plugin turns the request into a forced keyframe
+// (see the `take_keyframe_requests()` drain in `tick()`).
+//
+// That answer is the *symptom* fix.  The *cause* is usually that the
+// picture is too big for the peer to decode at the rate it is
+// arriving, or that a geometry change's parameter sets did not travel
+// with the frame.  The rate controller's answer to it is to step the
+// resolution ladder down (video plan B7): a smaller picture is
+// cheaper to send *and* cheaper to decode.
+//
+// This function is the bridge between the two.  It is the third of the
+// controller's three inputs:
+//
+//   - `on_bandwidth_estimate()`  — the link's opinion (the engine's
+//                                  tick, from the BWE estimator);
+//   - `on_measured_bitrate()`    — the encoder's opinion (the engine's
+//                                  tick, from the byte counter);
+//   - `on_keyframe_requested()`   — the *peer's* opinion (here).
+//
+// The peer can only have an opinion if it received something, so this
+// is the one input that arrives on the RTCP path rather than on the
+// tick.
+//
+// Each stream has its own controller, and a PLI names the media source
+// it is about (RFC 4585 §6.2.1: the sender SSRC of the feedback is
+// the media source).  The engine's demux does not currently surface
+// that SSRC for the feedback kinds it routes, so the request is
+// delivered to *every* controller: a multi-stream session is rare, the
+// step is downward and idempotent (the controller refuses a step that
+// would cross the resolution floor), and delivering it to the wrong
+// stream costs one rung while *not* delivering it costs the peer a
+// picture it cannot decode.
+
+void NimRTCEngine::notify_video_keyframe_requested() noexcept {
+    if (video_bitrate_controller_) {
+        video_bitrate_controller_->on_keyframe_requested();
+    }
+    for (auto& stream : impl_->video_state.video_streams.streams) {
+        if (!stream->controller) continue;
+        stream->controller->on_keyframe_requested();
+    }
 }
 
 
@@ -3449,31 +3521,31 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         auto& rd = out.remote_desktop;
         const auto ms_from_ns = [](double ns) { return ns / 1'000'000.0; };
 
-        rd.capture_ms  = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kCapture)));
-        rd.capture_fps = impl_->video_state.capture_fps();
-        rd.frames_captured = impl_->video_state.capture_frames_produced();
+        rd.capture.ms    = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kCapture)));
+        rd.capture.fps   = impl_->video_state.capture_fps();
+        rd.capture.frames = impl_->video_state.capture_frames_produced();
 
-        rd.encode_ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kEncode)));
-        rd.encode_p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kEncode, 95)));
-        rd.encode_fps    = t.rate_hz(Stage::kEncode);
-        rd.frames_encoded = t.samples(Stage::kEncode);
+        rd.encode.ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kEncode)));
+        rd.encode.p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kEncode, 95)));
+        rd.encode.fps    = t.rate_hz(Stage::kEncode);
+        rd.encode.frames = t.samples(Stage::kEncode);
 
-        rd.decode_ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kDecode)));
-        rd.decode_p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kDecode, 95)));
-        rd.decode_fps    = t.rate_hz(Stage::kDecode);
-        rd.frames_decoded = t.samples(Stage::kDecode);
+        rd.decode.ms     = ms_from_ns(static_cast<double>(t.mean_ns(Stage::kDecode)));
+        rd.decode.p95_ms = ms_from_ns(static_cast<double>(t.percentile_ns(Stage::kDecode, 95)));
+        rd.decode.fps    = t.rate_hz(Stage::kDecode);
+        rd.decode.frames = t.samples(Stage::kDecode);
 
         // The drops: frames the device produced that the encoder never
         // saw.  Only meaningful once both stages have run; a session
         // that has captured but not yet encoded has "dropped" nothing
         // yet, so the difference is clamped at 0 rather than wrapping.
         rd.frames_dropped_before_encode =
-            rd.frames_captured > rd.frames_encoded
-                ? rd.frames_captured - rd.frames_encoded
+            rd.capture.frames > rd.encode.frames
+                ? rd.capture.frames - rd.encode.frames
                 : 0;
         rd.frames_decoded_without_local_encode =
-            rd.frames_decoded > rd.frames_encoded
-                ? rd.frames_decoded - rd.frames_encoded
+            rd.decode.frames > rd.encode.frames
+                ? rd.decode.frames - rd.encode.frames
                 : 0;
     }
 

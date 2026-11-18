@@ -240,6 +240,25 @@ jobs:
           cmake --build --preset debug.msvc --target bench_saturation -j 2
           python tools/benchmark_saturation.py --build-dir build --out build/e2e/bench_saturation.json
 
+      # The G2 half of E6: the control plane's latency under a
+      # saturated video path.  The invariants are what matter — the
+      # media path really was saturated, the control plane reached the
+      # profile's rate, its p99 stayed inside the profile's declared
+      # budget, every control message arrived, and the two stacks rode
+      # different 5-tuples — and the wrapper exits non-zero when one of
+      # them fails.
+      #
+      # The rate invariant is **skipped** on a host without the
+      # high-resolution deadline (the binary reports whether it had
+      # one): the measured rate is produced by a thread waiting on a
+      # deadline, so without it the run would measure the host's timer
+      # rather than the transport.  A skip is reported, not hidden.
+      - name: Benchmark G2 control plane (plan E6)
+        shell: pwsh
+        run: |
+          cmake --build --preset debug.msvc --target bench_control_saturation -j 2
+          python tools/benchmark_control_saturation.py --build-dir build --out build/e2e/bench_control_saturation.json
+
       - name: Upload bench artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -249,6 +268,7 @@ jobs:
             build/e2e/bench_dc.json
             build/e2e/bench_weaknet.json
             build/e2e/bench_saturation.json
+            build/e2e/bench_control_saturation.json
           retention-days: 14
 
   # ---------------------------------------------------------------------------
@@ -502,6 +522,36 @@ jobs:
       # by a self-test.
       - name: Self-test the CI auto-retry classifier
         run: python tools/ci_retry_runner.py --self-test
+
+      # The release body is built by `tools/release_body.py`, which
+      # guards against GitHub's 125 000-character release-body limit.
+      # The limit was hit for real: the `v1.2.0` body was 364 350
+      # characters, GitHub silently truncated it to 124 999, and the
+      # publish step then died with `422 Validation Failed`.  A
+      # truncation is invisible in the artefact, so the tool's own rules
+      # -- the body fits, the `Status:` paragraph survives, no entry is
+      # dropped -- are pinned by a self-test.
+      - name: Self-test the release-body builder
+        run: python tools/release_body.py --self-test
+
+      # The real body for the version being cut must fit.  This is the
+      # check that would have caught the `v1.2.0` cut before it
+      # produced a broken draft.
+      #
+      # The version checked is the one **in the CHANGELOG**, not the one
+      # in `CMakeLists.txt`.  The tree's own version is `X.Y.(Z+1)-dev`
+      # between two releases, and there is no `## [X.Y.(Z+1)-dev]`
+      # section to write a body *for* -- asking for one makes the step
+      # fail on every post-release tree, for a reason that has nothing
+      # to do with the body.  The section that will actually be released
+      # next is the most recent `## [X.Y.Z]` heading, and that is what
+      # has to fit.
+      #
+      # `--latest` asks the tool for exactly that section, so the
+      # version resolution lives in one place (the tool) rather than
+      # being re-derived here and drifting from it.
+      - name: Check the release body fits GitHub's limit
+        run: python tools/release_body.py --latest --check > /dev/null
 
       # ADR-026: a `.h` under `src/**/include/` is a promise that a C
       # host can include it.  `sched_c.h` is the first public header
@@ -785,6 +835,24 @@ jobs:
           cmake --build --preset debug --target bench_saturation -j 2
           python3 tools/benchmark_saturation.py --build-dir build --out build/e2e/bench_saturation.json
 
+      # The G2 half of E6: the control plane's latency under a
+      # saturated video path.  The invariants are what matter — the
+      # media path really was saturated, the control plane reached the
+      # profile's rate, its p99 stayed inside the profile's declared
+      # budget, every control message arrived, and the two stacks rode
+      # different 5-tuples — and the wrapper exits non-zero when one of
+      # them fails.
+      #
+      # The rate invariant is **skipped** on a host without the
+      # high-resolution deadline (the binary reports whether it had
+      # one): the measured rate is produced by a thread waiting on a
+      # deadline, so without it the run would measure the host's timer
+      # rather than the transport.  A skip is reported, not hidden.
+      - name: Benchmark G2 control plane (plan E6)
+        run: |
+          cmake --build --preset debug --target bench_control_saturation -j 2
+          python3 tools/benchmark_control_saturation.py --build-dir build --out build/e2e/bench_control_saturation.json
+
       - name: Upload bench artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -795,6 +863,7 @@ jobs:
             build/e2e/bench_weaknet.json
             build/e2e/bench_weaknet_netem.json
             build/e2e/bench_saturation.json
+            build/e2e/bench_control_saturation.json
           retention-days: 14
 
       # E2 — leaf compile proof (docs/plan/v1.2-next-plan.md §3 Track E).

@@ -357,6 +357,17 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         // user-pluggable seam yet (see the remediation plan's B1 note).
         scfg.raw_id  = config_.raw_udp_name;
 
+        // The control stack opens its **own** UDP socket (plan G2), so
+        // it needs its own bind address.  The media stack's ICE socket
+        // and the control stack's ARQ socket are then two distinct
+        // 5-tuples — the acceptance criterion the remote-desktop plan
+        // states for G2 ("the two stacks carry independent traffic on
+        // different 5-tuples").
+        //
+        // The port stays 0 (OS picks), so the two sockets cannot
+        // collide even when both bind the same address.
+        scfg.raw_local_host = config_.local_bind_address;
+
         // ---- Bind the Selector to the plugin registry --------------------
         //
         // The transport module does not depend on `core::PluginRegistry`
@@ -1162,6 +1173,20 @@ int NimRTCEngine::tick() noexcept {
         }
     }
 
+    // ---- Feed the video rate controllers their measured rate (E6) -------
+    //
+    // The second half of the rate-control loop.  The call above hands
+    // the controller the link's *estimate*; this one hands it what the
+    // encoder is *actually* putting on the wire.
+    //
+    // It runs unconditionally — not inside the `if (bwe_)` above —
+    // because the measurement does not depend on the estimator.  A
+    // session with no BWE plugin still has an encoder, and the
+    // controller's own contract reads a zero measurement as "not
+    // congested" (see `BitrateController::is_congested()`), so
+    // feeding it is safe in every configuration.
+    feed_video_measured_bitrate();
+
     // ---- Emit the pending DTMF events (v1.2.0, RFC 4733 §2.5) ---------
     //
     // RFC 4733 §2.5.1.2 describes the event as a *sequence*: the packet
@@ -1326,6 +1351,16 @@ int NimRTCEngine::tick() noexcept {
     // The inbound messages are drained here too, so the host's callback
     // runs on the engine's thread — never on the ARQ thread, and never
     // under the channel lock.
+    //
+    // The G2 path's **receive** side needs a pump: the ARQ session
+    // queues the datagrams it accepted and fires the receive callback
+    // when that queue is drained.  Nothing else drains it (the ARQ
+    // session has no consumer thread of its own), so without this the
+    // control plane's inbound path never fires — the plane was
+    // structurally present and behaviourally dead.
+    if (impl_->session.control_stack) {
+        impl_->session.control_stack->pump_control();
+    }
     flush_control_channel();
     drain_control_messages();
 
@@ -1462,6 +1497,84 @@ void NimRTCEngine::update_pacing_rates() noexcept {
 // was invisible; with two extra streams the first one got the default's
 // target, the second got the first extra's target, and the third got
 // nothing at all.
+
+// ---------------------------------------------------------------------------
+// The measured outbound rate (v1.2 plan Track E / E6)
+// ---------------------------------------------------------------------------
+//
+// The rate controller has two inputs.  The first is the link's opinion
+// — `on_bandwidth_estimate()` — and the engine feeds it from the BWE
+// estimator.  The second is the *encoder's* opinion —
+// `on_measured_bitrate()` — and this function is what feeds it.
+//
+// The gap this closes is the whole point of the E6 caveat.  The
+// saturation benchmark drives the controller through exactly this
+// seam, so it measures a loop that is *correct* — but the engine
+// never called it, so the loop the benchmark measured was not the loop
+// the product ran.  The estimator, the pacer and the resolution ladder
+// under test were the shipped ones; the one missing link was the call
+// that turns the encoder's byte counter into a rate.
+//
+// The measurement is a **one-second window**, not a per-tick
+// instantaneous rate.  The reason is the controller's arithmetic: a
+// measurement above the estimate triggers a *multiplicative* decrease
+// (`BitrateController::budget()` scales the budget by
+// `estimate / measured`).  An instantaneous rate is dominated by
+// single-frame spikes — one keyframe, one IDR-sized burst — and a
+// spike on a perfectly healthy link would therefore trigger a
+// multiplicative decrease that the link never earned.  A one-second
+// window averages the burst out and still reacts fast enough: a link
+// that is genuinely overrunning stays overrunning for the whole
+// window.
+//
+// The window is *closed*, not sliding: the rate covers the interval
+// between two observations, and it is reported once that interval has
+// elapsed.  The rule lives in `engine_rate_window.hpp`, next to the
+// unit test that pins it.
+//
+// Each stream is measured on its own byte counter and fed to its own
+// controller — the streams share the session budget, but they do not
+// share an encoder, so they do not share a rate either.
+
+void NimRTCEngine::feed_video_measured_bitrate() noexcept {
+    auto& vstate = impl_->video_state;
+
+    // The default stream's controller is the engine's own member; the
+    // extra streams each have their own.
+    const bool have_default = (video_bitrate_controller_ != nullptr);
+    const bool have_extra = !vstate.video_streams.streams.empty();
+    if (!have_default && !have_extra) return;
+
+    const std::int64_t now_us = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            core::SteadyClock::now().time_since_epoch()).count());
+
+    // ---- The default stream ----------------------------------------------
+    //
+    // `video_bytes_sent` counts the bytes the engine put on the wire
+    // (post-SRTP, so it is what the peer actually receives).
+    if (have_default) {
+        std::uint32_t measured_bps = 0;
+        if (vstate.video_rate_window.observe(vstate.video_bytes_sent, now_us,
+                                             measured_bps)) {
+            video_bitrate_controller_->on_measured_bitrate(measured_bps);
+        }
+    }
+
+    // ---- The extra streams ------------------------------------------------
+    //
+    // Each extra stream keeps its own counter (`VideoStream::bytes_sent`)
+    // and its own window, and is handed its own rate.
+    for (auto& stream : vstate.video_streams.streams) {
+        if (!stream->controller) continue;
+        std::uint32_t measured_bps = 0;
+        if (stream->rate_window.observe(stream->bytes_sent, now_us,
+                                        measured_bps)) {
+            stream->controller->on_measured_bitrate(measured_bps);
+        }
+    }
+}
+
 
 void NimRTCEngine::compute_video_stream_shares(
     std::uint32_t estimate) noexcept {

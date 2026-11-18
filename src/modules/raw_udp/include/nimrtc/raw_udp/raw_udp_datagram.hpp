@@ -202,6 +202,29 @@ public:
      *  recv thread on each in-window, in-order delivered datagram. */
     virtual void on_recv(plugins::OnDatagramCb cb) noexcept = 0;
 
+    /**
+     * @brief Set the peer endpoint the datagrams are sent to.
+     *
+     * The control plane needs this because the peer's control address
+     * is learned out of band: the SDP exchange carries it (plan G2's
+     * `a=x-nimrtc-control:<host:port>`), and the transport stack hands
+     * it to the datagram through this seam.  Without it the ARQ
+     * session would only learn the peer from the first inbound
+     * datagram, which means the *first* control message could never
+     * be sent.
+     *
+     * The default implementation reports "unsupported", so a backend
+     * that cannot be pointed at a peer keeps working for the
+     * peer-learning path.
+     *
+     * @return kOk when the endpoint was accepted; kErrUnsupported when
+     *         the backend does not implement the seam.
+     */
+    virtual plugins::Status set_peer_endpoint(plugins::Endpoint peer) noexcept {
+        (void)peer;
+        return plugins::kErrUnsupported;
+    }
+
     /** Drain queued received datagrams and invoke on_recv for each. Returns
      *  the number dispatched. Provided so tests can drive a synchronous
      *  loop without spinning a background consumer. */

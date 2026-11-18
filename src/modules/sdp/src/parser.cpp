@@ -430,6 +430,21 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
                 else cur_media->dtls_setup = std::string(setup);
             } else if (av.starts_with("connection-address:")) {
                 if (cur_media) cur_media->connection_address = std::string(drop_prefix(av, 17));
+            } else if (av.starts_with("x-nimrtc-control:")) {
+                // The control plane's address (remote-desktop plan G2):
+                // `a=x-nimrtc-control:<host:port>`.
+                //
+                // This needs its **own** branch: the generic fallback
+                // below splits the attribute at the first *space*, so
+                // "x-nimrtc-control:127.0.0.1:5000" would land as one
+                // key with an empty value — the address would be lost.
+                auto ep = drop_prefix(av, 17);
+                if (!cur_media)
+                    session.extra_attrs.emplace_back("x-nimrtc-control",
+                                                    std::string(trim(ep)));
+                else
+                    cur_media->extra_attrs.emplace_back("x-nimrtc-control",
+                                                        std::string(trim(ep)));
             } else if (av.starts_with("mid:")) {
                 if (cur_media) cur_media->mid = std::string(drop_prefix(av, 4));
             } else if (av.starts_with("rtpmap:")) {

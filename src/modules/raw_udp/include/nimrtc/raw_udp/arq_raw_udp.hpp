@@ -65,6 +65,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -112,7 +113,8 @@ NIMRTC_API_STABLE std::vector<std::uint8_t> dtls_psk_decrypt(
 // ===========================================================================
 class NIMRTC_API_STABLE ArqRawUdp final : public IRawUdpDatagram {
 public:
-    explicit ArqRawUdp(RawUdpConfig cfg) : cfg_(std::move(cfg)) {}
+    explicit ArqRawUdp(RawUdpConfig cfg)
+        : cfg_(std::move(cfg)), peer_endpoint_(cfg_.peer_endpoint) {}
     ~ArqRawUdp() override { close(); }
 
     ArqRawUdp(const ArqRawUdp&)            = delete;
@@ -154,7 +156,11 @@ public:
                         << "(local=" << cfg_.local_host
                         << ":" << (socket_snapshot() ? socket_snapshot()->local_port()
                                                      : cfg_.local_port)
-                        << " peer_set=" << (cfg_.peer_endpoint.len != 0)
+                        // The peer is read under the lock, not from
+                        // `cfg_`: the receive thread may already have
+                        // discovered it, and `cfg_` is the configuration
+                        // snapshot -- it is written once, at construction.
+                        << " peer_set=" << (peer_endpoint_snapshot().len != 0)
                         << " real_socket=" << cfg_.enable_real_socket
                         << " rto=" << cfg_.rto_base_ms << "ms"
                         << " window=" << cfg_.rx_window_packets
@@ -237,7 +243,6 @@ public:
         if (dst.len != 0) {
             std::lock_guard<std::mutex> lk(peer_mu_);
             peer_endpoint_ = dst;
-            cfg_.peer_endpoint = dst;
         } else {
             std::lock_guard<std::mutex> lk(peer_mu_);
             if (peer_endpoint_.len == 0) {
@@ -249,7 +254,6 @@ public:
                     return plugins::kErrNotReady;
                 }
             }
-            cfg_.peer_endpoint = peer_endpoint_;
         }
 
         std::uint16_t seq = next_tx_seq();
@@ -303,6 +307,13 @@ public:
         on_recv_ = std::move(cb);
     }
 
+    plugins::Status set_peer_endpoint(plugins::Endpoint peer) noexcept override {
+        if (peer.len == 0) return plugins::kErrInvalidParam;
+        std::lock_guard<std::mutex> lk(peer_mu_);
+        peer_endpoint_ = peer;
+        return plugins::kOk;
+    }
+
     int recv() noexcept override {
         plugins::OnDatagramCb cb;
         std::deque<std::vector<std::uint8_t>> drained;
@@ -322,6 +333,20 @@ public:
     plugins::Endpoint local_endpoint() const noexcept override {
         std::shared_ptr<UdpSocket> sock = socket_snapshot();
         if (sock && sock->is_open()) {
+            // Ask the socket itself: it resolves a wildcard bind
+            // ("0.0.0.0") into a concrete routable address, which the
+            // configured local_host alone cannot express.
+            const std::string ep = sock->local_endpoint();
+            const std::size_t colon = ep.rfind(':');
+            if (colon != std::string::npos) {
+                const std::string host = ep.substr(0, colon);
+                const long port =
+                    std::strtol(ep.c_str() + colon + 1, nullptr, 10);
+                if (port > 0 && port <= 65535) {
+                    return UdpSocket::make_endpoint_v4(
+                        host, static_cast<std::uint16_t>(port));
+                }
+            }
             return UdpSocket::make_endpoint_v4(cfg_.local_host,
                                                sock->local_port());
         }
@@ -329,6 +354,19 @@ public:
     }
 
     plugins::Endpoint remote_endpoint() const noexcept override {
+        std::lock_guard<std::mutex> lk(peer_mu_);
+        return peer_endpoint_;
+    }
+
+    /** The current peer, read under the lock.
+     *
+     *  `peer_endpoint_` is the single authority on where this session
+     *  sends; `cfg_.peer_endpoint` is only the configuration snapshot
+     *  taken at construction.  A reader that wants the live value must
+     *  come through here -- reading `cfg_` would race with the receive
+     *  thread's peer discovery.
+     */
+    plugins::Endpoint peer_endpoint_snapshot() const noexcept {
         std::lock_guard<std::mutex> lk(peer_mu_);
         return peer_endpoint_;
     }

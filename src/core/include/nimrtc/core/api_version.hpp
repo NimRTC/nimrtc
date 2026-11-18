@@ -83,19 +83,19 @@
 #define NIMRTC_API_VERSION_MINOR 2
 
 /// Patch version number of the NimRTC public API.
-#define NIMRTC_API_VERSION_PATCH 0
+#define NIMRTC_API_VERSION_PATCH 1
 
-/// Pre-release identifier for the v1.2.0 release.  Empty string for
+/// Pre-release identifier for the v1.2.1 development cycle.  Empty string for
 /// final releases.
 ///
 /// The label tracks the release stage of the current cycle
 /// (ADR-015 Verification table): it cycles `"dev"` -> `"alpha.2"` ->
 /// `"beta.1"` -> `"rc.1"` -> `""` as the tags are cut, and it must be `""`
 /// under `scripts/check-release-freeze.sh --final-tag`.
-#define NIMRTC_API_VERSION_PRE_RELEASE ""
+#define NIMRTC_API_VERSION_PRE_RELEASE "dev"
 
 /// Encoded integer version for compile-time comparisons.
-/// Format: MAJOR*10000 + MINOR*100 + PATCH.  v1.2.0 = 10200.
+/// Format: MAJOR*10000 + MINOR*100 + PATCH.  v1.2.1 = 10201.
 #define NIMRTC_API_VERSION \
     (NIMRTC_API_VERSION_MAJOR * 10000 + NIMRTC_API_VERSION_MINOR * 100 + NIMRTC_API_VERSION_PATCH)
 

@@ -56,10 +56,13 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 #include <nimrtc/core/api_version.hpp>
+#include <cstring>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <algorithm>
 
 #include <nimrtc/transport/transport_stack.hpp>
 
@@ -126,6 +129,37 @@ public:
     void on_control(plugins::OnDatagramCb cb) noexcept override {
         if (!raw_control_) return;
         raw_control_->on_recv(std::move(cb));
+    }
+
+    // ---- The control plane's address book (plan G2) --------------------
+    //
+    // The stack owns the concrete `IRawUdpDatagram`, so it is the
+    // right place to answer "where am I" and "where is the peer".
+    std::string control_local_endpoint() const noexcept override {
+        if (!raw_control_) return {};
+        const plugins::Endpoint local = raw_control_->local_endpoint();
+        if (local.len == 0) return {};
+        return std::string(reinterpret_cast<const char*>(local.data), local.len);
+    }
+
+    plugins::Status set_control_peer(std::string_view endpoint) noexcept override {
+        if (!raw_control_) return plugins::kErrNotReady;
+        if (endpoint.empty()) return plugins::kErrInvalidParam;
+
+        // The endpoint travels as the ASCII form "host:port" — the
+        // `plugins::Endpoint` encoding the raw-UDP module uses.
+        plugins::Endpoint peer{};
+        const std::size_t n =
+            std::min(endpoint.size(), sizeof(peer.data));
+        std::memcpy(peer.data, endpoint.data(), n);
+        peer.len = static_cast<std::uint32_t>(n);
+
+        return raw_control_->set_peer_endpoint(peer);
+    }
+
+    int pump_control() noexcept override {
+        if (!raw_control_) return 0;
+        return raw_control_->recv();
     }
 
     // ---- ITransportStack: lifecycle ----------------------------------------

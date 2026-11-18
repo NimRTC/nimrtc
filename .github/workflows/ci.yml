@@ -517,19 +517,21 @@ jobs:
       # The real body for the version being cut must fit.  This is the
       # check that would have caught the `v1.2.0` cut before it
       # produced a broken draft.
+      #
+      # The version checked is the one **in the CHANGELOG**, not the one
+      # in `CMakeLists.txt`.  The tree's own version is `X.Y.(Z+1)-dev`
+      # between two releases, and there is no `## [X.Y.(Z+1)-dev]`
+      # section to write a body *for* -- asking for one makes the step
+      # fail on every post-release tree, for a reason that has nothing
+      # to do with the body.  The section that will actually be released
+      # next is the most recent `## [X.Y.Z]` heading, and that is what
+      # has to fit.
+      #
+      # `--latest` asks the tool for exactly that section, so the
+      # version resolution lives in one place (the tool) rather than
+      # being re-derived here and drifting from it.
       - name: Check the release body fits GitHub's limit
-        run: |
-          version="$(python -c "
-          import re, pathlib
-          text = pathlib.Path('CMakeLists.txt').read_text(encoding='utf-8')
-          m = re.search(r'project\s*\(\s*nimrtc\s+VERSION\s+([0-9.]+)', text)
-          print(m.group(1) if m else '')
-          ")"
-          if [[ -n "$version" ]]; then
-            python tools/release_body.py --version "$version" --check > /dev/null
-          else
-            echo "::notice::Could not read the project version from CMakeLists.txt — skipping."
-          fi
+        run: python tools/release_body.py --latest --check > /dev/null
 
       # ADR-026: a `.h` under `src/**/include/` is a promise that a C
       # host can include it.  `sched_c.h` is the first public header

@@ -111,6 +111,29 @@ def write_text(path: Path, text: str) -> None:
     path.write_bytes(text.encode("utf-8"))
 
 
+def latest_version(lines: list[str]) -> str | None:
+    """The version of the most recent **released** section.
+
+    A released section is a `## [X.Y.Z]` heading.  The `## [Unreleased]`
+    heading is skipped: it is the queue, not a release, and its version
+    is not a version at all.
+
+    This exists because the tree's own version is not always a version
+    with a section.  Between two releases `CMakeLists.txt` carries
+    `X.Y.(Z+1)-dev`, and `CHANGELOG.md` has no `## [X.Y.(Z+1)-dev]`
+    section -- there is nothing to write a release body *for* yet.  A
+    check that asked for the tree's version unconditionally would fail
+    on every post-release tree, which is the same failure mode as the
+    one this script was written to prevent: a gate that is red for a
+    reason that has nothing to do with the tree.
+    """
+    for line in lines:
+        m = re.match(r"^## \[(\d+\.\d+\.\d+)\]", line)
+        if m:
+            return m.group(1)
+    return None
+
+
 def find_section(lines: list[str], version: str) -> tuple[int, int]:
     """The `[start, end)` line range of the `## [version]` section."""
     wanted = f"## [{version}]"
@@ -331,6 +354,39 @@ def self_test() -> int:
         check(len(body) <= MAX_BODY_CHARS, f"{version}: the body must fit")
         check(f"## [{version}]" in body, f"{version}: the section heading must be present")
 
+    # --- `--latest` must find the newest released section. ---
+    #
+    # The queue heading is not a release: `## [Unreleased]` is where
+    # work lands before it is cut, and it carries no version.  The
+    # newest `## [X.Y.Z]` heading is the one that will be released
+    # next, and it is the one whose body has to fit.
+    queued = """# Changelog
+
+## [Unreleased]
+
+> Work that lands after the last release.
+
+## [4.2.0] - 2026-01-01
+
+### Added
+
+- **A thing.**
+"""
+    check(
+        latest_version(queued.split("\n")) == "4.2.0",
+        "--latest must pick the newest released section, skipping [Unreleased]",
+    )
+    check(
+        latest_version(["## [Unreleased]", "", "> text"]) is None,
+        "--latest must report no released section when there is none",
+    )
+    # A dev version has no section of its own, which is exactly why
+    # `--latest` exists.  The tool must not be asked for one.
+    check(
+        latest_version(queued.split("\n")) != "4.2.1-dev",
+        "--latest must never resolve to a dev version",
+    )
+
     if failures:
         for f in failures:
             print(f"release_body.py: FAIL -- {f}", file=sys.stderr)
@@ -354,12 +410,32 @@ def main() -> int:
         action="store_true",
         help="run the tool's own tests and exit",
     )
+    ap.add_argument(
+        "--latest",
+        action="store_true",
+        help=(
+            "use the most recent released `## [X.Y.Z]` section instead of "
+            "--version; this is what a tree between two releases needs, "
+            "because its own version (X.Y.(Z+1)-dev) has no section"
+        ),
+    )
     args = ap.parse_args()
 
     if args.self_test:
         return self_test()
 
-    if not args.version:
+    if args.latest:
+        lines = read_text(CHANGELOG_PATH).split("\n")
+        version = latest_version(lines)
+        if version is None:
+            print(
+                "release_body.py: CHANGELOG.md carries no released "
+                "`## [X.Y.Z]` section, so there is no release body to build",
+                file=sys.stderr,
+            )
+            return 1
+        args.version = version
+    elif not args.version:
         ap.error("--version is required (or use --self-test)")
 
     body = digest(args.version, read_text(CHANGELOG_PATH))

@@ -3082,6 +3082,79 @@ if(TARGET nimrtc::bwe AND TARGET nimrtc::pacing AND TARGET nimrtc::video_bitrate
 endif()
 
 # ---------------------------------------------------------------------------
+# The G2 control-plane benchmark (v1.2 plan item **E6**, remote-desktop
+# plan **G2**).
+#
+# `bench_saturation` above proves that the *media* path degrades
+# gracefully under a saturated link.  This one proves the other half of
+# the G2 criterion: that the **control** path is NOT starved by that
+# same saturation.
+#
+# Unlike `bench_saturation` (which drives three modules directly), this
+# benchmark drives **two real engines** over **real UDP sockets**:
+#
+#   - the control plane is the *shipped* `raw-udp-arq` stack with its
+#     *shipped* selective-repeat ARQ, reached through the engine's
+#     `kRawUdp` control transport, and its peer address travels in the
+#     SDP exchange as `a=x-nimrtc-control:<host:port>`;
+#   - the media plane is the *shipped* video pipeline sending real RTP
+#     over its *own* socket, whose receiving side enforces a
+#     token-bucket capacity (a datagram arriving with an empty bucket is
+#     dropped — a real loss of real packets);
+#   - the two planes therefore ride **different 5-tuples**, which is
+#     exactly what G2 buys.
+#
+# It is deliberately NOT a ctest case: the numbers are machine-dependent
+# (the loopback's real RTT and the host's real scheduling jitter), so a
+# threshold assertion would be a flaky test rather than a measurement.
+# `tools/benchmark_control_saturation.py` is the wrapper that captures
+# the run into `build/` and asserts the run's *invariants* (the media
+# path really was saturated, the control p99 really was inside the
+# profile's budget, and the two stacks really did ride different
+# 5-tuples).
+# ---------------------------------------------------------------------------
+if(TARGET nimrtc::engine AND TARGET nimrtc::raw_udp AND TARGET nimrtc::transport)
+    add_executable(bench_control_saturation bench/bench_control_saturation.cpp)
+    if(WIN32)
+        target_link_libraries(bench_control_saturation PRIVATE ws2_32 winmm)
+    elseif(APPLE)
+        target_link_libraries(bench_control_saturation PRIVATE c++ pthread)
+    else()
+        target_link_libraries(bench_control_saturation PRIVATE atomic)
+    endif()
+    target_link_libraries(bench_control_saturation PRIVATE
+        nimrtc::engine
+        # The PAL Slice 2 kDefaultRegistrars[] table references every
+        # concrete module's register_default_plugins() symbol, so the
+        # engine's open() → register_all_default_plugins() chain needs
+        # all of them linked.  Same set as nimrtc_add_engine_test().
+        nimrtc::ice
+        nimrtc::rtp
+        nimrtc::sdp
+        nimrtc::jb
+        nimrtc::audio3a
+        nimrtc::dtls_seam
+        nimrtc::sctp
+        nimrtc::raw_udp
+        nimrtc::transport
+        nimrtc::datachannel
+        nimrtc::net_feedback
+        nimrtc::web_transport
+        nimrtc::session)
+    target_include_directories(bench_control_saturation PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/engine/include")
+    if(WIN32)
+        target_compile_definitions(bench_control_saturation PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    set_target_properties(bench_control_saturation PROPERTIES
+        VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+    nimrtc_apply_options(bench_control_saturation LENIENT)
+    nimrtc_copy_msquic_dll(bench_control_saturation)
+endif()
+
+# ---------------------------------------------------------------------------
 # The zero-copy *seam* probe (remote-desktop M1).
 #
 # `bench_capture_encode` proves the *capture* side of the zero-copy claim

@@ -52,12 +52,14 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <nimrtc/core/registry.hpp>
@@ -630,6 +632,132 @@ TEST_F(EngineControlChannel, ARawUdpRequestWithoutAControlStackIsAHardError) {
 
     EXPECT_NE(engine.open(), 0u);
     EXPECT_NE(err, 0u);
+}
+
+TEST_F(EngineControlChannel,
+       TwoEnginesExchangeControlMessagesOverTheRawUdpControlPath) {
+    // ---- What this test proves -------------------------------------------
+    //
+    // The G2 control plane is **structurally** present in the engine (the
+    // test above proves the selection), but the structural presence says
+    // nothing about the *behaviour*.  This test is the behavioural half:
+    //
+    //   1. two engines negotiate over the **real** SDP exchange, and the
+    //      control endpoint travels in it (`a=x-nimrtc-control:<host:port>`)
+    //      — so neither side has to guess where to send;
+    //   2. the control plane's bytes travel over **real UDP sockets** (the
+    //      control stack's own ARQ session), not over the in-process bus
+    //      the G1 test above uses;
+    //   3. a message sent by one engine arrives at the other one, **whole**,
+    //      and decodes back to the event that was encoded.
+    //
+    // The transport is the "agent-gateway" shape (the remote-desktop
+    // profile's shape): browser interop for the media plane plus a
+    // separate `raw-udp-arq` control stack.
+    EngineConfig cfg = make_config();
+    cfg.transport_strategy_name = "agent-gateway";
+    cfg.control_channel_transport = np::ControlChannelTransport::kRawUdp;
+
+    NimRTCEngine a(cfg);
+    NimRTCEngine b(cfg);
+    ASSERT_EQ(a.open(), 0u) << "the first engine must open";
+    ASSERT_EQ(b.open(), 0u) << "the second engine must open";
+
+    // ---- The receiver's callback ----------------------------------------
+    std::vector<std::vector<std::uint8_t>> received;
+    b.set_on_control_message(
+        [&received](std::span<const std::uint8_t> message) {
+            received.emplace_back(message.begin(), message.end());
+        });
+
+    // ---- The SDP exchange -----------------------------------------------
+    //
+    // The offer carries the offerer's control endpoint; the answer carries
+    // the answerer's.  Each side reads the peer's endpoint out of the
+    // description and points its own control path at it — that is what
+    // makes the session *bidirectional*.
+    const std::string offer = a.create_offer();
+    ASSERT_FALSE(offer.empty()) << "the offer must be produced";
+    EXPECT_NE(offer.find("a=x-nimrtc-control:"), std::string::npos)
+        << "the offer must advertise the control endpoint; otherwise the "
+           "peer has no way to learn where the control plane lives";
+
+    const auto answer = b.process_remote_sdp(offer);
+    ASSERT_TRUE(answer.has_value()) << "the answer must be produced";
+    EXPECT_NE(answer->find("a=x-nimrtc-control:"), std::string::npos)
+        << "the answer must advertise the control endpoint too, so the "
+           "offerer's control path is not one-way";
+
+    const auto applied = a.process_remote_sdp(*answer);
+    ASSERT_TRUE(applied.has_value())
+        << "the offerer must accept the answer (an answer to our own offer "
+           "must not be answered again)";
+
+    // ---- Send one input event -------------------------------------------
+    ri::InputEvent event = ri::make_mouse_button(ri::MouseButton::kRight,
+                                                  ri::ButtonAction::kDown,
+                                                  640, 360);
+    event.timestamp_us = 424242u;
+    event.ref_frame = 77u;
+
+    ri::EncodeOptions encode_options;
+    encode_options.include_timestamp = true;
+    encode_options.include_ref_frame = true;
+
+    const auto encoded = ri::encode_event(event, encode_options);
+    ASSERT_TRUE(encoded.ok()) << encoded.error().message();
+
+    ASSERT_EQ(a.send_control_message(
+                  std::span<const std::uint8_t>(encoded.value().data(),
+                                                encoded.value().size())),
+              np::kOk);
+
+    // ---- Deliver it ------------------------------------------------------
+    //
+    // The inbound path is the engine's own tick: it pumps the control
+    // stack's ARQ receive queue (plan G2), which fires the receive
+    // callback, which feeds the control channel, which reassembles the
+    // message and queues it for the host's callback.
+    //
+    // A real socket needs real time: the ARQ session's own recv thread
+    // has to wake up and the tick has to drain the queue afterwards, so
+    // the wait is a bounded poll rather than a fixed number of ticks.
+    for (int i = 0; i < 200 && received.empty(); ++i) {
+        b.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    ASSERT_EQ(received.size(), 1u)
+        << "the control message must arrive at the far engine as ONE whole "
+           "message, over the real UDP control path";
+
+    // ---- Decode it -------------------------------------------------------
+    const auto decoded = ri::decode_event(
+        core::ByteSpan{received[0].data(), received[0].size()});
+    ASSERT_TRUE(decoded.ok()) << decoded.error().message();
+
+    EXPECT_EQ(decoded.value().type, ri::InputEventType::kMouseButton);
+    EXPECT_EQ(decoded.value().button, ri::MouseButton::kRight);
+    EXPECT_EQ(decoded.value().button_action, ri::ButtonAction::kDown);
+    EXPECT_EQ(decoded.value().x, 640);
+    EXPECT_EQ(decoded.value().y, 360);
+    EXPECT_EQ(decoded.value().timestamp_us, 424242u);
+    ASSERT_TRUE(decoded.value().ref_frame.has_value());
+    EXPECT_EQ(*decoded.value().ref_frame, 77u);
+
+    // ---- The counters ----------------------------------------------------
+    const auto a_stats = a.control_channel_stats();
+    EXPECT_EQ(a_stats.messages_sent, 1u);
+    EXPECT_EQ(a_stats.bytes_sent, encoded.value().size());
+
+    const auto b_stats = b.control_channel_stats();
+    EXPECT_EQ(b_stats.messages_received, 1u);
+    EXPECT_EQ(b_stats.bytes_received, encoded.value().size());
+    EXPECT_EQ(b_stats.malformed_received, 0u);
+    EXPECT_EQ(b_stats.oversized_received, 0u);
+
+    a.close();
+    b.close();
 }
 
 // ---------------------------------------------------------------------------

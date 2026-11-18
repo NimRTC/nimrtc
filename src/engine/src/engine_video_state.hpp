@@ -43,6 +43,7 @@
 
 #include "audio_routing.hpp"
 #include "engine_capture_cadence.hpp"
+#include "engine_feedback_guard.hpp"
 #include "engine_gpu_mailbox.hpp"
 #include "engine_rate_window.hpp"
 #include "engine_ref_frame_table.hpp"
@@ -108,6 +109,21 @@ struct VideoState {
     std::uint64_t video_feedback_tx_pli  = 0;
     /** NACKs (retransmission requests) we sent the peer. */
     std::uint64_t video_feedback_tx_nack = 0;
+
+    // ---- The receive-side feedback bound (v1.3 plan Q4 / video plan T2) --
+    //
+    // The receiver used to *merge* its feedback into one pending report
+    // without a bound, so a lossy peer could make the feedback grow
+    // without limit.  The bound itself — and every counter that makes it
+    // observable — lives in the `feedback_guard` collaborator below;
+    // the engine publishes the guard's counters through `Stats`.
+    //
+    // The two *doors* are counted separately, because they mean
+    // different things: the loss door says "the network dropped a
+    // picture", the decode-failure door says "the decoder cannot
+    // decode what it is being sent".  The two call for completely
+    // different fixes, and before Q4 they vanished into the same
+    // merged report.
 
     // ---- Video zero-copy counters (Phase 3 / C3) ------------------------
     //
@@ -212,9 +228,14 @@ struct VideoState {
      *  raises them from inside the ICE receive path, so the engine queues
      *  them and sends them from `tick()` — the same place the Sender
      *  Report is sent from.  Re-entering the transport's send() from
-     *  inside its recv() would be a needless risk. */
-    plugins::VideoFeedbackReport pending_video_feedback_{};
-    bool                        has_pending_video_feedback_ = false;
+     *  inside its recv() would be a needless risk.
+     *
+     *  v1.3 Q4: the pending report is no longer held here.  It lives in
+     *  the `feedback_guard` collaborator below, which owns the bound on
+     *  what may go out (the NACK cap, the PLI rate limit and the report
+     *  age) — this state only carries the *counters* that make the bound
+     *  observable. */
+    detail::FeedbackGuard feedback_guard;
 
     /** The last moment a *decoder-driven* key-frame request went out.
      *
@@ -224,9 +245,11 @@ struct VideoState {
      *  failure repeats on *every* subsequent P-frame, so an
      *  unthrottled request would be a PLI storm.
      *
-     *  This is the engine's own throttle: at most one decoder-driven
-     *  key-frame request per interval.  The *peer's* key-frame storm
-     *  limiter (plan B14) bounds the other side; this bounds ours. */
+     *  v1.3 Q4: the *global* throttle now lives in the feedback guard
+     *  (`feedback_guard`), which covers both doors.  This field stays
+     *  as the decode-failure door's own throttle: it keeps the log
+     *  quiet, because the failure repeats on every P-frame and an
+     *  unthrottled path would log once per frame. */
     std::int64_t video_last_decode_keyframe_us = 0;
 
     // ---- Negotiated payload-type routing (B-4) -------------------------

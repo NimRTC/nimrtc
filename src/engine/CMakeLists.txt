@@ -87,6 +87,11 @@ add_library(nimrtc_engine STATIC
     # TU so the transport surface has ONE visible owner, and so the
     # engine's other TUs do not grow the projection's vocabulary.
     src/engine_transport_stats.cpp
+    # v1.3 plan Q4 / video plan T2: the receive-side feedback bound.
+    # The NACK cap, the global key-frame rate limit and the pending
+    # report's age live in one private collaborator, so the engine's
+    # receive-side feedback has ONE visible owner.
+    src/engine_feedback_guard.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and

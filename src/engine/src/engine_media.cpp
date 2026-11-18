@@ -442,6 +442,20 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // starts from a clean slate.
     impl_->video_state.video_stats.ensure_created();
 
+    // ---- The receive-side feedback bound (v1.3 plan Q4 / video plan T2) ---
+    //
+    // The guard's bounds come from the host's configuration, so a host
+    // that knows its peer is on a fast link can tighten the key-frame
+    // rate, and a host debugging the receive path can lift it.  The
+    // defaults are the ones the acceptance test pins.
+    {
+        detail::FeedbackGuard::Config fb{};
+        fb.min_pli_interval_us = config_.video_feedback_min_pli_interval_us;
+        fb.max_nack_seqs       = config_.video_feedback_max_nack_seqs;
+        fb.max_report_age_us   = config_.video_feedback_max_report_age_us;
+        impl_->video_state.feedback_guard.set_config(fb);
+    }
+
     // Plan J6 / S7: the freeze *finding* and the freeze *accounting* live
     // in two different modules -- the `video_stats` sink owns the
     // definition of a freeze (the threshold and the idle detection),
@@ -2759,12 +2773,20 @@ void NimRTCEngine::request_keyframe_on_decode_failure() noexcept {
 
     auto& vstate = impl_->video_state;
 
-    // ---- The throttle ------------------------------------------------------
+    // ---- The door's own throttle -----------------------------------------
     //
     // The interval matches the key-frame limiter's own default (250 ms —
     // RFC 5104 §4.3.1.1's "about 4 Hz"), so the two ends of the loop agree
     // on the rate: the request is sent at most four times a second, and
     // the peer produces at most four IDRs a second in answer.
+    //
+    // v1.3 Q4: this is the *door's* throttle, not the only one.  The
+    // feedback guard holds the **global** limit, which covers the loss
+    // door as well — before Q4 the loss door had no limit of its own,
+    // so a stream that both lost packets and failed to decode asked for
+    // key frames at twice the rate.  This throttle still earns its
+    // keep: it keeps the log quiet, because the failure repeats on
+    // every P-frame.
     constexpr std::int64_t kMinRequestIntervalUs = 250'000;
 
     const std::int64_t now_us = static_cast<std::int64_t>(
@@ -2783,6 +2805,10 @@ void NimRTCEngine::request_keyframe_on_decode_failure() noexcept {
     // loss report uses (`queue_video_feedback()`), so the RTCP bytes
     // are produced by the receiver plugin and the engine only carries
     // them.  The engine never builds an RTCP packet itself.
+    //
+    // The *source* is what tells the two doors apart in the statistics:
+    // this is the decode-failure door (the bitstream is undecodable),
+    // not the loss door (the picture never arrived).
     plugins::VideoFeedbackReport report{};
     report.want_keyframe = true;
 
@@ -2790,7 +2816,7 @@ void NimRTCEngine::request_keyframe_on_decode_failure() noexcept {
         "engine[video]: the decoder refused a frame — requesting a key "
         "frame from the peer");
 
-    queue_video_feedback(report);
+    queue_video_feedback_from_decode_failure(report);
 }
 
 
@@ -2846,16 +2872,51 @@ void NimRTCEngine::notify_video_keyframe_requested() noexcept {
 
 void NimRTCEngine::queue_video_feedback(
     const plugins::VideoFeedbackReport& report) noexcept {
+    queue_video_feedback_impl(report, detail::FeedbackSource::kLoss);
+}
+
+
+void NimRTCEngine::queue_video_feedback_from_decode_failure(
+    const plugins::VideoFeedbackReport& report) noexcept {
+    queue_video_feedback_impl(report, detail::FeedbackSource::kDecodeFailure);
+}
+
+
+void NimRTCEngine::queue_video_feedback_impl(
+    const plugins::VideoFeedbackReport& report,
+    detail::FeedbackSource source) noexcept {
     if (report.missing_seqs.empty() && !report.want_keyframe) return;
 
+    auto& vstate = impl_->video_state;
+
+    // ---- The bound (v1.3 plan Q4 / video plan T2) -----------------------
+    //
+    // The guard is the *single* authority on what may go out: it caps
+    // the NACK list, applies the global key-frame rate limit, and ages
+    // the pending report out.  The engine only carries the result.
+    const detail::FeedbackGuard::QueueResult qr =
+        vstate.feedback_guard.queue(report, source);
+
+    // ---- The counters ----------------------------------------------------
+    //
+    // `video_keyframes_q` counts the key-frame requests the receiver
+    // *raised* (the demand), and `video_feedback_tx_pli` counts the
+    // ones that actually went on the wire.  Before Q4 the two were the
+    // same number, because every request went out; now the rate limit
+    // can hold one back, so they are two different facts.
+    if (report.want_keyframe) ++vstate.video_keyframes_q;
+    if (qr.pli_allowed) ++vstate.video_feedback_tx_pli;
+
     // v1.1 V1: outbound feedback queued (NACK seqs + keyframe requests).
-    impl_->video_state.video_nack_seqs_queued += report.missing_seqs.size();
-    if (report.want_keyframe) ++impl_->video_state.video_keyframes_q;
+    //
+    // Only the sequence numbers that actually made it into the report
+    // are counted as queued — the dropped ones did not enter the queue.
+    vstate.video_nack_seqs_queued += qr.nack_seqs_added;
 
     // Plan Track S / S2: the retransmission requests count against the
     // source they are about — the peer's video stream.
     impl_->inbound_state.note_nacks(
-        impl_->video_state.remote_video_ssrc_, report.missing_seqs.size());
+        vstate.remote_video_ssrc_, qr.nack_seqs_added);
 
     // Phase 4.2 / D2: record the feedback we are about to send.  A NACK
     // means the *peer* lost picture data on the **inbound** stream (the
@@ -2865,45 +2926,37 @@ void NimRTCEngine::queue_video_feedback(
     //
     // A key-frame request means the peer is already resynchronising
     // because a reference frame never arrived.
-    if (!report.missing_seqs.empty()) {
-        impl_->video_state.video_stats.on_rtcp_feedback(
+    if (qr.nack_seqs_added > 0) {
+        vstate.video_stats.on_rtcp_feedback(
             detail::VideoFeedbackKind::kNACK);
         // Plan Track S / S4: the per-type breakdown, outbound direction.
         // This NACK describes *our* inbound stream — packets arriving at
         // the peer damaged — so it is the mirror image of the
         // `video_feedback_rx_nack` counter above.
-        ++impl_->video_state.video_feedback_tx_nack;
+        ++vstate.video_feedback_tx_nack;
     }
-    if (report.want_keyframe) {
-        impl_->video_state.video_stats.on_rtcp_feedback(
+    if (qr.pli_allowed) {
+        vstate.video_stats.on_rtcp_feedback(
             detail::VideoFeedbackKind::kPLI);
-        ++impl_->video_state.video_feedback_tx_pli;
     }
-
-    // Merge into the pending report: two gaps detected back to back must
-    // not cost two round trips, and a NACK list plus a key-frame request
-    // belong in the same feedback packet anyway.
-    if (!impl_->video_state.has_pending_video_feedback_) {
-        impl_->video_state.pending_video_feedback_ = report;
-        impl_->video_state.has_pending_video_feedback_ = true;
-        return;
-    }
-    impl_->video_state.pending_video_feedback_.missing_seqs.insert(
-        impl_->video_state.pending_video_feedback_.missing_seqs.end(),
-        report.missing_seqs.begin(), report.missing_seqs.end());
-    impl_->video_state.pending_video_feedback_.want_keyframe =
-        impl_->video_state.pending_video_feedback_.want_keyframe || report.want_keyframe;
 }
 
 
 void NimRTCEngine::flush_video_feedback() noexcept {
-    if (!impl_->video_state.has_pending_video_feedback_) return;
+    auto& vstate = impl_->video_state;
+
     // Take the report out of the queue *before* sending: a send failure
     // must not make the engine retry the same report forever.
-    const plugins::VideoFeedbackReport report =
-        impl_->video_state.pending_video_feedback_;
-    impl_->video_state.pending_video_feedback_ = plugins::VideoFeedbackReport{};
-    impl_->video_state.has_pending_video_feedback_ = false;
+    //
+    // The guard also *ages* the report out: a report that sat in the
+    // queue while the link was down says nothing about the picture any
+    // more, so it is dropped rather than sent (and counted).
+    plugins::VideoFeedbackReport report{};
+    if (!vstate.feedback_guard.take(report)) {
+        // Nothing to send — either there was never a pending report, or
+        // the one there was had expired.
+        return;
+    }
 
     if (!video_receiver_) return;
     if (!ice_t_ || !is_ice_connected()) return;
@@ -3179,6 +3232,20 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         impl_->video_state.video_feedback_rx_transport_cc;
     out.video_feedback_tx_pli  = impl_->video_state.video_feedback_tx_pli;
     out.video_feedback_tx_nack = impl_->video_state.video_feedback_tx_nack;
+
+    // v1.3 plan Q4 / video plan T2: the receive-side feedback bound.
+    // The guard is the single authority on these numbers, so they are
+    // read from it rather than counted a second time here.
+    {
+        const auto& c = impl_->video_state.feedback_guard.counters();
+        out.video_feedback_pli_requests            = c.pli_requests;
+        out.video_feedback_pli_allowed             = c.pli_allowed;
+        out.video_feedback_pli_suppressed          = c.pli_suppressed;
+        out.video_feedback_pli_from_loss           = c.pli_from_loss;
+        out.video_feedback_pli_from_decode_failure = c.pli_from_decode_failure;
+        out.video_feedback_nack_seqs_dropped       = c.nack_seqs_dropped;
+        out.video_feedback_reports_expired        = c.reports_expired;
+    }
 
     // Remote-desktop plan H4: the per-stream statistics list.  The flat
     // `video_*` fields above describe the **default** stream; the list

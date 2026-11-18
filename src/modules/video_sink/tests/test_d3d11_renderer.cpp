@@ -49,6 +49,17 @@
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/video_sink/d3d11_renderer.hpp>
 
+#if defined(_WIN32)
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #include <windows.h>
+  #include <d3d11.h>
+#endif
+
 namespace {
 
 namespace np = nimrtc::plugins;
@@ -294,5 +305,230 @@ TEST(D3D11Renderer, RejectsAnEmptyFrame) {
     EXPECT_EQ(renderer.render(empty), np::kErrInvalidParam);
     renderer.close();
 }
+
+// ---------------------------------------------------------------------------
+// The GPU surface path (plan E5)
+// ---------------------------------------------------------------------------
+
+#if defined(_WIN32)
+
+namespace {
+
+/** A real `ID3D11Texture2D` the GPU path can actually consume.
+ *
+ *  The renderer validates the handle and copies the texture on the
+ *  presenter thread, so a fake pointer would crash rather than test
+ *  anything.  The texture is created on the *default* device — the same
+ *  one the capture backend produces — with `CopyResource` as a source
+ *  requirement (no bind flags, no CPU access). */
+struct D3D11TextureFixture {
+    ID3D11Device*        device  = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    ID3D11Texture2D*     texture = nullptr;
+
+    bool create(DXGI_FORMAT format, std::uint32_t w, std::uint32_t h) {
+        if (FAILED(::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE,
+                                       nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                       nullptr, 0, D3D11_SDK_VERSION, &device,
+                                       nullptr, &context))) {
+            return false;
+        }
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width  = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = format;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        return SUCCEEDED(device->CreateTexture2D(&td, nullptr, &texture));
+    }
+
+    ~D3D11TextureFixture() {
+        if (texture) texture->Release();
+        if (context) context->Release();
+        if (device)  device->Release();
+    }
+};
+
+/** A `GpuBuffer` wrapping a live D3D11 texture. */
+np::GpuBuffer wrap(ID3D11Texture2D* tex, std::uint32_t w, std::uint32_t h,
+                    np::VideoPixelFormat fmt) {
+    np::GpuHandle handle{};
+    handle.backend = np::GpuBackend::kWindowsD3D11Texture;
+    handle.handle  = tex;
+    return np::GpuBuffer(handle, w, h, fmt);
+}
+
+} // namespace
+
+// A BGRA8 surface goes from the mailbox to the present target with a
+// device-to-device copy: the picture never enters host memory.  The
+// sink reports the copy through `gpu_device_copies`, and nothing lands
+// in the staging-fallback counter.
+TEST(D3D11Renderer, GpuSurfaceIsCopiedDeviceSide) {
+    D3D11TextureFixture fx;
+    if (!fx.create(DXGI_FORMAT_B8G8R8A8_UNORM, 64, 64)) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+
+    np::VideoSinkConfig cfg{};
+    cfg.offscreen = true;
+    cfg.width  = 64;
+    cfg.height = 64;
+    cfg.target_fps = 30;
+
+    nimrtc::video_sink::D3D11Renderer renderer(cfg);
+    const np::Status rc = renderer.open();
+    if (rc == np::kErrHardwareError || rc == np::kErrUnsupported) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+    ASSERT_EQ(rc, np::kOk);
+
+    np::GpuBuffer surface = wrap(fx.texture, 64, 64, np::VideoPixelFormat::kBGRA);
+    ASSERT_EQ(renderer.render(surface), np::kOk);
+    // `render()` only posts to the mailbox; the copy happens on the
+    // presenter's next deadline.
+    sleep_ms(150);
+
+    const np::VideoSinkStats st = renderer.stats();
+    renderer.close();
+
+    EXPECT_GT(st.gpu_device_copies, 0u);
+    EXPECT_EQ(st.gpu_staging_fallbacks, 0u);
+    EXPECT_EQ(st.gpu_surfaces_refused, 0u);
+    EXPECT_GT(st.frames_presented, 0u);
+    // A GPU surface that fits the clock is not a back-pressure drop.
+    EXPECT_EQ(st.frames_dropped_present, 0u);
+}
+
+// A surface that is not the present format cannot be copied into a BGRA8
+// target; without a CPU mirror there is nothing to present, so the sink
+// says so (`kErrUnsupported`) and counts the staging fallback — it does
+// not copy garbage into the target (plan E5's documented fallback).
+TEST(D3D11Renderer, NonBgraSurfaceTakesTheDocumentedFallback) {
+    D3D11TextureFixture fx;
+    if (!fx.create(DXGI_FORMAT_NV12, 64, 64)) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+
+    np::VideoSinkConfig cfg{};
+    cfg.offscreen = true;
+    cfg.width  = 64;
+    cfg.height = 64;
+
+    nimrtc::video_sink::D3D11Renderer renderer(cfg);
+    const np::Status rc = renderer.open();
+    if (rc == np::kErrHardwareError || rc == np::kErrUnsupported) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+    ASSERT_EQ(rc, np::kOk);
+
+    np::GpuBuffer surface = wrap(fx.texture, 64, 64, np::VideoPixelFormat::kNV12);
+    EXPECT_EQ(renderer.render(surface), np::kErrUnsupported);
+    // The timeline overload must refuse the same frame for the same reason.
+    np::VideoFrameInfo info{};
+    EXPECT_EQ(renderer.render(surface, info), np::kErrUnsupported);
+
+    const np::VideoSinkStats st = renderer.stats();
+    renderer.close();
+
+    EXPECT_EQ(st.gpu_device_copies, 0u);
+    EXPECT_GE(st.gpu_staging_fallbacks, 2u);
+    EXPECT_EQ(st.frames_presented, 0u);
+}
+
+// A non-BGRA surface that *does* carry a CPU mirror is presented from the
+// mirror (I420 → BGRA conversion) instead of a GPU readback — the frame
+// still reaches the display, and only the conversion is counted.
+TEST(D3D11Renderer, NonBgraSurfaceWithCpuMirrorPresents) {
+    D3D11TextureFixture fx;
+    if (!fx.create(DXGI_FORMAT_NV12, 64, 64)) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+
+    const std::uint32_t w = 64, h = 64;
+    const std::int32_t stride_c = static_cast<std::int32_t>(w / 2u);
+    std::vector<std::uint8_t> y(static_cast<std::size_t>(w) * h, 0x80u);
+    std::vector<std::uint8_t> u(static_cast<std::size_t>(stride_c) * (h / 2u), 0x80u);
+    std::vector<std::uint8_t> v(static_cast<std::size_t>(stride_c) * (h / 2u), 0x80u);
+
+    np::GpuBuffer surface = wrap(fx.texture, w, h, np::VideoPixelFormat::kI420);
+    surface.set_cpu_mirror(y.data(), u.data(), v.data(),
+                           static_cast<std::int32_t>(w), stride_c, stride_c);
+
+    np::VideoSinkConfig cfg{};
+    cfg.offscreen = true;
+    cfg.width  = w;
+    cfg.height = h;
+    cfg.target_fps = 30;
+
+    nimrtc::video_sink::D3D11Renderer renderer(cfg);
+    const np::Status rc = renderer.open();
+    if (rc == np::kErrHardwareError || rc == np::kErrUnsupported) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+    ASSERT_EQ(rc, np::kOk);
+
+    ASSERT_EQ(renderer.render(surface), np::kOk);
+    sleep_ms(150);
+
+    const np::VideoSinkStats st = renderer.stats();
+    renderer.close();
+
+    EXPECT_GE(st.gpu_staging_fallbacks, 1u);
+    // The mirror is planar I420, so the CPU path's I420 → BGRA
+    // conversion ran; the frame reached the display from the mirror
+    // rather than from a GPU readback.
+    EXPECT_GE(st.format_conversions, 1u);
+    EXPECT_GT(st.frames_presented, 0u);
+}
+
+// The headline property of the GPU path: the *producer* never does the
+// copy.  Two thousand `render()` calls on a GPU surface must cost about
+// as much as two thousand CPU-path calls that are dropped in the
+// mailbox — i.e. the caller's thread is not serialised on the GPU.  The
+// assertion is loose on purpose (it is a smoke test, not a benchmark):
+// it fails only if `render()` started doing per-frame device work.
+TEST(D3D11Renderer, GpuRenderDoesNotDoDeviceWorkOnTheCaller) {
+    D3D11TextureFixture fx;
+    if (!fx.create(DXGI_FORMAT_B8G8R8A8_UNORM, 1280, 720)) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+
+    np::VideoSinkConfig cfg{};
+    cfg.offscreen = true;
+    cfg.width  = 1280;
+    cfg.height = 720;
+    cfg.target_fps = 30;
+
+    nimrtc::video_sink::D3D11Renderer renderer(cfg);
+    const np::Status rc = renderer.open();
+    if (rc == np::kErrHardwareError || rc == np::kErrUnsupported) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+    ASSERT_EQ(rc, np::kOk);
+
+    // The copy the producer must *not* pay for: a 720p BGRA surface is
+    // ~3.7 MB.  Two thousand of them are ~7.4 GB — no loop that copies
+    // each one through the GPU (let alone through the host) finishes in
+    // the 2 s budget below, while reference-count bumps do.
+    np::GpuBuffer surface = wrap(fx.texture, 1280, 720, np::VideoPixelFormat::kBGRA);
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 2000; ++i) {
+        ASSERT_EQ(renderer.render(surface), np::kOk);
+    }
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    const np::VideoSinkStats st = renderer.stats();
+    renderer.close();
+
+    EXPECT_EQ(st.frames_rendered, 2000u);
+    EXPECT_GT(st.frames_dropped_present, 1900u);   // the mailbox replaced them
+    EXPECT_LT(elapsed_ms, 2000);                   // not one device copy per call
+}
+
+#endif  // _WIN32
 
 } // namespace

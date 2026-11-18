@@ -48,6 +48,7 @@ target_include_directories(test_d3d11_renderer PRIVATE
     "${CMAKE_SOURCE_DIR}/src/plugins/include")
 if(WIN32)
     target_compile_definitions(test_d3d11_renderer PRIVATE _WIN32_WINNT=0x0A00)
+    target_link_libraries(test_d3d11_renderer PRIVATE d3d11 dxgi)
 endif()
 nimrtc_apply_options(test_d3d11_renderer LENIENT)
 add_test(NAME test_d3d11_renderer

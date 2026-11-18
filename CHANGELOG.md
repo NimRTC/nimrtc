@@ -46,7 +46,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > **Known limitations carried into this release** (none of them is a regression):
 
 > - **TURN over TLS is not negotiated.** `TurnTransport::Tls` is accepted by the API, but the negotiation is not implemented and the transport falls back to plain TCP.
-> - **The ABR benchmark measures a loop the engine does not yet drive.** `BitrateController::on_measured_bitrate()` is never called by the engine, so the shipped loop is not the measured loop.  The *estimator*, the *pacer* and the *resolution ladder* under test are the shipped ones; what is missing is the one call that would close the loop.
+> - **The ABR benchmark measures a loop the engine drives.**  The engine feeds the controller `BitrateController::on_measured_bitrate()` with a one-second closed window over the encoder's outbound byte counters, and `on_keyframe_requested()` when the peer asks for a key frame (PLI / FIR).  The *estimator*, the *pacer* and the *resolution ladder* under test are the shipped ones, and the loop is closed in production as well as in the benchmark.
 > - **HEVC has no software decoder.** x265 is GPL-2.0, which the licence review excludes, so the HEVC screen-content path is hardware-only.
 > - **The QoE latency percentiles are measured but the freeze *finding* is only wired on the video path.** The input-to-photon measurement covers the control transport, as the acceptance criterion requires.
 

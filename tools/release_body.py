@@ -158,11 +158,26 @@ def headline(entry: list[str]) -> str | None:
     return re.sub(r"\s+", " ", m.group(1)).strip()
 
 
-def digest(version: str, changelog: str) -> str:
-    """Build the release body for `version`."""
+def digest(version: str, changelog: str, limit: int | None = None) -> str:
+    """Build the release body for `version`.
+
+    The full section is returned when it fits; otherwise it is
+    reduced to a digest.
+
+    `limit` overrides the budget -- it exists so the self-test can
+    exercise both modes without inventing a 100 000-character fixture.
+    """
+    budget = MAX_BODY_CHARS if limit is None else limit
     lines = changelog.split("\n")
     start, end = find_section(lines, version)
     section = lines[start:end]
+
+    whole = "\n".join(section).rstrip("\n") + "\n"
+    if len(whole) <= budget:
+        # The complete notes fit: ship them.  No digest is needed, and
+        # the reader gets every paragraph, every measurement and every
+        # code reference.
+        return whole
 
     out: list[str] = [lines[start], ""]
 
@@ -223,22 +238,129 @@ def _group_body(section: list[str], heading: str) -> list[str]:
             continue
         if inside:
             out.append(line)
-    # Trim the trailing blank lines.
+    # Trim the leading and trailing blank lines: the caller emits its
+    # own separator around the group.
+    while out and not out[0].strip():
+        out.pop(0)
     while out and not out[-1].strip():
         out.pop()
     return out
 
 
+def self_test() -> int:
+    """Self-test the digest rules against synthetic changelogs.
+
+    The rules under test are the ones a silent truncation would hide:
+    the body must fit, the `Status:` paragraph must survive whole, and
+    **no entry may be dropped**.
+    """
+    failures: list[str] = []
+
+    def check(cond: bool, what: str) -> None:
+        if not cond:
+            failures.append(what)
+
+    # --- A changelog that fits: the whole section must be emitted. ---
+    small = """## [9.9.9] - 2026-01-01
+
+### Status: A test
+
+> The status paragraph.
+
+### Added
+
+- **One.** Its prose.
+- **Two.** Its prose.
+"""
+    body = digest("9.9.9", small)
+    check("Its prose." in body, "a section that fits must be emitted whole")
+    check("This is the **digest**" not in body, "a section that fits needs no digest footer")
+
+    # --- A changelog that does not fit: the digest must kick in. ---
+    # A small budget stands in for the real 125 000-character limit, so
+    # the test fixture stays readable.
+    fat = (
+        "## [9.9.8] - 2026-01-01\n\n"
+        "### Status: A test\n\n"
+        "> The status paragraph, which must survive the digest whole.\n\n"
+        "### Added\n\n"
+        + "".join(
+            f"- **Entry {i}.** {'x' * 400}\n" for i in range(200)
+        )
+    )
+    body = digest("9.9.8", fat, limit=5000)
+    check(len(body) <= 5000, f"the digest must fit ({len(body)} > 5000)")
+    check(
+        "The status paragraph, which must survive the digest whole." in body,
+        "the Status paragraph must survive the digest whole",
+    )
+    check("This is the **digest**" in body, "a digest must carry the footer")
+    check("xxxx" not in body, "the digest must drop the prose")
+    for i in range(200):
+        check(f"Entry {i}." in body, f"entry {i} was dropped from the digest")
+
+    # --- The headline extraction must tolerate a wrapped bold span. ---
+    wrapped_entry = ["- **A headline that", "  wraps across lines.** The prose."]
+    check(
+        headline(wrapped_entry) == "A headline that wraps across lines.",
+        f"a wrapped bold span must be joined into one headline "
+        f"(got {headline(wrapped_entry)!r})",
+    )
+    # A headline that wraps must also survive a digest.
+    wrapped = (
+        "## [9.9.7] - 2026-01-01\n\n"
+        "### Added\n\n"
+        + "".join(f"- **Entry {i}.** {'y' * 200}\n" for i in range(20))
+        + "- **A headline that\n  wraps across lines.** The prose.\n"
+    )
+    body = digest("9.9.7", wrapped, limit=2000)
+    check(
+        "- A headline that wraps across lines." in body,
+        "a wrapped bold span must be joined into one headline in the digest",
+    )
+
+    # --- An entry with no bold headline must not be lost. ---
+    nobold = "## [9.9.6] - 2026-01-01\n\n### Added\n\n- A plain entry with no bold span.\n"
+    body = digest("9.9.6", nobold, limit=120)
+    check("A plain entry with no bold span." in body, "an entry with no bold span must survive")
+
+    # --- The real changelog must produce a body that fits. ---
+    real = read_text(CHANGELOG_PATH)
+    for version in ("1.2.0", "1.1.0"):
+        body = digest(version, real)
+        check(len(body) <= MAX_BODY_CHARS, f"{version}: the body must fit")
+        check(f"## [{version}]" in body, f"{version}: the section heading must be present")
+
+    if failures:
+        for f in failures:
+            print(f"release_body.py: FAIL -- {f}", file=sys.stderr)
+        return 1
+
+    print("release_body.py: self-test passed")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--version", required=True, help="the version, e.g. 1.2.0")
+    ap.add_argument("--version", help="the version, e.g. 1.2.0")
     ap.add_argument("--out", help="write the body here")
     ap.add_argument(
         "--check",
         action="store_true",
         help="verify the length and print the body; write nothing",
     )
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the tool's own tests and exit",
+    )
     args = ap.parse_args()
+
+    if args.self_test:
+        return self_test()
+
+    if not args.version:
+        ap.error("--version is required (or use --self-test)")
 
     body = digest(args.version, read_text(CHANGELOG_PATH))
     size = len(body)
@@ -248,7 +370,6 @@ def main() -> int:
         f"(limit {MAX_BODY_CHARS}, GitHub's hard limit {GITHUB_BODY_LIMIT})",
         file=sys.stderr,
     )
-
     if size > MAX_BODY_CHARS:
         print(
             f"release_body.py: the digest for {args.version} is {size} chars, "

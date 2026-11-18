@@ -671,9 +671,11 @@ yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651
 
 ### Landed on `main`, not yet published
 
-These are in the trunk and will be part of the next release. There is **no `## [1.1.0]`
-CHANGELOG entry yet** — the release-hardening track (four-platform release legs, signed tag)
-has not closed.
+These are in the trunk and are part of the **`v1.2.0`** release: `CHANGELOG.md`
+carries the `## [1.2.0] - 2026-11-18` section, and the tree's version is
+`1.2.0` with an empty `NIMRTC_API_VERSION_PRE_RELEASE`. The `v1.2.0` **tag**
+is not cut yet — the release-hardening track (four-platform release legs,
+signed tag) has not closed. See `RELEASING.md` §3.3 for the cut procedure.
 
 | Capability | Status | Track |
 |---|---|---|

@@ -8,6 +8,8 @@
  *   3. Roundtrip preserves signal energy (PESQ-style sanity).
  *   4. PLC produces output for concealment.
  *   5. Stats counters increment correctly.
+ *   6. The int16 encode path (the TTS return path, slice v4-voice-agent)
+ *      produces real Opus packets and survives a roundtrip.
  */
 
 #include <gtest/gtest.h>
@@ -42,6 +44,30 @@ std::vector<float> make_sine(std::size_t n, float freq_hz, std::uint32_t rate) {
         pcm[i] = 0.5f * static_cast<float>(std::sin(static_cast<double>(i) * phase_step));
     }
     return pcm;
+}
+
+/** The int16 twin of `make_sine` — what a TTS synthesiser emits. */
+std::vector<std::int16_t> make_sine_int16(std::size_t n,
+                                          float freq_hz,
+                                          std::uint32_t rate) {
+    std::vector<std::int16_t> pcm(n);
+    const double phase_step =
+        2.0 * 3.141592653589793 * static_cast<double>(freq_hz) / static_cast<double>(rate);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double v = 0.5 * std::sin(static_cast<double>(i) * phase_step);
+        pcm[i] = static_cast<std::int16_t>(v * 32767.0);
+    }
+    return pcm;
+}
+
+/** RMS energy of an int16 buffer, normalised to the float scale (-1..1). */
+double rms_energy_int16(const std::int16_t* pcm, std::size_t n) {
+    double sum = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double v = static_cast<double>(pcm[i]) / 32768.0;
+        sum += v * v;
+    }
+    return std::sqrt(sum / static_cast<double>(n));
 }
 
 } // namespace
@@ -271,4 +297,166 @@ TEST(OpusEncoder, ReconfigureKeepsTheStatisticsAcrossAChannelChange) {
     EXPECT_TRUE(enc.reconfigure(ec));
     EXPECT_EQ(enc.channels(), 2);
     EXPECT_EQ(enc.stats().frames_encoded, 1u);
+}
+
+// -----------------------------------------------------------------------------
+// The int16 encode path (slice v4-voice-agent)
+//
+// `Encoder::encode_int16` is the TTS return path: a synthesiser emits signed
+// 16-bit PCM and it goes straight into Opus, without a float round-trip.  The
+// path only existed with the AI-game demo (PR #91), so it had no unit test of
+// its own — the demo's self-test was its only coverage.  These tests pin the
+// behaviour that path actually depends on.
+// -----------------------------------------------------------------------------
+
+TEST(OpusEncoder, EncodeInt16ProducesPacket) {
+    nimrtc::opus::EncoderConfig cfg;
+    cfg.sample_rate_hz = kSampleRate;
+    cfg.channels       = kChannels;
+    cfg.bitrate_bps    = 64000;
+    nimrtc::opus::Encoder enc(cfg);
+
+    auto pcm = make_sine_int16(kFrameSamples, 440.0f, kSampleRate);
+    std::uint8_t buf[4000];
+    const std::size_t n = enc.encode_int16(pcm.data(), pcm.size(), buf, sizeof(buf));
+
+    EXPECT_GT(n, 0u) << "the int16 path returned 0 bytes";
+    EXPECT_LE(n, sizeof(buf));
+
+    // The statistics must move exactly like the float path's do — the TTS
+    // return path counts packets with these counters.
+    const auto stats = enc.stats();
+    EXPECT_EQ(stats.frames_encoded, 1u);
+    EXPECT_EQ(stats.bytes_encoded, n);
+}
+
+TEST(OpusCodec, EncodeInt16RoundtripPreservesEnergy) {
+    nimrtc::opus::EncoderConfig ec;
+    ec.sample_rate_hz = kSampleRate;
+    ec.channels       = kChannels;
+    ec.bitrate_bps    = 64000;
+    nimrtc::opus::Encoder enc(ec);
+
+    nimrtc::opus::DecoderConfig dc;
+    dc.sample_rate_hz = kSampleRate;
+    dc.channels       = kChannels;
+    nimrtc::opus::Decoder dec(dc);
+
+    auto pcm_in = make_sine_int16(kFrameSamples * 3, 440.0f, kSampleRate);
+    const double energy_in = rms_energy_int16(pcm_in.data(), pcm_in.size());
+
+    std::uint8_t buf[4000];
+    float       out[kFrameSamples];
+
+    std::size_t total_decoded = 0;
+    for (std::size_t off = 0; off < pcm_in.size(); off += kFrameSamples) {
+        const std::size_t got = enc.encode_int16(pcm_in.data() + off, kFrameSamples,
+                                                 buf, sizeof(buf));
+        ASSERT_GT(got, 0u) << "encode_int16 frame " << off / kFrameSamples;
+        const std::size_t got_samples = dec.decode(buf, got, out, kFrameSamples);
+        EXPECT_GE(got_samples, 1u);
+        total_decoded += got_samples;
+    }
+    ASSERT_GE(total_decoded, kFrameSamples);
+
+    const std::vector<float> pcm_out(out, out + kFrameSamples);
+    const double energy_out = rms_energy(pcm_out.data(), pcm_out.size());
+
+    // Opus is lossy, but the recovered signal must carry the input's energy
+    // within an order of magnitude — otherwise the int16 path is not really
+    // encoding the caller's samples.
+    EXPECT_GT(energy_out, energy_in * 0.01)
+        << "recovered energy " << energy_out << " << input energy " << energy_in;
+    EXPECT_LT(energy_out, energy_in * 100.0)
+        << "recovered energy " << energy_out << " >> input energy " << energy_in;
+
+    EXPECT_EQ(enc.stats().frames_encoded, 3u);
+    EXPECT_EQ(dec.stats().frames_decoded, 3u);
+}
+
+TEST(OpusEncoder, EncodeInt16AndFloatAgreeOnTheSameSignal) {
+    // The two paths must be the *same* encoder: the int16 path is not a
+    // different codec with different behaviour, it is the float path without
+    // the conversion.  Encoding the same signal twice — once as int16, once
+    // as float — must produce packets of the same size.
+    //
+    // (The bytes need not be identical: libopus's int16 and float entry
+    // points round their input slightly differently.  The *size* is the
+    // stable invariant, and the energy test above covers the content.)
+    nimrtc::opus::EncoderConfig cfg;
+    cfg.sample_rate_hz = kSampleRate;
+    cfg.channels       = kChannels;
+    cfg.bitrate_bps    = 64000;
+
+    auto pcm_i16 = make_sine_int16(kFrameSamples, 440.0f, kSampleRate);
+    std::vector<float> pcm_f32(kFrameSamples);
+    for (std::size_t i = 0; i < kFrameSamples; ++i) {
+        pcm_f32[i] = static_cast<float>(pcm_i16[i]) / 32768.0f;
+    }
+
+    nimrtc::opus::Encoder enc_i16(cfg);
+    nimrtc::opus::Encoder enc_f32(cfg);
+
+    std::uint8_t buf_i16[4000];
+    std::uint8_t buf_f32[4000];
+    const std::size_t n_i16 = enc_i16.encode_int16(pcm_i16.data(), pcm_i16.size(),
+                                                   buf_i16, sizeof(buf_i16));
+    const std::size_t n_f32 = enc_f32.encode(pcm_f32.data(), pcm_f32.size(),
+                                             buf_f32, sizeof(buf_f32));
+
+    ASSERT_GT(n_i16, 0u);
+    ASSERT_GT(n_f32, 0u);
+    EXPECT_EQ(n_i16, n_f32)
+        << "the int16 and float paths encoded the same signal to "
+           "different-sized packets (" << n_i16 << " vs " << n_f32 << ")";
+}
+
+TEST(OpusEncoder, EncodeInt16RejectsAnInvalidFrameSize) {
+    nimrtc::opus::EncoderConfig cfg;
+    cfg.sample_rate_hz = kSampleRate;
+    cfg.channels       = kChannels;
+    nimrtc::opus::Encoder enc(cfg);
+
+    // 123 samples is not one of libopus's six permitted frame sizes.
+    auto pcm = make_sine_int16(123, 440.0f, kSampleRate);
+    std::uint8_t buf[4000];
+    EXPECT_EQ(enc.encode_int16(pcm.data(), pcm.size(), buf, sizeof(buf)), 0u);
+    EXPECT_EQ(enc.stats().frames_encoded, 0u)
+        << "a rejected frame must not be counted as encoded";
+}
+
+TEST(OpusEncoder, EncodeInt16RejectsNullAndEmptyInput) {
+    nimrtc::opus::EncoderConfig cfg;
+    cfg.sample_rate_hz = kSampleRate;
+    cfg.channels       = kChannels;
+    nimrtc::opus::Encoder enc(cfg);
+
+    auto pcm = make_sine_int16(kFrameSamples, 440.0f, kSampleRate);
+    std::uint8_t buf[4000];
+
+    EXPECT_EQ(enc.encode_int16(nullptr, kFrameSamples, buf, sizeof(buf)), 0u);
+    EXPECT_EQ(enc.encode_int16(pcm.data(), kFrameSamples, nullptr, sizeof(buf)), 0u);
+    EXPECT_EQ(enc.encode_int16(pcm.data(), 0, buf, sizeof(buf)), 0u);
+    EXPECT_EQ(enc.encode_int16(pcm.data(), kFrameSamples, buf, 0), 0u);
+    EXPECT_EQ(enc.stats().frames_encoded, 0u);
+}
+
+TEST(OpusEncoder, EncodeInt16AcceptsEveryPermittedFrameSize) {
+    // The int16 path must accept the same six frame sizes the float path
+    // does — the TTS synthesiser chunks its output at its own cadence, and
+    // a frame size the float path accepts must not be rejected here.
+    nimrtc::opus::EncoderConfig cfg;
+    cfg.sample_rate_hz = kSampleRate;
+    cfg.channels       = kChannels;
+    nimrtc::opus::Encoder enc(cfg);
+
+    for (std::size_t samples : {std::size_t{120}, std::size_t{240},
+                                std::size_t{480}, std::size_t{960},
+                                std::size_t{1920}, std::size_t{2880}}) {
+        auto pcm = make_sine_int16(samples, 440.0f, kSampleRate);
+        std::uint8_t buf[4000];
+        EXPECT_GT(enc.encode_int16(pcm.data(), samples, buf, sizeof(buf)), 0u)
+            << "the int16 path rejected the " << samples << "-sample frame";
+    }
+    EXPECT_EQ(enc.stats().frames_encoded, 6u);
 }

@@ -100,6 +100,111 @@ left / center / right）—— 两个模块**不互相链接**，所以编译期
 结论：**`game_source` 必须保持默认 `false`**。当前 `main` 上是 `false`，
 是正确的。
 
+### 0.5 复核后的处理（2026-11-18 第二次复核）
+
+对上面两条发现、以及复核中新发现的三项，采取的处理如下。
+**决策：不改写已发布历史**（理由见下）。
+
+#### 已修
+
+| 项 | 处理 |
+|---|---|
+| ① 隐式契约漂移 | 在 `game_source.hpp` 与 `ai_decision.hpp` **两侧**都写了显式注释：本模块的洞位几何与对侧的洞数模型**相互独立**，改任一侧不影响另一侧；两者今天一致是巧合，不是构造出来的；若日后需要两者是同一块棋盘，那是契约变更 —— 需要共享常量（或共享头文件）与一条 ADR，不允许悄悄改数字。**未**改任何行为。 |
+| `policy.yaml` 的 `allow-write-demo-agent` | 该规则已删除（它的路径写的是 `demo-agent-realtime/**`，而文件实际在 `examples/demo-agent-realtime/**`，匹配不到任何东西；而已有的 `examples/**` 规则本就覆盖该目录，此约等于冗余）。`policy/lock.json` 的哈希锚点已同步更新为改后文件的 sha256，两者一致。 |
+| `Opus::Encoder::encode_int16` 无单测 | 补了 6 条单元测试（出包、往返保能量、与 float 路径出包同尺寸、非法帧长、空/空指针、六种合法帧长全支持），并给源码里 `opus_int16` 与 `std::int16_t` 的 `reinterpret_cast` 补了两条 `static_assert`（libopus 在各平台对 `opus_int16` 的 typedef 不同，原来那句「guaranteed to be int16_t」只是注释，没有编译期兜底）。 |
+
+#### 记录，不修
+
+**③ demo 的一批提交缺少 DCO 签名。**
+
+`AGENTS.md` 的提交规范要求 DCO 签名（`Signed-off-by:`），但下列提交**没有**：
+
+```
+1e099e78  feat(demo): the M1-M4 AI-game demo, developed end-to-end by zelto (#91)
+5c2c55b3  feat(v1-game-source): slice approved
+6f8c1071  feat(v1-video-processing): slice approved
+dc2a6f67  feat(v2-input-binder): slice approved
+56bfbdf3  feat(v2-ai-decision): slice approved
+b1e13a32  feat(v2-qoe-feed): slice approved
+3f0de4a1  feat(v3-chrome-waterfall): slice approved
+03735718  feat(v3-weaknet-verdict): slice approved
+7cb9e6bc  feat(v4-ai-teammate): slice approved
+555fe0c3  feat(v4-voice-agent): slice approved
+a387536c  feat(v5-writeset-acceptance): slice approved
+```
+
+（`main` 上近期还有 `fe9771db`、`193453a9` 同样缺失。）
+
+**为什么不补：** 补签名只能改写 `main` 的历史，而 `main` 已经 squash 合并了
+`v1`–`v5` 的产物，`version/v1`–`version/v5` 分支是那些切片的**原始 commit 链**
+的追溯锚点（ADR-056 D6：版本分支不 rebase，tag 是不可变锚点）。
+改写 `main` 会动到这条追溯链 —— 为了补一个签名而动追溯锚点，代价与收益不成比例。
+
+**因此记录在此，并约定：** 从本条记录之后的提交起，一律带 `Signed-off-by:`；
+已合并的这批作为历史遗留，不再改写。
+
+#### 附：本次复核实测
+
+```
+构建：demo-agent-realtime / demo-agent-teammate / rd_device   → 编译通过（MSVC Debug）
+ctest：demo-agent-realtime_self_test        Passed
+       demo-agent-realtime_voice_self_test   Passed
+       demo-agent-teammate_self_test         Passed
+受影响模块回归：opus / qoe / video_source 共 37 个测试 → 37/37 Passed
+分层守卫：python tools/check_engine_layering.py → EXIT=0（L4 未被破坏）
+```
+
+另有一项**环境**问题（非代码缺陷）值得记下：`v1-video-processing` 套件硬断言
+`build/CMakeCache.txt` 里 `NIMRTC_PLUGINS_NVENC=ON` / `NVDEC=ON`
+（计划 §9 要求带硬件编解码开关配置构建树），而当时的构建树是
+`NVENC=OFF / NVDEC=OFF / OPENH264=ON` —— 套件因此必红。按计划 §9 的开关
+重新配置构建树即可，不是代码问题。
+
+**④ 打开 NVDEC 之后，AV1 的 dav1d 测试套件 6 条全红 —— 根因是测试自身的
+脆弱性，不是被测代码的问题。**
+
+按计划 §9 的开关重新配置构建树（`NVENC=ON / NVDEC=ON`）后，全量 `ctest`
+出现 6 条失败：
+
+```
+1074  Dav1dSoftware.BackendIsRegistered
+1075  Dav1dSoftware.BackendIdDistinguishesRealCodecFromStub
+1077  Dav1dSoftware.DecodesKeyFrameToNonZeroPixels
+1078  Dav1dSoftware.DecodesAnnexBStreamWithStartCodes
+1079  Dav1dSoftware.DecodeIntoOwnedBufferProducesSamePicture
+1083  modules_av1_tests_test_dav1d_software
+```
+
+根因：`test_dav1d_software.cpp` 的 `dav1d_backend()` 用
+`select_decoder_backend()` 取后端 —— 那是「按优先级挑一个可用的」。
+开了 NVDEC 之后，硬件的 `nvdec_av1`（优先级远高于软件）就赢了，
+于是这个 dav1d 套件**测的根本不是 dav1d**，而是 NVDEC：
+
+```
+[error] nvdec: cuvidCreateDecoder failed (1) for 64x64
+[warn]  nvdec: cuvidParseVideoData failed (999)
+Expected equality of these values:
+  be->id
+    Which is: "nvdec_av1"
+  "dav1d_av1"
+```
+
+（`cuvidCreateDecoder` 解不了这个 64x64 的 low-overhead OBU 流 ——
+测试位流是为 dav1d 造的，NVDEC 不接受。）
+
+**这不是被测代码的缺陷，是测试写法在有 GPU 的机器上不成立。**
+H.264 那边早就修过同一个问题 —— `test_openh264_software.cpp` 的
+`openh264_backend()` 是**按 id 查**的，注释里明写着原因：
+「NVENC / NVDEC 的优先级高得多，会赢下通用选择」。
+AV1 这个套件当时漏了。
+
+**已修：** `dav1d_backend()` 改成按 id 查（与 H.264 套件同一写法），
+并补上 `plugins/hw_video_backend.hpp` 的 include。**未改任何被测代码**，
+只改了测试取后端的方式。修完 6 条全绿。
+
+> 这条与「发现 2」是同一个教训的两面：**验收判据写得太弱，会在别的
+> 配置下变成假红**。这里的弱是「取后端的方式依赖运行环境」。
+
 ---
 
 ## 一、为什么用变异测试

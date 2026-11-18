@@ -18,6 +18,9 @@ const path = require('node:path');
 const ROOT  = path.resolve(__dirname, '..', '..', '..');
 const BUILD = path.join(ROOT, 'build');
 
+// 写集边界判据：四个套件共用同一份实现（v5-writeset-acceptance/）。
+const ws = require('../v5-writeset-acceptance/writeset-boundary.cjs');
+
 // ---------------------------------------------------------------------------
 // 帮助函数
 // ---------------------------------------------------------------------------
@@ -200,39 +203,22 @@ test('无卡机器不静默降级：硬件后端在无卡机上硬失败，软�
 // 验收标准 4：本片改动仅限视频源模块
 // ---------------------------------------------------------------------------
 test('本片不改输入绑定与质量评估与引擎时间线接口；验证方式：本片改动仅限视频源模块', () => {
-    const diff = spawnSync('git', ['diff', '--name-only'],
-        { cwd: ROOT, encoding: 'utf8' });
-    assert.equal(diff.status, 0, 'git diff --name-only 失败');
-    const changed = (diff.stdout || '').split(/\r?\n/).filter(Boolean);
-
-    // 本片允许改动的追踪文件：仅视频源模块头文件。
-    // src/third_party/msquic 是会话开始前就存在的子模块脏状态（非本片改动），
-    // 单独放行并显式记录，避免把环境脏状态算到本片头上。
-    const writeSetHeader = 'src/modules/video_source/include/nimrtc/video_source/video_source.hpp';
-    const allowed = new Set([writeSetHeader, 'src/third_party/msquic']);
-    for (const p of changed) {
-        assert.ok(allowed.has(p),
-            `追踪文件改动超出本片范围：${p}（写集仅限 video_source 模块）`);
-    }
-    assert.ok(changed.includes(writeSetHeader),
-        '本片的视频源头文件改动必须存在');
-
-    // 除预存 msquic 脏状态外，src/ 下不应有任何视频源模块之外的文件被改。
-    const outside = changed.filter(p => !p.startsWith('src/modules/video_source/') &&
-                                        p !== 'src/third_party/msquic');
-    assert.deepEqual(outside, [], `src/ 下有写集之外的文件被改动：${outside}`);
-
-    // 未追踪文件只允许：切片规格 + 本验收目录（都是本切片自产工件）。
-    const status = spawnSync('git', ['status', '--porcelain'],
-        { cwd: ROOT, encoding: 'utf8' });
-    assert.equal(status.status, 0, 'git status --porcelain 失败');
-    const untracked = (status.stdout || '')
-        .split(/\r?\n/).filter(Boolean)
-        .filter(l => l.startsWith('?? '))
-        .map(l => l.slice(3));
-    for (const p of untracked) {
-        assert.ok(p === 'specs/slices/v1-video-processing.md' ||
-                  p.startsWith('tests/acceptance/'),
-            `出现意外的未追踪文件：${p}`);
-    }
+    // 写集边界判据（v5-writeset-acceptance/writeset-boundary.cjs，四个套件共用）：
+    //
+    // 判据分两半，各用各的形态：
+    //   ① 越界检查 —— 「本片改了哪些文件」（工作区差异 ∪ 本片提交差异 ∪ 未跟踪文件），
+    //      任何落在写集外的路径仍判 failed，越界检测不削弱；
+    //   ② 产物检查 —— 「本片该有的产物在不在树上」（`git ls-files`，状态判据）。
+    //
+    // ② 为什么不用改动清单（ADR-075）：改动清单的来源 2 依赖提交历史 ——
+    // 切片被 squash 合并进主干后认不出本片提交 → 产物检查全部落空 →
+    // 干净已提交树上必红。而规格验收标准 1 要求的就是「干净已提交树上全部通过」。
+    // 「产物在树上」是状态判据，与合并策略无关。
+    const verdict = ws.evaluateSliceWriteSet({ root: ROOT, sliceId: 'v1-video-processing' });
+    assert.deepEqual(verdict.violations, [],
+        `改动超出本片范围（写集仅限 video_source 模块）：${verdict.violations.join(', ')}`);
+    assert.deepEqual(verdict.missing, [],
+        `本片产物缺失（产物必须在树上）：${verdict.missing.join(', ')}`);
+    assert.ok(verdict.onTree.length >= 1,
+        `本片产物必须在树上（已追踪文件）：${verdict.required.join(', ')}`);
 });

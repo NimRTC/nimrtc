@@ -466,6 +466,16 @@ jobs:
       - name: Self-test the engine-layering guard
         run: python tools/check_engine_layering.py --self-test
 
+      # v1.2 Track S / S8: the `Engine::Stats` field reference is a
+      # *derived* document.  It is generated from `engine.hpp` by
+      # `tools/dump_stats_fields.py`, and this step fails when the file
+      # on disk and the header disagree -- which is the only way a
+      # stable field set stays true over time: a field added to the
+      # header without a line in the reference is caught on the pull
+      # request, not six months later by a host whose build broke.
+      - name: Check the Engine::Stats field reference against the header
+        run: python3 tools/dump_stats_fields.py --check docs/api/stats_field_reference.md
+
       # The merge gate is a GitHub Ruleset that demands a list of
       # required status checks, and that list has to agree with the set
       # of checks the workflows actually produce.  The two drift apart

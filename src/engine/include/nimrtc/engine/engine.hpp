@@ -4069,6 +4069,10 @@ public:
         /** The reading's sequence number; increases by one per reading. */
         std::uint64_t snapshot_seq = 0;
 
+        /** The legacy SRTP drop counter: every SRTP auth-tag mismatch
+         *  since open().  The v1.2 transport block (`Stats::transport`)
+         *  carries the same figure alongside the rest of the SRTP plane;
+         *  this one stays because hosts read it. */
         int srtp_drops = 0;
         // ---- Video counters (v1.1 V1, additive) -------------------------
         // All cumulative since open().  Wired to the already-existing
@@ -4152,7 +4156,10 @@ public:
         // `video_zero_copy_fallbacks` counts the frames that carried a
         // GPU handle but fell back to the CPU path (the codec does not
         // support the zero-copy entry point, or it failed).
+        /** Frames that took the GPU path (no CPU staging). */
         std::uint64_t video_zero_copy_frames    = 0;
+
+        /** Frames that carried a GPU handle but fell back to the CPU. */
         std::uint64_t video_zero_copy_fallbacks = 0;
         // ---- Video receive-side delivery path (remote-desktop plan E1) ---
         //
@@ -4548,7 +4555,10 @@ public:
         // the transport entry has the complete picture.
         //
         // @see TransportStats
+
+        /** The ICE / DTLS / SRTP path the session runs over. */
         TransportStats transport;
+
         // ---- The per-channel data-channel entries (v1.2 plan Track S / S6)
         //
         // One entry per **data channel the host opened** with

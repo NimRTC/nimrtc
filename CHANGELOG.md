@@ -9,6 +9,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`Engine::Stats` has a documented, CI-enforced stable field set (v1.2
+  plan item `S8`).**
+  `docs/api/engine_api.md` §13.7 states the contract -- a field is not
+  renamed, retyped or removed in a minor release, its meaning does not
+  change, and growth is additive -- and lists all **136** fields with their
+  type and the definition the header gives them, plus the shape of every
+  nested entry (`VideoStreamStats`, `InboundRtpStats`,
+  `AudioStreamStats`, `DataChannelStats`, `TransportStats`,
+  `VideoSyncStats`, `RemoteDesktopStats`).
+  The table is **derived, not hand-maintained**:
+  `tools/dump_stats_fields.py` parses `struct Stats` out of `engine.hpp`
+  and `--check docs/api/stats_field_reference.md` fails when the document
+  and the header disagree; the `docs / markdown links` CI job runs it, so
+  a field added to the header without its reference line fails the pull
+  request instead of surfacing as documentation rot months later.
+  The sample-app half is recorded next to the table: `demo-p2p`'s
+  `audio-rx` line (whose *shape* `tools/run_e2e_acceptance.py` parses as
+  part of the e2e gate), and the `rd_device` / `rd_viewer` / `rd_verify`
+  rows.
+
 - **The remote-desktop pipeline has a statistics breakdown (v1.2 plan item
   `S7`).**
   `NimRTCEngine::Stats` carries a new `RemoteDesktopStats remote_desktop`

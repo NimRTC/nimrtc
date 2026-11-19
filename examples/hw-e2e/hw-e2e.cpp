@@ -73,6 +73,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -672,14 +673,24 @@ Record run_hardware_e2e(const Options& opts) {
         // decoder-side one by replaying the file with a reference decoder.
         // Only the first three units are dumped — enough for SPS + PPS +
         // IDR, which is what a decoder needs to start.
+        //
+        // The dumps go under `build/`, never the current directory: a
+        // diagnostic that litters the project root is a diagnostic
+        // nobody enables twice.
+        const char* dump_dir = std::getenv("NIMRTC_HW_E2E_DUMP_DIR");
+        const std::string dir = dump_dir != nullptr && dump_dir[0] != '\0'
+                                    ? std::string(dump_dir)
+                                    : std::string("build/hw-e2e");
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
         for (std::size_t di = 0; di < assembled.size() && di < 3; ++di) {
-            char name[64];
-            std::snprintf(name, sizeof(name), "hw-e2e-au-%zu.h264", di);
-            if (std::FILE* f = std::fopen(name, "wb")) {
+            std::string path =
+                dir + "/hw-e2e-au-" + std::to_string(di) + ".h264";
+            if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
                 std::fwrite(assembled[di].payload.data(), 1,
                             assembled[di].payload.size(), f);
                 std::fclose(f);
-                rec.payload_dumps.emplace_back(name);
+                rec.payload_dumps.emplace_back(path);
             }
         }
     }

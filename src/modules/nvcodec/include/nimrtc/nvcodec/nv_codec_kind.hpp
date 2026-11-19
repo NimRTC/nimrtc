@@ -56,7 +56,7 @@ enum class NIMRTC_API_STABLE NvCodec : std::uint8_t {
 
 /** The H.265 profile an NVENC session asks for (see
  *  `src/hevc_profile.hpp`).  Declared here so the test can name it. */
-enum class H265Profile : std::uint8_t;
+enum class NIMRTC_API_STABLE H265Profile : std::uint8_t;
 
 /** True iff this host can *encode* @p codec with NVENC at @p profile.
  *

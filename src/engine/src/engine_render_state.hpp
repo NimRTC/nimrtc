@@ -5,8 +5,8 @@
  * ## What lives here
  *
  *   - the **render clock** (remote-desktop plan E5): the
- *     `detail::VideoSyncController` that turns the observed skew into an
- *     align / drop / delay decision, plus the counters the engine
+ *     `plugins::IVideoSyncController` that turns the observed skew into
+ *     an align / drop / delay decision, plus the counters the engine
  *     publishes;
  *   - the **displayed-frame record** (plan E9): what the operator was
  *     looking at when they clicked — the capture timestamp and the
@@ -40,12 +40,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 
 #include <nimrtc/engine/engine.hpp>
+#include <nimrtc/plugins/video_sync.hpp>
 
 #include "input_echo_controller.hpp"
-#include "video_sync_controller.hpp"
 
 namespace nimrtc::engine::detail {
 
@@ -74,7 +75,22 @@ struct RenderState {
     // The controller owns the decision rule and the counters.  The
     // engine asks it before every render; the answer is a present, a
     // drop or a (bounded) delay.
-    VideoSyncController sync;
+    //
+    // The controller is reached through the `plugins::IVideoSyncController`
+    // seam: the *policy* lives in the `video_sync` module, and the
+    // engine may not name a concrete module (Layout Invariant 4 /
+    // ADR-025).  This is the seam's single instance, resolved at
+    // `open()` time from the registry's video-sync slot.
+    std::unique_ptr<plugins::IVideoSyncController> sync;
+
+    /** The tolerance band, in **milliseconds** (the engine's public
+     *  vocabulary).  Kept here so the value survives a re-resolve of
+     *  the controller. */
+    std::int32_t sync_tolerance_ms = 40;
+
+    /** The cap on a single hold, in **milliseconds**.  0 means "use the
+     *  controller's default". */
+    std::int32_t sync_max_delay_ms = 0;
 
     /** The peer capture instant of the audio frame that is currently at
      *  the speaker, in Unix microseconds (the peer's timeline).

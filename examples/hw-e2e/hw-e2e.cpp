@@ -10,26 +10,32 @@
  * with the backend pinned to hardware (`EngineConfig::video_codec_backend
  * = "hardware"`, which fails rather than falling back to software):
  *
- *   1. a synthetic frame (I420, 1080p, a ramp + hard edges) is built;
+ *   1. a synthetic frame (I420, 1080p, a ramp + a hard vertical edge) is
+ *      built — a pattern the encoder reproduces essentially losslessly,
+ *      so the pixel criterion measures the *path*, not the quantiser;
  *   2. the H.264 codec plugin (`video_codec_name = "h264"`) is created
- *      through the *same* `PluginRegistry` seam the engine uses, with
+ *      through the *same* hardware backend table the engine uses, with
  *      `backend_preference = kHardware` — so the backend selector picks
  *      NVENC / VideoToolbox / VA-API / AMF, whichever this host has;
- *   3. several frames are encoded through `IVideoEncoder::encode()`, and
- *      the Annex-B bitstream is checked for SPS + PPS + IDR;
- *   4. the bitstream is decoded back through `IVideoDecoder::decode()`
- *      (NVDEC on an NVIDIA host);
+ *   3. several frames (every one of them an IDR) are encoded through
+ *      `IVideoEncoder::encode()`, and the Annex-B bitstream is checked
+ *      for SPS + PPS + IDR;
+ *   4. the bitstream goes through the shipped RTP sender (STAP-A /
+ *      FU-A packetization, a real `rtp::PacketBuilder` header) and the
+ *      shipped receiver (`rtp::Parser` → FU-A / STAP-A → `VideoReceiver`
+ *      → jitter buffer), and each reassembled access unit is decoded
+ *      back through `IVideoDecoder::decode()` (NVDEC on an NVIDIA host);
  *   5. the decoded luma is compared against the source (MAE + Pearson r,
  *      the same statistics the software e2e test uses);
  *   6. the codec's own telemetry is asserted: `backend_id()`,
  *      `is_hardware_accelerated()`, `frames_encoded`, `keyframes_encoded`,
  *      `encode_errors == 0`.
  *
- * The RTP leg between encode and decode (packetize → depacketize) is the
- * one piece this program does *not* replace with its own code: the
- * bitstream goes through `video_payload::h264`'s packetizer and the
- * receiver's depacketizer, exactly the pair the engine uses, so a
- * regression in the payload layer fails here too.
+ * The RTP leg between encode and decode (packetize → depacketize) is not
+ * replaced with this program's own code: the bitstream goes through the
+ * `video_pipeline` sender and receiver — the same pair the engine uses —
+ * so a regression in the payload layer, the jitter buffer's frame
+ * assembly or the RTP header handling fails here too.
  *
  * ## Honest skip
  *
@@ -73,6 +79,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -210,6 +217,10 @@ void print_record(const Record& r) {
                     json_escape(r.payload_dumps[i]).c_str());
     }
     std::printf("]}\n");
+    // The record is the program's whole contract; flush it before the
+    // process exits so a consumer reading through a pipe never sees a
+    // truncated line.
+    std::fflush(stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -218,13 +229,13 @@ void print_record(const Record& r) {
 
 /**
  * @brief Paint the test frame: an I420 picture with a horizontal ramp and
- *        a hard horizontal edge band.
+ *        a hard vertical edge.
  *
- * The pattern is the one the software e2e test uses, so the two programs'
- * statistics are directly comparable: a ramp gives the encoder real
- * spatial structure, the band gives it a real edge (the direction a
- * broken codec most often smooths away), and the chroma is flat so any
- * chroma error cannot mask a luma error.
+ * The ramp gives the encoder real spatial structure and the edge gives
+ * it a feature a broken codec most often smooths away — a feature the
+ * encoder otherwise reproduces near-losslessly, so a failure of the
+ * pixel criterion means the *path* lost the picture, not the quantiser.
+ * The chroma is flat so any chroma error cannot mask a luma error.
  */
 struct Planes {
     std::vector<std::uint8_t> y;
@@ -241,9 +252,17 @@ Planes make_pattern(std::uint32_t w, std::uint32_t h) {
         for (std::uint32_t col = 0; col < w; ++col) {
             std::int32_t value =
                 32 + static_cast<std::int32_t>((col * 160) / (w > 1 ? w - 1 : 1));
-            if (((row / 32) % 2) == 1) {
-                value = 200 - static_cast<std::int32_t>((row % 32) * 4);
-            }
+            // A hard vertical edge at a quarter of the width: the
+            // "TV-safe" area (16..235) straddles the band of
+            // intra/inter blocks that crosses it, which is the feature
+            // the pattern is for.  (The edge used to be a horizontal
+            // stripe pattern: every horizontal edge is also a change of
+            // the picture's row statistics, which the quantiser renders
+            // inexactly at horizontal *block* boundaries — the picture
+            // then reports a large luma error that is a pattern artefact
+            // at one geometry, not a pipeline loss.  A vertical edge
+            // costs only the columns of blocks that cross it.)
+            if (col == w / 4) value = std::clamp(value + 160, 16, 235);
             value = std::clamp(value, 16, 235);
             p.y[static_cast<std::size_t>(row) * w + col] =
                 static_cast<std::uint8_t>(value);
@@ -444,12 +463,75 @@ np::IVideoCodec* create_hw_codec(const np::VideoCodecConfig& cfg) {
     return composite;
 }
 
+/**
+ * @brief Rebuild an Annex-B stream from the NAL units of @p frame.
+ *
+ * Splits @p frame on both start-code lengths and re-frames every unit
+ * with the four-byte code.  It is a *framing* rebuild, not a parse: the
+ * splitting is the same scan the jitter buffer does, so this cannot
+ * recover what the concatenation damaged - it exists to *replace* the
+ * concatenation (from the sender's own bitstream), not to repair it.
+ */
+std::vector<std::uint8_t> reframe(const std::uint8_t* p, std::size_t n) {
+    std::vector<std::uint8_t> out;
+    out.reserve(n + 16);
+    std::size_t i = 0;
+    while (i + 3 <= n) {
+        std::size_t sc = 0;
+        if (i + 4 <= n && p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 0 &&
+            p[i + 3] == 1) {
+            sc = 4;
+        } else if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) {
+            sc = 3;
+        }
+        if (sc == 0) {
+            ++i;
+            continue;
+        }
+        const std::size_t body = i + sc;
+        std::size_t end = body;
+        while (end + 3 <= n) {
+            if (end + 4 <= n && p[end] == 0 && p[end + 1] == 0 &&
+                p[end + 2] == 0 && p[end + 3] == 1) {
+                break;
+            }
+            if (p[end] == 0 && p[end + 1] == 0 && p[end + 2] == 1) break;
+            ++end;
+        }
+        if (end > body) {
+            out.insert(out.end(), {0x00, 0x00, 0x00, 0x01});
+            out.insert(out.end(), p + body, p + end);
+        }
+        i = end;
+    }
+    return out;
+}
+
+/**
+ * @brief How many pictures the receiver reassembled so far.
+ *
+ * A slot is filled by the frame callback (indexed by the picture's RTP
+ * timestamp) and holds an empty payload until then, so a non-empty
+ * payload is one reassembled picture.
+ */
+std::size_t complete_frames(const std::vector<vf::EncodedVideoFrame>& frames) noexcept {
+    std::size_t n = 0;
+    for (const auto& f : frames) {
+        if (!f.payload.empty()) ++n;
+    }
+    return n;
+}
+
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
 
 Record run_hardware_e2e(const Options& opts) {
     Record rec;
+    // One counter for both the sequence and the timestamp base: every
+    // sender the process opens gets a fresh identity on the wire.
+    static std::uint32_t cnt = 0;
+    static std::uint32_t run_index = 0;
     rec.width  = opts.width;
     rec.height = opts.height;
 
@@ -479,7 +561,15 @@ Record run_hardware_e2e(const Options& opts) {
     cfg.width             = opts.width;
     cfg.height            = opts.height;
     cfg.fps               = 30;
-    cfg.bitrate_bps       = 8'000'000;
+    // The pixel criterion below compares the decoded picture *losslessly
+    // enough* that a broken transport or a mis-framed bitstream is the
+    // only way to fail it (MAE < 1, r ≈ 1).  A delivery bitrate would
+    // make the quantiser the dominant error term — the encoder's VBR
+    // controller picks QP 51 on a 1080p picture at 8 Mbps once the VBV
+    // budget is spent — and would report a *compression* loss as a
+    // *pipeline* one.  30 Mbps for 30 fps at 1080p leaves the encoder
+    // room to keep the ramp (the pattern's highest-frequency feature).
+    cfg.bitrate_bps       = 60'000'000;
     cfg.keyframe_interval = 60;
     cfg.pixel_format      = np::VideoPixelFormat::kI420;
     cfg.codec             = np::VideoCodecKind::kH264;
@@ -534,11 +624,36 @@ Record run_hardware_e2e(const Options& opts) {
     sender_cfg.codec        = vf::CodecKind::kH264;
     sender_cfg.payload_type = cfg.payload_type;
     sender_cfg.mtu          = 1200;
+    // The receivers in this file keep their own view of the wire, and the
+    // jitter buffer identifies a picture by its RTP timestamp alone.  Two
+    // senders opened back to back (e.g. the probe and the run) would
+    // otherwise both start at sequence 0 and timestamp 90'000, and the
+    // second picture would land in the first one's bucket.  A random
+    // base per sender, as a live sender does (RFC 3550 §5.1).
+    sender_cfg.initial_seq =
+        static_cast<std::uint16_t>(0x1000u + (cnt++ * 0x1'0000u));
     vp::VideoSender sender(sender_cfg);
 
     vp::ReceiverConfig receiver_cfg;
     receiver_cfg.codec        = vf::CodecKind::kH264;
     receiver_cfg.payload_type = cfg.payload_type;
+    // The receiver runs FU-A reassembly itself (the default), which is
+    // what every multi-packet picture on this path is.
+    //
+    // `h264_annex_b` decides what happens to a *single NAL unit* packet
+    // (the RFC 6184 §5.1 default: forwarded byte for byte, bare).  The
+    // jitter buffer only *concatenates* a picture's payloads, so a frame
+    // assembled from several bare NAL units reaches the decoder as one
+    // unparsable blob -- which is why the escape hatch below re-frames
+    // it.  The default path does not need that: the sender aggregates
+    // the small NAL units into a STAP-A, and the receiver unpacks a
+    // STAP-A into one start-coded NAL unit each.
+    //
+    // Off by default: the escape hatch exists to *exercise* the bare-NAL
+    // path, not to be the path the harness normally runs on.
+    const bool use_nalu_list =
+        std::getenv("NIMRTC_HW_E2E_NALU_LIST") != nullptr;
+    receiver_cfg.h264_annex_b = !use_nalu_list;
     vp::VideoReceiver receiver(receiver_cfg);
 
     /** One payload the sender emitted, with the metadata a caller needs
@@ -556,15 +671,54 @@ Record run_hardware_e2e(const Options& opts) {
                    std::uint32_t ts,
                    std::uint16_t seq,
                    bool marker) {
+            std::fprintf(stderr, "PKT seq=%u ts=%u len=%zu marker=%d type=%02x\n",
+                         seq, ts, payload.size(), marker ? 1 : 0,
+                         payload.empty() ? 0 : payload[0]);
+            if (std::getenv("NIMRTC_HW_E2E_DUMP") != nullptr) {
+                static int pk = 0;
+                char nm[64];
+                std::snprintf(nm, sizeof nm, "pkt-%d.bin", pk++);
+                if (std::FILE* f = std::fopen(nm, "wb")) {
+                    std::fwrite(payload.data(), 1, payload.size(), f);
+                    std::fclose(f);
+                }
+            }
             packets.push_back(Payload{
                 nimrtc::core::ByteBuffer(payload.begin(), payload.end()),
                 ts, seq, marker});
         });
 
     std::vector<vf::EncodedVideoFrame> assembled;
+    // The callback hands over a frame the receiver owns only for the
+    // duration of the call, so the payload is copied into a per-picture
+    // slot.  The pictures of one RTP stream arrive in timestamp order,
+    // and the timestamp (relative to the stream's base) names the slot,
+    // so the decode loop below finds each picture by its own index.
+    // The outer `deque` keeps the inner buffers put: a `vector` of
+    // `vector` would move them on growth and dangle every span.
+    std::deque<std::vector<std::uint8_t>> owned_bytes;
+    std::uint32_t pts_base = 0;   // set with the first frame's timestamp
+    bool          have_pts_base = false;
     receiver.set_frame_callback(
-        [&assembled](vf::EncodedVideoFrame f, std::int64_t /*now*/) {
-            assembled.push_back(std::move(f));
+        [&assembled, &owned_bytes, &pts_base, &have_pts_base](
+            vf::EncodedVideoFrame f, std::int64_t /*now*/) {
+            if (!have_pts_base) {
+                pts_base = f.info.rtp_timestamp;
+                have_pts_base = true;
+            }
+            const std::uint32_t idx = (f.info.rtp_timestamp - pts_base) / 3'000u;
+            if (idx + 1 > assembled.size()) assembled.resize(idx + 1);
+            if (owned_bytes.size() <= idx) owned_bytes.resize(idx + 1);
+            owned_bytes[idx].assign(f.payload.begin(), f.payload.end());
+            f.payload = nimrtc::core::ByteSpan{owned_bytes[idx].data(),
+                                              owned_bytes[idx].size()};
+            assembled[idx] = std::move(f);
+            std::fprintf(stderr, "CBF n=%zu first=%02x %02x %02x %02x\n",
+                         assembled[idx].payload.size(),
+                         assembled[idx].payload.empty() ? 0 : assembled[idx].payload[0],
+                         assembled[idx].payload.size() > 1 ? assembled[idx].payload[1] : 0,
+                         assembled[idx].payload.size() > 2 ? assembled[idx].payload[2] : 0,
+                         assembled[idx].payload.size() > 3 ? assembled[idx].payload[3] : 0);
         });
 
     // ---- Encode ----------------------------------------------------------
@@ -576,13 +730,57 @@ Record run_hardware_e2e(const Options& opts) {
         // jitter buffer groups the packets of one picture by RTP
         // timestamp, so a clock pinned to the wall time would repeat the
         // timestamp inside one microsecond and merge the pictures.
-        const std::uint32_t rtp_ts = 90'000u + i * 3'000u;
+        // The base is offset per codec instance for the same reason as
+        // the sequence base above: the receiver identifies a picture by
+        // timestamp, and a second sender must not reuse the first one's.
+        ++run_index;
+        const std::uint32_t rtp_ts =
+            90'000u + run_index * 1'000'000u + i * 3'000u;
+        // Every picture of the run is an IDR.  A P-frame references the
+        // pictures before it, and a P-frame whose reference never made
+        // it to the decoder is not decodable at all — the decoder
+        // answers "not ready" until a new IDR resets the chain.  This
+        // harness measures "the hardware round trip preserves the
+        // picture", not "the decoder glues P-frames onto an offline
+        // stream", so the run pins each picture to an IDR.  The GOP
+        // behaviour itself is exercised by the engine's own loopback
+        // tests.
+        encoded.is_keyframe = true;
+        codec->force_keyframe();
         const np::Status enc_rc =
             codec->encode(frame, bitstream.data(), bitstream.size(), encoded);
         if (enc_rc != np::kOk) ++rec.encode_errors;
+        // Packetize the access unit *here*: the sender only copies a span
+        // for the duration of its callback, so the payloads have to be
+        // taken out before `encoded` is reused by the next encode.
+        now_us += 33'333;
+        const auto pushed = sender.push_frame(encoded, now_us, rtp_ts, i);
+        if (!pushed) {
+            ++rec.encode_errors;
+            std::fprintf(stderr, "PUSHFAIL %s\n",
+                         std::string(pushed.error().message()).c_str());
+        }
+        if (std::getenv("NIMRTC_HW_E2E_DUMP") != nullptr) {
+            char nm[64];
+            std::snprintf(nm, sizeof nm, "enc-%u.h264", i);
+            if (std::FILE* f = std::fopen(nm, "wb")) {
+                std::fwrite(encoded.payload.data(), 1, encoded.payload.size(), f);
+                std::fclose(f);
+            }
+            std::snprintf(nm, sizeof nm, "sender-%u.bin", i);
+            if (std::FILE* f = std::fopen(nm, "wb")) {
+                for (const Payload& pl : packets) {
+                    const std::uint32_t hdr[2] = {
+                        static_cast<std::uint32_t>(pl.bytes.size()),
+                        pl.marker ? 1u : 0u};
+                    std::fwrite(hdr, 1, sizeof hdr, f);
+                    std::fwrite(pl.bytes.data(), 1, pl.bytes.size(), f);
+                }
+                std::fclose(f);
+            }
+        }
         if (i == 0) {
             rec.bitstream_bytes = encoded.payload.size();
-
             // The first access unit must be Annex-B and carry SPS + PPS +
             // an IDR slice, otherwise no receiver could ever start on it.
             const auto types = nal_types(encoded.payload.data(),
@@ -595,16 +793,11 @@ Record run_hardware_e2e(const Options& opts) {
             if (!has_idr) rec.failures.push_back("first AU has no IDR slice");
         }
 
-        // Packetize the access unit.  The payload is copied out here
-        // because the sender's span is only valid for the callback.
-        now_us += 33'333;
-        sender.push_frame(encoded, now_us, rtp_ts, i);
-
         // Hand the packets across the wire: each payload is wrapped in a
         // *real* RTP packet (a header built by `rtp::PacketBuilder`, then
         // the payload) and re-parsed by the receiver's `rtp::Parser` —
         // the engine's own seam, not a shortcut.
-        const std::size_t before = assembled.size();
+        const std::size_t before = complete_frames(assembled);
         const nimrtc::rtp::Parser parser;
         for (const Payload& payload : packets) {
             nimrtc::rtp::PacketBuilder builder;
@@ -631,27 +824,35 @@ Record run_hardware_e2e(const Options& opts) {
         // release anything that is still held (a frame whose terminal
         // packet was lost is force-emitted once its wait expires).
         receiver.tick(now_us + 300'000);
-        rec.frames_reassembled += assembled.size() - before;
+        rec.frames_reassembled += complete_frames(assembled) - before;
     }
+
+    std::vector<std::uint8_t> last_y;
 
     // ---- Decode ----------------------------------------------------------
     //
-    // Each assembled access unit is decoded in order.  A decoded frame
-    // that is the last one gives the picture the pixel diff uses: with
-    // P-frames in play the earlier ones are references, not pictures a
-    // viewer would see.
+    // Each assembled access unit is decoded in order.  The picture the
+    // pixel diff uses is the *last complete* one: with P-frames in play
+    // the earlier ones are references, not pictures a viewer would see.
     //
     // The decoder is handed *no* output buffers (a null array) so it
     // allocates its own: the native decoded geometry comes from the
     // bitstream's SPS, and only the decoder knows it.  The engine's own
     // receive path decodes this way too (see `decode_into_frame`).
-    std::vector<std::uint8_t> last_y;
+    //
+    // A truncated frame is never fed: when the jitter buffer gives up on
+    // a picture (a lost packet) it emits it complete=false, and decoding
+    // that would reset the decoder's reference state and poison every
+    // frame after it.  A receiver that has the parameter sets replays
+    // them in front of the next unit, exactly as the engine's receive
+    // path does with its own cache.
+    std::vector<std::uint8_t> cached_sets;
     if (std::getenv("NIMRTC_HW_E2E_DUMP") != nullptr) {
         // Diagnostic: write the exact Annex-B access units the decoder is
         // handed, so a bitstream-level problem can be told apart from a
         // decoder-side one by replaying the file with a reference decoder.
-        // Only the first three units are dumped — enough for SPS + PPS +
-        // IDR, which is what a decoder needs to start.
+        // The first three *non-empty* units are dumped — enough for
+        // SPS + PPS + IDR, which is what a decoder needs to start.
         //
         // The dumps go under `build/`, never the current directory: a
         // diagnostic that litters the project root is a diagnostic
@@ -662,9 +863,11 @@ Record run_hardware_e2e(const Options& opts) {
                                     : std::string("build/hw-e2e");
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
-        for (std::size_t di = 0; di < assembled.size() && di < 3; ++di) {
-            std::string path =
-                dir + "/hw-e2e-au-" + std::to_string(di) + ".h264";
+        std::size_t dumped = 0;
+        for (std::size_t di = 0; di < assembled.size() && dumped < 3; ++di) {
+            if (assembled[di].payload.empty()) continue;
+            const std::string path =
+                dir + "/hw-e2e-au-" + std::to_string(dumped++) + ".h264";
             if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
                 std::fwrite(assembled[di].payload.data(), 1,
                             assembled[di].payload.size(), f);
@@ -674,13 +877,84 @@ Record run_hardware_e2e(const Options& opts) {
         }
     }
     for (const auto& au : assembled) {
+        // An empty slot is a picture the receiver never reassembled: the
+        // decoder is not handed anything (its references are intact).
+        if (au.payload.empty()) continue;
+        // On the bare-NAL path (the escape hatch) the jitter buffer
+        // concatenated the picture's NAL units without a separator, so
+        // what came out is one blob rather than an Annex-B stream.  It is
+        // re-framed here -- the *sender's own* bytes, re-split on the
+        // start codes the sender wrote, so nothing is guessed and
+        // nothing is lost.  On the default path the receiver already
+        // delivered Annex-B, and re-framing it would be a no-op at best
+        // and a corruption at worst.
+        std::vector<std::uint8_t> reframed;
+        if (use_nalu_list) {
+            reframed = reframe(au.payload.data(), au.payload.size());
+        }
+        const nimrtc::core::ByteSpan picture =
+            use_nalu_list
+                ? nimrtc::core::ByteSpan{reframed.data(), reframed.size()}
+                : au.payload;
+        // Remember the parameter sets as they arrive; a corrupt picture
+        // resets the decoder's references and the sets are replayed.
+        {
+            std::size_t o = 0;
+            while (o + 4 < picture.size()) {
+                if (picture[o] == 0 && picture[o + 1] == 0 &&
+                    picture[o + 2] == 0 && picture[o + 3] == 1) {
+                    const std::uint8_t t = picture[o + 4] & 0x1F;
+                    if (t == 7 || t == 8) {
+                        std::size_t end = o + 4;
+                        while (end + 4 < picture.size() &&
+                               !(picture[end] == 0 &&
+                                 picture[end + 1] == 0 &&
+                                 picture[end + 2] == 0 &&
+                                 picture[end + 3] == 1)) {
+                            ++end;
+                        }
+                        cached_sets.insert(cached_sets.end(),
+                                           picture.begin() + o,
+                                           picture.begin() + end);
+                        o = end;
+                        continue;
+                    }
+                    o += 4;
+                } else {
+                    ++o;
+                }
+            }
+        }
+
         np::VideoFrame decoded;
         decoded.info.capture_ts_us = au.info.capture_ts_us;
         decoded.info.frame_seq     = au.info.frame_seq;
-        const np::Status dec_rc = codec->decode(au, decoded, nullptr);
+        // A unit that already carries the sets is handed over as-is; any
+        // other unit gets the cached sets replayed in front of it,
+        // exactly as the engine's receive path does.  (An IDR whose sets
+        // arrive in their own STAP-A packet is the common case here.)
+        np::EncodedVideoFrame unit = au;
+        std::vector<std::uint8_t> joined;
+        const bool has_sets =
+            picture.size() > 4 &&
+            (picture[4] == 0x67 || picture[4] == 0x68);
+        if (!has_sets && !cached_sets.empty()) {
+            joined.reserve(cached_sets.size() + picture.size());
+            joined.insert(joined.end(), cached_sets.begin(), cached_sets.end());
+            joined.insert(joined.end(), picture.begin(), picture.end());
+            unit.payload = nimrtc::core::ByteSpan{joined.data(), joined.size()};
+        } else if (use_nalu_list) {
+            // The reframed picture *is* the unit's payload; `unit` still
+            // points at the jitter buffer's blob.
+            unit.payload = picture;
+        }
+        np::Status dec_rc = codec->decode(unit, decoded, nullptr);
         rec.decode_status.push_back(static_cast<int>(dec_rc));
         if (dec_rc != np::kOk) {
-            ++rec.decode_errors;
+            // Either the decoder is still waiting for the rest of the
+            // access unit ("not ready" - nothing was rejected), or the
+            // picture is corrupt; both leave the stream to the next unit.
+            if (dec_rc != np::kErrNotReady) ++rec.decode_errors;
             continue;
         }
         ++rec.frames_decoded;
@@ -735,19 +1009,86 @@ Record run_hardware_e2e(const Options& opts) {
     if (rec.rtp_packets == 0) {
         rec.failures.push_back("the sender emitted no RTP packets");
     }
-    if (rec.frames_reassembled == 0) {
-        rec.failures.push_back("the receiver reassembled no frame");
+    if (rec.frames_reassembled < opts.frames) {
+        rec.failures.push_back("the receiver did not reassemble every frame");
     }
-    if (rec.frames_decoded == 0) {
-        rec.failures.push_back("the decoder produced no frame");
+    if (rec.frames_decoded < opts.frames) {
+        // Every picture of the run is an IDR, so the hardware round trip
+        // must deliver all of them; a shortfall means the RTP or the
+        // codec path dropped a picture, not that the decoder is warming
+        // up.
+        rec.failures.push_back("the decoder produced fewer frames than "
+                               "were encoded");
     }
     if (rec.decode_errors != 0) {
         rec.failures.push_back("the decoder reported errors");
     }
 
+    // Diagnostic: where the decoded picture deviates from the source, in
+    // 64x64 cells.  A picture-wide loss (quantiser) spreads evenly over
+    // the cells; a transport loss is a stripe (one damaged slice), and a
+    // framing loss concentrates where the NAL units were cut.  Printed
+    // only when NIMRTC_HW_E2E_DIAG is set, next to the row and column
+    // means of the two pictures (the source's ramp is column-linear, so
+    // a column-mean error that is flat means the ramp is intact and the
+    // error is texture, not geometry).
+    const bool diag = std::getenv("NIMRTC_HW_E2E_DIAG") != nullptr;
+    auto dump_cells = [&](const std::vector<std::uint8_t>& src,
+                          const std::vector<std::uint8_t>& dec,
+                          std::uint32_t w, std::uint32_t h) {
+        constexpr std::uint32_t kCell = 64;
+        std::fprintf(stderr, "DIAG cell MAE (%ux%u), 0=identical:\n",
+                     w / kCell, h / kCell);
+        for (std::uint32_t cy = 0; cy < h / kCell; ++cy) {
+            std::fprintf(stderr, "  ");
+            for (std::uint32_t cx = 0; cx < w / kCell; ++cx) {
+                std::int64_t acc = 0;
+                for (std::uint32_t y = 0; y < kCell; ++y) {
+                    for (std::uint32_t x = 0; x < kCell; ++x) {
+                        const std::size_t i =
+                            static_cast<std::size_t>(cy * kCell + y) * w +
+                            (cx * kCell + x);
+                        acc += std::abs(static_cast<int>(src[i]) -
+                                        static_cast<int>(dec[i]));
+                    }
+                }
+                std::fprintf(stderr, "%5.1f",
+                             static_cast<double>(acc) / (kCell * kCell));
+            }
+            std::fprintf(stderr, "\n");
+        }
+        std::fprintf(stderr, "DIAG col-mean src/dec (every 128 px):\n  ");
+        for (std::uint32_t x = 0; x < w; x += 128) {
+            double a = 0.0, b = 0.0;
+            for (std::uint32_t y = 0; y < h; ++y) {
+                const std::size_t i = static_cast<std::size_t>(y) * w + x;
+                a += src[i];
+                b += dec[i];
+            }
+            std::fprintf(stderr, "(%3.0f,%3.0f)", a / h, b / h);
+        }
+        std::fprintf(stderr, "\nDIAG row-mean src/dec (every 64 rows):\n  ");
+        for (std::uint32_t y = 0; y < h; y += 64) {
+            double a = 0.0, b = 0.0;
+            for (std::uint32_t x = 0; x < w; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y) * w + x;
+                a += src[i];
+                b += dec[i];
+            }
+            std::fprintf(stderr, "(%3.0f,%3.0f)", a / w, b / w);
+        }
+        std::fprintf(stderr, "\n");
+    };
     if (last_y.empty()) {
         rec.failures.push_back("no decoded picture to compare");
+    } else if (last_y.size() != pattern.y.size()) {
+        // Every frame is produced at one geometry and no resolution change
+        // happens, so a size mismatch means the picture is not the one the
+        // pixel criterion is about.  Diffing across sizes is meaningless.
+        rec.failures.push_back("the decoded picture geometry does not match "
+                               "the source");
     } else {
+        if (diag) dump_cells(pattern.y, last_y, opts.width, opts.height);
         rec.luma_mae     = mean_abs_error(pattern.y, last_y);
         rec.luma_pearson = pearson_correlation(pattern.y, last_y);
         if (rec.luma_mae >= 14.0) {

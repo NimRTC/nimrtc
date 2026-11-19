@@ -1742,10 +1742,16 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
   add_test(NAME test_engine_video_hw_loopback
       COMMAND $<TARGET_FILE:test_engine_video_hw_loopback>)
   set_tests_properties(test_engine_video_hw_loopback PROPERTIES TIMEOUT 90)
+  # The target links `nimrtc::web_transport` (the engine's registrar table
+  # references its factory), so it needs msquic.dll beside it on Windows.
+  # PRE_TEST discovery keeps the gtest probe from running before the
+  # POST_BUILD copy — otherwise it dies with STATUS_DLL_NOT_FOUND.
+  nimrtc_copy_msquic_dll(test_engine_video_hw_loopback)
   if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_engine_video_hw_loopback
         PROPERTIES TIMEOUT 90
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60
+        DISCOVERY_MODE PRE_TEST)
   endif()
   nimrtc_copy_wolfssl_certs(test_engine_video_hw_loopback)
 endif()

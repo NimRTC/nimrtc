@@ -70,9 +70,18 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include <nimrtc/nvcodec/nv_codec_kind.hpp>
+
+// The H.265 profile enum (Q1b).  `nv_backends.hpp` only *declares* it —
+// the enumerators live in this module's private header, which is the
+// only place the encoder can see them.  `hevc_pts.hpp` is the module's
+// parameter-set helper (Q1b): the encoder is what *writes* the sets and
+// what summarises them into `HevcPtsSummary` for `last_hevc_pts()`.
+#include "hevc_pts.hpp"
+#include "hevc_profile.hpp"
 
 #if defined(_WIN32)
   #ifndef WIN32_LEAN_AND_MEAN
@@ -93,6 +102,8 @@
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/video_frame/frame.hpp>   // VideoFrame / EncodedVideoFrame
+
+#include "hevc_profile.hpp"
 
 namespace nimrtc::nvcodec::nvenc_backend {
 namespace {
@@ -500,13 +511,16 @@ GUID nv_encode_guid(NvCodec codec) noexcept {
  *  used stays zero-initialised — the driver only reads the member that
  *  matches the `encodeGUID` it was given.
  *
- *  @param codec  Which codec family the session encodes. */
+ *  @param codec  Which codec family the session encodes.
+ *  @param profile  The H.265 profile the session is initialised for
+ *                  (ignored by the other codecs). */
 NV_ENC_CONFIG build_encode_config(NvCodec codec,
                                   uint32_t width,
                                   uint32_t height,
                                   uint32_t fps,
                                   uint32_t bitrate_bps,
-                                  uint32_t gop_length) noexcept {
+                                  uint32_t gop_length,
+                                  H265Profile profile = H265Profile::kMain) noexcept {
     NV_ENC_CONFIG cfg{};
     cfg.version      = NV_ENC_CONFIG_VER;
     cfg.gopLength    = gop_length > 0 ? gop_length : kDefaultGopLength;
@@ -552,7 +566,11 @@ NV_ENC_CONFIG build_encode_config(NvCodec codec,
             break;
         }
         case NvCodec::kH265: {
-            cfg.profileGUID = NV_ENC_HEVC_PROFILE_MAIN_GUID;
+            // The profile is the caller's (Q1b).  MAIN is the default and
+            // what this backend has always produced; MAIN10 is opt-in.
+            cfg.profileGUID = (profile == H265Profile::kMain10)
+                                  ? NV_ENC_HEVC_PROFILE_MAIN10_GUID
+                                  : NV_ENC_HEVC_PROFILE_MAIN_GUID;
             NV_ENC_CONFIG_HEVC& hevc = cfg.encodeCodecConfig.hevcConfig;
             hevc.level              = NV_ENC_LEVEL_AUTOSELECT;
             hevc.idrPeriod          = cfg.gopLength;
@@ -652,8 +670,9 @@ public:
     /** @param cfg    The caller's configuration.
      *  @param codec  Which codec family this encoder produces. */
     explicit NvEncEncoder(plugins::VideoCodecConfig cfg,
-                          NvCodec codec) noexcept
-        : cfg_(std::move(cfg)), codec_(codec),
+                          NvCodec codec,
+                          H265Profile profile = H265Profile::kMain) noexcept
+        : cfg_(std::move(cfg)), codec_(codec), profile_(profile),
           desc_(codec_desc(codec)) {}
 
     ~NvEncEncoder() override { close(); }
@@ -796,6 +815,17 @@ public:
         if (!vbuf) {
             // GPU path not yet supported
             stats_.encode_errors++;
+            return plugins::kErrInvalidParam;
+        }
+        // This staging path converts I420 -> NV12 row by row; any other
+        // layout would be encoded as garbage.  Reject it explicitly
+        // instead of silently corrupting the picture.
+        if (vbuf->format() != plugins::VideoPixelFormat::kI420) {
+            stats_.encode_errors++;
+            NIMRTC_LOG_ERROR("nvenc: encode — unsupported input pixel format "
+                             << plugins::pixel_format_name(
+                                    vbuf->format())
+                             << " (the staging path converts I420 only)");
             return plugins::kErrInvalidParam;
         }
         const uint8_t* y_in = vbuf->plane(0);
@@ -956,6 +986,17 @@ public:
             (lock_bs.pictureType == NV_ENC_PIC_TYPE_IDR);
 
         lib.fn.nvEncUnlockBitstream(session_, out_buf_.bitstreamBuffer);
+
+        // Q1b: remember which H.265 *parameter sets* this access unit
+        // carried.  A mid-stream change is only observable if the
+        // backend reports it, and the decoder side compares it with the
+        // sequence it created its hardware decoder for.
+        if (codec_ == NvCodec::kH265 && is_keyframe) {
+            const plugins::HevcPtsSummary pts =
+                hevc_detail::summarize_hevc_pts(core::ByteSpan{output, n_copy});
+            std::lock_guard<std::mutex> pts_lock(pts_mtx_);
+            hevc_last_pts_ = pts;
+        }
 
         // NVENC already outputs Annex B (00 00 00 01 start codes) for
         // H.264 / H.265, and Annex-B OBU framing for AV1 (the
@@ -1292,6 +1333,14 @@ public:
         lib.fn.nvEncUnmapInputResource(session_, map.mappedResource);
         lib.fn.nvEncUnregisterResource(session_, reg.registeredResource);
 
+        // Q1b: same bookkeeping as the CPU path.
+        if (codec_ == NvCodec::kH265 && is_keyframe) {
+            const plugins::HevcPtsSummary pts =
+                hevc_detail::summarize_hevc_pts(core::ByteSpan{output, n_copy});
+            std::lock_guard<std::mutex> pts_lock(pts_mtx_);
+            hevc_last_pts_ = pts;
+        }
+
         encoded_out.codec        = desc_.kind;
         encoded_out.payload      = core::ByteSpan{output, n_copy};
         encoded_out.payload_type = cfg_.payload_type != 0 ? cfg_.payload_type
@@ -1379,6 +1428,14 @@ public:
         return opened_ && session_ != nullptr;
     }
 
+    /** Q1b: the parameter sets of the most recent keyframe (H.265 only).
+     *  Empty for every other codec, and before the first keyframe. */
+    std::optional<plugins::HevcPtsSummary> last_hevc_pts() const noexcept override {
+        std::lock_guard<std::mutex> lock(pts_mtx_);
+        if (!hevc_last_pts_.has_sps) return std::nullopt;
+        return hevc_last_pts_;
+    }
+
 private:
     // ---- Session lifecycle -------------------------------------------------
 
@@ -1428,7 +1485,8 @@ private:
         NV_ENC_CONFIG encode_cfg = build_encode_config(
             codec_, w, h, fps,
             cfg_.bitrate_bps > 0 ? cfg_.bitrate_bps : kDefaultBitrate,
-            cfg_.keyframe_interval > 0 ? cfg_.keyframe_interval : kDefaultGopLength);
+            cfg_.keyframe_interval > 0 ? cfg_.keyframe_interval : kDefaultGopLength,
+            profile_);
 
         NV_ENC_INITIALIZE_PARAMS init = build_init_params(codec_, w, h, fps,
                                                           &encode_cfg);
@@ -1555,7 +1613,8 @@ private:
                             : (cfg_.bitrate_bps ? cfg_.bitrate_bps : kDefaultBitrate),
             gop_length > 0 ? gop_length
                            : (cfg_.keyframe_interval ? cfg_.keyframe_interval
-                                                     : kDefaultGopLength));
+                                                     : kDefaultGopLength),
+            profile_);
 
         NV_ENC_INITIALIZE_PARAMS init = build_init_params(
             codec_, width_, height_,
@@ -1588,11 +1647,18 @@ private:
 
     plugins::VideoCodecConfig cfg_;
     NvCodec             codec_      = NvCodec::kH264;
+    H265Profile         profile_    = H265Profile::kMain;
     NvCodecDesc         desc_{};
     std::mutex              mtx_;
     bool                    opened_          = false;
     bool                    force_keyframe_next_ = false;
     bool                    broken_              = false;
+    /** Q1b: the parameter sets of the most recent keyframe (H.265 only).
+     *  Written by the encode paths, read by `last_hevc_pts()` from the
+     *  engine's tick thread, so it is guarded by its own small lock
+     *  rather than the encoder's (which is held across a driver call). */
+    mutable std::mutex      pts_mtx_;
+    plugins::HevcPtsSummary hevc_last_pts_{};
     void*                   session_        = nullptr;
     NV_ENC_CREATE_INPUT_BUFFER  in_buf_    = {};
     NV_ENC_CREATE_BITSTREAM_BUFFER out_buf_ = {};
@@ -1630,8 +1696,10 @@ enum class ProbeResult { Available, NoDriver, NoGpuSession, UnsupportedCodec };
  *      that honestly.
  *
  *  Step 2 also proves that the driver accepts the SDK-13.1 struct ABI,
- *  which is what the INVALID_VERSION check used to cover. */
-ProbeResult probe_nvenc(NvCodec codec) noexcept {
+ *  which is what the INVALID_VERSION check used to cover.  @p profile
+ *  selects the H.265 profile (Q1b); the other codecs ignore it. */
+ProbeResult probe_nvenc(NvCodec codec,
+                        H265Profile profile = H265Profile::kMain) noexcept {
     auto& lib = NvEncLib::instance();
     if (!lib.loaded()) return ProbeResult::NoDriver;
     if (!d3d11().create()) return ProbeResult::NoDriver;
@@ -1657,7 +1725,7 @@ ProbeResult probe_nvenc(NvCodec codec) noexcept {
     constexpr uint32_t kProbeHeight = 240;
     NV_ENC_CONFIG enc_cfg = build_encode_config(
         codec, kProbeWidth, kProbeHeight, kDefaultFps,
-        kDefaultBitrate, kDefaultGopLength);
+        kDefaultBitrate, kDefaultGopLength, profile);
     NV_ENC_INITIALIZE_PARAMS init = build_init_params(
         codec, kProbeWidth, kProbeHeight, kDefaultFps, &enc_cfg);
 
@@ -1698,6 +1766,18 @@ bool nvenc_codec_available(NvCodec codec) noexcept {
 #endif
 }
 
+bool nvenc_codec_available_at_profile(NvCodec codec,
+                                      H265Profile profile) noexcept {
+#if defined(NIMRTC_PLUGINS_NVENC_ON) && defined(_WIN32)
+    return nvenc_backend::probe_nvenc(codec, profile) ==
+           nvenc_backend::ProbeResult::Available;
+#else
+    (void)codec;
+    (void)profile;
+    return false;
+#endif
+}
+
 std::unique_ptr<plugins::IVideoCodec>
 make_nvenc_codec(NvCodec codec, plugins::VideoCodecConfig cfg) {
 #if defined(NIMRTC_PLUGINS_NVENC_ON) && defined(_WIN32)
@@ -1721,6 +1801,34 @@ make_nvenc_codec(NvCodec codec, plugins::VideoCodecConfig cfg) {
 #endif
 }
 
+std::unique_ptr<plugins::IVideoCodec>
+make_nvenc_codec_for_profile(NvCodec codec, plugins::VideoCodecConfig cfg,
+                             H265Profile profile) {
+#if defined(NIMRTC_PLUGINS_NVENC_ON) && defined(_WIN32)
+    // The probe answers the profile question honestly: a host whose
+    // silicon has no MAIN10 encoder fails the *probe*, not the session.
+    if (nvenc_backend::probe_nvenc(codec, profile) !=
+        nvenc_backend::ProbeResult::Available) {
+        NIMRTC_LOG_INFO("nvenc: the " << codec_desc(codec).display_name
+                        << " encoder is not available at the requested "
+                           "profile — returning nullptr");
+        return nullptr;
+    }
+    auto enc = std::make_unique<nvenc_backend::NvEncEncoder>(
+        std::move(cfg), codec, profile);
+    if (enc->open() != plugins::kOk) {
+        NIMRTC_LOG_WARN("nvenc: encoder open() failed — returning nullptr");
+        return nullptr;
+    }
+    return enc;
+#else
+    (void)codec;
+    (void)cfg;
+    (void)profile;
+    return nullptr;
+#endif
+}
+
 } // namespace nimrtc::nvcodec
 
 #else  // NIMRTC_PLUGINS_NVENC_ON
@@ -1734,8 +1842,14 @@ make_nvenc_codec(NvCodec codec, plugins::VideoCodecConfig cfg) {
 namespace nimrtc::nvcodec {
 
 bool nvenc_codec_available(NvCodec) noexcept { return false; }
+bool nvenc_codec_available_at_profile(NvCodec, H265Profile) noexcept {
+    return false;
+}
 std::unique_ptr<plugins::IVideoCodec>
 make_nvenc_codec(NvCodec, plugins::VideoCodecConfig) { return nullptr; }
+std::unique_ptr<plugins::IVideoCodec>
+make_nvenc_codec_for_profile(NvCodec, plugins::VideoCodecConfig,
+                             H265Profile) { return nullptr; }
 
 } // namespace nimrtc::nvcodec
 

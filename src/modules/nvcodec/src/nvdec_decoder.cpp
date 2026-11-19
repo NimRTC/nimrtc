@@ -38,8 +38,9 @@
  *      parser synchronously invokes three callbacks:
  *
  *        pfnSequenceCallback  — a new SPS arrived (or the resolution
- *                               changed).  We create / recreate the
- *                               hardware decoder here.
+ *                               changed, *or the parameter sets
+ *                               themselves changed* — Q1b).  We create /
+ *                               recreate the hardware decoder here.
  *        pfnDecodePicture     — one picture is ready to decode *in
  *                               decode order*.  We call
  *                               cuvidDecodePicture(), map the frame with
@@ -116,6 +117,8 @@
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/video_frame/frame.hpp>
+
+#include "hevc_pts.hpp"
 
 namespace nimrtc::nvcodec::nvdec_backend {
 namespace {
@@ -399,6 +402,16 @@ public:
         // callback synchronously from inside cuvidParseVideoData().
         have_frame_ = false;
 
+        // Q1b: summarise the H.265 parameter sets of this access unit
+        // *before* the driver sees it.  The sequence callback (which runs
+        // inside cuvidParseVideoData below) then knows which parameter
+        // sets the new sequence belongs to — including a change whose
+        // geometry is the same as the previous sequence's.
+        if (codec_ == NvCodec::kH265) {
+            const auto in = hevc_detail::summarize_hevc_pts(encoded.payload);
+            if (in.has_sps && in.has_pps) pending_pts_ = in;
+        }
+
         CUVIDSOURCEDATAPACKET pkt{};
         pkt.flags        = CUVID_PKT_ENDOFPICTURE;
         pkt.payload_size = static_cast<tcu_ulong>(encoded.payload.size());
@@ -423,12 +436,38 @@ public:
             return plugins::kErrNotReady;
         }
 
+        // Q1b: the picture decoded, so the parameter sets this access unit
+        // carried are the ones the session is now working from.  The
+        // sequence callback that records them alongside the
+        // *creation* (see handle_sequence) only fires where the driver
+        // considers the sequence new; a driver may treat a same-geometry
+        // profile change as a continuation of the previous sequence and
+        // not call back at all.  Recording here keeps `last_hevc_pts()`
+        // describing the parameter sets actually in effect, not just the
+        // ones the session was opened with.
+        if (codec_ == NvCodec::kH265 && pending_pts_.has_sps) {
+            pts_         = pending_pts_;
+            pending_pts_ = {};
+        }
+
         // ---- the decoded geometry ----
+        //
+        // The visible picture is the display area out_w_ x out_h_; the
+        // surface is the *coded* frame (coded_w_ x coded_h_), padded to
+        // whole macroblocks.  The two differ whenever the height is not a
+        // multiple of 16 (1920x1080 codes as 1920x1088), and the decoder
+        // is never asked to resample (a non-integer scale corrupts the
+        // picture), so the padding is dropped here.  The caller gets the
+        // visible geometry only.
         const std::uint32_t ow = out_w_;
         const std::uint32_t oh = out_h_;
         if (ow == 0 || oh == 0) {
             stats_.decode_errors++;
             return plugins::kErrCorrupt;
+        }
+        if (stage_y_.size() < static_cast<std::size_t>(ow) * oh) {
+            stats_.decode_errors++;
+            return plugins::kErrInternal;
         }
 
         // The output strides must match the frame layout the caller used to
@@ -464,7 +503,7 @@ public:
         // ---- the destination planes ----
         //
         // In the decoder-owned mode the buffer is allocated here with the
-        // native layout, and the staged pixels are written straight into
+        // visible layout, and the staged pixels are written straight into
         // it.  In the caller-supplied mode the pixels go into the
         // caller's memory.
         std::shared_ptr<video_frame::VideoFrameBuffer> owned_buf;
@@ -487,7 +526,7 @@ public:
             v_dst = owned_buf->plane(2);
         }
 
-        // Luma.
+        // The staged planes are the visible rectangle at its own width.
         for (std::uint32_t row = 0; row < oh; ++row) {
             std::memcpy(y_dst + static_cast<std::size_t>(row) * sy,
                         stage_y_.data() + static_cast<std::size_t>(row) * ow, ow);
@@ -587,6 +626,13 @@ public:
 
     plugins::VideoCodecStats stats() const noexcept override { return stats_; }
 
+    /** Q1b: the parameter sets the decoder's hardware session was last
+     *  (re)created for.  H.265 only; nullopt for every other codec and
+     *  before the first sequence. */
+    std::optional<plugins::HevcPtsSummary> last_hevc_pts() const noexcept override {
+        return pts_;
+    }
+
     std::uint8_t payload_type() const noexcept override {
         return cfg_.payload_type != 0 ? cfg_.payload_type : std::uint8_t{102};
     }
@@ -594,8 +640,13 @@ public:
 private:
     // ---- parser callbacks (invoked synchronously from cuvidParseVideoData)
 
-    static int CUDAAPI on_sequence(void* user_data, CUVIDEOFORMAT* fmt) {
-        auto* self = static_cast<NvDecDecoder*>(user_data);
+    /** A picture the parser completed; kept only so the driver's own
+     *  callback signature has a stable type. */
+    struct QueuedPicture {
+        CUVIDPICPARAMS params;
+    };
+
+    static int CUDAAPI on_sequence(void* user_data, CUVIDEOFORMAT* fmt) {        auto* self = static_cast<NvDecDecoder*>(user_data);
         if (!self || !fmt) return 0;
         // A return value > 1 overrides the parser's DPB size with the
         // driver's own `min_num_decode_surfaces` for this sequence, which
@@ -619,7 +670,28 @@ private:
     // ---- sequence handling -------------------------------------------------
 
     /** Handle a new sequence.  Returns the DPB size the parser should use
-     *  for this sequence (0 = failure, aborting the parse). */
+     *  for this sequence (0 = failure, aborting the parse).
+     *
+     *  ## Q1b — a new sequence is not always a new *geometry*
+     *
+     *  The parser calls this whenever it starts a new sequence, which in
+     *  HEVC includes a *parameter-set change* whose geometry is
+     *  unchanged (a different `general_profile_idc`, a different VUI, a
+     *  different `sps_id`).  The decoder is (re)created here for every
+     *  such sequence, which is what makes the switch take effect on the
+     *  same `CUvideoparser`: no `close()` / `open()`, no PLI.
+     *
+     *  The `CUVIDDECODECREATEINFO` therefore has to declare the
+     *  *profile* the new sequence is in.  Creating the decoder for the
+     *  default (MAIN / 8-bit) profile of a MAIN10 sequence makes
+     *  `cuvidDecodePicture` reject the picture — the container is legal,
+     *  the pictures are not — and the receiver would be stuck until a
+     *  key frame round trip.  `pending_pts_` carries the profile the
+     *  access unit's SPS declared (`decode()` summarised it before the
+     *  driver saw the bytes).
+     *
+     *  The *level* is autoselected: `cuvidCreateDecoder` accepts 0 and
+     *  picks one that satisfies the frame size. */
     int handle_sequence(CUVIDEOFORMAT* fmt) {
         const std::uint32_t cw = fmt->coded_width  ? fmt->coded_width  : cfg_.width;
         const std::uint32_t ch = fmt->coded_height ? fmt->coded_height : cfg_.height;
@@ -643,9 +715,9 @@ private:
 
         out_w_ = right - left;
         out_h_ = bottom - top;
-        // The driver performs the display-area crop for us (see
-        // CUVIDDECODECREATEINFO::display_area below), so the mapped surface
-        // is already the *visible* size and no host-side crop is needed.
+        // The visible rectangle is recorded here and copied host-side in
+        // copy_surface_to_host(); the decoder's target stays the coded
+        // size (see CUVIDDECODECREATEINFO below for why).
 
         // (Re)create the hardware decoder for this sequence.
         destroy_decoder();
@@ -657,6 +729,12 @@ private:
         dci.CodecType          = nv_cuvid_codec(codec_);
         dci.ChromaFormat       = cudaVideoChromaFormat_420;
         dci.OutputFormat       = cudaVideoSurfaceFormat_NV12;
+        // 8-bit surfaces: this backend maps NV12 regardless of the
+        // profile.  A MAIN10 sequence whose pictures are 10-bit would
+        // therefore fail at cuvidDecodePicture — honestly, and without
+        // taking the session down (see the log below).  A MAIN10
+        // *container* whose pictures stay 8-bit (what NVENC produces
+        // from this encoder's 8-bit NV12 input) decodes fine.
         dci.bitDepthMinus8     = 0;
         dci.ulNumDecodeSurfaces = std::max(1u,
             static_cast<std::uint32_t>(fmt->min_num_decode_surfaces));
@@ -681,13 +759,16 @@ private:
         // ulTargetWidth/Height == 0 the driver has no output geometry and
         // cuvidMapVideoFrame() fails with CUDA_ERROR_INVALID_VALUE.
         //
-        // Setting the target to the *display* size (rather than the coded
-        // size) together with display_area makes the driver crop the
-        // macroblock-aligned coded frame down to the visible picture in
-        // one hardware step — NVDEC decodes 1280x736 for a 720p stream but
-        // only 1280x720 is visible.
-        dci.ulTargetWidth  = out_w_;
-        dci.ulTargetHeight = out_h_;
+        // The target stays the *coded* size, not the display size, and
+        // the visible rectangle travels in display_area.  The two differ
+        // whenever the picture is not a multiple of 16 (1920x1080 is
+        // coded 1920x1088).  A target smaller than the coded frame makes
+        // the driver's post-processor *resample* the picture, and a
+        // non-integer vertical scale corrupts every row after the first
+        // macroblock row — the picture never completes.  The crop to the
+        // visible picture is done host-side in copy_surface_to_host().
+        dci.ulTargetWidth  = cw;
+        dci.ulTargetHeight = ch;
         dci.display_area.left   = static_cast<short>(left);
         dci.display_area.top    = static_cast<short>(top);
         dci.display_area.right  = static_cast<short>(right);
@@ -696,12 +777,24 @@ private:
         CUresult r = lib.cuvid->cuvidCreateDecoder(&decoder_, &dci);
         if (r != CUDA_SUCCESS || !decoder_) {
             NIMRTC_LOG_ERROR("nvdec: cuvidCreateDecoder failed (" << r << ") for "
-                             << cw << "x" << ch);
-            decoder_ = nullptr;
+                             << cw << "x" << ch);            decoder_ = nullptr;
             return 0;
         }
         coded_w_ = cw;
         coded_h_ = ch;
+        // Q1b: remember the parameter sets this hardware session was
+        // *created* for.  `last_hevc_pts()` exposes it, and the test
+        // compares it with the encoder's summary to assert that a
+        // mid-stream parameter-set change reached the decoder.
+        //
+        // If the access unit that opened this sequence carried no SPS /
+        // PPS of its own (the driver can recall a previously parsed
+        // one), the previous summary is kept: the session is still the
+        // one that summary describes.
+        if (codec_ == NvCodec::kH265 && pending_pts_.has_sps) {
+            pts_ = pending_pts_;
+            pending_pts_ = {};
+        }
         NIMRTC_LOG_INFO("nvdec: decoder created for " << cw << "x" << ch
                         << " (display " << out_w_ << "x" << out_h_ << ")");
 
@@ -736,6 +829,8 @@ private:
             NIMRTC_LOG_WARN("nvdec: cuvidDecodePicture failed (" << r << ")");
             return false;
         }
+        // The parser calls this from inside cuvidParseVideoData(); the
+        // surfaces are filled by then and are mapped right away.
 
         // Map the decoded surface.
         //
@@ -768,19 +863,33 @@ private:
 
     /** Copy the mapped NV12 device surface into the host staging buffers.
      *
-     *  The surface geometry is the *target* geometry that was requested at
-     *  cuvidCreateDecoder() time (the display area, already cropped by the
-     *  driver), so the surface is out_w_ x out_h_ pixels with the driver
-     *  reported `pitch` stride. */
+     *  The surface geometry is the *coded* geometry requested at
+     *  cuvidCreateDecoder() time (the driver never resamples; see
+     *  handle_sequence()), so the surface is coded_w_ x coded_h_ pixels
+     *  with the driver-reported `pitch` stride.  Only the visible
+     *  out_w_ x out_h_ rectangle at the surface's origin is staged: the
+     *  driver pads the frame up to whole macroblocks, never crops the
+     *  sides, and the display area starts at the origin for every
+     *  camera / screen-capture stream this backend serves. */
     bool copy_surface_to_host(CUdeviceptr dev_ptr, unsigned int pitch) {
         auto& lib = NvDecLib::instance();
         auto* fn = lib.cuda;
         if (!fn || !fn->cuMemcpy2D) return false;
-        if (pitch == 0) pitch = out_w_;
+        if (pitch == 0) pitch = coded_w_;
 
-        const std::uint32_t sh = out_h_;   // surface height (== target height)
-        const std::uint32_t ow = out_w_;
-        const std::uint32_t oh = out_h_;
+        const std::uint32_t sh = coded_h_;   // surface height (coded)
+        const std::uint32_t ow = out_w_;     // visible width
+        const std::uint32_t oh = out_h_;     // visible height
+
+        // The surface geometry the driver actually uses, reported once:
+        // whether the picture is shifted or scaled is a question about
+        // this pitch, this height and the visible rectangle.
+        if (!logged_surface_) {
+            logged_surface_ = true;
+            NIMRTC_LOG_INFO("nvdec: mapped surface pitch=" << pitch
+                            << " coded=" << coded_w_ << "x" << coded_h_
+                            << " visible=" << ow << "x" << oh);
+        }
 
         stage_y_.resize(static_cast<std::size_t>(ow) * oh);
         stage_uv_.resize(static_cast<std::size_t>(ow) * (oh / 2));
@@ -837,6 +946,7 @@ private:
     CUvideoparser           parser_      = nullptr;
     CUvideodecoder          decoder_     = nullptr;
 
+    bool                    logged_surface_ = false;
     std::uint32_t coded_w_   = 0;
     std::uint32_t coded_h_   = 0;
     std::uint32_t out_w_     = 0;
@@ -844,6 +954,16 @@ private:
 
     std::vector<std::uint8_t> stage_y_;
     std::vector<std::uint8_t> stage_uv_;
+
+    /** Q1b: the parameter sets of the access unit being parsed (carried
+     *  to the sequence callback, which runs inside cuvidParseVideoData),
+     *  and the ones the current hardware session was created for. */
+    plugins::HevcPtsSummary pending_pts_{};
+    std::optional<plugins::HevcPtsSummary> pts_;
+
+    /** Reserved for the parser's picture callbacks; the current driver
+     *  path decodes them inline, so nothing is queued. */
+    std::vector<QueuedPicture> pending_pics_;
 
     plugins::VideoCodecStats stats_{};
 };

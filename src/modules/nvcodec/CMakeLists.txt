@@ -43,6 +43,11 @@
 add_library(nimrtc_nvcodec STATIC
     src/nv_codec_kind.cpp
     src/hw_composite_codec.cpp
+    # Q1b: the H.265 parameter-set summary both directions report.
+    # Built on every platform — it parses the bitstream, it does not
+    # talk to a driver — so the H.265 codec module can link it on a
+    # host with no NVIDIA hardware.
+    src/hevc_pts.cpp
     src/nvenc_encoder.cpp
     src/nvdec_decoder.cpp
     src/videotoolbox_encoder.cpp

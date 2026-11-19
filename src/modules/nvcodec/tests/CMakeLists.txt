@@ -192,3 +192,48 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# test_hevc_pts — Q1b: H.265 parameter-set parsing + the mid-stream switch
+# -----------------------------------------------------------------------------
+# Two halves, both in this module's private `src/` tree:
+#
+#   - the *parser* (hevc_pts.cpp) reads profile_tier_level and the SPS
+#     geometry fields -- pure bit work, testable on every host;
+#   - the *switch* drives a real NVENC H.265 encoder into a real NVDEC
+#     decoder and asserts that a new sequence (a geometry change, or a
+#     profile change at the same geometry) decodes on the SAME session,
+#     with the new geometry, on the first decode call.  Every case skips
+#     cleanly without the hardware.
+# -----------------------------------------------------------------------------
+add_executable(test_hevc_pts test_hevc_pts.cpp)
+
+set_target_properties(test_hevc_pts PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_hevc_pts LENIENT)
+
+target_include_directories(test_hevc_pts PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/modules/nvcodec/src")
+
+target_link_libraries(test_hevc_pts PRIVATE
+    nimrtc::nvcodec
+    nimrtc::video_frame
+    nimrtc::video_payload
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+add_test(NAME modules_nvcodec_tests_test_hevc_pts
+         COMMAND test_hevc_pts)
+# The hardware half opens two NVENC sessions and an NVDEC parser.
+
+# Registered the explicit way, not through `gtest_discover_tests`: the
+# discovery step *runs the executable*, and this suite opens the GPU.  A
+# build that ran discovery would spin up NVENC / NVDEC on every `cmake
+# --build` — and a GPU driver that is slow or wedged would then stall
+# the build itself.  CTest still runs the whole binary; the case names
+# simply are not pre-expanded at build time.
+set_tests_properties(modules_nvcodec_tests_test_hevc_pts
+    PROPERTIES TIMEOUT 120)

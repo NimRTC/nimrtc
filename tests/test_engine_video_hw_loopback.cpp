@@ -633,6 +633,13 @@ struct LoopbackResult {
     std::uint32_t width  = 0;
     std::uint32_t height = 0;
 
+    // The receiving engine's own counters — the "decoded and rendered"
+    // half of Q7's sentence, read from the stats rather than inferred
+    // from the sink.
+    std::uint64_t rx_frames_decoded  = 0;
+    std::uint64_t rx_frames_rendered = 0;
+    std::uint64_t rx_tx_frames_encoded = 0;
+
     // The TX engine's telemetry, copied before the engines are destroyed.
     std::string codec_backend;
     std::string codec_backend_preference;
@@ -687,6 +694,7 @@ LoopbackResult run_loopback() {
                                           tx_stats.video_codec_frames_zero_copy;
         result.codec_keyframes          = tx_stats.video_codec_keyframes;
         result.codec_encode_errors      = tx_stats.video_codec_encode_errors;
+        result.rx_tx_frames_encoded     = tx_stats.video_tx_frames_encoded;
     }
 
     FakeIceTransport* tx_ice = g_tx_ice.instance();
@@ -706,6 +714,8 @@ LoopbackResult run_loopback() {
     for (int i = 0; i < 20; ++i) rx_engine.tick();
 
     const auto rx_stats = rx_engine.stats();
+    result.rx_frames_decoded  = rx_stats.video_frames_decoded;
+    result.rx_frames_rendered = rx_stats.video_frames_rendered;
     EXPECT_GE(rx_stats.video_frames_decoded, 1u)
         << "the decoder must have decoded the hardware bitstream";
 
@@ -782,17 +792,51 @@ TEST_F(EngineVideoHwLoopback, HardwareEncodeReachesTheReceiverAsRealPixels) {
     EXPECT_EQ(result.codec_encode_errors, 0u)
         << "the hardware encoder reported errors";
 
+    // ---- The encoder produced pictures -----------------------------------
+    //
+    // "Captured, encoded by the hardware codec": the pump must have
+    // handed the synthetic capture's frames to the hardware encoder, and
+    // the encoder must have returned bitstream for them.
+    ASSERT_GT(result.codec_frames_encoded, 0u)
+        << "the capture pump delivered no frame to the encoder";
+    ASSERT_GT(result.rx_tx_frames_encoded, 0u)
+        << "the hardware encoder returned no encoded frame";
+
     // ---- The wire carried the picture ------------------------------------
     ASSERT_GT(result.tx_rtp_packets, 0u)
         << "the hardware encoder's bitstream never reached the wire";
     ASSERT_GT(result.rx_frames, 0u)
         << "the receiving engine rendered nothing";
 
+    // ---- The receiving engine decoded *and rendered* it ------------------
+    //
+    // Q7's sentence names both verbs; these counters are the engine's
+    // own answer, independent of what the recording sink kept.
+    EXPECT_GE(result.rx_frames_decoded, 1u)
+        << "the receiving engine did not decode the hardware bitstream";
+    EXPECT_GE(result.rx_frames_rendered, 1u)
+        << "the receiving engine did not render the decoded picture";
+
     // ---- The pixels are the source picture --------------------------------
     const std::vector<std::uint8_t> reference = reference_luma();
     ASSERT_EQ(result.width, kWidth);
     ASSERT_EQ(result.height, kHeight);
     ASSERT_EQ(result.luma.size(), reference.size());
+
+    // A picture that decoded but came out blank would pass a correlation
+    // *shape* check only by accident — rule out the degenerate cases
+    // (an all-zero surface is the classic NVDEC "no output" symptom)
+    // before measuring.
+    {
+        std::uint64_t min_v = 255, max_v = 0;
+        for (const std::uint8_t v : result.luma) {
+            if (v < min_v) min_v = v;
+            if (v > max_v) max_v = v;
+        }
+        ASSERT_GT(max_v - min_v, 16u)
+            << "the rendered luma is flat (range " << min_v << ".." << max_v
+            << ") — the decoder produced no picture";
+    }
 
     const double mae = mean_abs_error(reference, result.luma);
     EXPECT_LT(mae, 14.0)

@@ -595,11 +595,17 @@ TEST(VideoPipelineRtx, TheSenderRetransmissionReachesTheRightFrame) {
     ASSERT_EQ(rtx.size(), 1u);
 
     // ---- The receiver -----------------------------------------------------
+    //
+    // The sender above pushed an Annex-B frame, so the receiver is told so:
+    // with `h264_annex_b` on, every NAL unit the receiver delivers carries
+    // the start code the frame contract promises (a bare unit would be
+    // accepted and framed as-is only when the flag is off).
     ReceiverConfig rc;
     rc.codec        = video_frame::CodecKind::kH264;
     rc.ssrc         = kSsrc;
     rc.payload_type = kPt;
     rc.rtx_payload_type = kRtxPt;
+    rc.h264_annex_b = true;
 
     VideoReceiver rx(rc);
     FrameRecorder frames;
@@ -635,12 +641,16 @@ TEST(VideoPipelineRtx, ThePluginSeamCarriesTheRetransmission) {
     rc.payload_type    = kPt;
     rc.rtx_payload_type = kRtxPt;
 
+    // Annex-B in, Annex-B out: the assertion below pins the start code the
+    // frame contract promises, and the receiver rebuilds it only for a
+    // sender that declares Annex-B framing.
     vp::ReceiverAdapter rx(std::make_unique<VideoReceiver>(
         vp::ReceiverConfig{
             .codec           = video_frame::CodecKind::kH264,
             .ssrc            = kSsrc,
             .payload_type    = kPt,
             .rtx_payload_type = kRtxPt,
+            .h264_annex_b    = true,
         }));
 
     std::vector<std::uint8_t> bitstream;

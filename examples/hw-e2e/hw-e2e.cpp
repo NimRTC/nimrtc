@@ -359,27 +359,6 @@ void print_usage() {
 // Backend selection — the *module's* own table, restricted to hardware
 // ---------------------------------------------------------------------------
 
-/** True iff a hardware H.264 encoder is available on this host. */
-bool hardware_encoder_available() {
-    nimrtc::h264::register_default_video_backends();
-    // The probe config names the geometry the run will use: `available()`
-    // is allowed to answer "no" for this configuration, so asking with a
-    // default 0x0 config could refuse a backend that the real run can
-    // use.
-    np::VideoCodecConfig probe{};
-    probe.width  = 1920;
-    probe.height = 1080;
-    probe.fps    = 30;
-    probe.codec  = np::VideoCodecKind::kH264;
-    for (const auto* be : np::HwVideoBackendRegistry::instance()
-                             .list_encoders(np::VideoCodecKind::kH264)) {
-        if (be != nullptr && be->is_hw && be->available && be->available(probe)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /** True iff a hardware H.264 decoder is available on this host.
  *
  *  Only consulted when the encoder is also a hardware one: a hardware
@@ -780,7 +759,12 @@ Record run_hardware_e2e(const Options& opts) {
         }
         const auto [min_it, max_it] =
             std::minmax_element(last_y.begin(), last_y.end());
-        if (*max_it - *min_it < 30u) {
+        // The luma samples are `std::uint8_t`, so the subtraction
+        // promotes to `int`; comparing that against an `unsigned` literal
+        // is a signedness mismatch (`-Wsign-compare`).  The cast makes
+        // the promotion explicit and the comparison well-typed.
+        const int spread = static_cast<int>(*max_it) - static_cast<int>(*min_it);
+        if (spread < 30) {
             rec.failures.push_back("the decoded picture is flat");
         }
     }

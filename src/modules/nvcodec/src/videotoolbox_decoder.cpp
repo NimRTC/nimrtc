@@ -800,13 +800,14 @@ public:
         // encoder's surface row this says whether the picture was lost
         // in the *bitstream* or in the *copy* out of the surface.
         {
-            std::printf("[vt-dec] surface %ux%u fmt=%u pitch=%zu row0:",
+            std::printf("[vt-dec] surface %ux%u fmt=%u whole_pitch=%zu "
+                        "plane0_pitch=%zu row0:",
                         static_cast<unsigned>(CVPixelBufferGetWidth(pixel_buffer)),
                         static_cast<unsigned>(CVPixelBufferGetHeight(pixel_buffer)),
                         static_cast<unsigned>(
                             CVPixelBufferGetPixelFormatType(pixel_buffer)),
-                        static_cast<std::size_t>(
-                            CVPixelBufferGetBytesPerRow(pixel_buffer)));
+                        CVPixelBufferGetBytesPerRow(pixel_buffer),
+                        CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0));
             for (std::uint32_t col = 0; col < w; col += w / 16u) {
                 std::printf(" %u:%u", col, static_cast<unsigned>(y_plane[col]));
             }
@@ -949,9 +950,27 @@ private:
         if (format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
             format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
             // ---- The bi-planar (NV12) layout ------------------------------
-            const auto* base = static_cast<const std::uint8_t*>(
-                CVPixelBufferGetBaseAddress(pixel_buffer));
-            const std::size_t pitch = CVPixelBufferGetBytesPerRow(pixel_buffer);
+            //
+            // The luma plane's own stride and address, *not* the
+            // buffer's.
+            //
+            // `CVPixelBufferGetBytesPerRow(pb)` returns a value whose
+            // product with the height covers the *whole buffer, all
+            // planes together* (for 1920x1080 NV12: 2904, which is
+            // (1920*1080 + 1920*540) / 1080 rounded up) — it is not the
+            // luma plane's row stride.  Using it as one walks the luma
+            // plane diagonally: row N is read from an offset of N*2904
+            // instead of N*luma_stride, so the picture that comes out is
+            // shifted sideways row by row, and the rows near the bottom
+            // come from the chroma plane (or past the end of the
+            // surface) instead of from the luma plane.
+            //
+            // The luma plane's base address has the same problem: it
+            // comes from the buffer, not from the whole-buffer base.
+            const std::size_t y_pitch =
+                CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+            const auto* y_src = static_cast<const std::uint8_t*>(
+                CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0));
             const std::size_t uv_pitch =
                 CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
             // The chroma plane's *address* comes from the buffer, not
@@ -962,7 +981,7 @@ private:
             // reading the chroma from there is a wild read.
             const auto* uv_plane = static_cast<const std::uint8_t*>(
                 CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1));
-            if (!base || pitch == 0 || uv_pitch == 0 || !uv_plane) {
+            if (!y_src || y_pitch == 0 || uv_pitch == 0 || !uv_plane) {
                 CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
                 return false;
             }
@@ -970,7 +989,7 @@ private:
             // Luma.
             for (std::uint32_t row = 0; row < h; ++row) {
                 std::memcpy(y_plane + static_cast<std::size_t>(row) * sy,
-                            base + static_cast<std::size_t>(row) * pitch, w);
+                            y_src + static_cast<std::size_t>(row) * y_pitch, w);
             }
 
             // Chroma: the NV12 surface interleaves U and V.

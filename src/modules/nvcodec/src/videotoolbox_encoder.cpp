@@ -75,6 +75,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -748,14 +749,7 @@ public:
         // reads past the end of the surface.  That is a heap overrun,
         // and it is what used to crash the macOS CI leg.
         const CVReturn lock_st = CVPixelBufferLockBaseAddress(pixel_buffer, 0);
-        void* base = (lock_st == kCVReturnSuccess)
-                         ? CVPixelBufferGetBaseAddress(pixel_buffer) : nullptr;
-        const std::size_t pitch = (lock_st == kCVReturnSuccess)
-                                      ? CVPixelBufferGetBytesPerRow(pixel_buffer) : 0;
-        if (!base || pitch == 0) {
-            if (lock_st == kCVReturnSuccess) {
-                CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
-            }
+        if (lock_st != kCVReturnSuccess) {
             CVPixelBufferRelease(pixel_buffer);
             stats_.encode_errors++;
             return plugins::kErrInternal;
@@ -779,7 +773,6 @@ public:
         }
 
         {
-            auto* dst = static_cast<std::uint8_t*>(base);
             const auto& layout = cpu->layout();
             const std::uint32_t stride_y =
                 static_cast<std::uint32_t>(layout.strides[0]);
@@ -794,9 +787,36 @@ public:
                 format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
                 // ---- The bi-planar (NV12) layout -------------------------
                 //
-                // The luma plane: one row at a time, at the buffer's pitch.
+                // The luma plane: one row at a time, at the *plane's own*
+                // stride.
+                //
+                // The stride is `CVPixelBufferGetBytesPerRowOfPlane(pb, 0)`,
+                // NOT `CVPixelBufferGetBytesPerRow(pb)`: for a buffer with
+                // more than one plane the latter returns a value whose
+                // product with the height covers *the whole buffer, all
+                // planes together* (for 1920x1080 NV12: 2904, which is
+                // (1920*1080 + 1920*540) / 1080 rounded up).  Using it
+                // as the luma row stride walks the luma plane diagonally:
+                // row N is read from an offset of N*2904 instead of
+                // N*luma_stride, so the encoder codes a picture whose
+                // rows are shifted sideways — and whose bottom rows come
+                // from the chroma plane or past the end of the surface.
+                //
+                // The same applies to the plane's *address*: the luma
+                // plane's base address comes from the buffer, not from
+                // `base + something`.
+                const std::size_t y_pitch =
+                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+                void* y_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0);
+                if (y_pitch == 0 || !y_plane) {
+                    CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+                    CVPixelBufferRelease(pixel_buffer);
+                    stats_.encode_errors++;
+                    return plugins::kErrInternal;
+                }
+                auto* y_dst = static_cast<std::uint8_t*>(y_plane);
                 for (std::uint32_t row = 0; row < h; ++row) {
-                    std::memcpy(dst + static_cast<std::size_t>(row) * pitch,
+                    std::memcpy(y_dst + static_cast<std::size_t>(row) * y_pitch,
                                 y_in + static_cast<std::size_t>(row) * stride_y, w);
                 }
                 // The chroma plane: U and V interleaved, at the buffer's
@@ -902,14 +922,16 @@ public:
             const CVReturn relock = CVPixelBufferLockBaseAddress(pixel_buffer, 0);
             if (relock == kCVReturnSuccess) {
                 const auto* pb = static_cast<const std::uint8_t*>(
-                    CVPixelBufferGetBaseAddress(pixel_buffer));
+                    CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0));
                 const std::size_t pb_pitch =
-                    CVPixelBufferGetBytesPerRow(pixel_buffer);
-                std::printf("[vt-enc] surface %ux%u fmt=%u pitch=%zu row0:",
+                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+                std::printf("[vt-enc] surface %ux%u fmt=%u whole_pitch=%zu "
+                            "plane0_pitch=%zu row0:",
                             static_cast<unsigned>(CVPixelBufferGetWidth(pixel_buffer)),
                             static_cast<unsigned>(CVPixelBufferGetHeight(pixel_buffer)),
                             static_cast<unsigned>(
                                 CVPixelBufferGetPixelFormatType(pixel_buffer)),
+                            CVPixelBufferGetBytesPerRow(pixel_buffer),
                             pb_pitch);
                 if (pb) {
                     for (std::uint32_t col = 0; col < w; col += w / 16u) {
@@ -1102,6 +1124,14 @@ private:
                     }
                 }
                 std::printf("\n");
+                // Dump the bitstream so it can be decoded offline.
+                if (const char* path = std::getenv("NIMRTC_VT_DUMP")) {
+                    std::FILE* f = std::fopen(path, "ab");
+                    if (f) {
+                        std::fwrite(annex_b.data(), 1, annex_b.size(), f);
+                        std::fclose(f);
+                    }
+                }
             }
         }
 

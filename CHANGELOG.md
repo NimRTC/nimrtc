@@ -179,6 +179,57 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the 498 measured `ci-retry` runs over the last 1200, and
   `windows / fast` is not a required check.
 
+- **A mid-stream parameter-set change is now *proven* to decode on its own
+  (v1.3 plan item `Q1`, video plan `R2`).**
+  The survey behind the v1.3 plan found that the *sender* already did the
+  right thing — `openh264_encoder.cpp`'s `set_params()` re-creates the
+  encoder when the geometry changes and the new SPS / PPS travel in-band
+  with the next IDR — and that the *receiver* needed no mechanism at all:
+  OpenH264's decoder handles a mid-stream SPS update on its own, because
+  the decoder is the sole owner of "do my parameter sets still match?".
+
+  What was missing was therefore not a mechanism; it was an **assertion**.
+  Q1 is the test that would have caught a regression, and it is now in the
+  standard CI matrix:
+
+  - **The codec-level half**
+    (`src/modules/h264/tests/test_openh264_software.cpp`) exercises the
+    *warm* decoder: it decodes a 320×240 picture first (so the decoder is
+    holding that parameter set), the encoder's geometry then changes to
+    640×480, and the new picture is decoded **with the same decoder** — no
+    flush, no re-initialisation, no key-frame request.  The bar is `kOk`
+    on the *first* decode call: a `kErrNotReady` would mean the decoder
+    needed another round trip.  The two parameter sets are compared
+    byte-for-byte, so the test cannot pass by decoding the *old* frame
+    twice, and a second case asserts the decoded picture carries real
+    signal (a correctly-sized but blank frame would pass a
+    geometry-only assertion).
+  - **The engine-level half**
+    (`tests/test_engine_video_e2e_loopback.cpp`) drives the *whole*
+    pipeline with no stub in the middle: two engines, a real OpenH264
+    encoder, real RTP on the wire (STAP-A for the parameter sets, FU-A
+    for the slice), and the real receive path (depacketize → jitter
+    buffer → decode → render).  The host pushes a 320×240 frame and then a
+    640×480 one; the receiver must decode both and render the *new*
+    geometry.  The acceptance is the plan's own wording — the
+    decode-failure door stayed shut
+    (`video_feedback_pli_from_decode_failure == 0`) **and** no PLI
+    datagram went on the wire, which is the "no key-frame round-trip"
+    half checked on the wire rather than only in a counter.
+  - **The negative control.**  A counter that is *always* zero would
+    satisfy `== 0` vacuously, so the harness also has to show the counter
+    *does* move when the decoder really does refuse a frame.
+    `TheDecodeFailureDoorIsLiveInThisHarness` feeds the receiver a
+    synthetic single-NAL H.264 picture whose body is nonsense: the
+    depacketizer accepts it, the jitter buffer assembles it, and the
+    decoder refuses it — which opens the decode-failure door and moves
+    the counter.  Without that control, the Q1 assertion would prove
+    nothing.
+
+  The H.265 half of Q1 is **still open** — the H.265 decoder in the tree
+  is a stub, so there is nothing to assert on yet.  It is recorded as an
+  explicit follow-up in the v1.3 plan's §6, not silently skipped.
+
 - **The receiver's feedback to the peer is bounded, and the two reasons
   for a key-frame request are now distinguishable (v1.3 plan item `Q4`,
   video plan `T2`).**

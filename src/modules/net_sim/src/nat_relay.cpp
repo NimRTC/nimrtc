@@ -68,6 +68,22 @@ void close_socket(socket_t s) noexcept { (void)::close(s); }
 #endif
 
 /**
+ * @brief The length argument of `sendto()` / `recvfrom()`.
+ *
+ * Winsock declares it `int`; the BSDs (Linux, macOS) declare it
+ * `size_t`.  A single spelling cannot satisfy both: the `int` cast
+ * Winsock needs is a narrowing conversion on the BSDs, and
+ * `-Wsign-conversion` reports it there.  The cast is therefore made
+ * where the declaration requires it, and the length type follows the
+ * platform.
+ */
+#ifdef _WIN32
+using io_len_t = int;
+#else
+using io_len_t = std::size_t;
+#endif
+
+/**
  * @brief Put a socket into non-blocking mode.
  *
  * The relay reads its sockets with a non-blocking `recvfrom()` and
@@ -317,9 +333,9 @@ struct NatRelay::Impl {
                 for (;;) {
                     sockaddr_in src{};
                     addr_len_t src_len = sizeof(src);
-                    const long n = ::recvfrom(sock[i],
+                    const auto n = ::recvfrom(sock[i],
                                               reinterpret_cast<recv_buf_t>(buffer.data()),
-                                              static_cast<int>(buffer.size()), 0,
+                                              static_cast<io_len_t>(buffer.size()), 0,
                                               reinterpret_cast<sockaddr*>(&src), &src_len);
                     if (n > 0) {
                         handle(i, src, buffer.data(), static_cast<std::size_t>(n));
@@ -472,10 +488,10 @@ struct NatRelay::Impl {
                 sock[item.socket] == kInvalidSocket) {
                 // Skip to the next due packet.
             } else {
-                const long sent =
+                const auto sent =
                     ::sendto(sock[item.socket],
                              reinterpret_cast<send_buf_t>(item.payload.data()),
-                             static_cast<int>(item.payload.size()), 0,
+                             static_cast<io_len_t>(item.payload.size()), 0,
                              reinterpret_cast<const sockaddr*>(&item.dest),
                              static_cast<addr_len_t>(sizeof(item.dest)));
                 if (sent > 0) {

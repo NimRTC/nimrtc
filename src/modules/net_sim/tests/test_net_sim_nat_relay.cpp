@@ -58,6 +58,29 @@ constexpr socket_t kInvalidSocket = -1;
 void close_socket(socket_t s) noexcept { (void)::close(s); }
 #endif
 
+/**
+ * The byte-order conversions, spelled so that they compile everywhere.
+ *
+ * On Windows these are **functions**, so the global-scope qualifier
+ * (`::htonl`) is valid.  On macOS and the BSDs they are **macros**
+ * (`#define htonl(x) __DARWIN_OSSwapInt32(x)`), and a macro cannot be
+ * named with a `::` in front of it -- the compiler rejects it with
+ * "expected unqualified-id".  The test binds real loopback sockets on
+ * every platform, so it cannot dodge the question by being Windows-only.
+ *
+ * So the calls go through these wrappers, which call the unqualified
+ * name: a macro expands there, and on Windows the function is found in
+ * the global namespace as it is.  This is the same spelling
+ * `tests/bench/bench_saturation.cpp` already uses.
+ */
+std::uint32_t host_to_network32(std::uint32_t v) noexcept {
+    return htonl(v);
+}
+
+std::uint16_t host_to_network16(std::uint16_t v) noexcept {
+    return htons(v);
+}
+
 /** The port part of a "host:port" endpoint. */
 std::uint16_t endpoint_port(const std::string& endpoint) {
     const std::size_t colon = endpoint.rfind(':');
@@ -80,7 +103,12 @@ public:
         sockaddr_in addr{};
         addr.sin_family      = AF_INET;
         addr.sin_port        = 0;
-        addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+        // `INADDR_LOOPBACK` is an `int` literal on macOS and an
+        // `unsigned int` on Linux glibc, so the cast is explicit: the
+        // signedness difference is not the compiler's business to
+        // guess at.
+        addr.sin_addr.s_addr = host_to_network32(
+            static_cast<std::uint32_t>(INADDR_LOOPBACK));
         ::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
 
         // Non-blocking: `receive()` treats "would block" as "nothing yet".
@@ -113,13 +141,24 @@ public:
         // integer, so it has to be converted -- without `htons` the
         // datagram goes to a different port than the one printed in the
         // endpoint and the relay never sees it.
-        addr.sin_port = ::htons(static_cast<unsigned short>(
+        addr.sin_port = host_to_network16(static_cast<std::uint16_t>(
             std::stoi(endpoint.substr(colon + 1))));
         ::inet_pton(AF_INET, endpoint.substr(0, colon).c_str(), &addr.sin_addr);
-        const long n = ::sendto(fd_, payload.data(), static_cast<int>(payload.size()), 0,
-                                reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        // The length argument is `int` on Winsock and `size_t` on the
+        // BSDs.  A single spelling cannot satisfy both: the `int` cast
+        // Windows needs is a narrowing conversion on the BSDs, and
+        // `-Wsign-conversion` reports it.  The cast is therefore made
+        // where the declaration requires it.
+#ifdef _WIN32
+        const int length = static_cast<int>(payload.size());
+#else
+        const std::size_t length = payload.size();
+#endif
+        const auto n = ::sendto(fd_, payload.data(), length, 0,
+                                 reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
         if (n < 0) {
-            std::fprintf(stderr, "[peer] sendto failed (%ld)\n", n);
+            std::fprintf(stderr, "[peer] sendto failed (%ld)\n",
+                         static_cast<long>(n));
         }
     }
 
@@ -137,8 +176,14 @@ public:
             // wait forever for traffic that has in fact arrived.
             sockaddr_in src{};
             addr_len_t len = sizeof(src);
-            const long n = ::recvfrom(fd_, buffer.data(),
-                                      static_cast<int>(buffer.size()), 0,
+            // Same reason as in `send_to()`: the length argument is
+            // `int` on Winsock and `size_t` on the BSDs.
+#ifdef _WIN32
+            const int length = static_cast<int>(buffer.size());
+#else
+            const std::size_t length = buffer.size();
+#endif
+            const auto n = ::recvfrom(fd_, buffer.data(), length, 0,
                                       reinterpret_cast<sockaddr*>(&src), &len);
             if (n > 0) {
                 if (source_port) *source_port = ntohs(src.sin_port);

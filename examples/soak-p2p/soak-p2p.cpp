@@ -74,6 +74,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -507,22 +508,24 @@ int run(const Params& p, Measurement* m) {
 
     if (p.verbose) {
         std::fprintf(stderr,
-                     "[soak-p2p] relay: received=%llu forwarded=%llu dropped=%llu "
-                     "reordered=%llu buffered=%llu\n",
-                     (unsigned long long)rs.packets_received,
-                     (unsigned long long)rs.packets_forwarded,
-                     (unsigned long long)rs.packets_dropped,
-                     (unsigned long long)rs.packets_reordered,
-                     (unsigned long long)rs.packets_buffered);
+                     "[soak-p2p] relay: received=%" PRIu64 " forwarded=%" PRIu64
+                     " dropped=%" PRIu64 " reordered=%" PRIu64 " buffered=%" PRIu64
+                     "\n",
+                     rs.packets_received,
+                     rs.packets_forwarded,
+                     rs.packets_dropped,
+                     rs.packets_reordered,
+                     rs.packets_buffered);
         std::fprintf(stderr,
-                     "[soak-p2p] audio: sent=%llu received=%llu concealed=%llu "
-                     "fec_recovered=%llu lost=%llu decode_errors=%llu\n",
-                     (unsigned long long)m->audio_packets_sent,
-                     (unsigned long long)m->audio_frames_received,
-                     (unsigned long long)m->audio_concealed,
-                     (unsigned long long)m->audio_fec_recovered,
-                     (unsigned long long)m->audio_packets_lost,
-                     (unsigned long long)m->audio_decode_errors);
+                     "[soak-p2p] audio: sent=%" PRIu64 " received=%" PRIu64
+                     " concealed=%" PRIu64 " fec_recovered=%" PRIu64
+                     " lost=%" PRIu64 " decode_errors=%" PRIu64 "\n",
+                     m->audio_packets_sent,
+                     m->audio_frames_received,
+                     m->audio_concealed,
+                     m->audio_fec_recovered,
+                     m->audio_packets_lost,
+                     m->audio_decode_errors);
     }
 
     a.close();
@@ -623,34 +626,44 @@ std::string json_escape(const std::string& s) {
 
 std::string to_json(const Measurement& m, const Verdict& v) {
     char buf[4096];
+    // The counters are `std::uint64_t`, so they are printed with the
+    // `PRIu64` format macro rather than a hard-coded `%llu`.  The
+    // difference is not cosmetic: `uint64_t` is `unsigned long` on
+    // Linux and `unsigned long long` on Windows, and a `%llu` with the
+    // former is a format mismatch -- which the old-style casts were
+    // papering over, at the price of a `-Werror=old-style-cast` failure
+    // on the GCC legs.
     std::snprintf(
         buf, sizeof(buf),
         "{\n"
         "  \"schema\": \"nimrtc-soak-impaired/1\",\n"
         "  \"params\": {\"seconds\": %.3f, \"loss_pct\": %.3f, \"delay_ms\": %.3f, "
-        "\"jitter_ms\": %.3f, \"reorder_pct\": %.3f, \"rate_bps\": %llu, \"seed\": %llu},\n"
-        "  \"relay\": {\"received\": %llu, \"forwarded\": %llu, \"dropped\": %llu, "
-        "\"reordered\": %llu, \"buffered\": %llu},\n"
-        "  \"audio\": {\"packets_sent\": %llu, \"frames_received\": %llu, "
-        "\"concealed\": %llu, \"fec_recovered\": %llu, \"packets_lost\": %llu, "
-        "\"decode_errors\": %llu, \"jb_dropped\": %llu},\n"
-        "  \"memory\": {\"peak_pending_audio_bytes\": %llu},\n"
-        "  \"feedback\": {\"tx_nack\": %llu, \"rx_nack\": %llu, \"tx_pli\": %llu, "
-        "\"rx_pli\": %llu},\n"
+        "\"jitter_ms\": %.3f, \"reorder_pct\": %.3f, \"rate_bps\": %" PRIu64
+        ", \"seed\": %" PRIu64 "},\n"
+        "  \"relay\": {\"received\": %" PRIu64 ", \"forwarded\": %" PRIu64
+        ", \"dropped\": %" PRIu64 ", \"reordered\": %" PRIu64
+        ", \"buffered\": %" PRIu64 "},\n"
+        "  \"audio\": {\"packets_sent\": %" PRIu64 ", \"frames_received\": %" PRIu64
+        ", \"concealed\": %" PRIu64 ", \"fec_recovered\": %" PRIu64
+        ", \"packets_lost\": %" PRIu64 ", \"decode_errors\": %" PRIu64
+        ", \"jb_dropped\": %" PRIu64 "},\n"
+        "  \"memory\": {\"peak_pending_audio_bytes\": %" PRIu64 "},\n"
+        "  \"feedback\": {\"tx_nack\": %" PRIu64 ", \"rx_nack\": %" PRIu64
+        ", \"tx_pli\": %" PRIu64 ", \"rx_pli\": %" PRIu64 "},\n"
         "  \"green\": %s,\n"
         "  \"failures\": [%s]\n"
         "}\n",
         m.seconds, m.loss_pct, m.delay_ms, m.jitter_ms, m.reorder_pct,
-        (unsigned long long)m.rate_bps, (unsigned long long)m.seed,
-        (unsigned long long)m.relay_received, (unsigned long long)m.relay_forwarded,
-        (unsigned long long)m.relay_dropped, (unsigned long long)m.relay_reordered,
-        (unsigned long long)m.relay_buffered, (unsigned long long)m.audio_packets_sent,
-        (unsigned long long)m.audio_frames_received, (unsigned long long)m.audio_concealed,
-        (unsigned long long)m.audio_fec_recovered, (unsigned long long)m.audio_packets_lost,
-        (unsigned long long)m.audio_decode_errors, (unsigned long long)m.jb_dropped,
-        (unsigned long long)m.audio_samples_pending, (unsigned long long)m.feedback_tx_nack,
-        (unsigned long long)m.feedback_rx_nack, (unsigned long long)m.feedback_tx_pli,
-        (unsigned long long)m.feedback_rx_pli, v.ok ? "true" : "false", "");
+        m.rate_bps, m.seed,
+        m.relay_received, m.relay_forwarded,
+        m.relay_dropped, m.relay_reordered,
+        m.relay_buffered, m.audio_packets_sent,
+        m.audio_frames_received, m.audio_concealed,
+        m.audio_fec_recovered, m.audio_packets_lost,
+        m.audio_decode_errors, m.jb_dropped,
+        m.audio_samples_pending, m.feedback_tx_nack,
+        m.feedback_rx_nack, m.feedback_tx_pli,
+        m.feedback_rx_pli, v.ok ? "true" : "false", "");
     std::string json(buf);
     if (!v.failures.empty()) {
         std::string list;
@@ -682,9 +695,9 @@ int main(int argc, char** argv) {
 
     std::fprintf(stderr,
                  "NimRTC soak-p2p: %.1f s, loss=%.1f%% delay=%.0fms jitter=%.0fms "
-                 "reorder=%.1f%% rate=%llu bps\n",
+                 "reorder=%.1f%% rate=%" PRIu32 " bps\n",
                  p.seconds, p.loss_pct, p.delay_ms, p.jitter_ms, p.reorder_pct,
-                 (unsigned long long)p.rate_bps);
+                 p.rate_bps);
 
     Measurement m;
     const int rc = run(p, &m);

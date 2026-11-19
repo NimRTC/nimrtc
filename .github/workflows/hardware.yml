@@ -32,8 +32,18 @@ name: hardware
 #
 # The job only runs on the self-hosted runner (label `gpu-nvenc`): on a
 # hosted runner it would skip, and a green check that means "nothing
-# ran" is worse than no check at all.  `workflow_dispatch` is the
-# manual trigger; the release process runs it before cutting `v1.3.0`.
+# ran" is worse than no check at all.
+#
+# **There is deliberately no `pull_request` trigger.**  A PR trigger
+# would put a job that needs a runner the repository does not have
+# onto every hardware-touching PR, and the job would sit *queued*
+# forever -- a check that never reports is not a gate, it is a
+# decoration.  The trigger is `workflow_dispatch` (the release
+# process runs it before cutting `v1.3.0`) plus a weekly `schedule`
+# (a driver update on the runner is noticed without a PR).  This is
+# the same shape `soak.yml` uses, and for the same reason: an evidence
+# collector needs a machine the standard matrix does not have, so it
+# is triggered where the machine is, not where the code is.
 
 on:
   workflow_dispatch:
@@ -42,14 +52,6 @@ on:
         description: 'Tree to measure (default: the branch this workflow runs on)'
         required: false
         type: string
-  pull_request:
-    paths:
-      - 'src/modules/nvcodec/**'
-      - 'src/modules/h264/**'
-      - 'examples/hw-e2e/**'
-      - 'tests/test_engine_video_hw_loopback.cpp'
-      - 'tools/run_hardware_e2e.py'
-      - '.github/workflows/hardware.yml'
   schedule:
     # Weekly, so a driver update on the runner is noticed without a PR.
     - cron: '41 4 * * 1'

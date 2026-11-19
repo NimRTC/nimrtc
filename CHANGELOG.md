@@ -332,13 +332,25 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.2.0] - 2026-11-18
 
-### Status: Release candidate
+### Status: Stable
 
 > **The source version is `1.2.0`** (`project(VERSION)` in `CMakeLists.txt`,
 > `NIMRTC_API_VERSION` = 10200, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
 > `v1.2.0` is the release that closes the `v1.2` plan
 > (`docs/plan/v1.2-next-plan.md`): **Track E** (the convergence gates) and
 > **Track S** (the observability surface) are both complete.
+>
+> **The label was corrected on 2026-11-19.** This section was written by
+> `tools/release_changelog.py`, which hard-coded the heading
+> `### Status: Release candidate` for every release it produced. The
+> version carries no SemVer pre-release identifier (`RELEASING.md` §2.2),
+> the tag was cut as `v1.2.0`, and the GitHub Release is published as a
+> non-prerelease "Latest" release -- so the section said "candidate" while
+> the release said "stable". The generator now derives the label from the
+> version (a pre-release identifier means a candidate; no identifier means
+> stable), and `tools/release_changelog.py --self-test` pins the rule.
+> The same defect is in the `[1.1.0]` section below, which was also
+> published as a stable release; it is corrected there too.
 
 > Track E -- every gate is green:
 
@@ -6470,7 +6482,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.1.0] - 2026-11-07
 
-### Status: Release candidate
+### Status: Stable
 
 > **The source version is `1.1.0`** (`project(VERSION)` in `CMakeLists.txt`,
 > `NIMRTC_API_VERSION` = 10100, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
@@ -6484,6 +6496,14 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > built; the GitHub Release stays a **draft** until the last remaining
 > release-hardening gate — the 7-day soak — closes (see "Known
 > limitations"). The published stable cut is still `v1.0.2`.
+>
+> **The label was corrected on 2026-11-19.** This section carried the
+> hard-coded `### Status: Release candidate` heading that
+> `tools/release_changelog.py` wrote for every release. The version carries
+> no SemVer pre-release identifier, the tag was cut as `v1.1.0`, and the
+> GitHub Release was published on 2026-11-09 as a non-prerelease — so the
+> section said "candidate" while the release said "stable". The generator
+> now derives the label from the version.
 
 ### Fixed
 

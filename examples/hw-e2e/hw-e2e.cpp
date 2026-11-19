@@ -638,14 +638,23 @@ Record run_hardware_e2e(const Options& opts) {
     receiver_cfg.codec        = vf::CodecKind::kH264;
     receiver_cfg.payload_type = cfg.payload_type;
     // The receiver runs FU-A reassembly itself (the default), which is
-    // what every multi-packet picture on this path is.  `h264_annex_b`
-    // stays off for the router: the *jitter buffer's* frame is the one
-    // that gets reframed (see the decode loop), and the escape-hatch
-    // branch below has to see the stack's own output to detect it.
-    vp::VideoReceiver receiver(receiver_cfg);
-    // Off-by-default escape hatch for NAL framing.  See the decode loop.
+    // what every multi-packet picture on this path is.
+    //
+    // `h264_annex_b` decides what happens to a *single NAL unit* packet
+    // (the RFC 6184 §5.1 default: forwarded byte for byte, bare).  The
+    // jitter buffer only *concatenates* a picture's payloads, so a frame
+    // assembled from several bare NAL units reaches the decoder as one
+    // unparsable blob -- which is why the escape hatch below re-frames
+    // it.  The default path does not need that: the sender aggregates
+    // the small NAL units into a STAP-A, and the receiver unpacks a
+    // STAP-A into one start-coded NAL unit each.
+    //
+    // Off by default: the escape hatch exists to *exercise* the bare-NAL
+    // path, not to be the path the harness normally runs on.
     const bool use_nalu_list =
         std::getenv("NIMRTC_HW_E2E_NALU_LIST") != nullptr;
+    receiver_cfg.h264_annex_b = !use_nalu_list;
+    vp::VideoReceiver receiver(receiver_cfg);
 
     /** One payload the sender emitted, with the metadata a caller needs
      *  to build the RTP packet it belongs to. */
@@ -818,10 +827,7 @@ Record run_hardware_e2e(const Options& opts) {
         rec.frames_reassembled += complete_frames(assembled) - before;
     }
 
-    std::uint32_t last_w = 0;
-    std::uint32_t last_h = 0;
     std::vector<std::uint8_t> last_y;
-    bool          have_picture = false;
 
     // ---- Decode ----------------------------------------------------------
     //
@@ -874,26 +880,42 @@ Record run_hardware_e2e(const Options& opts) {
         // An empty slot is a picture the receiver never reassembled: the
         // decoder is not handed anything (its references are intact).
         if (au.payload.empty()) continue;
+        // On the bare-NAL path (the escape hatch) the jitter buffer
+        // concatenated the picture's NAL units without a separator, so
+        // what came out is one blob rather than an Annex-B stream.  It is
+        // re-framed here -- the *sender's own* bytes, re-split on the
+        // start codes the sender wrote, so nothing is guessed and
+        // nothing is lost.  On the default path the receiver already
+        // delivered Annex-B, and re-framing it would be a no-op at best
+        // and a corruption at worst.
+        std::vector<std::uint8_t> reframed;
+        if (use_nalu_list) {
+            reframed = reframe(au.payload.data(), au.payload.size());
+        }
+        const nimrtc::core::ByteSpan picture =
+            use_nalu_list
+                ? nimrtc::core::ByteSpan{reframed.data(), reframed.size()}
+                : au.payload;
         // Remember the parameter sets as they arrive; a corrupt picture
         // resets the decoder's references and the sets are replayed.
         {
             std::size_t o = 0;
-            while (o + 4 < au.payload.size()) {
-                if (au.payload[o] == 0 && au.payload[o + 1] == 0 &&
-                    au.payload[o + 2] == 0 && au.payload[o + 3] == 1) {
-                    const std::uint8_t t = au.payload[o + 4] & 0x1F;
+            while (o + 4 < picture.size()) {
+                if (picture[o] == 0 && picture[o + 1] == 0 &&
+                    picture[o + 2] == 0 && picture[o + 3] == 1) {
+                    const std::uint8_t t = picture[o + 4] & 0x1F;
                     if (t == 7 || t == 8) {
                         std::size_t end = o + 4;
-                        while (end + 4 < au.payload.size() &&
-                               !(au.payload[end] == 0 &&
-                                 au.payload[end + 1] == 0 &&
-                                 au.payload[end + 2] == 0 &&
-                                 au.payload[end + 3] == 1)) {
+                        while (end + 4 < picture.size() &&
+                               !(picture[end] == 0 &&
+                                 picture[end + 1] == 0 &&
+                                 picture[end + 2] == 0 &&
+                                 picture[end + 3] == 1)) {
                             ++end;
                         }
                         cached_sets.insert(cached_sets.end(),
-                                           au.payload.begin() + o,
-                                           au.payload.begin() + end);
+                                           picture.begin() + o,
+                                           picture.begin() + end);
                         o = end;
                         continue;
                     }
@@ -914,13 +936,17 @@ Record run_hardware_e2e(const Options& opts) {
         np::EncodedVideoFrame unit = au;
         std::vector<std::uint8_t> joined;
         const bool has_sets =
-            au.payload.size() > 4 &&
-            (au.payload[4] == 0x67 || au.payload[4] == 0x68);
+            picture.size() > 4 &&
+            (picture[4] == 0x67 || picture[4] == 0x68);
         if (!has_sets && !cached_sets.empty()) {
-            joined.reserve(cached_sets.size() + au.payload.size());
+            joined.reserve(cached_sets.size() + picture.size());
             joined.insert(joined.end(), cached_sets.begin(), cached_sets.end());
-            joined.insert(joined.end(), au.payload.begin(), au.payload.end());
+            joined.insert(joined.end(), picture.begin(), picture.end());
             unit.payload = nimrtc::core::ByteSpan{joined.data(), joined.size()};
+        } else if (use_nalu_list) {
+            // The reframed picture *is* the unit's payload; `unit` still
+            // points at the jitter buffer's blob.
+            unit.payload = picture;
         }
         np::Status dec_rc = codec->decode(unit, decoded, nullptr);
         rec.decode_status.push_back(static_cast<int>(dec_rc));
@@ -931,7 +957,6 @@ Record run_hardware_e2e(const Options& opts) {
             if (dec_rc != np::kErrNotReady) ++rec.decode_errors;
             continue;
         }
-        have_picture = true;
         ++rec.frames_decoded;
         const auto cpu_buf = decoded.cpu_buffer();
         if (!cpu_buf || !cpu_buf->data() || cpu_buf->plane(0) == nullptr) {
@@ -942,8 +967,6 @@ Record run_hardware_e2e(const Options& opts) {
         const std::uint32_t dw = dl.width;
         const std::uint32_t dh = dl.height;
         if (dw == 0 || dh == 0) continue;
-        last_w = dw;
-        last_h = dh;
         rec.decoded_width  = dw;
         rec.decoded_height = dh;
         last_y.resize(static_cast<std::size_t>(dw) * dh);

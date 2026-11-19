@@ -71,10 +71,20 @@ namespace {
 
 class RbspWriter {
 public:
-    /** Append @p n bits of @p value (MSB first). */
+    /** Append @p n bits of @p value (MSB first).
+     *
+     *  @p n may exceed 32: the H.265 syntax has a 44-bit
+     *  `general_reserved_zero_44bits` field, and the writer is asked to
+     *  emit it.  The value is widened to 64 bits before the shift so
+     *  that a shift count of 43 or more is not undefined behaviour --
+     *  the bits above 31 are zero, and a 64-bit shift says so without
+     *  tripping the undefined-behaviour sanitizer. */
     void u(std::uint32_t value, std::size_t n) {
+        const std::uint64_t wide = value;
         for (std::size_t i = 0; i < n; ++i) {
-            const auto bit = static_cast<std::uint8_t>((value >> (n - 1 - i)) & 1u);
+            const std::size_t shift = n - 1 - i;
+            const auto bit = static_cast<std::uint8_t>(
+                shift < 64 ? ((wide >> shift) & 1u) : 0u);
             if (bit_pos_ == 0) bytes_.push_back(0);
             bytes_.back() |= static_cast<std::uint8_t>(bit << (7 - bit_pos_));
             bit_pos_ = (bit_pos_ + 1) & 7;

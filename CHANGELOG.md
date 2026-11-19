@@ -457,6 +457,33 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The VideoToolbox path walked the luma plane diagonally, so the
+  decoded picture was garbage in the left columns (2026-11-19).**
+  Both the encoder's staging copy and the decoder's `copy_surface_to_i420()`
+  used `CVPixelBufferGetBytesPerRow(pb)` as the luma row stride.  For a
+  buffer with more than one plane that value is **not** the luma plane's
+  stride: Apple documents it as the stride whose product with the height
+  covers *the whole buffer, all planes together* — for a 1920x1080 NV12
+  buffer it is 2904, which is
+  `(1920*1080 + 1920*540) / 1080` rounded up, while the luma plane's own
+  stride is 1920.
+
+  So row N was read from an offset of `N*2904` instead of `N*1920`: the
+  picture was walked diagonally, each row shifted sideways relative to the
+  one above it, and the rows near the bottom read from the chroma plane
+  or past the end of the surface.  The symptom was a *partly* correct
+  picture — the left 576 columns of the 1080p frame came out black, the
+  rest of the row matched the reference, and the hardware loopback test
+  failed with mae 15.68 and Pearson 0.759.
+
+  The same call also returned the wrong *base address* (the whole
+  buffer's, not the luma plane's), which on an IOSurface-backed buffer
+  points into the middle of the luma allocation.
+
+  Both sites now use `CVPixelBufferGetBytesPerRowOfPlane(pb, 0)` and
+  `CVPixelBufferGetBaseAddressOfPlane(pb, 0)` — the same way the chroma
+  plane and the planar path already did.
+
 - **The macOS hardware video decoder existed, but could never open a
   session (2026-11-19).**
   `vt_decoder_available()` probed the host by creating a real

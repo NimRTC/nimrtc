@@ -9,6 +9,73 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.2.0`.
 
+- **The receiver's feedback to the peer is bounded, and the two reasons
+  for a key-frame request are now distinguishable (v1.3 plan item `Q4`,
+  video plan `T2`).**
+  The receiver used to *merge* its feedback into one pending report
+  without a bound, and the two doors into that report were
+  indistinguishable.  Three things could go wrong, and all three are
+  feedback amplification:
+
+  - **The key-frame request had no rate limit of its own.**  The engine's
+    decode-failure path had a 250 ms throttle, but the jitter buffer's own
+    loss report did not — and both went into the *same* pending report, so
+    a stream that both lost packets and failed to decode asked for key
+    frames at twice the rate.
+  - **The NACK list was uncapped.**  Every detected gap added its sequence
+    numbers to a list that was merged into the pending report without a
+    limit, so a peer that dropped 30 % of a 30 fps stream produced a report
+    that grew with the loss.
+  - **The pending report had no age.**  A report that sat in the queue while
+    the link was down was stale by the time it went out: the losses it
+    named had either been retransmitted already or were long gone.
+
+  The bound now lives in one private collaborator,
+  `src/engine/src/engine_feedback_guard.{hpp,cpp}`
+  (`nimrtc::engine::detail::FeedbackGuard`), so the receive-side feedback
+  has a single visible owner:
+
+  - **The key-frame rate limit is global, not per-door** — one request per
+    interval (default 250 ms, i.e. 4 Hz per RFC 5104 §4.3.1.1), whichever
+    door raised it.  The peer's encoder is the shared resource the limit
+    protects, so a per-door limit would let the two doors add up to twice
+    the rate.  The engine's own decode-failure throttle stays as the
+    *door's* throttle (it keeps the log quiet).
+  - **The NACK cap keeps the *most recent* losses** (default 64 per
+    report).  RFC 4585 §6.2.1 shapes the request around the recent
+    losses, and the sender's retransmission cache only holds the recent
+    packets — a request for an old loss is a request the peer cannot
+    answer.  When the list overflows, the *oldest* entries are dropped.
+  - **A stale report is dropped, not sent** (default age 1 s).
+
+  The two doors are counted separately, because they call for completely
+  different fixes: `video_feedback_pli_from_loss` says "the network dropped
+  a picture", `video_feedback_pli_from_decode_failure` says "the decoder
+  cannot decode what it is being sent".
+
+  The bound is reachable from a host and visible to one:
+
+  - `EngineConfig::video_feedback_min_pli_interval_us` (default 250000;
+    `0` disables the limit), `EngineConfig::video_feedback_max_nack_seqs`
+    (default 64; a negative value means unbounded) and
+    `EngineConfig::video_feedback_max_report_age_us` (default 1000000;
+    `0` means "never expire") are new.
+  - `Engine::Stats` gains seven counters:
+    `video_feedback_pli_requests` (the demand),
+    `video_feedback_pli_allowed` (what went on the wire),
+    `video_feedback_pli_suppressed` (what the limit dropped),
+    `video_feedback_pli_from_loss`, `video_feedback_pli_from_decode_failure`,
+    `video_feedback_nack_seqs_dropped` and `video_feedback_reports_expired`.
+
+  The guard's clock is **injected**, which is what makes the acceptance
+  deterministic: the engine passes the monotonic clock, the test passes a
+  virtual one it advances by hand.  `tests/test_engine_feedback_guard.cpp`
+  therefore runs the 30 s synthetic-loss profile in microseconds of real
+  time and asserts the same numbers on every machine — at most **121**
+  key-frame requests may go out in 30 s, both for a 30 % loss profile and
+  for the adversarial "every frame is lost" one (901 requests raised).
+  `tests/test_engine_video_feedback.cpp` covers the engine-level half.
+
 - **The audio jitter buffer's memory is bounded, and the bound is
   reported (v1.3 plan item `Q2`, video plan `R4`).**
   `jb::Config::max_packets` was **declared and never read**: its own

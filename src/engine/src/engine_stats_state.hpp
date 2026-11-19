@@ -112,6 +112,14 @@ namespace nimrtc::engine::detail {
     X(video_feedback_rx_transport_cc, core::StatSemantics::kCumulative)              \
     X(video_feedback_tx_pli, core::StatSemantics::kCumulative)                       \
     X(video_feedback_tx_nack, core::StatSemantics::kCumulative)                      \
+    /* ---- The receive-side feedback bound (v1.3 Q4 / video plan T2) ---- */        \
+    X(video_feedback_pli_requests, core::StatSemantics::kCumulative)                 \
+    X(video_feedback_pli_allowed, core::StatSemantics::kCumulative)                  \
+    X(video_feedback_pli_suppressed, core::StatSemantics::kCumulative)               \
+    X(video_feedback_pli_from_loss, core::StatSemantics::kCumulative)                \
+    X(video_feedback_pli_from_decode_failure, core::StatSemantics::kCumulative)      \
+    X(video_feedback_nack_seqs_dropped, core::StatSemantics::kCumulative)            \
+    X(video_feedback_reports_expired, core::StatSemantics::kCumulative)              \
     /* ---- The key-frame storm limiter ---- */                                      \
     X(video_keyframes_limiter_requests, core::StatSemantics::kCumulative)            \
     X(video_keyframes_granted, core::StatSemantics::kCumulative)                     \

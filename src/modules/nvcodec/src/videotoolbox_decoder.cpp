@@ -5,12 +5,36 @@
  * The decode counterpart of `videotoolbox_encoder.cpp`, and modelled on
  * the same shape:
  *
- *   1. `vt_decoder_available()` creates a *real* decompression session
- *      for the requested codec and tears it down again — it reports the
- *      truth about the hardware, not about the OS version.
+ *   1. `vt_decoder_available()` asks the host whether it has a hardware
+ *      decoder for the codec (`VTIsHardwareDecodeSupported`) — it reports
+ *      the truth about the hardware, not about the OS version.
  *   2. `make_vt_decoder()` creates the session for real and returns an
  *      opened decoder; a failure returns nullptr so the registry falls
  *      through to the next backend.
+ *
+ * ## Why the session is *deferred*
+ *
+ * A hardware VideoToolbox decoder is created from a format description
+ * that must carry the stream's **own** parameter sets — the codec
+ * extension atom (`avcC` for H.264, `hvcC` for HEVC) is what tells the
+ * hardware which stream it is about to decode.  A description built from
+ * a bare codec type carries none, and the session creation then fails
+ * with `-8971` (`codecExtensionNotFoundErr`).
+ *
+ * The parameter sets are not known before the first access unit arrives,
+ * so the session is opened in one of two ways:
+ *
+ *   - the caller supplies the parameter sets → the session is created
+ *     immediately, from them;
+ *   - the caller has none yet → the open is **deferred**: it succeeds
+ *     (the host *does* have a hardware decoder for the codec — that is
+ *     what `VTIsHardwareDecodeSupported()` says), and `decode()` creates
+ *     the session from the first access unit that carries the parameter
+ *     sets.
+ *
+ * AV1 is the exception: it carries its sequence header inside the OBU
+ * stream, has no codec extension atom, and is therefore created eagerly
+ * from the codec-type description.
  *
  * ## The zero-copy contract
  *
@@ -79,8 +103,13 @@ constexpr std::uint32_t kProbeHeight = 240;
  *  The tree's own RTP packetizer carries AVCC (4-byte length-prefixed)
  *  NAL units, so the parameter sets are described with a 4-byte length
  *  field — which is what `CMVideoFormatDescriptionCreateFrom*ParameterSets`
- *  expects. */
-constexpr std::int32_t kAvccNalUnitHeaderLength = 4;
+ *  expects.
+ *
+ *  The type is `std::uint8_t` because that is what the CoreMedia
+ *  functions declare the parameter as; a wider type would be an
+ *  implicit narrowing conversion at the call site, and this tree builds
+ *  with warnings-as-errors. */
+constexpr std::uint8_t kAvccNalUnitHeaderLength = 4;
 
 // ---------------------------------------------------------------------------
 // VtDecoderSession — the wrapper around VTDecompressionSession.
@@ -98,20 +127,39 @@ public:
      *
      *  The session is created from a *format description*.  For H.264 /
      *  HEVC the description must carry the stream's own parameter sets
-     *  — a description built from a bare codec type carries none, and
-     *  the decoder then rejects the first frame.  The parameter sets are
-     *  therefore supplied when the caller has a bitstream; the probe
-     *  (which has no bitstream) uses the codec-type form, which is
-     *  enough to answer "does this host have a decoder for the codec".
+     *  — a description built from a bare codec type carries none, and a
+     *  **hardware** decoder rejects it with `-8971`
+     *  (`codecExtensionNotFoundErr`), because the codec extension atom
+     *  (`avcC` / `hvcC`) is what tells the hardware which stream it is
+     *  about to decode.
      *
-     *  @param sets  The parameter sets, or nullptr for the codec-type
-     *               form.
-     *  @return true on success. */
+     *  So there are two outcomes when the caller has no parameter sets
+     *  yet:
+     *
+     *  - the host has **no** hardware decoder for the codec → the open
+     *    fails, and the caller must not fall back to software (the
+     *    "hardware" claim would be false);
+     *  - the host **does** have one → the open *defers*: the session is
+     *    created later, from the parameter sets the first access unit
+     *    carries.  `decode()` performs that step.
+     *
+     *  @param sets  The parameter sets, or nullptr when the caller has
+     *               none yet.
+     *  @return true on success (including the deferred case). */
     bool open(vt_detail::Codec codec,
               const vt_detail::ParameterSets* sets = nullptr) noexcept {
-        close();
-
         codec_ = codec;
+
+        // The session itself is **not** torn down here.  The new one is
+        // built first and only replaces the old one once it is known
+        // good; otherwise a failed mid-stream re-creation would destroy
+        // a session that was still working.
+        //
+        // Whether the stream's *sequence* changed is not this function's
+        // business — the caller owns that, because the caller is the only
+        // party that knows whether the sets it passed in are the ones the
+        // stream is actually sending.
+        deferred_ = false;
 
         // ---- The format description ------------------------------------
         //
@@ -123,19 +171,18 @@ public:
         CMFormatDescriptionRef desc = nullptr;
         OSStatus st = noErr;
 
-        if (sets && sets->has_sps() && sets->has_pps()) {
+        const bool have_sets = sets && vt_detail::parameter_sets_complete(codec, *sets);
+        if (have_sets) {
             if (codec == vt_detail::Codec::kH265) {
                 // HEVC wants the VPS as well; without it the format
                 // description is incomplete.
-                if (!sets->vps.empty()) {
-                    const std::uint8_t* ptrs[3] = {
-                        sets->vps.data(), sets->sps.data(), sets->pps.data()};
-                    const std::size_t sizes[3] = {
-                        sets->vps.size(), sets->sps.size(), sets->pps.size()};
-                    st = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
-                        kCFAllocatorDefault, 3, ptrs, sizes,
-                        kAvccNalUnitHeaderLength, nullptr, &desc);
-                }
+                const std::uint8_t* ptrs[3] = {
+                    sets->vps.data(), sets->sps.data(), sets->pps.data()};
+                const std::size_t sizes[3] = {
+                    sets->vps.size(), sets->sps.size(), sets->pps.size()};
+                st = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                    kCFAllocatorDefault, 3, ptrs, sizes,
+                    kAvccNalUnitHeaderLength, nullptr, &desc);
             } else {
                 const std::uint8_t* ptrs[2] = {sets->sps.data(),
                                                sets->pps.data()};
@@ -146,9 +193,9 @@ public:
                     kAvccNalUnitHeaderLength, &desc);
             }
         }
-        if (!desc) {
-            // The codec-type form (the probe's path, and the fallback
-            // when the stream carried no parameter sets).
+        if (!desc && codec == vt_detail::Codec::kAv1) {
+            // AV1 has no codec extension atom to carry, so the
+            // codec-type form is the whole description.
             st = CMVideoFormatDescriptionCreate(
                 kCFAllocatorDefault,
                 vt_detail::cm_codec_type(codec),
@@ -156,6 +203,29 @@ public:
                 static_cast<std::int32_t>(kProbeHeight),
                 nullptr,
                 &desc);
+        }
+        if (!desc && !have_sets && codec != vt_detail::Codec::kAv1) {
+            // ---- The deferred case ---------------------------------------
+            //
+            // No parameter sets, so no codec extension atom, so a
+            // hardware decoder would refuse the session.  The host's
+            // capability is asked instead: if it has a hardware decoder
+            // for the codec, the session is created from the stream's
+            // own parameter sets when the first access unit arrives.
+            if (!vt_detail::hardware_decode_supported(codec)) {
+                NIMRTC_LOG_WARN("vt: no hardware decoder for "
+                                << vt_detail::codec_short_name(codec)
+                                << " on this host, and the stream carried no "
+                                   "parameter sets to build one from");
+                return false;
+            }
+            // There is no session to speak the stream yet, so any session
+            // left over from a previous sequence is released here.
+            release_session();
+            deferred_ = true;
+            NIMRTC_LOG_INFO("vt: the decompression session is deferred until "
+                            "the stream's parameter sets arrive");
+            return true;
         }
         if (st != noErr || !desc) {
             NIMRTC_LOG_WARN("vt: the format description could not be built "
@@ -200,46 +270,72 @@ public:
         record.decompressionOutputCallback = &VtDecoderSession::output_callback;
         record.decompressionOutputRefCon  = this;
 
+        // The new session is built into a *local* first: when the
+        // parameter sets changed mid-stream, the session that is already
+        // working must survive a failed re-creation.  Destroying it
+        // first would turn a recoverable hiccup into a dead decoder.
+        VTDecompressionSessionRef new_session = nullptr;
         st = VTDecompressionSessionCreate(kCFAllocatorDefault, desc,
                                           decoder_spec, nullptr, &record,
-                                          &session_);
+                                          &new_session);
         CFRelease(decoder_spec);
 
-        if (st != noErr || !session_) {
+        if (st != noErr || !new_session) {
             NIMRTC_LOG_WARN("vt: VTDecompressionSessionCreate failed (os="
                             << static_cast<int>(st) << ")");
-            session_ = nullptr;
             CFRelease(desc);
             return false;
         }
 
-        // The format description the session was built from — the sample
-        // buffers handed to the decoder must carry the *same* one, or
-        // the decoder rejects the frame.
+        // The new session is good — the old one (if any) can go.
+        release_session();
+        session_     = new_session;
         format_desc_ = desc;
+        session_failed_ = false;
 
         NIMRTC_LOG_INFO("vt: decompression session created");
         return true;
     }
 
     void close() noexcept {
-        if (session_) {
-            VTDecompressionSessionInvalidate(session_);
-            CFRelease(session_);
-            session_ = nullptr;
-        }
-        if (format_desc_) {
-            CFRelease(format_desc_);
-            format_desc_ = nullptr;
-        }
+        release_session();
         if (decoded_) {
             CVPixelBufferRelease(decoded_);
             decoded_ = nullptr;
         }
         desc_from_parameter_sets_ = false;
+        session_sets_              = vt_detail::ParameterSets{};
+        deferred_                  = false;
+        session_failed_            = false;
     }
 
     [[nodiscard]] bool is_open() const noexcept { return session_ != nullptr; }
+
+    /** True iff the host has a hardware decoder for this codec.
+     *
+     *  Before the session exists (the deferred case) this is the
+     *  capability probe's answer; afterwards it is "a hardware session
+     *  exists", because the session was created with
+     *  `RequireHardwareAcceleratedVideoDecoder = true` — the software
+     *  decoder would have been refused. */
+    [[nodiscard]] bool hardware_capable() const noexcept {
+        return session_ != nullptr || deferred_;
+    }
+
+    /** True iff the session is still waiting for the stream's parameter
+     *  sets. */
+    [[nodiscard]] bool is_deferred() const noexcept { return deferred_; }
+
+    /** True iff the last attempt to create the session from the
+     *  stream's own parameter sets failed.
+     *
+     *  A frame that arrived *before* the parameter sets is "not ready"
+     *  — nothing was rejected, the engine just has to wait for a key
+     *  frame.  A frame that arrived *with* them and still could not be
+     *  decoded is a real decode error, and is counted as one. */
+    [[nodiscard]] bool session_creation_failed() const noexcept {
+        return session_failed_;
+    }
 
     /** Decode one compressed frame.
      *
@@ -249,7 +345,92 @@ public:
      *  @return true on success. */
     bool decode(const std::uint8_t* data, std::size_t size,
                 CVPixelBufferRef& out) noexcept {
-        if (!session_ || !data || size == 0) return false;
+        if (!data || size == 0) return false;
+
+        // ---- The parameter sets ----------------------------------------
+        //
+        // The format description a VideoToolbox decoder needs carries
+        // the stream's own parameter sets.  The session is opened
+        // *before* the first frame arrives (the factory contract is
+        // "created, then opened"), so the first frame may carry the
+        // parameter sets that the session does not have yet.
+        //
+        // Two cases:
+        //
+        //  - the session does not exist yet because the open was
+        //    **deferred** (the host has a hardware decoder, but there
+        //    were no parameter sets to build the codec extension atom
+        //    from) — the session is created now, from this frame;
+        //  - the session exists but was built without the stream's
+        //    parameter sets — it is re-created with them.
+        vt_detail::ParameterSets sets;
+        if (codec_ != vt_detail::Codec::kAv1) {
+            vt_detail::extract_parameter_sets(codec_, data, size, sets);
+            const bool have_sets = vt_detail::parameter_sets_complete(codec_, sets);
+
+            if (!session_) {
+                // The session does not exist yet: the open was
+                // **deferred** (the host has a hardware decoder, but there
+                // were no parameter sets to build the codec extension
+                // atom from).  It is created now, from this access unit.
+                if (!deferred_) return false;
+                if (!have_sets) {
+                    // The session is waiting for the stream's parameter
+                    // sets; this access unit does not carry them.  The
+                    // frame is dropped — the engine will ask for a key
+                    // frame, and the next key frame carries the sets.
+                    NIMRTC_LOG_WARN("vt: the access unit carries no "
+                                    "parameter sets yet; waiting for a key "
+                                    "frame");
+                    return false;
+                }
+                // `this->open(...)`, not `session_.open(...)`: the class
+                // has a *data* member called `session_` (the
+                // `VTDecompressionSessionRef`), so `session_.open` would
+                // resolve to the pointer member and Clang rejects it
+                // ("member reference type 'VTDecompressionSessionRef'
+                // is a pointer; did you mean to use '->'?").
+                if (!this->open(codec_, &sets)) {
+                    // The session could not be created from the stream's
+                    // *own* parameter sets.  The failure is remembered so
+                    // the decoder reports it as a decode error (rather
+                    // than as "not ready") — but the deferred flag is
+                    // kept, so the next access unit that carries the
+                    // sets gets another chance: the failure may have
+                    // been transient, and a permanently broken stream
+                    // fails the same way on every access unit anyway.
+                    deferred_      = true;
+                    session_failed_ = true;
+                    NIMRTC_LOG_ERROR("vt: the decoder session could not be "
+                                     "created from the stream's parameter sets");
+                    return false;
+                }
+                desc_from_parameter_sets_ = true;
+                session_sets_              = sets;
+            } else if (have_sets) {
+                // The stream may switch sequence mid-flight (a new
+                // geometry, a new profile).  The session's format
+                // description describes the *old* sequence, so the
+                // session has to be re-created when the sets change.
+                const bool changed = !desc_from_parameter_sets_ ||
+                                     !vt_detail::parameter_sets_equal(sets, session_sets_);
+                if (changed) {
+                    if (!this->open(codec_, &sets)) {
+                        // The old session survives — `open()` only
+                        // replaces it once the new one is known good —
+                        // but it speaks the *old* sequence, so it cannot
+                        // decode this access unit.
+                        NIMRTC_LOG_ERROR("vt: the decoder session could not be "
+                                         "re-created with the updated parameter "
+                                         "sets");
+                        return false;
+                    }
+                    desc_from_parameter_sets_ = true;
+                    session_sets_              = sets;
+                }
+            }
+        }
+        if (!session_) return false;
 
         // ---- The framing conversion -----------------------------------
         //
@@ -279,34 +460,6 @@ public:
             NIMRTC_LOG_ERROR("vt: the bitstream is neither Annex-B nor a "
                              "well-formed length-prefixed stream");
             return false;
-        }
-
-        // ---- The parameter sets ----------------------------------------
-        //
-        // The format description a VideoToolbox decoder needs carries
-        // the stream's own parameter sets.  The session is opened
-        // *before* the first frame arrives (the factory contract is
-        // "created, then opened"), so the first frame may carry the
-        // parameter sets that the session does not have yet — in that
-        // case the session is re-created with them.
-        vt_detail::ParameterSets sets;
-        if (codec_ != vt_detail::Codec::kAv1) {
-            vt_detail::extract_parameter_sets(codec_, data, size, sets);
-            if (!desc_from_parameter_sets_ && sets.has_sps() && sets.has_pps()) {
-                // `this->open(...)`, not `session_.open(...)`: the class
-                // has a *data* member called `session_` (the
-                // `VTDecompressionSessionRef`), so `session_.open` would
-                // resolve to the pointer member and Clang rejects it
-                // ("member reference type 'VTDecompressionSessionRef'
-                // is a pointer; did you mean to use '->'?").
-                if (!this->open(codec_, &sets)) {
-                    NIMRTC_LOG_ERROR("vt: the decoder session could not be "
-                                     "re-created with the stream's parameter "
-                                     "sets");
-                    return false;
-                }
-                desc_from_parameter_sets_ = true;
-            }
         }
 
         // ---- The sample buffer -----------------------------------------
@@ -396,6 +549,24 @@ public:
     }
 
 private:
+    /** Release the decompression session and its format description.
+     *
+     *  The two are released together because the sample buffers handed to
+     *  the decoder must carry the *same* format description the session
+     *  was built from — so a description without a session is useless,
+     *  and a session without its description is a dangling reference. */
+    void release_session() noexcept {
+        if (session_) {
+            VTDecompressionSessionInvalidate(session_);
+            CFRelease(session_);
+            session_ = nullptr;
+        }
+        if (format_desc_) {
+            CFRelease(format_desc_);
+            format_desc_ = nullptr;
+        }
+    }
+
     /** The output callback VideoToolbox delivers the decoded picture to. */
     static void output_callback(void* refcon,
                                 void* /*sourceFrameRefCon*/,
@@ -425,6 +596,20 @@ private:
     /// parameter sets (the format description the frames are decoded
     /// with).
     bool                      desc_from_parameter_sets_ = false;
+    /// The parameter sets the current session was built from — the
+    /// reference the next access unit's sets are compared against, to
+    /// detect a mid-stream sequence switch.
+    vt_detail::ParameterSets session_sets_{};
+    /// True while the session is still waiting for the stream's
+    /// parameter sets: the host has a hardware decoder for the codec,
+    /// but no format description can be built without the codec
+    /// extension atom the parameter sets carry.
+    bool                      deferred_ = false;
+    /// True when the session creation from the stream's own parameter
+    /// sets has failed.  The failure is a *decode error* (the stream is
+    /// not decodable by this hardware), but it does not stop the retry:
+    /// a transient failure must not kill the decoder for good.
+    bool                      session_failed_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -521,6 +706,15 @@ public:
         CVPixelBufferRef pixel_buffer = nullptr;
         if (!session_.decode(encoded.payload.data(), encoded.payload.size(),
                              pixel_buffer) || !pixel_buffer) {
+            // A frame that arrived *before* the stream's parameter sets
+            // is not a decoding failure: the session is still waiting
+            // for them, and the engine's keyframe request is what
+            // brings them.  Counting it as an error would make a
+            // perfectly healthy stream look broken.
+            if (session_.is_deferred() &&
+                !session_.session_creation_failed()) {
+                return plugins::kErrNotReady;
+            }
             stats_.decode_errors++;
             return plugins::kErrCorrupt;
         }
@@ -581,9 +775,16 @@ public:
     // The decoder can hand the `CVPixelBufferRef` the session produced
     // straight to the caller, so the picture never crosses the PCIe
     // bus into host memory.
+    //
+    // The answer is the *capability*, not "a session happens to exist
+    // right now": the session is created from the stream's first
+    // access unit, which may be later than the engine's `open()`.  A
+    // decoder that will produce a native surface says so even before
+    // that surface exists — otherwise the engine would pick the CPU
+    // staging path for a decoder that never stages anything.
     bool supports_zero_copy_decode() const noexcept override {
         std::lock_guard<std::mutex> lock(mtx_);
-        return opened_ && session_.is_open();
+        return opened_ && session_.hardware_capable();
     }
 
     plugins::Status decode_zero_copy(const plugins::EncodedVideoFrame& encoded,
@@ -594,6 +795,13 @@ public:
         CVPixelBufferRef pixel_buffer = nullptr;
         if (!session_.decode(encoded.payload.data(), encoded.payload.size(),
                              pixel_buffer) || !pixel_buffer) {
+            // The same rule as the CPU path: a frame that arrived before
+            // the stream's parameter sets is "not ready", not a decode
+            // error.
+            if (session_.is_deferred() &&
+                !session_.session_creation_failed()) {
+                return plugins::kErrNotReady;
+            }
             stats_.decode_errors++;
             return plugins::kErrCorrupt;
         }
@@ -640,7 +848,13 @@ public:
 
     bool is_hardware_accelerated() const noexcept override {
         std::lock_guard<std::mutex> lock(mtx_);
-        return opened_ && session_.is_open();
+        // The *capability*, not "a session happens to exist right now":
+        // the session is created from the stream's first access unit,
+        // which may be later than the engine's `open()`.  A deferred
+        // session is still a hardware one — it is created with
+        // `RequireHardwareAcceleratedVideoDecoder = true`, so the
+        // software decoder would have been refused.
+        return opened_ && session_.hardware_capable();
     }
 
 private:
@@ -789,10 +1003,13 @@ bool vt_decoder_available(VtCodec codec) noexcept {
         return false;
     }
 
-    // The probe creates a *real* decompression session and tears it down
-    // again — the honest answer about the hardware.
-    vt_backend::VtDecoderSession probe;
-    return probe.open(c);
+    // The host's *capability* is the answer, not a probe session: a
+    // hardware VideoToolbox decoder refuses a format description that
+    // carries no codec extension atom, and only the stream's own
+    // parameter sets can produce one.  A probe that created a session
+    // would therefore report "no hardware decoder" on every Mac that
+    // has one — and the hardware path would be dead everywhere.
+    return vt_detail::hardware_decode_supported(c);
 #else
     (void)c;
     return false;

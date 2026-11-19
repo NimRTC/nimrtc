@@ -9,6 +9,47 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.2.0`.
 
+- **The macOS hardware video decoder existed, but could never open a
+  session (2026-11-19).**
+  `vt_decoder_available()` probed the host by creating a real
+  `VTDecompressionSession` and tearing it down — the honest question for
+  the *encoder*, whose compression session needs no stream context.  The
+  *decoder* cannot be probed that way: a hardware VideoToolbox decoder
+  rejects a format description that carries no **codec extension atom**
+  (`avcC` for H.264, `hvcC` for HEVC) with `-8971`
+  (`codecExtensionNotFoundErr`), and only the *stream's own* parameter
+  sets can produce one.  So the probe reported "this host has no
+  hardware decoder" on every Mac that in fact had one — and the
+  hardware decode path was dead everywhere, silently, while the
+  capability table claimed the row existed.
+
+  Two changes fix it:
+
+  - **The capability query is now a capability query.**
+    `VTIsHardwareDecodeSupported()` answers "does this host have a
+    hardware decoder for the codec?" without a format description, which
+    is the only way to ask it.  `vt_decoder_available()` asks that, and
+    `vt_detail::hardware_decode_supported()` exposes it to the rest of
+    the module.
+  - **The session creation is deferred to the first access unit.**
+    `VtDecoderSession::open()` succeeds when the host has a hardware
+    decoder but the stream has not yet delivered its parameter sets; the
+    session is then created from the first access unit that carries
+    them (`CMVideoFormatDescriptionCreateFromH264ParameterSets` /
+    `...FromHEVCParameterSets`).  Access units that arrive before the
+    parameter sets are dropped rather than failing the decoder, and a
+    mid-stream parameter-set change re-creates the session — the format
+    description the session holds describes the *old* sequence.
+
+  AV1 is unaffected and stays eager: it carries its sequence header
+  inside the OBU stream, has no codec extension atom, and is created
+  from the codec-type description.
+
+  The rule that decides what a format description needs — the SPS and
+  the PPS for H.264, the VPS as well for HEVC, nothing for AV1 — is a
+  *pure* predicate (`vt_detail::parameter_sets_complete()`), so it is
+  unit-tested on every host rather than only on a Mac.
+
 - **A shell expansion inside `${{ }}` can stop an entire workflow from
   running, and nothing local says a word (2026-11-19).**
   The v1.2.0 follow-up added to `release.yml`'s tag-ancestry step:

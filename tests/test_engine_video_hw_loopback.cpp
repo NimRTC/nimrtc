@@ -42,12 +42,16 @@
  * decoder's own reason, rather than failing a test that is really
  * asserting "this machine has no hardware H.264 decoder".
  *
- * (On macOS / Apple Silicon the hardware *decoder* is genuinely
- * unavailable today: `VTDecompressionSessionCreate` rejects a format
+ * (On macOS / Apple Silicon the hardware *decoder* used to be
+ * unavailable: `VTDecompressionSessionCreate` rejects a format
  * description built from a bare codec type with `os=-8971`
  * (`codecExtensionNotFoundErr`), because such a description carries no
- * `avcC` atom.  The encoder is fine; the decoder row is not.  The
- * dedicated hardware job is where the end-to-end claim is gated.)
+ * `avcC` atom.  The decoder now asks
+ * `VTIsHardwareDecodeSupported()` whether the host has a hardware
+ * decoder at all, and creates the session from the *stream's own*
+ * parameter sets when they arrive — so the row is live there too.  The
+ * encoder is unaffected either way.  The dedicated hardware job is
+ * where the end-to-end claim is gated.)
  *
  * ## Why a hardware *encode* and any decode is enough
  *

@@ -255,6 +255,138 @@ TEST(VtCommon, ParameterSetExtractionFailsWithoutAnSps) {
 }
 
 // ---------------------------------------------------------------------------
+// The parameter-set completeness rule
+//
+// This is the rule the VideoToolbox *decoder* depends on: a hardware
+// decompression session is created from a format description, and for
+// H.264 / HEVC that description has to carry the codec extension atom
+// (`avcC` / `hvcC`) — which is built from the stream's own parameter
+// sets.  Without them the session creation fails with `-8971`
+// (`codecExtensionNotFoundErr`).
+//
+// The rule is pure, so it is verified here on *every* host — including
+// the ones without VideoToolbox.  Otherwise the only thing that could
+// ever catch a regression in it is a Mac.
+// ---------------------------------------------------------------------------
+
+TEST(VtCommon, H264NeedsSpsAndPps) {
+    vt::ParameterSets sets;
+
+    // Nothing at all.
+    EXPECT_FALSE(vt::parameter_sets_complete(vt::Codec::kH264, sets));
+
+    // The SPS alone is not enough.
+    sets.sps = {0x67, 0x42};
+    EXPECT_FALSE(vt::parameter_sets_complete(vt::Codec::kH264, sets));
+
+    // The PPS alone is not enough either.
+    sets = vt::ParameterSets{};
+    sets.pps = {0x68, 0xCE};
+    EXPECT_FALSE(vt::parameter_sets_complete(vt::Codec::kH264, sets));
+
+    // Both — now it is complete.
+    sets.sps = {0x67, 0x42};
+    EXPECT_TRUE(vt::parameter_sets_complete(vt::Codec::kH264, sets));
+}
+
+TEST(VtCommon, HevcAlsoNeedsTheVps) {
+    vt::ParameterSets sets;
+    sets.sps = {0x42, 0x02};
+    sets.pps = {0x44, 0x03};
+
+    // Without the VPS the `hvcC` atom is incomplete.
+    EXPECT_FALSE(vt::parameter_sets_complete(vt::Codec::kH265, sets));
+
+    sets.vps = {0x40, 0x01};
+    EXPECT_TRUE(vt::parameter_sets_complete(vt::Codec::kH265, sets));
+}
+
+TEST(VtCommon, Av1HasNoOutOfBandParameterSets) {
+    // AV1 carries its sequence header inside the OBU stream, so there
+    // is never an out-of-band set to complete — and the AV1 path must
+    // therefore never ask the question.
+    vt::ParameterSets sets;
+    sets.sps = {0x00};
+    sets.pps = {0x00};
+    EXPECT_FALSE(vt::parameter_sets_complete(vt::Codec::kAv1, sets));
+}
+
+TEST(VtCommon, ParameterSetComparisonIsExact) {
+    vt::ParameterSets a;
+    a.sps = {0x67, 0x42};
+    a.pps = {0x68, 0xCE};
+
+    // An identical set compares equal.
+    vt::ParameterSets b = a;
+    EXPECT_TRUE(vt::parameter_sets_equal(a, b));
+
+    // A different SPS is a different sequence.
+    b.sps = {0x67, 0x43};
+    EXPECT_FALSE(vt::parameter_sets_equal(a, b));
+
+    // A different PPS too.
+    b = a;
+    b.pps = {0x68, 0xCF};
+    EXPECT_FALSE(vt::parameter_sets_equal(a, b));
+
+    // The VPS participates as well (the HEVC case).
+    vt::ParameterSets h1;
+    h1.vps = {0x40, 0x01};
+    h1.sps = {0x42, 0x02};
+    h1.pps = {0x44, 0x03};
+    vt::ParameterSets h2 = h1;
+    EXPECT_TRUE(vt::parameter_sets_equal(h1, h2));
+    h2.vps = {0x40, 0x09};
+    EXPECT_FALSE(vt::parameter_sets_equal(h1, h2));
+}
+
+TEST(VtCommon, ParameterSetComparisonDistinguishesEmptyFromAbsent) {
+    const vt::ParameterSets empty{};
+    vt::ParameterSets with_one;
+    with_one.sps = {0x67};
+    EXPECT_FALSE(vt::parameter_sets_equal(empty, with_one));
+    EXPECT_FALSE(vt::parameter_sets_equal(with_one, empty));
+    EXPECT_TRUE(vt::parameter_sets_equal(empty, empty));
+}
+
+// ---------------------------------------------------------------------------
+// The hardware-decode capability query
+//
+// `VTIsHardwareDecodeSupported()` answers "does this host have a hardware
+// decoder for the codec?" without a format description — which is the
+// only way to ask it, because a hardware decoder refuses a description
+// that carries no codec extension atom.
+//
+// Off-Apple there is no VideoToolbox, so the answer is `false`.
+// ---------------------------------------------------------------------------
+
+TEST(VtCommon, HardwareDecodeSupportIsFalseOffApple) {
+#if !defined(__APPLE__)
+    for (const auto codec : {vt::Codec::kH264, vt::Codec::kH265, vt::Codec::kAv1}) {
+        EXPECT_FALSE(vt::hardware_decode_supported(codec));
+    }
+#else
+    // On Apple the answer is the host's own — it may legitimately be
+    // `true` (most Macs) or `false` (a virtualised host).  What *can*
+    // be asserted is the invariant that ties the two together: the
+    // availability probe must consult the capability query, not a probe
+    // session.  A probe session would need a format description, and
+    // the only way to build one is from the stream's parameter sets —
+    // which is exactly what made the probe report "no hardware
+    // decoder" on every Mac that had one.
+    const auto check = [](vt::Codec detail, nimrtc::nvcodec::VtCodec public_codec) {
+        const bool supported = vt::hardware_decode_supported(detail);
+        const bool old_enough = vt::os_at_least(vt::min_macos_version(detail));
+        EXPECT_EQ(supported && old_enough,
+                  nimrtc::nvcodec::vt_decoder_available(public_codec));
+    };
+    check(vt::Codec::kH264, nimrtc::nvcodec::VtCodec::kH264);
+    check(vt::Codec::kH265, nimrtc::nvcodec::VtCodec::kH265);
+    check(vt::Codec::kAv1, nimrtc::nvcodec::VtCodec::kAv1);
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // Annex-B scanning
 // ---------------------------------------------------------------------------
 

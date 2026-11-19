@@ -508,6 +508,13 @@ public:
         // address of the temporary `converted.size()` cannot be taken
         // ("cannot take the address of an rvalue"), and the array must
         // outlive the call.
+        //
+        // The timing count is 1, not 0: `numSampleTimingEntries` is the
+        // number of entries in the array that is being passed, and the
+        // array has one.  CoreMedia accepts 0, 1 or `numSamples` -- and
+        // 0 with a non-null array says "this buffer carries no timing",
+        // which is not what the array says.  Apple's own one-frame
+        // video example passes 1, 1, 1.
         const std::size_t sample_size = converted.size();
         const CMSampleTimingInfo timing = {
             .duration = CMTimeMake(1, 1000),
@@ -515,7 +522,7 @@ public:
             .decodeTimeStamp = kCMTimeInvalid,
         };
         st = CMSampleBufferCreate(kCFAllocatorDefault, block, true, nullptr,
-                                  nullptr, desc, 1, 0, &timing, 1,
+                                  nullptr, desc, 1, 1, &timing, 1,
                                   &sample_size, &sample);
         if (owns_desc) CFRelease(desc);
         CFRelease(block);

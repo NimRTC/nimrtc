@@ -877,7 +877,6 @@ public:
         // ---- TEMP DIAGNOSTIC --------------------------------------------
         {
             const std::uint8_t* sy = cpu->plane(0);
-            const std::uint32_t ss = static_cast<std::uint32_t>(cpu->layout().strides[0]);
             std::printf("[vt-enc] input luma row0:");
             for (std::uint32_t col = 0; col < w; col += w / 16u) {
                 std::printf(" %u:%u", col, static_cast<unsigned>(sy[col]));

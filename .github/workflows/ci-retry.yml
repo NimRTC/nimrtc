@@ -30,55 +30,69 @@
 # before it touches one, and the two signatures are disjoint:
 #
 #     starved   steps == 0  AND  runner_name == ""   -> re-run
-#     genuine   the job ran and failed                -> left alone
+#     genuine   the job ran and failed/cancelled     -> left alone
 #
-# That distinction has been checked against real runs of this
-# repository:
+# The distinction is the same for `failure` and for `cancelled`.  Over
+# the 60 cancelled runs measured on 2026-11-19 there were 124
+# cancelled jobs that *had* a runner and had run steps (a
+# `cancel-in-progress: true` supersede, or an operator stop) against
+# 25 that never reached a machine (starvation).  Blanket-retrying
+# `cancelled` -- the review's suggestion -- would re-run the first 124
+# and resurrect runs the repository has already moved past.
 #
-#     run 43938323684  macos-clang / arm64   steps=0   runner=""   -> starved
-#     run 43877514623  macos-clang / arm64   steps=19  runner set -> genuine
-#     run 43864579652  linux-sanitizers / asan-ubsan  steps=11     -> genuine
+# Why this workflow was red itself (fixed 2026-11-19)
+# ----------------------------------------------------
+#
+# Nine of the ten red `ci-retry` runs between 11-17 and 11-19 failed
+# with `403 Forbidden` from the re-run endpoint, one with
+# `HTTP 502: Bad Gateway`.  Neither was a misclassification:
+#
+#   * The 403 is a race.  `workflow_run` fires on the *run*
+#     transition, but a concurrency cancel tears jobs down
+#     asynchronously, and the run's own state is a snapshot taken at a
+#     different moment from its jobs'.  Run 44439751037 was still
+#     `in_progress` at 01:49:22Z when `ci-retry` fired and tried to
+#     re-run its attempt-1 jobs; the platform refuses to re-run a job
+#     whose run is still running.  The script now polls until the run
+#     reports `completed`, and if it never settles it says so and
+#     exits 0 (see "The loop guard" below) rather than trying anyway.
+#   * The 502 is a platform hiccup.  It *is* retryable, and the script
+#     now retries 5xx/429 with exponential backoff.  403 is
+#     deliberately not retried: the same call would get the same
+#     answer.
 #
 # The loop guard
 # --------------
 #
-# A retry can itself be starved.  The script therefore only re-runs a
-# run's **first** attempt (`--max-attempt 1`): if the second attempt is
-# starved too, the platform is having a sustained outage and more
-# retries only burn runner minutes.  The run attempt counter is
-# reliable for this -- a job-level re-run increments it, which was
-# verified against the API (run 43938323684 went from attempt 1 to
-# attempt 2 after a job-level re-run).
+# A retry can itself be starved.  The guard used to be the run's
+# `run_attempt`: any attempt above 1 was refused.  That was wrong in
+# both directions.  Run 44306330102 had the macOS leg starved in
+# attempt 1, was re-run, and the SAME leg starved again in attempt 2 --
+# the old guard refused the second retry and the merge gate stayed red
+# for 39 minutes.  A job-level re-run also bumps `run_attempt` for
+# *every* job, so the counter said "this run has had its retry" when
+# the truth was "this job has not".
 #
-# Because the re-run creates a new attempt, that attempt also fires
-# `workflow_run`.  The attempt counter is what makes that safe: the
-# second attempt is reported, not retried.
+# The guard is now per job name: `--max-retries 1` means a job name
+# may be re-run once on top of the attempt it was first seen starved
+# in, and a third starvation is reported as a sustained outage instead
+# of retried forever.  A job that *starts running* on its second try
+# stops being starved and needs no bookkeeping.
 #
 # Scope
 # -----
 #
-# `ci`, `ci-e2e`, `ci-fast` and `release` -- every workflow whose jobs
-# can leave the merge gate or a release cut red.  `soak` is the only
-# workflow left out, and not because a release measurement should not
-# be retried:
-#
-#   * Both soak jobs carry `continue-on-error: true` (the verdict
-#     lives in the evidence record, not in the job status -- see the
-#     comment above `continue-on-error` in `soak.yml`).  A job that
-#     ran and failed therefore still reports `success`, so the
-#     classifier would classify it as `fine` and never touch it.  The
-#     exclusion is about the *starved* case only.
-#   * A starved soak job would be safe to re-run, but re-running it
-#     does not help: the soak window is a statement about
-#     *calendar* days, and `tools/run_soak.py` counts a day green only
-#     when it carries a PASS record measured on the candidate tree.
-#     A retry that lands on the next UTC day produces a record for a
-#     *different* day, which is a second data point rather than a
-#     replacement -- and a day whose only record is INCONCLUSIVE
-#     breaks the streak just as a missing day does.
-#
-# In short: the soak is a measurement, and re-measuring a day is not
-# the same act as re-running a build.
+# `ci`, `ci-e2e` and `release` -- the workflows whose jobs can leave
+# the merge gate or a release cut red.  `ci-fast` is deliberately out:
+# measured over the last 1200 runs, it triggered 1 of the 498 ci-retry
+# runs, and `windows / fast` is not a required check (`ci-fast.yml`
+# does not run on `main` at all).  Watching it bought noise, not
+# failures caught.  `soak` is out because both of its jobs carry
+# `continue-on-error: true`, so a job that ran and failed still
+# reports `success` and the classifier would never touch it; and
+# because the soak window is a statement about *calendar* days, a
+# retry landing on the next UTC day is a second data point rather than
+# a replacement.
 #
 # Why `release` belongs here
 # --------------------------
@@ -141,9 +155,12 @@ on:
   #
   # NB: `workflow_run` only fires for workflows that exist on the
   # default branch -- which is why this file has to be merged before it
-  # can act on anything.
+  # can act on anything.  It also fires *before* the run is fully
+  # settled in the concurrency-cancel case (see the 403 note above),
+  # which is why the script polls for `completed` rather than trusting
+  # the event.
   workflow_run:
-    workflows: [ci, ci-e2e, ci-fast, release]
+    workflows: [ci, ci-e2e, release]
     types: [completed]
 
   # Manual escape hatch: re-run the retry logic against any run, on
@@ -170,7 +187,7 @@ jobs:
   retry:
     name: ci-retry / starved jobs
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     # Only a *failed* run is worth inspecting.  Without this guard the
     # workflow would claim a runner after every green CI run -- the
     # workflow_run event carries no conclusion filter of its own, so
@@ -178,6 +195,8 @@ jobs:
     #
     # `cancelled` counts as failure: a run that was cancelled may have
     # been cancelled because one of its jobs was starved of a runner.
+    # The classifier, not this guard, decides whether a cancelled job
+    # was starved or superseded.
     #
     # The manual dispatch path is exempt: it has no workflow_run payload
     # at all (the conclusion is null), and the operator named the run
@@ -219,10 +238,16 @@ jobs:
           fi
 
           echo "inspecting run ${TARGET_RUN_ID}"
+          # `--wait-polls 20 --wait-interval 15` gives the platform up to
+          # five minutes to settle the run before any re-run is attempted.
+          # The 403 on 2026-11-19 came from firing while the run was still
+          # `in_progress`; 15 minutes of job timeout leaves that headroom.
           python3 tools/ci_retry_runner.py \
             --repo "${GITHUB_REPOSITORY}" \
             --run-id "${TARGET_RUN_ID}" \
-            --max-attempt 1 \
+            --max-retries 1 \
+            --wait-polls 20 \
+            --wait-interval 15 \
             | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Surface the verdict
@@ -237,8 +262,8 @@ jobs:
             echo "Run \`${TARGET_RUN_ID:-n/a}\` inspected."
             echo ""
             echo "Only jobs that never received a runner are re-run. A job"
-            echo "that ran and failed is left alone, because that failure"
-            echo "belongs to the tree."
+            echo "that ran and failed (or was cancelled after it started)"
+            echo "is left alone, because that failure belongs to the tree."
           } >> "${GITHUB_STEP_SUMMARY}"
         env:
           TARGET_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}

@@ -646,6 +646,97 @@ def self_test() -> int:
     expect(is_stale({"head_sha": "new"}, "") is True,
            "a run whose current head cannot be established must be stale")
 
+    # --- The two guards are ANDed, not alternatives ----------------------
+    # The staleness guard (this commit's predecessor) and the per-job
+    # budget were written against different defects, and both must hold.
+    # They were merged into one `process()` by resolving a real conflict,
+    # where the plausible mistake is to keep one branch and drop the
+    # other.  The assertion runs the whole `process()` because that is
+    # where the ordering lives: a stale run must not be retried *even
+    # when the budget has room*, which is only observable end to end.
+    #
+    # Without it, deleting the staleness guard leaves every other case
+    # green -- the guard's own unit tests call `is_stale` directly.
+    output = []
+    retried = []
+    see = {}
+    original = {name: globals()[name] for name in
+                ("fetch_run", "wait_until_completed", "fetch_run_jobs",
+                 "current_head_sha", "retries_spent", "rerun_job")}
+    globals()["fetch_run"] = lambda *a, **kw: see["run"]
+    globals()["wait_until_completed"] = lambda *a, **kw: see["run"]
+    globals()["fetch_run_jobs"] = lambda *a, **kw: [
+        _job(name="macos-clang / arm64", conclusion="cancelled")]
+    globals()["current_head_sha"] = lambda *a, **kw: "new"
+    # The budget has room for five retries; this job has spent none.
+    globals()["retries_spent"] = lambda *a, **kw: {}
+    globals()["rerun_job"] = lambda *a, **kw: retried.append(a)
+    try:
+        see["run"] = {"status": "completed", "conclusion": "failure",
+                      "head_sha": "old", "head_branch": "main",
+                      "event": "push", "pull_requests": [],
+                      "run_attempt": 1}
+        stale_code = process("o/r", 1, "t", dry_run=False, max_retries=5,
+                             wait_polls=1, wait_interval=0,
+                             sleep=lambda s: None, log=output.append)
+        stale_retried = len(retried)
+
+        # The control: the same run at the head *is* retried.  Without it,
+        # a `process` that never retries anything would pass the case
+        # above.
+        see["run"] = dict(see["run"], head_sha="new")
+        head_code = process("o/r", 1, "t", dry_run=False, max_retries=5,
+                            wait_polls=1, wait_interval=0,
+                            sleep=lambda s: None, log=output.append)
+        head_retried = len(retried) - stale_retried
+    finally:
+        globals().update(original)
+
+    expect(stale_code == 0 and stale_retried == 0,
+           "a stale run must not be retried even when the per-job budget "
+           "has room -- the staleness guard runs ahead of the budget loop")
+    expect(head_code == 0 and head_retried == 1,
+           "the control must retry: the current head run, with budget, is "
+           "eligible -- otherwise the case above proves nothing")
+    expect(any("stale" in line for line in output),
+           "the refusal must say *why* it refused, not just do nothing")
+
+    # --- The budget still bites on a run that *is* current ---------------
+    # The case above pins the staleness guard.  It cannot pin the budget:
+    # with `retries_spent` returning {} the budget never fires, so a
+    # `process` that had dropped the budget loop entirely would still
+    # pass it.  This case spends the budget for the job about to be
+    # selected and asserts the retry is refused *for that reason*.
+    output = []
+    retried = []
+    see["run"] = {"status": "completed", "conclusion": "failure",
+                  "head_sha": "new", "head_branch": "main",
+                  "event": "push", "pull_requests": [],
+                  "run_attempt": 1}
+    original = {name: globals()[name] for name in
+                ("fetch_run", "wait_until_completed", "fetch_run_jobs",
+                 "current_head_sha", "retries_spent", "rerun_job")}
+    globals()["fetch_run"] = lambda *a, **kw: see["run"]
+    globals()["wait_until_completed"] = lambda *a, **kw: see["run"]
+    globals()["fetch_run_jobs"] = lambda *a, **kw: [
+        _job(name="macos-clang / arm64", conclusion="cancelled")]
+    globals()["current_head_sha"] = lambda *a, **kw: "new"
+    globals()["retries_spent"] = lambda *a, **kw: {"macos-clang / arm64": 2}
+    globals()["rerun_job"] = lambda *a, **kw: retried.append(a)
+    try:
+        budget_code = process("o/r", 1, "t", dry_run=False, max_retries=1,
+                              wait_polls=1, wait_interval=0,
+                              sleep=lambda s: None, log=output.append)
+    finally:
+        globals().update(original)
+
+    expect(budget_code == 0 and not retried,
+           "a current run whose job has spent its budget must not be "
+           "retried -- the budget loop is still doing its job")
+    expect(any("sustained outage" in line for line in output),
+           "the budget refusal must name the reason (a sustained outage), "
+           "not stay silent")
+
     # --- The per-job retry budget ---------------------------------------
     # The bug the run-level `run_attempt` guard caused: run 44306330102
     # had the macOS leg starved in attempt 1, was re-run, and the SAME

@@ -9,7 +9,7 @@
 #
 # Regenerate with: python scripts/check_api_manifest.py --write
 #
-# count: 190
+# count: 191
 
 src/core/include/nimrtc/core/api_version.hpp
 src/core/include/nimrtc/core/bytes.hpp
@@ -98,6 +98,7 @@ src/modules/rtp/include/nimrtc/rtp/rtcp_xr.hpp
 src/modules/rtp/include/nimrtc/rtp/rtp_plugin.hpp
 src/modules/rtp/include/nimrtc/rtp/timeline.hpp
 src/modules/rtp/include/nimrtc/rtp/xr_report_plugin.hpp
+src/modules/rtx/include/nimrtc/rtx/rtx.hpp
 src/modules/sched/include/nimrtc/sched/sched.hpp
 src/modules/sctp/include/nimrtc/sctp/dcep.hpp
 src/modules/sctp/include/nimrtc/sctp/sctp_plugin.hpp

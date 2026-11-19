@@ -280,24 +280,28 @@ TEST(HevcPtsParse, SummarisesTheParameterSetsOfAnAccessUnit) {
     const auto s = hevc::summarize_hevc_pts(span_of(au));
     EXPECT_TRUE(s.has_sps);
     EXPECT_TRUE(s.has_pps);
+    EXPECT_TRUE(s.has_vps);
     EXPECT_EQ(s.sps_width, 1280u);
     EXPECT_EQ(s.sps_height, 720u);
     EXPECT_EQ(s.profile_idc, 1u);
     EXPECT_NE(s.sps_hash, 0u);
     EXPECT_NE(s.pps_hash, 0u);
+    EXPECT_NE(s.vps_hash, 0u);
 
     // The same access unit summarises identically.
     const auto again = hevc::summarize_hevc_pts(span_of(au));
     EXPECT_EQ(again.sps_hash, s.sps_hash);
     EXPECT_EQ(again.pps_hash, s.pps_hash);
+    EXPECT_EQ(again.vps_hash, s.vps_hash);
 
     // A different profile at the same geometry, different PPS: the hashes
     // must move even though the size does not.  This is the case a
     // width/height comparison cannot see.
     std::vector<std::uint8_t> au2;
+    const auto vps2 = wrap_nalu(32, {0x0C, 0x01, 0xFE});             // VPS
     const auto sps2 = wrap_nalu(33, make_sps_rbsp(1280, 720, 2, {1, 2, 3}));
     const auto pps2 = wrap_nalu(34, {0xC1, 0x62, 0x85});
-    for (const auto* n : {&sps2, &pps2}) {
+    for (const auto* n : {&vps2, &sps2, &pps2}) {
         au2.insert(au2.end(), n->begin(), n->end());
     }
     const auto s2 = hevc::summarize_hevc_pts(span_of(au2));
@@ -306,6 +310,50 @@ TEST(HevcPtsParse, SummarisesTheParameterSetsOfAnAccessUnit) {
     EXPECT_EQ(s2.profile_idc, 2u);
     EXPECT_NE(s2.sps_hash, s.sps_hash);
     EXPECT_NE(s2.pps_hash, s.pps_hash);
+    EXPECT_NE(s2.vps_hash, s.vps_hash);
+}
+
+TEST(HevcPtsParse, AVpsChangeAloneMovesTheSummary) {
+    // Two access units with byte-identical SPS and PPS and only the VPS
+    // differing.  A summary that hashes SPS / PPS alone reports these as
+    // the same parameter set; they are not.
+    const auto sps = wrap_nalu(33, make_sps_rbsp(640, 360, 1, {1}));
+    const auto pps = wrap_nalu(34, {0xC1, 0x62, 0x84});
+
+    auto build = [&](std::uint8_t vps_tail) {
+        std::vector<std::uint8_t> au;
+        const auto vps = wrap_nalu(32, {0x0C, 0x01, vps_tail});
+        for (const auto* n : {&vps, &sps, &pps}) {
+            au.insert(au.end(), n->begin(), n->end());
+        }
+        return au;
+    };
+
+    const auto a = hevc::summarize_hevc_pts(span_of(build(0xFF)));
+    const auto b = hevc::summarize_hevc_pts(span_of(build(0xFE)));
+    EXPECT_EQ(a.sps_hash, b.sps_hash)
+        << "the SPS is byte-identical in the two access units";
+    EXPECT_EQ(a.pps_hash, b.pps_hash)
+        << "the PPS is byte-identical in the two access units";
+    EXPECT_NE(a.vps_hash, b.vps_hash)
+        << "the VPS changed, so the summary must move";
+}
+
+TEST(HevcPtsParse, AnAccessUnitWithoutAVpsIsAnHonestAbsence) {
+    // The three flags are independent facts about the stream, not one
+    // flag copied three times: an SPS/PPS-only unit (no VPS in-band)
+    // must still say so.
+    std::vector<std::uint8_t> au;
+    const auto sps = wrap_nalu(33, make_sps_rbsp(640, 360, 1, {1}));
+    const auto pps = wrap_nalu(34, {0xC1, 0x62, 0x84});
+    for (const auto* n : {&sps, &pps}) {
+        au.insert(au.end(), n->begin(), n->end());
+    }
+    const auto s = hevc::summarize_hevc_pts(span_of(au));
+    EXPECT_TRUE(s.has_sps);
+    EXPECT_TRUE(s.has_pps);
+    EXPECT_FALSE(s.has_vps);
+    EXPECT_EQ(s.vps_hash, 0u);
 }
 
 TEST(HevcPtsParse, AnAccessUnitWithoutParameterSetsSummarisesToEmpty) {
@@ -315,6 +363,7 @@ TEST(HevcPtsParse, AnAccessUnitWithoutParameterSetsSummarisesToEmpty) {
     const auto s = hevc::summarize_hevc_pts(span_of(au));
     EXPECT_FALSE(s.has_sps);
     EXPECT_FALSE(s.has_pps);
+    EXPECT_FALSE(s.has_vps);
 }
 
 // ===========================================================================
@@ -477,6 +526,12 @@ TEST(HwPtsSwitch, GeometryChangeDecodesOnTheSameNvdecSession) {
     ASSERT_NE(switch_pts->sps_hash, first_pts->sps_hash)
         << "the new sequence's SPS is identical to the old one — there was "
            "no parameter-set change to assert";
+    // The VPS is a parameter set in its own right: the geometry change
+    // must move it too, and the summary has to have seen it at all.
+    EXPECT_TRUE(switch_pts->has_vps);
+    EXPECT_TRUE(first_pts->has_vps);
+    EXPECT_NE(switch_pts->vps_hash, first_pts->vps_hash)
+        << "the VPS did not change with the sequence";
 
     // The *first* decode call after the switch must succeed, with the new
     // geometry: same session, no re-open, no key-frame request.
@@ -497,6 +552,8 @@ TEST(HwPtsSwitch, GeometryChangeDecodesOnTheSameNvdecSession) {
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(after->sps_hash, switch_pts->sps_hash)
         << "the decoder's session was not re-created for the new sequence";
+    EXPECT_EQ(after->vps_hash, switch_pts->vps_hash)
+        << "the decoder kept the previous sequence's VPS";
 
     EXPECT_EQ(rx.codec().stats().decode_errors, 0u);
 }
@@ -570,6 +627,8 @@ TEST(HwPtsSwitch, ParameterSetChangeAtTheSameGeometryIsNoticed) {
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(after->sps_hash, s_main10->sps_hash)
         << "the decoder kept the previous sequence's parameter sets";
+    EXPECT_EQ(after->vps_hash, s_main10->vps_hash)
+        << "the decoder kept the previous sequence's VPS";
 }
 
 NIMRTC_SUPPRESS_DEPRECATION_END

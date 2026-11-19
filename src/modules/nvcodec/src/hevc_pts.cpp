@@ -23,6 +23,7 @@
 namespace nimrtc::nvcodec::hevc_detail {
 namespace {
 
+constexpr std::uint8_t kVpsType = 32;
 constexpr std::uint8_t kSpsType = 33;
 constexpr std::uint8_t kPpsType = 34;
 
@@ -361,10 +362,17 @@ plugins::HevcPtsSummary summarize_hevc_pts(core::ByteSpan access_unit) {
             s.has_pps        = true;
             const auto rbsp  = nalu_to_rbsp(span);
             s.pps_hash       = fnv1a64(rbsp.data(), rbsp.size());
+        } else if (n.type == kVpsType && !s.has_vps) {
+            s.has_vps        = true;
+            const auto rbsp  = nalu_to_rbsp(span);
+            s.vps_hash       = fnv1a64(rbsp.data(), rbsp.size());
         }
-        // Stop once both sets are summarised: the slices that follow carry
-        // nothing the summary needs.
-        return !(s.has_sps && s.has_pps);
+        // Stop once every set is summarised: the slices that follow carry
+        // nothing the summary needs.  A set that is *absent* cannot arrive
+        // later in the same access unit, so "all three seen" is the bound
+        // -- not "SPS and PPS seen", which would skip a VPS that trails
+        // them in stream order.
+        return !(s.has_vps && s.has_sps && s.has_pps);
     });
     return s;
 }

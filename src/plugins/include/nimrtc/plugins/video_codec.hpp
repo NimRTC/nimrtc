@@ -903,15 +903,22 @@ struct NIMRTC_API_STABLE HevcPtsSummary {
     bool has_sps = false;
     bool has_pps = false;
 
+    /** True iff it carried a VPS too.  A VPS change is its own switch:
+     *  two sequences can share byte-identical SPS / PPS and still differ
+     *  in a VPS the SPS references only by id (`vps_max_dec_pic_buffering`,
+     *  the sub-layer structure, the profiling block). */
+    bool has_vps = false;
+
     /** The *visible* picture size (conformance window applied). */
     std::uint32_t sps_width  = 0;
     std::uint32_t sps_height = 0;
 
-    /** FNV-1a over the SPS / PPS RBSP (the NAL unit minus its header,
-     *  emulation-prevention bytes removed).  Two access units whose
-     *  parameter sets are byte-identical hash identically; anything a
-     *  decoder could notice changing the picture's interpretation
-     *  changes the hash. */
+    /** FNV-1a over the VPS / SPS / PPS RBSP (the NAL unit minus its
+     *  header, emulation-prevention bytes removed).  Two access units
+     *  whose parameter sets are byte-identical hash identically;
+     *  anything a decoder could notice changing the picture's
+     *  interpretation changes the hash. */
+    std::uint64_t vps_hash = 0;
     std::uint64_t sps_hash = 0;
     std::uint64_t pps_hash = 0;
 

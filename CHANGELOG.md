@@ -445,7 +445,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     that parses `profile_tier_level` and the SPS geometry fields
     (ITU-T H.265 搂7.3.3, 搂7.3.2.2.1) **independently of the driver**, and
     summarises an Annex-B access unit into `plugins::HevcPtsSummary`:
-    the visible size, FNV-1a hashes of the SPS / PPS RBSPs, and the
+    the visible size, FNV-1a hashes of the **VPS / SPS / PPS** RBSPs, and the
     profile idc with its compatibility flags.  The summary is what lets a
     test tell "the parameter sets changed" from "the stream never
     changed".

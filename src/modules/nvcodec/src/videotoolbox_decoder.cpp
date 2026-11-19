@@ -465,7 +465,7 @@ public:
 
         // ---- TEMP DIAGNOSTIC --------------------------------------------
         {
-            std::printf("[vt-dec] access unit (%zu B) nalus:", data.size());
+            std::printf("[vt-dec] access unit (%zu B) nalus:", size);
             const auto nalus = vt_detail::scan_annex_b(codec_, data, size);
             for (const auto& n : nalus) {
                 std::printf(" t%u/l%zu", static_cast<unsigned>(n.type), n.size);

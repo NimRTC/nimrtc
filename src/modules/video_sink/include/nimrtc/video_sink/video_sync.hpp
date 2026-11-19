@@ -32,6 +32,22 @@
  * engine exists.
  *
  * @note Remote-desktop plan E5 (module half).
+ *
+ * @deprecated **v1.3 (Q6)** — this class is an **orphan**: the engine
+ *   never used it (it had its own private copy, which Q6 removed), and
+ *   the shipped correction now lives in the `video_sync` module and is
+ *   reached through the `plugins::IVideoSyncController` seam.
+ *
+ *   The rule it implements is *the same* rule — positive skew (the
+ *   picture ahead) delays, negative skew (the picture behind) drops —
+ *   and the `video_sync` module's `RenderClock` is the one implementation
+ *   that now counts.  Keeping a second copy would be exactly the "second
+ *   skew model" that Q6 forbids.
+ *
+ *   Use `plugins::IVideoSyncController` (the seam) or
+ *   `nimrtc::video_sync::RenderClock` (the implementation) instead.
+ *
+ *   Removed in **v2.0.0**.
  */
 
 #pragma once
@@ -129,6 +145,11 @@ struct NIMRTC_API_STABLE SyncDecision {
  * @brief Turns an observed A/V skew into a present / delay / drop
  *        decision (plan E5).
  *
+ * @deprecated **v1.3 (Q6)** — use `plugins::IVideoSyncController` (the
+ *   seam) or `nimrtc::video_sync::RenderClock` (the implementation).
+ *   This class is an orphan and is removed in **v2.0.0**.  See the
+ *   file's header note for why a second copy of the rule cannot stay.
+ *
  * ## The skew sign
  *
  * The skew is `video_position - audio_position`:
@@ -146,7 +167,10 @@ struct NIMRTC_API_STABLE SyncDecision {
  * correction is happening at all — an A/V sync controller that silently
  * does nothing looks exactly like one that is working.
  */
-class NIMRTC_API_STABLE VideoSyncController {
+class NIMRTC_API_STABLE NIMRTC_API_DEPRECATED(
+    "Use plugins::IVideoSyncController / nimrtc::video_sync::RenderClock "
+    "instead; removed in v2.0.0")
+VideoSyncController {
 public:
     /** Construct a controller. */
     explicit VideoSyncController(SyncConfig config = SyncConfig{});

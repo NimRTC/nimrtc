@@ -64,11 +64,6 @@ add_library(nimrtc_engine STATIC
     # state — the render clock (E5), the input echo (E6), the
     # presentation (E7) and the displayed-frame record (E9).
     src/engine_render_state.cpp
-    # The render clock's *rule* (plan E5).  It lives in its own
-    # translation unit so the engine's internal headers stay free of a
-    # second implementation of it — the same pattern as
-    # `video_render_path.hpp` and `bandwidth_allocation.hpp`.
-    src/video_sync_controller.cpp
     # Remote-desktop plan H1 / H2 / H4: the multi-stream video plane.
     # The default stream keeps the engine's own plugin members; every
     # extra stream owns its own codec / sender / receiver / sink /
@@ -269,6 +264,15 @@ if(NIMRTC_MODULE_VIDEO_CAPTURE)
 endif()
 if(NIMRTC_MODULE_VIDEO_SINK)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_sink)
+endif()
+# v1.3 Q6 (remote-desktop plan R3): the render-clock module.  The engine
+# never includes its header -- the correction policy is reached through the
+# `plugins::IVideoSyncController` seam (Layout Invariant 4 / ADR-025).
+# The link exists so the module's registrar entry point (in
+# `kDefaultRegistrars[]`) resolves at link time (same pattern as the
+# rd_qoe entry above).
+if(NIMRTC_MODULE_VIDEO_SYNC)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_sync)
 endif()
 if(NIMRTC_MODULE_VIDEO_PIPELINE)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_pipeline)

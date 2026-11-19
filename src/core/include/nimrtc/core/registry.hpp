@@ -115,6 +115,13 @@ class NIMRTC_API_STABLE IControlChannelFactory;
 // TypedRegistry<> field can reference it without pulling the seam header
 // into core (Layout Invariant 1).
 class NIMRTC_API_STABLE IQoeCollectorFactory;
+// v1.3 Q6 (remote-desktop plan R3): the render-clock seam.  The engine
+// asks it what to do with each decoded frame -- present, drop or hold --
+// and it never includes the `video_sync` module's headers (Layout
+// Invariant 4).  Forward-declared like the other factory types so the
+// registry's TypedRegistry<> field can reference it without pulling the
+// seam header into core (Layout Invariant 1).
+class NIMRTC_API_STABLE IVideoSyncControllerFactory;
 // v1.2.0 M1 (F2): the receiver-side network-feedback collector seam.
 // Forward-declared like the other factory types so the registry's
 // TypedRegistry<> field can reference it without pulling the seam header
@@ -240,6 +247,13 @@ namespace video_sink      { void register_default_plugins() noexcept; }
 // can wire the built-in collector through the unified table.
 #ifdef NIMRTC_HAS_RD_QOE
 namespace rd_qoe           { void register_default_plugins() noexcept; }
+#endif
+// v1.3 Q6 (remote-desktop plan R3): the render-clock module.  Its entry
+// point populates the registry's video-sync slot (register_video_sync_controller)
+// so `core::register_all_default_plugins()` can wire the built-in clock
+// through the unified table.
+#ifdef NIMRTC_HAS_VIDEO_SYNC
+namespace video_sync       { void register_default_plugins() noexcept; }
 #endif
 namespace bwe             { void register_default_plugins() noexcept; }
 namespace sched           { void register_default_plugins() noexcept; }
@@ -686,6 +700,32 @@ public:
         return video_bitrate_controller_.list_ids();
     }
 
+    // -- Render clock (v1.3 Q6 / remote-desktop plan R3) ------------------
+    //
+    // Typed slot for `plugins::IVideoSyncControllerFactory*` -- the
+    // render clock that turns the measured A/V skew into a present /
+    // drop / hold decision.  The built-in implementation lives in
+    // `src/modules/video_sync/` and registers under the id
+    // "render-clock"; the engine resolves it through
+    // `EngineConfig::video_sync_controller_name`.
+    void register_video_sync_controller(
+        std::string_view id,
+        const plugins::IVideoSyncControllerFactory* f);
+    /// Remove a render-clock factory by id.  Returns true if a matching
+    /// entry was removed.  Test-only helper; the production path always
+    /// registers through static-init registration.
+    bool unregister_video_sync_controller(std::string_view id) {
+        return video_sync_controller_.unregister_one(id);
+    }
+    [[nodiscard]] const plugins::IVideoSyncControllerFactory*
+    get_video_sync_controller(std::string_view id) const {
+        return video_sync_controller_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string>
+    list_video_sync_controllers() const {
+        return video_sync_controller_.list_ids();
+    }
+
     // -- Video Receiver -----------------------------------------------------
     void register_video_receiver(std::string_view id,
                                  const plugins::IVideoReceiverFactory* f);
@@ -1010,6 +1050,11 @@ private:
     // built-in ladder controller registers under "video-bitrate-control".
     TypedRegistry<plugins::IVideoBitrateControllerFactory>
                                               video_bitrate_controller_{"video-bitrate-controller"};
+    // v1.3 Q6 (remote-desktop plan R3): the render-clock slot.  The
+    // built-in clock registers under "render-clock"; the engine resolves
+    // it through `EngineConfig::video_sync_controller_name`.
+    TypedRegistry<plugins::IVideoSyncControllerFactory>
+                                              video_sync_controller_{"video-sync-controller"};
     TypedRegistry<plugins::IVideoReceiverFactory> video_receiver_{"video-receiver"};
     TypedRegistry<plugins::IVideoSenderFactory>   video_sender_{"video-sender"};
     TypedRegistry<plugins::IBweFactory>           bwe_{"bwe"};
@@ -1367,6 +1412,19 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kQoeCollector, \
             #id, factory_ptr }
 
+/** Register a render-clock plugin by ID and factory pointer.
+ *  v1.3 Q6 (remote-desktop plan R3) -- typed slot for
+ *  `plugins::IVideoSyncControllerFactory*`.
+ *
+ *  Usage: NIMRTC_REGISTER_VIDEO_SYNC_CONTROLLER(video_sync, &factory); */
+#define NIMRTC_REGISTER_VIDEO_SYNC_CONTROLLER(id, factory_ptr)          \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_sync_controller_){           \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoSyncController, \
+            #id, factory_ptr }
+
 /** Register a DTLS session-factory plugin by ID and factory pointer.
  *  Transport PAL Slice 4 / Slice 8 (v0.10.2) ??typed slot for
  *  `nimrtc::dtls::IDtlsSessionFactory*`. */
@@ -1515,6 +1573,9 @@ public:
         // Remote-desktop plan J3 / J6: the QoE-collector typed factory slot
         // — see register_qoe_collector().
         kQoeCollector,
+        // v1.3 Q6 (remote-desktop plan R3): the render-clock typed factory
+        // slot — see register_video_sync_controller().
+        kVideoSyncController,
         // Transport PAL Slice 8 (v0.10.2): typed factory slots for the
         // DTLS / SCTP / raw_udp / transport-stack seams. See the
         // NIMRTC_REGISTER_DTLS_SESSION / SCTP_SOCKET / RAW_UDP_DATAGRAM /
@@ -1632,6 +1693,10 @@ public:
             case Category::kQoeCollector:
                 reg.register_qoe_collector(id,
                     static_cast<const plugins::IQoeCollectorFactory*>(factory));
+                break;
+            case Category::kVideoSyncController:
+                reg.register_video_sync_controller(id,
+                    static_cast<const plugins::IVideoSyncControllerFactory*>(factory));
                 break;
             case Category::kDtlsSession:
                 reg.register_dtls_session(id,

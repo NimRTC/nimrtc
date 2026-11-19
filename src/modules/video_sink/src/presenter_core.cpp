@@ -142,6 +142,31 @@ struct PresenterCore::Impl {
                 slot_valid_ = false;
             }
 
+            // ---- The A/V-sync hold (v1.3 Q6 / remote-desktop plan R3) ----
+            //
+            // When the render clock decided the picture was *ahead* of the
+            // sound, it asked for the frame to be held back until the
+            // sound catches up.  `present_at_us` is the instant the hold
+            // ends — a *local monotonic* deadline, so it is comparable
+            // with `Clock::now()` right here.
+            //
+            // The wait is a *timed* wait on the same condition variable
+            // the stop path uses, so a shutdown does not have to wait out
+            // the hold: the presenter returns immediately.
+            //
+            // The hold happens *after* the frame left the mailbox, so a
+            // newer frame arriving during the wait is not lost — it is
+            // picked up on the next turn of the loop.
+            if (frame.present_at_us > 0) {
+                const auto deadline = Clock::time_point{
+                    std::chrono::microseconds(frame.present_at_us)};
+                std::unique_lock<std::mutex> lock(mtx_);
+                if (cv_.wait_until(lock, deadline, [this] { return stop_; })) {
+                    // The presenter was asked to stop while it waited.
+                    return;
+                }
+            }
+
             const bool ok = present_ ? present_(frame) : false;
             if (ok) {
                 frames_presented_.fetch_add(1, std::memory_order_relaxed);

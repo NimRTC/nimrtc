@@ -426,6 +426,27 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  Ignored when `qoe_collector_name` is empty. */
     plugins::QoeConfig qoe_config;
 
+    /** The plugin id of the render clock — the video half of the
+     *  A/V-sync correction (v1.3 Q6, remote-desktop plan R3).
+     *
+     *  The `video_sync` module registers its factory under this id.  It
+     *  is the default value, so a session that says nothing about the
+     *  A/V sync still gets the correction — the picture is held back or
+     *  dropped to match the sound.
+     *
+     *  **Empty means "no render clock"**: every frame is presented
+     *  unchanged, which is the pre-v1.3 behaviour.  That is the
+     *  explicit way to opt out.
+     *
+     *  A **named** id that does not resolve is a hard error at
+     *  `open()` time — the engine does not silently fall back.
+     *
+     *  The one exception is the default id itself: when the
+     *  `video_sync` module is not in the build there is no factory to
+     *  resolve, and that is *not* an error — the picture is presented
+     *  unchanged.  The module is optional by construction. */
+    std::string video_sync_controller_name = "render-clock";
+
     /** The transport the control channel rides (plan G1 / G2).
      *
      *  - `kDtlsAppData` — the media stack's DTLS application-data seam
@@ -3728,8 +3749,9 @@ public:
      *
      * The band is the whole policy: a skew whose magnitude is at or
      * below it means the picture and the sound already agree, so the
-     * frame is presented unchanged.  Beyond it the frame is dropped
-     * (the video is ahead) or held back (the video is behind).
+     * frame is presented unchanged.  Beyond it the frame is held back
+     * (the picture is *ahead* of the sound) or dropped (the picture is
+     * *behind* it).
      *
      * @param tolerance_ms  The band, in milliseconds.  0 = every frame
      *                     is synchronised exactly, which in practice
@@ -3743,6 +3765,64 @@ public:
     NIMRTC_API_STABLE void set_video_sync_tolerance(
         std::int32_t tolerance_ms,
         std::int32_t max_delay_ms = 0) noexcept;
+
+    /**
+     * @brief Turn the video half of the A/V-sync correction on or off.
+     *
+     * The video correction is **on by default** (v1.3 Q6, decision Q6-1):
+     * the audio half is switchable, and the video half matching it keeps
+     * the two symmetric — a caller that turned the audio correction off
+     * should not get a video correction it cannot also turn off.
+     *
+     * Turning it off does not reset the counters, so a host can turn it
+     * off and still read how much the correction had done.
+     */
+    NIMRTC_API_STABLE void set_video_sync_enabled(bool enabled) noexcept;
+
+    /** Whether the video half of the A/V-sync correction is on. */
+    NIMRTC_API_STABLE bool video_sync_enabled() const noexcept;
+
+    /** The render clock's own entry point (plan E5).
+     *
+     * The engine's receive path calls this once per inbound frame,
+     * before the frame is decoded: a frame that has to be dropped is
+     * dropped without paying for the decode, and a frame that has to
+     * be held is held before the decode so the hold does not add to
+     * the decode's latency.
+     *
+     * @param peer_capture_us  The frame's capture instant **on the
+     *                         peer's timeline** (Unix microseconds), as
+     *                         reconstructed by the ADR-017 seam.  It
+     *                         must be the *same* timeline the audio
+     *                         reference lives on, or the difference
+     *                         between the two is an artefact of two
+     *                         unrelated clocks rather than a skew.
+     *                         0 when the seam has not reconstructed it
+     *                         yet -- the frame is then presented
+     *                         unchanged.
+     * @param delay_us       Set to the hold time the clock asked for,
+     *                        in microseconds.  Zero for a present.
+     * @return false when the clock said to **drop** the frame (the
+     *          video was behind the audio); true otherwise. */
+    NIMRTC_API_UNSTABLE
+    bool apply_render_sync(std::int64_t peer_capture_us,
+                           std::int64_t* delay_us) noexcept;
+
+    /** Set the audio side of the A/V comparison (plan E5).
+     *
+     * The engine normally learns this from the audio delivery path,
+     * where the ADR-017 reconstruction produced the peer's capture
+     * instant for the frame that is now at the speaker.  A host that
+     * drives the engine by hand -- or a test that wants a *known*
+     * reference -- can set it directly.
+     *
+     * The value is the **peer's capture instant, in Unix microseconds**:
+     * the same timeline `apply_render_sync()`'s picture operand lives
+     * on.  0 clears the reference, and the render path then presents
+     * every frame unchanged (there is nothing to align against).
+     */
+    NIMRTC_API_UNSTABLE
+    void set_video_sync_audio_reference_us(std::int64_t peer_capture_us) noexcept;
 
     /**
      * @brief The render clock's counters (plan E5).
@@ -5717,31 +5797,20 @@ private:
      *  @param enc         The assembled encoded frame.
      *  @param capture_ts_us  The frame's capture timestamp (for the
      *                        sink's timeline metadata).
+     *  @param present_at_us  The instant the picture must reach the
+     *                        display — a *local monotonic* deadline
+     *                        produced by the render clock's hold (v1.3
+     *                        Q6).  0 = no deadline.
      *  @return kOk when the frame reached the sink; an error code when
      *          the GPU path could not deliver it (the caller then falls
      *          back to the CPU staging path). */
     plugins::Status render_decoded_gpu_frame(
         const plugins::EncodedVideoFrame& enc,
-        std::int64_t capture_ts_us) noexcept;
+        std::int64_t capture_ts_us,
+        std::int64_t present_at_us = 0) noexcept;
 
     // ---- The receive-side render state (remote-desktop plan E5 / E6 /
     // E7 / E9) ---------------------------------------------------
-
-    /** Ask the render clock what to do with one decoded frame
-     *  (remote-desktop plan E5).
-     *
-     *  The skew the clock consumes is the one the ADR-017 timeline
-     *  already produced (`last_sender_recv_skew_us()`) — the engine
-     *  does not derive a second one (RD-9).
-     *
-     *  @param capture_ts_us  The frame's capture timestamp (the peer's
-     *                        clock), carried through for the record.
-     *  @param delay_us       Set to the hold time the clock asked for,
-     *                        in microseconds.  Zero for a present.
-     *  @return false when the clock said to **drop** the frame (the
-     *          video was ahead of the audio); true otherwise. */
-    bool apply_render_sync(std::int64_t capture_ts_us,
-                           std::int64_t* delay_us) noexcept;
 
     /** Record one displayed frame (remote-desktop plan E9).
      *
@@ -6127,6 +6196,27 @@ private:
      *  an integrator error.
      */
     uint32_t resolve_qoe_collector() noexcept;
+
+    /**
+     * @brief Resolve the render clock through the registry seam (v1.3 Q6).
+     *
+     * The correction *policy* lives in the `video_sync` module, and the
+     * engine may not name a concrete module (Layout Invariant 4 /
+     * ADR-025).  So the engine resolves a
+     * `plugins::IVideoSyncController` through the registry's video-sync
+     * slot, whose default id is the built-in `"render-clock"`.
+     *
+     * The module is **optional**: a build without it has no factory
+     * under the default id, and that is *not* an error — the picture is
+     * simply presented unchanged, which is exactly what the pre-v1.3
+     * engine did.  The engine degrades gracefully (with a warning)
+     * instead of failing `open()`.
+     *
+     * A *named* id that does not resolve IS an error — the engine does
+     * not silently fall back, because a typo'd id would otherwise mask
+     * an integrator error.
+     */
+    uint32_t resolve_video_sync_controller() noexcept;
 
     /**
      * @brief Report that a frame reached the viewer.

@@ -69,6 +69,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -728,6 +729,61 @@ LoopbackResult run_loopback() {
             result.luma   = first.luma;
             result.width  = first.width;
             result.height = first.height;
+        }
+        // ---- The diagnostic ------------------------------------------------
+        //
+        // Every rendered frame is compared against the reference, and the
+        // per-frame numbers are printed.  A picture that is merely *shifted*
+        // or *re-ranged* still correlates perfectly, so a low correlation
+        // means the decoded picture has a different *shape* — and the
+        // per-frame numbers say whether that is one bad frame or every
+        // frame.
+        const std::vector<std::uint8_t> reference = reference_luma();
+        std::printf("[hw-loopback] rendered frames: %zu\n", result.rx_frames);
+        for (std::size_t i = 0; i < sink->frames().size(); ++i) {
+            const RecordedFrame& f = sink->frames()[i];
+            if (f.luma.size() != reference.size()) {
+                std::printf("[hw-loopback] frame %zu: geometry %ux%u (the "
+                            "reference is %ux%u)\n",
+                            i, f.width, f.height, kWidth, kHeight);
+                continue;
+            }
+            const double mae = mean_abs_error(reference, f.luma);
+            const double corr = pearson_correlation(reference, f.luma);
+            std::uint64_t min_v = 255, max_v = 0, sum = 0;
+            for (const std::uint8_t v : f.luma) {
+                if (v < min_v) min_v = v;
+                if (v > max_v) max_v = v;
+                sum += v;
+            }
+            std::printf("[hw-loopback] frame %zu: mae=%.3f corr=%.4f "
+                        "min=%llu max=%llu mean=%.2f\n",
+                        i, mae, corr,
+                        static_cast<unsigned long long>(min_v),
+                        static_cast<unsigned long long>(max_v),
+                        static_cast<double>(sum) /
+                            static_cast<double>(f.luma.size()));
+        }
+        // The row profile of the *first* frame: a column-wise dump makes a
+        // shift, a re-range and a scrambled picture distinguishable at a
+        // glance.
+        if (!sink->frames().empty() &&
+            sink->frames().front().luma.size() == reference.size()) {
+            const std::vector<std::uint8_t>& luma = sink->frames().front().luma;
+            std::printf("[hw-loopback] row 0 profile (col: ref->got):");
+            for (std::uint32_t col = 0; col < kWidth; col += kWidth / 16u) {
+                std::printf(" %u:%u->%u", col,
+                            static_cast<unsigned>(reference[col]),
+                            static_cast<unsigned>(luma[col]));
+            }
+            std::printf("\n[hw-loopback] near the edge column:\n");
+            for (std::uint32_t col = kWidth / 4u - 8u;
+                 col < kWidth / 4u + 8u; ++col) {
+                std::printf(" %u:%u->%u", col,
+                            static_cast<unsigned>(reference[col]),
+                            static_cast<unsigned>(luma[col]));
+            }
+            std::printf("\n");
         }
     }
 

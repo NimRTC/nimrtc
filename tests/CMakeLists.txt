@@ -1413,6 +1413,42 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
 endif()
 
 # ----------------------------------------------------------------------------
+# v1.3 plan Q4 / video plan T2 — the receive-side feedback bound.
+#
+# The bound itself (the NACK cap, the global key-frame rate limit, the
+# pending report's age) lives in the engine's private
+# `engine_feedback_guard.hpp` / `.cpp`, so the test includes that header
+# directly and compiles the implementation into its own target — the same
+# pattern as `test_engine_rate_window.cpp` (the rate window's rule).
+#
+# The clock is injected, so the 30 s synthetic-loss acceptance run is
+# deterministic and takes microseconds of real time.
+# ----------------------------------------------------------------------------
+add_executable(test_engine_feedback_guard
+    test_engine_feedback_guard.cpp
+    "${CMAKE_SOURCE_DIR}/src/engine/src/engine_feedback_guard.cpp")
+target_link_libraries(test_engine_feedback_guard PRIVATE
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main)
+target_include_directories(test_engine_feedback_guard PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_engine_feedback_guard PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_engine_feedback_guard LENIENT)
+add_test(NAME test_engine_feedback_guard
+    COMMAND $<TARGET_FILE:test_engine_feedback_guard>)
+set_tests_properties(test_engine_feedback_guard PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_feedback_guard
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
+endif()
+
+# ----------------------------------------------------------------------------
 # The windowed outbound rate measurement — the *rule*, on its own.
 #
 # The rule lives in the engine's private `engine_rate_window.hpp` (the same

@@ -29,11 +29,13 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <nimrtc/core/registry.hpp>
@@ -321,6 +323,93 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// A codec that *decodes* successfully
+// ---------------------------------------------------------------------------
+//
+// The `counting-codec` above refuses to decode (`kErrUnsupported`), which
+// is what makes it useful for the outbound half of the feedback tests —
+// but it also means every assembled frame raises the engine's
+// **decode-failure** key-frame request.
+//
+// The Q4 tests need to see the **loss** door on its own, so they use this
+// codec instead: its `decode()` succeeds, so the only key-frame request
+// that reaches the feedback guard is the one the jitter buffer raised.
+//
+// (`decode()` returns success without producing pixels; the engine stops
+// at the null buffer check, which is exactly as far as the test needs.)
+
+class DecodingVideoCodec final : public np::IVideoCodec {
+public:
+    const char* name() const noexcept override { return "decoding-codec"; }
+    np::Status open() noexcept override { return np::kOk; }
+    void close() noexcept override {}
+
+    bool can_encode() const noexcept override { return true; }
+    bool can_decode() const noexcept override { return true; }
+    np::VideoCodecKind kind() const noexcept override {
+        return np::VideoCodecKind::kH264;
+    }
+    std::string_view codec_name() const noexcept override { return "decoding"; }
+
+    np::Status encode(const np::VideoFrame&,
+                       std::uint8_t* output,
+                       std::size_t output_capacity,
+                       np::EncodedVideoFrame& encoded_out) noexcept override {
+        static constexpr std::uint8_t kAnnexBIdr[] = {0x00, 0x00, 0x00, 0x01, 0x65};
+        if (!output || output_capacity < sizeof(kAnnexBIdr)) return np::kErrBufferTooSmall;
+        std::memcpy(output, kAnnexBIdr, sizeof(kAnnexBIdr));
+        encoded_out.payload = nimrtc::core::ByteSpan{output, sizeof(kAnnexBIdr)};
+        encoded_out.codec = np::VideoCodecKind::kH264;
+        encoded_out.is_keyframe = true;
+        encoded_out.nalu_format = np::NaluFormat::kAnnexBStartCode;
+        encoded_out.payload_type = payload_type();
+        return np::kOk;
+    }
+
+    np::Status decode(const np::EncodedVideoFrame&,
+                      np::VideoFrame&,
+                      std::uint8_t* const*) noexcept override {
+        ++decode_calls_;
+        return np::kOk;
+    }
+
+    np::Status force_keyframe() noexcept override { return np::kOk; }
+
+    np::VideoCodecConfig config() const noexcept override { return cfg_; }
+    np::Status update_config(np::VideoCodecConfig cfg) noexcept override {
+        cfg_ = cfg;
+        return np::kOk;
+    }
+    np::VideoCodecStats stats() const noexcept override { return {}; }
+    std::uint8_t payload_type() const noexcept override { return 102; }
+
+    int decode_calls() const noexcept {
+        return decode_calls_.load(std::memory_order_relaxed);
+    }
+
+private:
+    np::VideoCodecConfig cfg_{};
+    std::atomic<int>     decode_calls_{0};
+};
+
+class DecodingVideoCodecFactory final : public np::IVideoCodecFactory {
+public:
+    std::string_view id() const noexcept override { return "decoding-codec"; }
+    std::string_view display_name() const noexcept override {
+        return "Decoding video codec (test)";
+    }
+    np::IVideoCodec* create(np::VideoCodecConfig) const override {
+        auto* c = new DecodingVideoCodec();
+        last_created() = c;
+        return c;
+    }
+    static DecodingVideoCodec*& last_created() {
+        static DecodingVideoCodec* instance = nullptr;
+        return instance;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Fixture
 // ---------------------------------------------------------------------------
 
@@ -336,6 +425,9 @@ protected:
 
         static CountingVideoCodecFactory codec_factory;
         PluginRegistry::instance().register_video_codec("counting-codec", &codec_factory);
+
+        static DecodingVideoCodecFactory decoding_factory;
+        PluginRegistry::instance().register_video_codec("decoding-codec", &decoding_factory);
     }
 
     EngineConfig make_config() {
@@ -752,6 +844,209 @@ TEST_F(EngineVideoFeedback, a_transport_cc_message_is_counted_on_its_own) {
         << "a transport-cc must NOT be counted as a NACK";
     EXPECT_EQ(s1.video_feedback_rx_pli, s0.video_feedback_rx_pli)
         << "a transport-cc must NOT be counted as a PLI";
+
+    engine.close();
+}
+
+// ---------------------------------------------------------------------------
+// v1.3 plan Q4 / video plan T2: the receive-side feedback bound, wired
+// ---------------------------------------------------------------------------
+//
+// The bound itself is unit-tested in `tests/test_engine_feedback_guard.cpp`
+// (which drives the collaborator directly, on a virtual clock).  What this
+// file adds is the *wiring*: that the engine's two doors reach the guard,
+// that the guard's counters reach `Stats`, and that the host can change
+// the bounds through `EngineConfig`.
+//
+// ## Why the tests below wait
+//
+// The jitter buffer raises the key-frame request when a frame *fails to
+// assemble*, and a frame only fails to assemble when its playout deadline
+// passes — so the request arrives on a later tick, not on the tick that
+// carried the packet.  The tests therefore use a short jitter-buffer
+// window and let the deadline pass before they look at the counters.
+//
+// (The *NACK* is different: a sequence gap is detected immediately, so
+// the NACK path needs no waiting at all.)
+
+/// The jitter-buffer window the Q4 tests use: short enough that the
+/// deadline passes during the test, long enough that a packet's own
+/// arrival does not trip it.
+constexpr std::uint32_t kQ4JitterWindowMs = 20;
+
+/// How long the tests wait for the deadline to pass.
+constexpr int kQ4DeadlineWaitMs = 60;
+
+TEST_F(EngineVideoFeedback, the_feedback_bound_counters_start_at_zero) {
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    const auto s0 = engine.stats();
+    EXPECT_EQ(s0.video_feedback_pli_requests, 0u);
+    EXPECT_EQ(s0.video_feedback_pli_allowed, 0u);
+    EXPECT_EQ(s0.video_feedback_pli_suppressed, 0u);
+    EXPECT_EQ(s0.video_feedback_pli_from_loss, 0u);
+    EXPECT_EQ(s0.video_feedback_pli_from_decode_failure, 0u);
+    EXPECT_EQ(s0.video_feedback_nack_seqs_dropped, 0u);
+    EXPECT_EQ(s0.video_feedback_reports_expired, 0u);
+
+    engine.close();
+}
+
+TEST_F(EngineVideoFeedback, a_loss_raises_the_loss_door) {
+    EngineConfig cfg = make_config();
+    // The codec must *decode* successfully, or every assembled frame
+    // would raise the decode-failure request too and the two doors could
+    // not be told apart.
+    cfg.video_codec_name = "decoding-codec";
+    cfg.video_receiver_tuning.max_jitter_buffer_ms = kQ4JitterWindowMs;
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    FakeIceTransport* ice = FakeIceFactory::last_created();
+    ASSERT_NE(ice, nullptr);
+    ice->clear_sent();
+
+    // A hole in the sequence: the jitter buffer cannot assemble the
+    // frame, so the engine queues the report through the *loss* door.
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 100, 90000, pt, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 102, 93000, pt, {0x41, 0x9A}));
+    engine.tick();
+
+    // Let the playout deadline pass, then push one more packet so the
+    // receiver is ticked again — that is the tick on which the
+    // unassembled frame is force-emitted and the request is raised.
+    std::this_thread::sleep_for(std::chrono::milliseconds(kQ4DeadlineWaitMs));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 103, 96000, pt, {0x41, 0x9A}));
+    engine.tick();
+    engine.tick();
+
+    const auto s1 = engine.stats();
+    EXPECT_GT(s1.video_feedback_pli_from_loss, 0u)
+        << "the jitter buffer's loss report must be counted by the loss door";
+    EXPECT_EQ(s1.video_feedback_pli_from_decode_failure, 0u)
+        << "a loss is not a decode failure — the two doors must stay apart";
+    EXPECT_EQ(s1.video_feedback_pli_requests,
+              s1.video_feedback_pli_from_loss +
+                  s1.video_feedback_pli_from_decode_failure)
+        << "every request must be attributed to exactly one door";
+
+    engine.close();
+}
+
+TEST_F(EngineVideoFeedback, the_key_frame_rate_limit_is_configurable) {
+    EngineConfig cfg = make_config();
+    cfg.video_receiver_tuning.max_jitter_buffer_ms = kQ4JitterWindowMs;
+    // Lift the limit: every request must go out.
+    cfg.video_feedback_min_pli_interval_us = 0;
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    FakeIceTransport* ice = FakeIceFactory::last_created();
+    ASSERT_NE(ice, nullptr);
+    ice->clear_sent();
+
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+
+    // Three separate holes, each raising its own key-frame request.
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 100, 90000, pt, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 102, 93000, pt, {0x41, 0x9A}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 103, 96000, pt, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 105, 99000, pt, {0x41, 0x9A}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 106, 102000, pt, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 108, 105000, pt, {0x41, 0x9A}));
+    engine.tick();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(kQ4DeadlineWaitMs));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 109, 108000, pt, {0x41, 0x9A}));
+    engine.tick();
+    engine.tick();
+
+    const auto s1 = engine.stats();
+    EXPECT_GE(s1.video_feedback_pli_requests, 3u)
+        << "the three holes must raise three key-frame requests";
+    EXPECT_EQ(s1.video_feedback_pli_suppressed, 0u)
+        << "the limit was lifted, so nothing may be suppressed";
+    EXPECT_EQ(s1.video_feedback_pli_allowed, s1.video_feedback_pli_requests);
+
+    engine.close();
+}
+
+TEST_F(EngineVideoFeedback, the_default_limit_suppresses_a_burst) {
+    EngineConfig cfg = make_config();
+    cfg.video_receiver_tuning.max_jitter_buffer_ms = kQ4JitterWindowMs;
+    // The default: one request per 250 ms.
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    FakeIceTransport* ice = FakeIceFactory::last_created();
+    ASSERT_NE(ice, nullptr);
+    ice->clear_sent();
+
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+
+    // Three holes in a row — three requests inside a few milliseconds.
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 100, 90000, pt, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 102, 93000, pt, {0x41, 0x9A}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 103, 96000, pt, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 105, 99000, pt, {0x41, 0x9A}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 106, 102000, pt, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 108, 105000, pt, {0x41, 0x9A}));
+    engine.tick();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(kQ4DeadlineWaitMs));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 109, 108000, pt, {0x41, 0x9A}));
+    engine.tick();
+    engine.tick();
+
+    const auto s1 = engine.stats();
+    EXPECT_GE(s1.video_feedback_pli_requests, 3u);
+    EXPECT_GT(s1.video_feedback_pli_suppressed, 0u)
+        << "the default rate limit must hold back the burst — otherwise the "
+           "peer is asked for an IDR per hole";
+    EXPECT_EQ(s1.video_feedback_pli_allowed + s1.video_feedback_pli_suppressed,
+              s1.video_feedback_pli_requests)
+        << "every request must be either allowed or suppressed";
+    EXPECT_LE(s1.video_feedback_pli_allowed, 1u)
+        << "the three holes are inside one interval, so at most one request "
+           "may go out";
+
+    engine.close();
+}
+
+TEST_F(EngineVideoFeedback, the_nack_list_is_capped) {
+    EngineConfig cfg = make_config();
+    // A cap of 2: the report may carry at most two sequence numbers.
+    cfg.video_feedback_max_nack_seqs = 2;
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    FakeIceTransport* ice = FakeIceFactory::last_created();
+    ASSERT_NE(ice, nullptr);
+    ice->clear_sent();
+
+    // A wide hole: sequences 101..110 are all missing.
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 100, 90000,
+                                 cfg.video_receiver_tuning.payload_type, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 111, 93000,
+                                 cfg.video_receiver_tuning.payload_type, {0x41, 0x9A}));
+    engine.tick();
+    engine.tick();
+
+    const auto s1 = engine.stats();
+    EXPECT_GT(s1.video_feedback_nack_seqs_dropped, 0u)
+        << "the cap must have discarded some sequence numbers";
+
+    // The NACK that went on the wire may name at most two sequences.
+    const auto* nack = find_sent(ice->sent(), is_nack);
+    ASSERT_NE(nack, nullptr) << "the engine did not put a NACK on the wire";
+    // RTCP header(4) + sender SSRC(4) + media SSRC(4) = 12 bytes, then
+    // the FCI entries (4 bytes each).
+    const std::size_t fci_entries = (nack->size() - 12) / 4;
+    EXPECT_LE(fci_entries, 2u)
+        << "the NACK on the wire carried more FCI entries than the cap allows";
 
     engine.close();
 }

@@ -9,6 +9,124 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.2.0`.
 
+- **The receiver's feedback to the peer is bounded, and the two reasons
+  for a key-frame request are now distinguishable (v1.3 plan item `Q4`,
+  video plan `T2`).**
+  The receiver used to *merge* its feedback into one pending report
+  without a bound, and the two doors into that report were
+  indistinguishable.  Three things could go wrong, and all three are
+  feedback amplification:
+
+  - **The key-frame request had no rate limit of its own.**  The engine's
+    decode-failure path had a 250 ms throttle, but the jitter buffer's own
+    loss report did not — and both went into the *same* pending report, so
+    a stream that both lost packets and failed to decode asked for key
+    frames at twice the rate.
+  - **The NACK list was uncapped.**  Every detected gap added its sequence
+    numbers to a list that was merged into the pending report without a
+    limit, so a peer that dropped 30 % of a 30 fps stream produced a report
+    that grew with the loss.
+  - **The pending report had no age.**  A report that sat in the queue while
+    the link was down was stale by the time it went out: the losses it
+    named had either been retransmitted already or were long gone.
+
+  The bound now lives in one private collaborator,
+  `src/engine/src/engine_feedback_guard.{hpp,cpp}`
+  (`nimrtc::engine::detail::FeedbackGuard`), so the receive-side feedback
+  has a single visible owner:
+
+  - **The key-frame rate limit is global, not per-door** — one request per
+    interval (default 250 ms, i.e. 4 Hz per RFC 5104 §4.3.1.1), whichever
+    door raised it.  The peer's encoder is the shared resource the limit
+    protects, so a per-door limit would let the two doors add up to twice
+    the rate.  The engine's own decode-failure throttle stays as the
+    *door's* throttle (it keeps the log quiet).
+  - **The NACK cap keeps the *most recent* losses** (default 64 per
+    report).  RFC 4585 §6.2.1 shapes the request around the recent
+    losses, and the sender's retransmission cache only holds the recent
+    packets — a request for an old loss is a request the peer cannot
+    answer.  When the list overflows, the *oldest* entries are dropped.
+  - **A stale report is dropped, not sent** (default age 1 s).
+
+  The two doors are counted separately, because they call for completely
+  different fixes: `video_feedback_pli_from_loss` says "the network dropped
+  a picture", `video_feedback_pli_from_decode_failure` says "the decoder
+  cannot decode what it is being sent".
+
+  The bound is reachable from a host and visible to one:
+
+  - `EngineConfig::video_feedback_min_pli_interval_us` (default 250000;
+    `0` disables the limit), `EngineConfig::video_feedback_max_nack_seqs`
+    (default 64; a negative value means unbounded) and
+    `EngineConfig::video_feedback_max_report_age_us` (default 1000000;
+    `0` means "never expire") are new.
+  - `Engine::Stats` gains seven counters:
+    `video_feedback_pli_requests` (the demand),
+    `video_feedback_pli_allowed` (what went on the wire),
+    `video_feedback_pli_suppressed` (what the limit dropped),
+    `video_feedback_pli_from_loss`, `video_feedback_pli_from_decode_failure`,
+    `video_feedback_nack_seqs_dropped` and `video_feedback_reports_expired`.
+
+  The guard's clock is **injected**, which is what makes the acceptance
+  deterministic: the engine passes the monotonic clock, the test passes a
+  virtual one it advances by hand.  `tests/test_engine_feedback_guard.cpp`
+  therefore runs the 30 s synthetic-loss profile in microseconds of real
+  time and asserts the same numbers on every machine — at most **121**
+  key-frame requests may go out in 30 s, both for a 30 % loss profile and
+  for the adversarial "every frame is lost" one (901 requests raised).
+  `tests/test_engine_video_feedback.cpp` covers the engine-level half.
+
+- **The audio jitter buffer's memory is bounded, and the bound is
+  reported (v1.3 plan item `Q2`, video plan `R4`).**
+  `jb::Config::max_packets` was **declared and never read**: its own
+  comment said *"Hard cap on buffered packets (FIFO trim from oldest when
+  exceeded)"*, but nothing in the module read it, and the plugin adapter
+  hard-coded `512`. The buffer's `frame_buffer_` — a `std::map` keyed by
+  RTP timestamp that only ever shrinks in `pop()` / `flush()` — therefore
+  grew without limit: a peer that sent a new timestamp per packet, or a
+  stream whose frames never became playable, could make the receiver
+  allocate as much as it liked.
+
+  The bound is now real, and it has two halves:
+
+  - **`Config::max_bytes` is new** (default 4 MiB) and joins
+    `max_packets` (default 512). A packet-count cap alone does not bound
+    memory — the packets of one stream can differ in size by orders of
+    magnitude — so the byte count is the half that actually caps what the
+    receiver holds. Both bounds are enforced in the same loop; `0`
+    disables either half, and the historical unbounded behaviour stays
+    available on request.
+  - **The trim runs *before* the insert**, so the packet that has just
+    arrived can never be the one the bound evicts. This is the video
+    jitter buffer's `enforce_inflight_cap(incoming=1)` rule applied
+    verbatim; without it the newest audio — the one the peer just sent —
+    would always be the first to be dropped. The victim is the *oldest*
+    frame, which is the frame that has already missed its slot.
+
+  The bound is reachable from a host and visible to one:
+
+  - `plugins::JBConfig::max_packets` is new — `0` means "use the
+    implementation's default", a negative value means unbounded — so the
+    cap crosses the plugin seam instead of being frozen at `512` inside
+    the adapter.
+  - The drop counter is reported all the way up: `jb::Stats::packets_dropped`
+    → `plugins::IJB::Stats::packets_dropped` →
+    `plugins::IAudioReceiver::Stats::packets_dropped` →
+    `Engine::Stats::audio_packets_dropped` and
+    `AudioStreamStats::packets_dropped`. Each step republishes the
+    buffer's own counter unchanged, so there is no second copy of the
+    bookkeeping that could drift from what the buffer really did.
+
+  The tests all fail on the pre-change code:
+  `src/modules/jb/tests/test_jb.cpp` (the bound itself: the packet count
+  and the byte count never exceed their caps under a sustained overrun,
+  the drops are counted, the newest packet is never the victim, the oldest
+  frame is trimmed first, and tightening the cap takes effect
+  immediately), `src/modules/jb/tests/test_jb_plugin.cpp` (the seam: the
+  cap crosses it, the drop counter comes back, and a live reconfigure
+  carries the new cap), and a propagation case in
+  `src/modules/audio_rx/tests/test_audio_rx.cpp`.
+
 - **The control plane now rides a real socket, and the G2 criterion is
   measured instead of asserted (remote-desktop plan `G2`, v1.2 plan item
   `E6`).**
@@ -152,13 +270,25 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.2.0] - 2026-11-18
 
-### Status: Release candidate
+### Status: Stable
 
 > **The source version is `1.2.0`** (`project(VERSION)` in `CMakeLists.txt`,
 > `NIMRTC_API_VERSION` = 10200, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
 > `v1.2.0` is the release that closes the `v1.2` plan
 > (`docs/plan/v1.2-next-plan.md`): **Track E** (the convergence gates) and
 > **Track S** (the observability surface) are both complete.
+>
+> **The label was corrected on 2026-11-19.** This section was written by
+> `tools/release_changelog.py`, which hard-coded the heading
+> `### Status: Release candidate` for every release it produced. The
+> version carries no SemVer pre-release identifier (`RELEASING.md` §2.2),
+> the tag was cut as `v1.2.0`, and the GitHub Release is published as a
+> non-prerelease "Latest" release -- so the section said "candidate" while
+> the release said "stable". The generator now derives the label from the
+> version (a pre-release identifier means a candidate; no identifier means
+> stable), and `tools/release_changelog.py --self-test` pins the rule.
+> The same defect is in the `[1.1.0]` section below, which was also
+> published as a stable release; it is corrected there too.
 
 > Track E -- every gate is green:
 
@@ -6290,7 +6420,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.1.0] - 2026-11-07
 
-### Status: Release candidate
+### Status: Stable
 
 > **The source version is `1.1.0`** (`project(VERSION)` in `CMakeLists.txt`,
 > `NIMRTC_API_VERSION` = 10100, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
@@ -6304,6 +6434,14 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > built; the GitHub Release stays a **draft** until the last remaining
 > release-hardening gate — the 7-day soak — closes (see "Known
 > limitations"). The published stable cut is still `v1.0.2`.
+>
+> **The label was corrected on 2026-11-19.** This section carried the
+> hard-coded `### Status: Release candidate` heading that
+> `tools/release_changelog.py` wrote for every release. The version carries
+> no SemVer pre-release identifier, the tag was cut as `v1.1.0`, and the
+> GitHub Release was published on 2026-11-09 as a non-prerelease — so the
+> section said "candidate" while the release said "stable". The generator
+> now derives the label from the version.
 
 ### Fixed
 

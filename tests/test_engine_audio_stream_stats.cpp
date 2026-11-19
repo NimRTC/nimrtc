@@ -295,6 +295,7 @@ TEST_F(EngineAudioStreamStats, TheListAgreesWithTheFlatCounters) {
     EXPECT_EQ(e.frames_fec_recovered, s.audio_fec_recovered_frames);
     EXPECT_EQ(e.packets_lost, s.audio_packets_lost);
     EXPECT_EQ(e.decode_errors, s.audio_decode_errors);
+    EXPECT_EQ(e.packets_dropped, s.audio_packets_dropped);
     EXPECT_EQ(e.jitter_ms, s.audio_jitter_ms);
     EXPECT_EQ(e.playout_delay_ms, s.audio_playout_delay_ms);
     EXPECT_EQ(e.encoder_bitrate_bps, s.audio_encoder_bitrate_bps);

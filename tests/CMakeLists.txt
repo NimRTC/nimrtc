@@ -3354,8 +3354,19 @@ endif()
 # `tools/ci_retry_runner.py --self-test` pins that classification: the
 # starved shape, the genuine-failure shape, the cancelled-but-scheduled
 # shape (a runner was assigned, so it was a superseded run rather than a
-# starved queue), and the unknown shape (an API response that omits the
-# `steps` field is not evidence of starvation).
+# starved queue), the concurrency-cancel shape that dominates the
+# repository (cancelled *after* steps ran -- 124 of 149 jobs over the
+# last 60 cancelled runs on 2026-11-19), and the unknown shape (an API
+# response that omits the `steps` field is not evidence of starvation).
+#
+# It also pins the two bugs the 2026-11-19 review exposed.  The loop
+# guard is now per job name rather than the run's `run_attempt`: run
+# 44306330102 re-starved its macOS leg in attempt 2, the run-level guard
+# refused the retry, and the merge gate stayed red.  And the script
+# polls until the run reports `completed` before re-running anything:
+# nine `ci-retry` runs went red with `403 Forbidden` because
+# `workflow_run` fired while the run was still `in_progress` after a
+# concurrency cancel.  Both are asserted in the self-test.
 #
 # Registered as a ctest case for the same reason as the merge-gate
 # guard: a developer sees it next to the other gates, and `ctest` alone
@@ -3373,6 +3384,22 @@ if(NIMRTC_BUILD_TESTS)
         set_tests_properties(test_ci_retry_runner PROPERTIES
             TIMEOUT 60
             LABELS "ci;guard")
+
+        # The licence collector is the release's BSD-3 / Apache-2 gate: it
+        # is what stops a bundle shipping a static codec library without
+        # its licence text.  Before it existed, the v1.2.0 Windows bundle
+        # carried six static codecs (+55 % over v1.1) and no licence text
+        # at all -- the SBOM named each SPDX id, but the notices did not
+        # travel.  Its self-test pins that a distributed vendor with no
+        # licence file fails the cut while an uninitialised submodule does
+        # not.
+        add_test(NAME test_collect_licenses
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/collect_licenses.py"
+                         --self-test)
+        set_tests_properties(test_collect_licenses PROPERTIES
+            TIMEOUT 60
+            LABELS "ci;guard;release")
     else()
         message(STATUS
             "Python3 interpreter not found — skipping the CI auto-retry "
@@ -3445,6 +3472,40 @@ if(NIMRTC_BUILD_TESTS)
             "Python3 interpreter not found — skipping the release-body "
             "guard (tools/release_body.py).  CI runs it as a dedicated "
             "step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The README-release guard.
+#
+# The README's version badge, its "Latest release" paragraph and its
+# "Current `main`" paragraph all make claims about which release is
+# published, and those claims went stale for eleven days after
+# `v1.2.0`: the badge still read `v1.0.2` while the body of the same
+# file said `v1.2.0` was shipped.  Documentation drift is invisible to
+# the compiler and to the test suite, so only an explicit check can
+# catch it.
+#
+# The self-test is what makes the guard worth having: it builds a
+# synthetic tree with each drift shape and asserts the checker still
+# distinguishes them, so the guard cannot silently degrade into a
+# no-op.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_readme_release
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_readme_release.py"
+                         --self-test)
+        set_tests_properties(test_readme_release PROPERTIES
+            TIMEOUT 60
+            LABELS "release;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the README-release "
+            "guard (tools/check_readme_release.py).  CI runs it as a "
+            "dedicated step.")
     endif()
 endif()
 

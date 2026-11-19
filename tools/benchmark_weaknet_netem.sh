@@ -10,6 +10,12 @@
 # numbers are what a real socket sees; the in-process shaper exists so
 # the same tier list can be measured on Windows and macOS without root.
 #
+# The tiers are the v1.1 Q4 four (5% loss / 100 ms jitter / 1 Mbps cap)
+# plus the v1.3 plan's Q5 addition: a `reorder` tier.  netem's reorder
+# knob was not used by any tier before Q5, and the plan names
+# **reordering** as one of the three impairments the soak must survive
+# (loss, jitter, reorder).
+#
 # How the impairments are applied: the whole benchmark runs inside a
 # throwaway network namespace whose only interface is 'lo', and the
 # netem qdisc is attached to that 'lo'.  Loopback traffic then crosses
@@ -37,8 +43,8 @@ usage() {
   cat <<'EOF'
 usage: tools/benchmark_weaknet_netem.sh [--count N] [--size BYTES] [--util F] [--out PATH]
 
-Runs the three v1.1 Q4 weak-network tiers with 'tc qdisc netem'.
-Requires root (CAP_NET_ADMIN) and iproute2.
+Runs the v1.1 Q4 weak-network tiers -- plus the v1.3 Q5 `reorder`
+tier -- with 'tc qdisc netem'.  Requires root (CAP_NET_ADMIN) and iproute2.
 EOF
 }
 
@@ -128,6 +134,15 @@ run_tier "jitter-100ms" delay 70ms 50ms
 # 'rate 1mbit 0 1' = 1 Mbps, no packet overhead, cell size 1 byte:
 # the limiter then charges the exact on-wire length of each datagram.
 run_tier "cap-1mbps" delay 5ms rate 1mbit 0 1
+# The v1.3 plan's Q5 addition: netem's `reorder` knob, which the v1.1
+# tier list did not use.  'reorder 10% 50%' = 10 % of packets are held
+# back so that 50 % of them are overtaken by their successors.  netem
+# implements reordering by *delaying* the held packets, so the held
+# share arrives late rather than being lost -- the same shape
+# `net_sim::ImpairmentConfig::reorder_pct` applies in-process.  The base
+# delay is netem's default (0), because the reorder hold is the only
+# impairment this tier is meant to measure.
+run_tier "reorder-10pct" delay 5ms reorder 10% 50%
 
 python3 - "$ROOT/build/e2e" "$OUT" "$COUNT" "$SIZE" "$UTIL" <<'PY'
 import json, pathlib, sys
@@ -139,7 +154,7 @@ e2e, out, count, size, util = (
     int(sys.argv[4]),
     float(sys.argv[5]),
 )
-tiers = ("loss-5pct", "jitter-100ms", "cap-1mbps")
+tiers = ("loss-5pct", "jitter-100ms", "cap-1mbps", "reorder-10pct")
 results = []
 for tier in tiers:
     data = json.loads((e2e / f"bench_weaknet_netem_{tier}.json").read_text())

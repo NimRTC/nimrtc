@@ -224,3 +224,35 @@ if(NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_SINK)
     # The msquic runtime DLL and the Chrome-friendly DTLS cert.
     nimrtc_stage_runtime(rd_verify)
 endif()
+
+# ---------------------------------------------------------------------------
+# `soak-p2p` — the engine-level impairment harness (v1.3 plan Q5)
+# ---------------------------------------------------------------------------
+#
+# Two real engines stream audio across a `net_sim::NatRelay`, which is
+# both the **NAT** (neither engine sees the other's real address) and the
+# **impairment shaper** (loss / delay / jitter / reorder / rate), so the
+# soak's impairments hit the real RTP path on every platform.  The run
+# emits one JSON record (`--json`) that `tools/run_soak_impaired.py`
+# archives; see the header of `soak-p2p.cpp` for the green criteria.
+#
+# It is built only when the net_sim module is, because the relay is the
+# program's whole point — without it there would be nothing to run.
+if(NIMRTC_MODULE_NET_SIM AND TARGET nimrtc::net_sim)
+    add_executable(soak-p2p soak-p2p/soak-p2p.cpp)
+    nimrtc_apply_options(soak-p2p)
+    target_link_libraries(soak-p2p PRIVATE
+        nimrtc::engine
+        nimrtc::net_sim           # the simulated NAT + the impairment shaper
+        nimrtc::audio_rx          # the receive-side codec the engine resolves
+        nimrtc::datachannel       # the engine's registrar table references it
+        nimrtc::web_transport     # ditto
+    )
+    if(TARGET nimrtc::opus)
+        target_link_libraries(soak-p2p PRIVATE nimrtc::opus)
+    endif()
+
+    # The msquic runtime DLL and the Chrome-friendly DTLS cert: without
+    # them the program dies with STATUS_DLL_NOT_FOUND before `main()`.
+    nimrtc_stage_runtime(soak-p2p)
+endif()

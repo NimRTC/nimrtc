@@ -234,6 +234,15 @@ option(NIMRTC_MODULE_VIDEO_BITRATE_CONTROL
 option(NIMRTC_MODULE_RD_QOE
        "Build remote-desktop QoE module (freeze / sharpness / latency / input-to-photon metrics)" ON)
 
+# v1.3 plan Q5 (the long soak across NAT + netem): the **network
+# simulation** module — the simulated NAT (an address-translating UDP
+# relay) and the deterministic impairment shaper (loss / delay / jitter /
+# reorder / rate).  It is a *test* facility, not an engine seam: the
+# soak harness and the relay's unit tests are its only consumers, so a
+# production build can leave it off.
+option(NIMRTC_MODULE_NET_SIM
+       "Build network simulation module (simulated NAT relay + impairment shaper)" ON)
+
 # Vendored libwebrtc-audio-processing-2.a (audio3a WebRTC APM wrapper) is
 # pre-built with MinGW/gcc in Release /MD mode.  When MSVC links it into a
 # Debug /MDd consumer it trips LNK2038 mismatch errors.  Override the

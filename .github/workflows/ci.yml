@@ -540,6 +540,14 @@ jobs:
       - name: Self-test the engine-layering guard
         run: python tools/check_engine_layering.py --self-test
 
+      # v1.3 plan Q5: the impaired-soak recorder is the thing that
+      # decides whether a 24 h run counts as evidence, so it has to be
+      # able to fail.  The self-test pins the three verdicts (PASS /
+      # FAIL / INCONCLUSIVE), the dirty-tree rule and the 24 h duration
+      # bar, against a synthetic evidence file in the temp directory.
+      - name: Self-test the impaired-soak recorder
+        run: python3 tools/run_soak_impaired.py --self-test
+
       # v1.2 Track S / S8: the `Engine::Stats` field reference is a
       # *derived* document.  It is generated from `engine.hpp` by
       # `tools/dump_stats_fields.py`, and this step fails when the file

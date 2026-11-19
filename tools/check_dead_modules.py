@@ -419,6 +419,18 @@ REACHABILITY_ROOTS = {
     # module consumed only by one of them is part of the product.
     "rd_device",
     "rd_viewer",
+    # The Q5 impairment soak harness (v1.3 plan Q5).  `soak-p2p` is the
+    # executable an operator runs for the acceptance window: it drives two
+    # real engines across a `net_sim::NatRelay`, so the `net_sim` module
+    # (the simulated NAT + the impairment shaper) is reached from it.
+    # It is a shipped consumer in the same sense as `rd_device` above --
+    # a program an operator starts, not a benchmark that only exists to
+    # measure a hot path.
+    "soak-p2p",
+    # The hardware-encode end-to-end harness (v1.3 plan Q7).  Same
+    # reasoning: `hw-e2e` is the program the CI job and the operator
+    # run, and it is the shipped consumer of the hardware codec modules.
+    "hw-e2e",
 }
 
 

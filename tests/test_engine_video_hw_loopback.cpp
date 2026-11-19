@@ -32,6 +32,23 @@
  * (`.github/workflows/hardware.yml`), where a skip is visible as a skip
  * rather than hidden inside a green suite.
  *
+ * The *decoder* is probed too, and for the same reason the encoder is.
+ * The engine holds **one** codec instance per session and drives both
+ * directions through it, and the `"hardware"` pin (plan B2) is honoured
+ * in both: a host that has a hardware encoder but no hardware decoder
+ * cannot open a hardware-pinned engine at all — the codec factory
+ * refuses to substitute the software decoder, and `open()` reports
+ * `kVideoCodecPluginMissing` (6705).  Such a host skips here, with the
+ * decoder's own reason, rather than failing a test that is really
+ * asserting "this machine has no hardware H.264 decoder".
+ *
+ * (On macOS / Apple Silicon the hardware *decoder* is genuinely
+ * unavailable today: `VTDecompressionSessionCreate` rejects a format
+ * description built from a bare codec type with `os=-8971`
+ * (`codecExtensionNotFoundErr`), because such a description carries no
+ * `avcC` atom.  The encoder is fine; the decoder row is not.  The
+ * dedicated hardware job is where the end-to-end claim is gated.)
+ *
  * ## Why a hardware *encode* and any decode is enough
  *
  * Q7's wording is "a frame was captured, encoded by the hardware codec,
@@ -127,6 +144,55 @@ std::string HardwareEncoderUnavailableReason() {
         }
     }
     return "no hardware H.264 encoder row is available on this host";
+}
+
+/** True iff the H.264 backend table offers a usable hardware *decoder*.
+ *
+ *  The engine's `video_codec_backend = "hardware"` pin (plan B2) demands
+ *  a hardware backend in *both* directions: the encoder sends, the
+ *  decoder receives, and the engine holds one codec instance for the
+ *  two.  A host that has a hardware encoder but no hardware decoder
+ *  therefore cannot open a hardware-pinned engine at all — the codec
+ *  factory refuses to fall back to software — so the test has to know
+ *  about the decoder before it asserts anything.
+ *
+ *  The probe asks the *same* question the registry asks, so the test
+ *  and the engine can never disagree about what the host can do. */
+bool HardwareDecoderAvailable() {
+    nimrtc::h264::register_default_video_backends();
+    np::VideoCodecConfig probe{};
+    probe.width  = kWidth;
+    probe.height = kHeight;
+    probe.fps    = 30;
+    probe.codec  = np::VideoCodecKind::kH264;
+    for (const auto* be : np::HwVideoBackendRegistry::instance()
+                             .list_decoders(np::VideoCodecKind::kH264)) {
+        if (be != nullptr && be->is_hw && be->available && be->available(probe)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** The reason the table gives for the first *unavailable* hardware
+ *  decoder — used to make the skip message honest. */
+std::string HardwareDecoderUnavailableReason() {
+    nimrtc::h264::register_default_video_backends();
+    np::VideoCodecConfig probe{};
+    probe.width  = kWidth;
+    probe.height = kHeight;
+    probe.fps    = 30;
+    probe.codec  = np::VideoCodecKind::kH264;
+    for (const auto* be : np::HwVideoBackendRegistry::instance()
+                             .list_decoders(np::VideoCodecKind::kH264)) {
+        if (be == nullptr || !be->is_hw) continue;
+        if (be->available && be->available(probe)) return {};
+        if (be->unavailable_reason) {
+            const std::string why = be->unavailable_reason(probe);
+            if (!why.empty()) return why;
+        }
+    }
+    return "no hardware H.264 decoder row is available on this host";
 }
 
 // ---------------------------------------------------------------------------
@@ -665,6 +731,18 @@ TEST_F(EngineVideoHwLoopback, HardwareEncodeReachesTheReceiverAsRealPixels) {
     if (!HardwareEncoderAvailable()) {
         GTEST_SKIP() << "no hardware H.264 encoder on this host — "
                      << HardwareEncoderUnavailableReason();
+    }
+
+    // The engine's codec serves *both* directions, and the "hardware"
+    // pin is honoured in both.  A host with a hardware encoder but no
+    // hardware decoder cannot open a hardware-pinned engine — the codec
+    // factory refuses to substitute the software decoder — so the
+    // end-to-end claim cannot be made here.  That is a skip with a
+    // reason, not a failure: the dedicated hardware job
+    // (`.github/workflows/hardware.yml`) is where the claim is gated.
+    if (!HardwareDecoderAvailable()) {
+        GTEST_SKIP() << "no hardware H.264 decoder on this host — "
+                     << HardwareDecoderUnavailableReason();
     }
 
     const LoopbackResult result = run_loopback();

@@ -92,17 +92,17 @@ namespace nimrtc::rtx {
  *
  *  The header is exactly two octets: the OSN, in network byte order.
  *  Nothing else is allowed before the original payload. */
-inline constexpr std::size_t kHeaderSize = 2;
+NIMRTC_API_STABLE inline constexpr std::size_t kHeaderSize = 2;
 
 /** The size of a *complete* RTX payload: the header plus an original
  *  payload of at least one byte.
  *
  *  A retransmission whose original payload was empty is not a thing
  *  worth sending, so the minimum useful RTX payload is three octets. */
-inline constexpr std::size_t kMinPayloadSize = kHeaderSize + 1;
+NIMRTC_API_STABLE inline constexpr std::size_t kMinPayloadSize = kHeaderSize + 1;
 
 /** The MIME subtype RFC 4588 §8 registers for this payload format. */
-inline constexpr const char* kEncodingName = "rtx";
+NIMRTC_API_STABLE inline constexpr const char* kEncodingName = "rtx";
 
 /** The clock rate of a video retransmission stream.
  *
@@ -111,7 +111,7 @@ inline constexpr const char* kEncodingName = "rtx";
  *  original payload type".  Every video codec NimRTC negotiates runs
  *  on the 90 kHz video clock (RFC 6184 §5.6, RFC 7798 §4.1), so 90000
  *  is the value the `a=rtpmap:` line carries. */
-inline constexpr std::uint32_t kVideoClockRateHz = 90000;
+NIMRTC_API_STABLE inline constexpr std::uint32_t kVideoClockRateHz = 90000;
 
 // ---------------------------------------------------------------------------
 // Building an RTX payload

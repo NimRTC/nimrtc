@@ -138,6 +138,10 @@ struct D3D11Renderer::Impl {
         std::uint32_t height = 0;
         /** The pending frame's capture timestamp. */
         std::int64_t capture_ts_us = 0;
+        /** The instant the frame must reach the display (local monotonic).
+         *  Zero = no deadline (present at the presentation clock's pace).
+         *  See `plugins::VideoFrameInfo::present_at_us` (v1.3 Q6). */
+        std::int64_t present_at_us = 0;
         std::uint32_t frame_seq     = 0;
         std::uint32_t rtp_timestamp = 0;
         /** Non-null when the frame is a GPU surface: the mailbox holds a
@@ -320,6 +324,27 @@ void D3D11Renderer::Impl::present_loop() {
             // so the producer can post the next one immediately.
             frame = std::move(slot_);
             slot_ = Slot{};
+        }
+
+        // ---- The A/V-sync hold (v1.3 Q6 / remote-desktop plan R3) ----
+        //
+        // When the render clock decided the picture was *ahead* of the
+        // sound, it asked for the frame to be held back until the sound
+        // catches up.  `present_at_us` is the instant the hold ends — a
+        // *local monotonic* deadline, so it is comparable with
+        // `Clock::now()` right here.
+        //
+        // The wait is a *timed* wait on the same condition variable the
+        // stop path uses, so a shutdown does not have to wait out the
+        // hold.
+        if (frame.present_at_us > 0) {
+            const auto deadline = Clock::time_point{
+                std::chrono::microseconds(frame.present_at_us)};
+            std::unique_lock<std::mutex> lock(mtx_);
+            if (cv_.wait_until(lock, deadline, [this] { return stop_; })) {
+                // The presenter was asked to stop while it waited.
+                return;
+            }
         }
 
         const bool ok = present_one(frame);
@@ -803,6 +828,7 @@ plugins::Status D3D11Renderer::render(
         impl_->slot_.width         = frame.width;
         impl_->slot_.height        = frame.height;
         impl_->slot_.capture_ts_us = frame.capture_ts_us;
+        impl_->slot_.present_at_us = frame.present_at_us;
         impl_->slot_.frame_seq     = frame.frame_seq;
         impl_->slot_.rtp_timestamp = frame.rtp_timestamp;
         impl_->slot_.valid         = true;
@@ -822,6 +848,7 @@ plugins::Status D3D11Renderer::render(
         impl_->last_info_.capture_ts_us = frame.capture_ts_us;
         impl_->last_info_.frame_seq     = frame.frame_seq;
         impl_->last_info_.rtp_timestamp = frame.rtp_timestamp;
+        impl_->last_info_.present_at_us = frame.present_at_us;
         impl_->last_info_.render_time_us = now_us;
     }
     return plugins::kOk;
@@ -903,6 +930,7 @@ plugins::Status D3D11Renderer::render(
         impl_->slot_.width         = surface.width();
         impl_->slot_.height        = surface.height();
         impl_->slot_.capture_ts_us = 0;
+        impl_->slot_.present_at_us = 0;
         impl_->slot_.frame_seq     = 0;
         impl_->slot_.rtp_timestamp = 0;
         impl_->slot_.valid         = true;
@@ -923,10 +951,18 @@ plugins::Status D3D11Renderer::render(
     const plugins::VideoFrameInfo& info) noexcept {
     const plugins::Status rc = render(surface);
     if (rc != plugins::kOk) return rc;
+    {
+        // The A/V-sync hold (v1.3 Q6): the render clock's presentation
+        // deadline travels with the frame, so the presenter waits for it
+        // before it puts the picture on the screen.
+        std::lock_guard<std::mutex> lock(impl_->mtx_);
+        impl_->slot_.present_at_us = info.present_at_us;
+    }
     std::lock_guard<std::mutex> lock(impl_->info_mutex_);
     impl_->last_info_.capture_ts_us = info.capture_ts_us;
     impl_->last_info_.frame_seq     = info.frame_seq;
     impl_->last_info_.rtp_timestamp = info.rtp_timestamp;
+    impl_->last_info_.present_at_us = info.present_at_us;
     impl_->last_info_.render_time_us = static_cast<std::int64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             Clock::now().time_since_epoch()).count());

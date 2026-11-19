@@ -195,6 +195,12 @@ endif()
 if(NIMRTC_MODULE_VIDEO_SINK)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VIDEO_SINK=1)
 endif()
+# v1.3 Q6 (remote-desktop plan R3): the render-clock module's registrar
+# entry materialises only when the module is built.  Same shape as the
+# video_sink entry above.
+if(NIMRTC_MODULE_VIDEO_SYNC)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VIDEO_SYNC=1)
+endif()
 # Remote-desktop plan D1: the video rate controller module's registrar entry
 # materialises only when the module is built.  Same shape as the
 # video_source / video_capture entries above.

@@ -188,6 +188,12 @@ option(NIMRTC_MODULE_VIDEO_PIPELINE
        "Build video pipeline module (VideoReceiver/VideoSender glue)" ON)
 option(NIMRTC_MODULE_VIDEO_SINK
        "Build video sink module (headless / pinned render sinks)" ON)
+# v1.3 Q6 (remote-desktop plan R3): the render-clock module — the video
+# half of the A/V-sync correction.  The engine reaches it through the
+# `plugins::IVideoSyncController` seam (Layout Invariant 4), so this
+# module is a *policy* the engine wires, not an implementation it names.
+option(NIMRTC_MODULE_VIDEO_SYNC
+       "Build video sync module (render clock: present / drop / delay)" ON)
 # Remote-desktop plan Track G (G3 / G4 / G7): the remote-desktop input
 # module — the input event codec, the pointer coalescer / rate limiter and
 # the input safety filter.  A module, not a seam: the control transport is

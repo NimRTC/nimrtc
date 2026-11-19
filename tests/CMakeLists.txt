@@ -1547,6 +1547,12 @@ function(nimrtc_add_engine_video_sync_test name source)
         nimrtc::h264
         nimrtc::datachannel
         GTest::gtest_main)
+    # v1.3 Q6: the render-clock module.  The engine reaches it through the
+    # `plugins::IVideoSyncController` seam, so the engine's test links the
+    # module the same way it would link any other plugin.
+    if(TARGET nimrtc::video_sync)
+        target_link_libraries(${name} PRIVATE nimrtc::video_sync)
+    endif()
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
@@ -2214,7 +2220,7 @@ target_link_libraries(test_registry_contract PRIVATE
 # symbol only exists when the module is compiled in.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input rd_qoe)
+              rd_input rd_qoe video_sync)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_registry_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -2299,7 +2305,7 @@ target_link_libraries(test_plugin_id_contract PRIVATE
 # only when it was actually built.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input rd_qoe)
+              rd_input rd_qoe video_sync)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_plugin_id_contract PRIVATE nimrtc::${_mod})
     endif()

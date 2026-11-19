@@ -302,7 +302,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 > **Why:** the shipped sinks **discard the pixels** (`video_sink.cpp:156,165`
 > — "Headless sink (drops pixels; counts frames)"). There is no path from a
 > decoded frame to a screen, and the video plan's R3 (video render clock) is
-> scheduled for v1.4.0.
+> scheduled as Q6 of v1.3.0 (Track Q).
 
 | ID | Item | Landing | Acceptance |
 |---|---|---|---|
@@ -546,9 +546,33 @@ machine; and the HEVC software decoder is deliberately absent
 | B2 (hardware-first selection) | video plan C12 / C13 / C14 | **Same item.** The registry and the selection policy already exist (`src/plugins/include/nimrtc/plugins/hw_video_backend.hpp`); this plan adds the real backends and the screen-content preference. |
 | B12 / B13 / B14 | video plan B5 / B8 / B7 | **Same items.** Landed in v1.2.0 (video plan Track B) — M1 depends on them, M3 hardens B14. |
 | D1 (the ladder) | video plan B2 / B3 / B4 | **Same item.** v1.2.0. M3 consumes it and adds the screen-specific entries. |
-| E5 (render clock) | video plan R3 | **Same item.** v1.4.0. |
-| E8 (receiver back-pressure) | video plan R4 | **Same item.** v1.4.0. |
+| E5 (render clock) | video plan R3 | **Same item.** `v1.3-plan.md` Q6 — but see the release-map conflict below. |
+| E8 (receiver back-pressure) | video plan R4 | **Same item.** `v1.3-plan.md` Q2 — but see the release-map conflict below. |
 | H3 (simulcast) | video plan T4 | Deferred in both; the thumbnail case is the cheap substitute. |
+
+### Release-map conflict: E5 / E8
+
+**Found 2026-11-18.**  Three documents now disagree about when the render clock
+and the receiver back-pressure land, and they disagree by two major versions:
+
+| Source | E5 (render clock / R3) | E8 (back-pressure / R4) |
+|---|---|---|
+| This plan's M-table (below) | **M2 = v1.4.0** | **M3 = v1.5.0** |
+| `v1.2-next-plan.md` Track Q | v1.3.0 (Q6) | v1.3.0 (Q2) |
+| `v1.3-plan.md` | v1.3.0 (Q6) | v1.3.0 (Q2) |
+
+The v1.3 plan is the one that governs the *next* release, and it treats both
+as resilience work: an unbounded receive buffer (R4) makes the 24 h soak
+meaningless, and an unreconciled video clock (R3) turns the audio correction
+shipped in v1.2.0 into a new skew source.  **This plan's M-table has not been
+rewritten**, because moving E5 out of M2 also moves it out of the milestone
+whose acceptance test names it (`M2-d — A/V sync`), and that is a decision
+about this plan's own scope, not a bookkeeping edit.
+
+**Status: open owner decision.**  Default if unanswered: `v1.3-plan.md` wins
+for the *implementation schedule* (E5/E8 are built in v1.3.0 as Q6/Q2), and
+this plan's M2/M3 continue to *claim* their acceptance — a milestone may close
+on work that shipped earlier.
 | — | audio plan WP-1..WP-15 | The audio pipeline lands in v1.2.0. **M2 depends on it** and adds only the device layer (Track F). |
 | G2 (control transport) | `transport-strategies.md` | Reuses the existing strategy shape; no new transport. |
 | G5 (input ↔ frame binding) | ADR-017 timeline | Exposes existing machinery; no new timeline model. |

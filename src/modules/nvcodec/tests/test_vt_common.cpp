@@ -374,6 +374,15 @@ TEST(VtCommon, HardwareDecodeSupportIsFalseOffApple) {
     // the only way to build one is from the stream's parameter sets —
     // which is exactly what made the probe report "no hardware
     // decoder" on every Mac that had one.
+    //
+    // AV1 is the exception, and it has to be: it carries no codec
+    // extension atom, so its description *is* the codec type and a
+    // probe session is well-formed.  The capability query can disagree
+    // with the session there — `VTIsHardwareDecodeSupported` says the
+    // codec is supported, but the session is created with
+    // `RequireHardwareAcceleratedVideoDecoder` and is refused with
+    // -12906 — and an availability answer of "yes" that the decoder
+    // then cannot honour leaves the codec with no decoder at all.
     const auto check = [](vt::Codec detail, nimrtc::nvcodec::VtCodec public_codec) {
         const bool supported = vt::hardware_decode_supported(detail);
         const bool old_enough = vt::os_at_least(vt::min_macos_version(detail));
@@ -382,7 +391,15 @@ TEST(VtCommon, HardwareDecodeSupportIsFalseOffApple) {
     };
     check(vt::Codec::kH264, nimrtc::nvcodec::VtCodec::kH264);
     check(vt::Codec::kH265, nimrtc::nvcodec::VtCodec::kH265);
-    check(vt::Codec::kAv1, nimrtc::nvcodec::VtCodec::kAv1);
+
+    // AV1 is probed with a real session, so the only invariant is the
+    // one that matters: when the host has no hardware AV1 decoder, the
+    // availability query must say so — otherwise the VideoToolbox
+    // backend wins the selection and then fails to open.
+    if (!vt::hardware_decode_supported(vt::Codec::kAv1)) {
+        EXPECT_FALSE(nimrtc::nvcodec::vt_decoder_available(
+            nimrtc::nvcodec::VtCodec::kAv1));
+    }
 #endif
 }
 

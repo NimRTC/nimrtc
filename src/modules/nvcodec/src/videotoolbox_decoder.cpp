@@ -1009,6 +1009,25 @@ bool vt_decoder_available(VtCodec codec) noexcept {
     // parameter sets can produce one.  A probe that created a session
     // would therefore report "no hardware decoder" on every Mac that
     // has one — and the hardware path would be dead everywhere.
+    //
+    // AV1 is the exception, and it has to be.  It carries no codec
+    // extension atom at all — the description is built from the codec
+    // type alone — so AV1 *can* be probed with a real session, and
+    // probing it is the only honest answer.  `VTIsHardwareDecodeSupported`
+    // reports what the framework believes about the codec, but the
+    // session is created with
+    // `kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder`,
+    // so the two can disagree: on a host that reports AV1 support but
+    // cannot back it with a hardware decoder, the session creation
+    // fails with -12906.  A capability answer of "yes" there makes the
+    // VideoToolbox backend *win* the selection and then fail to open,
+    // which leaves the codec with no decoder at all — on a host that
+    // does have a software AV1 decoder to fall back to.  The probe
+    // asks the question the session will actually be asked.
+    if (c == vt_detail::Codec::kAv1) {
+        vt_backend::VtDecoderSession probe;
+        return probe.open(c);
+    }
     return vt_detail::hardware_decode_supported(c);
 #else
     (void)c;

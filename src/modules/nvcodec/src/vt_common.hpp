@@ -294,6 +294,16 @@ inline std::string decoder_unavailable_reason(Codec codec) noexcept {
                " decoder (VTIsHardwareDecodeSupported reports no hardware "
                "support for the codec)";
     }
+    // AV1 carries no codec extension atom, so its description is built
+    // from the codec type alone and the session is not waiting for
+    // anything the stream has yet to deliver; the failure here is the
+    // host refusing a *hardware* session, not a missing parameter set.
+    if (codec == Codec::kAv1) {
+        return std::string("videotoolbox: VTDecompressionSessionCreate failed for ") +
+               codec_name(codec) +
+               " — the host reports a hardware decoder for the codec, but it "
+               "would not create a hardware-accelerated session for it";
+    }
     return std::string("videotoolbox: VTDecompressionSessionCreate failed for ") +
            codec_name(codec) +
            " — the host has a hardware decoder for the codec, but the "

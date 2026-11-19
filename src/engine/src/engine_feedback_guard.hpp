@@ -202,13 +202,27 @@ public:
     FeedbackGuard();
 
     /**
-     * @brief A guard with an explicit clock.
+     * @brief A guard with an explicit clock and the default bounds.
      *
      * The engine passes the monotonic clock; the unit test passes a
      * virtual one, which is what makes the 30 s synthetic-loss run
      * deterministic.
      */
-    explicit FeedbackGuard(ClockFn clock, Config cfg = Config{});
+    explicit FeedbackGuard(ClockFn clock);
+
+    /**
+     * @brief A guard with an explicit clock and explicit bounds.
+     *
+     * The bounds are a *separate* overload rather than a default
+     * argument on the one above, because a default argument of the
+     * form `Config cfg = Config{}` is ill-formed on GCC and Clang:
+     * the nested class's default member initializers are not yet
+     * complete at the point where the enclosing class's default
+     * argument is parsed.  MSVC accepts it; the CI's GCC and Clang
+     * legs do not.  Two overloads say the same thing and compile
+     * everywhere.
+     */
+    FeedbackGuard(ClockFn clock, Config cfg);
 
     /** Replace the bounds.  The clock is kept. */
     void set_config(const Config& cfg) noexcept { cfg_ = cfg; }

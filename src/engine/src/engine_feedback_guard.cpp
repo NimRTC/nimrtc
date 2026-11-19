@@ -27,6 +27,9 @@ std::int64_t steady_now_us() noexcept {
 FeedbackGuard::FeedbackGuard()
     : FeedbackGuard([] { return steady_now_us(); }, Config{}) {}
 
+FeedbackGuard::FeedbackGuard(ClockFn clock)
+    : FeedbackGuard(std::move(clock), Config{}) {}
+
 FeedbackGuard::FeedbackGuard(ClockFn clock, Config cfg)
     : cfg_(cfg), clock_(std::move(clock)) {
     if (!clock_) clock_ = [] { return steady_now_us(); };

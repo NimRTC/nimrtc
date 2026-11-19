@@ -50,6 +50,21 @@ on:
 # runner, etc.  NB: interop.yml uses "ci-e2e-${{ github.ref }}" so the two
 # workflows do NOT share a concurrency group (avoids cascading cancels on
 # rapid re-pushes).
+#
+# NB: the group deliberately does NOT carry the head SHA.  A pull
+# request's `github.ref` is `refs/pull/<n>/merge` for EVERY commit on
+# that pull request, so the group cannot tell two commits apart -- and a
+# re-run of an OLD commit's run enters the group of the CURRENT run and
+# cancels it.  That is an infinite loop (the `ci-retry` workflow does
+# exactly such a re-run for a starved job; the retry kills the current
+# run, the cancellation fires another retry, and the pull request can
+# never go green -- observed on PR #124).
+#
+# The fix belongs in the actor, not in the group: the group must stay
+# SHA-free so that a new push still cancels the run it supersedes (which
+# is what keeps a rapid sequence of pushes from burning a full
+# four-platform matrix each).  `tools/ci_retry_runner.py` therefore
+# refuses to re-run a run whose commit is no longer the head of its ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

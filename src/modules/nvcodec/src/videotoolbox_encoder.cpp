@@ -74,6 +74,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -873,6 +874,17 @@ public:
         }
         CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
 
+        // ---- TEMP DIAGNOSTIC --------------------------------------------
+        {
+            const std::uint8_t* sy = cpu->plane(0);
+            const std::uint32_t ss = static_cast<std::uint32_t>(cpu->layout().strides[0]);
+            std::printf("[vt-enc] input luma row0:");
+            for (std::uint32_t col = 0; col < w; col += w / 16u) {
+                std::printf(" %u:%u", col, static_cast<unsigned>(sy[col]));
+            }
+            std::printf("\n");
+        }
+
         const plugins::Status st = encode_pixel_buffer(pixel_buffer, output,
                                                        output_capacity,
                                                        encoded_out,
@@ -1025,6 +1037,35 @@ private:
             NIMRTC_LOG_ERROR("vt: the compressed bitstream is neither Annex-B "
                              "nor a well-formed length-prefixed stream");
             return plugins::kErrCorrupt;
+        }
+
+        if (!annex_b.empty()) {
+            // ---- TEMP DIAGNOSTIC ----------------------------------------
+            {
+                std::printf("[vt-enc] annex-b access unit (%zu B):",
+                            annex_b.size());
+                std::size_t pos = 0;
+                int n = 0;
+                while (pos + 3 < annex_b.size() && n < 12) {
+                    if (annex_b[pos] == 0 && annex_b[pos+1] == 0 &&
+                        annex_b[pos+2] == 0 && annex_b[pos+3] == 1) {
+                        const std::size_t hdr = pos + 4;
+                        if (hdr >= annex_b.size()) break;
+                        std::printf(" type%u", static_cast<unsigned>(annex_b[hdr] & 0x1F));
+                        // find the end of this NAL
+                        std::size_t e = hdr;
+                        while (e + 3 < annex_b.size() &&
+                               !(annex_b[e]==0 && annex_b[e+1]==0 &&
+                                 annex_b[e+2]==0 && annex_b[e+3]==1)) ++e;
+                        std::printf("(len%zu)", e - hdr);
+                        pos = e;
+                        ++n;
+                    } else {
+                        ++pos;
+                    }
+                }
+                std::printf("\n");
+            }
         }
 
         // ---- The parameter sets ----------------------------------------

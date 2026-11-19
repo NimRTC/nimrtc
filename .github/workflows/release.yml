@@ -130,6 +130,108 @@ jobs:
           fi
           echo "CMake VERSION matches tag: $cmake_version"
 
+      # The tag must be reachable FROM `main`, not merely comparable to
+      # it.  A tag that is not an ancestor of `main` cannot be found by
+      # `git describe` from `main`, cannot be the base of a `1.2.x`
+      # maintenance branch without a second compare, and leaves "which
+      # commit was this package built from?" a question that has to be
+      # answered by hand.
+      #
+      # The v1.2.0 tag had exactly this shape: `compare/v1.2.0...main`
+      # reported "diverged" (main +19 / tag +10), the trees were
+      # byte-identical, and `git describe` on `main` could not find
+      # v1.2.0.  It was a topology accident, and it was fixed afterwards
+      # by merging `release/1.2` back into `main`.  This step is what
+      # stops the next cut from repeating it: the tag has to be an
+      # ancestor of `main` BEFORE the release is cut, not repaired
+      # afterwards.
+      - name: Verify the tag is an ancestor of main
+        shell: bash
+        run: |
+          tag="${{ steps.resolve-tag.outputs.tag }}"
+          # Fetch `main` explicitly: `actions/checkout` is shallow and
+          # only has the tag's own history.
+          git fetch --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" || {
+            echo "::error::could not fetch main"
+            exit 1
+          }
+          # The annotated tag object may not be in the shallow checkout.
+          # Fetch it explicitly, or `merge-base` cannot resolve it.
+          if ! git cat-file -e "refs/tags/$tag" 2>/dev/null; then
+            git fetch --no-tags origin \
+              "+refs/tags/$tag:refs/tags/$tag"
+          fi
+          if ! git merge-base --is-ancestor "$tag" origin/main; then
+            echo "::error::tag '$tag' is NOT an ancestor of main."
+            echo "       A release tag must be reachable from main, or"
+            echo "       'git describe' cannot find it, a '${{ tag%.* }}.x'"
+            echo "       maintenance branch cannot be based on it, and the"
+            echo "       provenance of the published artefact has to be"
+            echo "       reconstructed by hand."
+            echo "       Merge the release branch back into main (and push"
+            echo "       main) BEFORE cutting the tag."
+            exit 1
+          fi
+          echo "Tag '$tag' is an ancestor of main."
+
+      # The seven-day soak evidence, read AT THE TAG.
+      #
+      # This step did not exist: the release was cut with no reading of
+      # the soak evidence at all, and the plan's "7-day soak before the
+      # tag" box (v1.1 plan §4.1) was still empty two releases later.
+      # A gate that is written down but never consulted is not a gate.
+      #
+      # The window has to satisfy three things, and all three are
+      # checked here rather than assumed:
+      #
+      #   1. it is GREEN -- 7 consecutive green days on both platforms,
+      #      with no failing or inconclusive day in the window;
+      #   2. it is about THIS tree -- every day must have been measured
+      #      on a commit the tagged commit descends from (the ancestry
+      #      rule), so a window measured on some other branch cannot be
+      #      credited;
+      #   3. it is RECENT -- the window must have closed within
+      #      `--max-window-age-days` of the tagged commit's date, so a
+      #      window from two generations ago cannot satisfy a release
+      #      cut today.
+      #
+      # The evidence is read from the workflow artifacts, which are the
+      # record of the window (`docs/plan/soak-runbook.md` §4.3).  The
+      # collector's `--require` is what turns the window into a gate.
+      - name: Verify the soak evidence for this release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve-tag.outputs.tag }}"
+          max_age="${NIMRTC_SOAK_MAX_AGE_DAYS:-30}"
+          echo "Reading the soak window for $tag (max age ${max_age} days)."
+
+          # The fetcher pulls the window's artifacts back into
+          # build/soak/.  A window read from an incomplete set of
+          # artifacts is not the window, and the fetcher fails when it
+          # cannot read one -- that failure is the point.
+          python3 tools/fetch_soak_evidence.py --days 21 --out build/soak
+
+          # `--expect-ref ""` disables the branch-name rule on purpose:
+          # the window is measured on `main` (which moves), and the
+          # ancestry rule below is the one that actually binds.
+          # `--expect-ancestor-of` is the strong rule: every day must
+          # have been measured on a commit the tagged commit descends
+          # from.
+          #
+          # The `--require` gate is what makes this a gate rather than
+          # a report: it exits non-zero unless EVERY tracked platform
+          # has a 7-day streak.
+          python3 tools/run_soak.py \
+            --summary --require --require-days 7 \
+            --expect-ref "" \
+            --expect-ancestor-of "$tag" \
+            --max-window-age-days "$max_age" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
       # Pre-tag guardrail (v1.1 plan Track C, item C3).  This runs at
       # cut time with --final-tag, so a release cannot be tagged while
       # the SFU track has picked up engine wiring, while a public
@@ -187,7 +289,27 @@ jobs:
           python3 tools/verify_tag_signature.py --tag "$tag" --shape-only
           echo "Tag '$tag' is an annotated tag carrying a signature block."
 
-      - name: Verify GPG signing prerequisites (optional pre-1.0)
+      # The README is the front page of a release: its badge says which
+      # version is published and its "Latest release" paragraph says what
+      # the package contains.  Both went stale for eleven days after
+      # v1.2.0 (badge on v1.0.2, body describing v1.2.0 as shipped) and
+      # nothing noticed, because documentation drift is invisible to the
+      # compiler and to the test suite.
+      #
+      # CI runs this on every push, so drift is normally caught long
+      # before a tag exists -- but the release is the moment the claim is
+      # published, and CI's comparison is "newest changelog section vs
+      # README".  At a cut the question is the reverse: does the README
+      # already describe THIS tag?  `--expect-tag` is what asks it, and
+      # it is what makes a release with a stale front page fail here
+      # rather than eleven days later.
+      - name: Verify the README already describes this release
+        shell: bash
+        run: |
+          python3 tools/check_readme_release.py --verbose \
+            --expect-tag "${{ steps.resolve-tag.outputs.tag }}"
+
+      - name: Verify the GPG signing prerequisites (optional pre-1.0)
         shell: bash
         id: gpg-check
         env:
@@ -315,6 +437,16 @@ jobs:
           $staging = "build/_install/windows"
           cmake --install build --prefix $staging --config Release
 
+          # BSD-3-Clause and Apache-2.0 both require the licence text to
+          # travel with a binary redistribution.  The SBOM names each
+          # vendored component's SPDX id, but the text itself used to stay
+          # in the source tree -- so the published bundle shipped six
+          # static codec libraries (the +55 % the v1.2.0 review noticed)
+          # with no obligation discharged.  Collect them into
+          # `licenses/` inside the staging tree, and fail the cut if a
+          # distributed vendor has no licence file.
+          python tools/collect_licenses.py --staging $staging
+
           # Bundle name: nimrtc-${version}-windows-x86_64-msvc.tar.xz
           $bundle = "build/nimrtc-$version-windows-x86_64-msvc.tar.xz"
           # Pack the staging tree ONLY.  The previous implementation was
@@ -430,6 +562,10 @@ jobs:
           version="${RELEASE_TAG#v}"
           staging="build/_install/linux-x86_64"
           cmake --install build --prefix "$staging"
+          # BSD-3-Clause / Apache-2.0 obligations travel with the binary:
+          # collect the vendored licence texts into `licenses/` inside the
+          # staging tree, and fail the cut if a distributed vendor has none.
+          python3 tools/collect_licenses.py --staging "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz" .
           # Sanity guard: a correct bundle is a few MB.  A bundle that grew
           # to hundreds of MB means the wrong directory was archived (that
@@ -542,6 +678,8 @@ jobs:
           version="${RELEASE_TAG#v}"
           staging="build/_install/linux-aarch64"
           cmake --install build --prefix "$staging"
+          # BSD-3-Clause / Apache-2.0 obligations travel with the binary.
+          python3 tools/collect_licenses.py --staging "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz" .
           # Sanity guard: a correct bundle is a few MB.  A bundle that grew
           # to hundreds of MB means the wrong directory was archived (that
@@ -664,6 +802,8 @@ jobs:
           version="${RELEASE_TAG#v}"
           staging="build/_install/macos-arm64"
           cmake --install build --prefix "$staging"
+          # BSD-3-Clause / Apache-2.0 obligations travel with the binary.
+          python3 tools/collect_licenses.py --staging "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-macos-arm64-clang.tar.xz" .
           # Sanity guard: a correct bundle is a few MB.  A bundle that grew
           # to hundreds of MB means the wrong directory was archived (that

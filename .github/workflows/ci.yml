@@ -445,6 +445,24 @@ jobs:
       - name: Check Markdown links and anchors
         run: python tools/check_md_links.py
 
+      # The README is the front page, and it makes two claims about the
+      # release: the badge says which version is published, and the
+      # "Latest release" paragraph says what it contains.  Both went
+      # stale for eleven days after v1.2.0 -- the badge still read
+      # v1.0.2 while the body of the same file described v1.2.0 as
+      # shipped.  Nothing caught it, because documentation drift is
+      # invisible to the compiler and to the test suite.
+      #
+      # This check compares the badge, the "Latest release" paragraph
+      # and the "Current main" paragraph in both languages against the
+      # newest released section of the changelog, and fails when they
+      # disagree.
+      - name: Check the README's release claims against the changelog
+        run: python tools/check_readme_release.py --verbose
+
+      - name: Self-test the README release guard
+        run: python tools/check_readme_release.py --self-test
+
       # The plugin catalogue in docs/plugin_author_guide.md section 4 is
       # a promise about the code: every knob it names must exist in
       # EngineConfig, every macro it names must exist in the registry,

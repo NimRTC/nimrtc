@@ -101,6 +101,62 @@ _HEADLINE_RE = re.compile(r"^\s*-\s+\*\*(.+?)\*\*", re.DOTALL)
 #: list of changes and no idea what they are changes *to*.
 VERBATIM_GROUPS = ("Status:",)
 
+#: The `### Status:` label a *stable* version carries.
+#:
+#: The label used to be the hard-coded string "Release candidate" for
+#: every release, whatever the version was.  That was wrong twice over:
+#: `v1.0.0`, `v1.0.1` and `v1.0.2` were all cut as stable releases,
+#: and `v1.1.0` / `v1.2.0` were published as stable GitHub Releases --
+#: non-prerelease, marked "Latest" -- while their bodies still claimed
+#: to be candidates.  A reader saw "Status: Release candidate" on the
+#: release page of a release GitHub itself calls stable.
+#:
+#: The label is now *derived* from the version, so it cannot drift from
+#: the tag again.  A version with a SemVer pre-release identifier
+#: (`1.2.0-rc.1`) is a candidate; a version without one (`1.2.0`) is a
+#: stable release.
+STATUS_STABLE = "Stable"
+STATUS_CANDIDATE = "Release candidate"
+
+
+def status_label(version: str) -> str:
+    """The `### Status:` label for `version`."""
+    return STATUS_CANDIDATE if "-" in version else STATUS_STABLE
+
+
+#: The `### Status:` heading in a changelog section.
+_STATUS_HEADING_RE = re.compile(r"^### Status:\s*(.*?)\s*$", re.MULTILINE)
+
+
+def normalize_status_heading(section: str, version: str) -> str:
+    """Rewrite the section's `### Status:` heading to the derived label.
+
+    The section in `CHANGELOG.md` is written by hand, and the hand
+    written label went stale: the `v1.2.0` section said "Release
+    candidate" while the release was published as stable.  The release
+    body is generated from that section, so a stale label in the
+    changelog becomes a stale label on the release page -- and the
+    release page is the document a consumer reads.
+
+    The label is derived here rather than copied, so the body says what
+    the version says.  The *prose* under the heading is left alone: it
+    is the release's own account of itself, and this script has no
+    business rewriting prose.
+
+    A section with no `### Status:` heading is left untouched -- the
+    changelog's own structure decides what it carries.
+    """
+    expected = status_label(version)
+    match = _STATUS_HEADING_RE.search(section)
+    if not match:
+        return section
+    current = match.group(1).strip()
+    if current == expected:
+        return section
+    return section[:match.start()] + "### Status: " + expected + \
+        section[match.end():]
+
+
 
 def read_text(path: Path) -> str:
     return path.read_bytes().decode("utf-8-sig")
@@ -200,14 +256,19 @@ def digest(version: str, changelog: str, limit: int | None = None) -> str:
         # The complete notes fit: ship them.  No digest is needed, and
         # the reader gets every paragraph, every measurement and every
         # code reference.
-        return whole
+        return normalize_status_heading(whole, version)
 
     out: list[str] = [lines[start], ""]
 
     for heading, entries in split_groups(section):
         if any(heading.startswith(v) for v in VERBATIM_GROUPS):
             # Kept whole: it is the release's statement of itself.
-            out.append("### " + heading)
+            #
+            # The heading's own label is derived from the version, not
+            # copied from the changelog -- see `normalize_status_heading`
+            # for why the hand-written label went stale.
+            out.append("### " + heading.split(":", 1)[0] + ": "
+                       + status_label(version))
             out.append("")
             # Re-emit the group's raw body.  The heading line and the
             # bullet structure are recovered from the section text
@@ -298,6 +359,71 @@ def self_test() -> int:
     body = digest("9.9.9", small)
     check("Its prose." in body, "a section that fits must be emitted whole")
     check("This is the **digest**" not in body, "a section that fits needs no digest footer")
+
+    # --- The Status label must be derived from the version. ---
+    #
+    # The `v1.2.0` section was hand-written with "Status: Release
+    # candidate" while the release was published as stable, and the
+    # body -- which is generated from that section -- carried the wrong
+    # label to the release page.  The label must come from the
+    # version, in both the whole-section and the digest path.
+    stale = """## [9.9.6] - 2026-01-01
+
+### Status: Release candidate
+
+> The status paragraph.
+
+### Added
+
+- **One.** Its prose.
+"""
+    body = digest("9.9.6", stale)
+    check(
+        "### Status: Stable" in body,
+        "a stable version must render the Stable label, not the label "
+        "hand-written in the changelog",
+    )
+    check(
+        "### Status: Release candidate" not in body,
+        "a stable version must not render the candidate label",
+    )
+    stale_fat = (
+        "## [9.9.5] - 2026-01-01\n\n"
+        "### Status: Release candidate\n\n"
+        "> The status paragraph.\n\n"
+        "### Added\n\n"
+        + "".join(f"- **Entry {i}.** {'x' * 400}\n" for i in range(200))
+    )
+    body = digest("9.9.5", stale_fat, limit=5000)
+    check(
+        "### Status: Stable" in body,
+        "the digest path must also derive the Stable label",
+    )
+    check(
+        "### Status: Release candidate" not in body,
+        "the digest path must not render the candidate label",
+    )
+    # A pre-release version keeps the candidate label.
+    rc = """## [9.9.4-rc.1] - 2026-01-01
+
+### Status: Release candidate
+
+> The status paragraph.
+
+### Added
+
+- **One.** Its prose.
+"""
+    body = digest("9.9.4-rc.1", rc)
+    check(
+        "### Status: Release candidate" in body,
+        "a pre-release version must keep the candidate label",
+    )
+    check(
+        status_label("1.2.0") == STATUS_STABLE
+        and status_label("1.2.0-rc.1") == STATUS_CANDIDATE,
+        "the label must be derived from the version's pre-release suffix",
+    )
 
     # --- A changelog that does not fit: the digest must kick in. ---
     # A small budget stands in for the real 125 000-character limit, so

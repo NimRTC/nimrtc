@@ -109,6 +109,13 @@ ALWAYS_ALLOWED = frozenset({"core", "plugins", "engine"})
 #                   negotiation path reads and writes
 #   video_stats:: — the quality counters, behind the
 #                   `video_stats_bridge.hpp` adapter
+#   rtx::    — the RFC 4588 retransmission *payload format* (the two-octet
+#              OSN header) and the `apt=` SDP parameter.  The engine
+#              reads the peer's `apt=` line to learn which payload type
+#              carries the retransmissions, and writes its own — the
+#              same role `video_sdp_attributes` plays for the codec
+#              format parameters: an SDP attribute vocabulary the
+#              negotiation path reads and writes.
 #
 # `h264` is deliberately *not* in this list.  It used to be included
 # behind `NIMRTC_HAS_H264` purely as a link-time registration
@@ -120,6 +127,7 @@ ALWAYS_ALLOWED = frozenset({"core", "plugins", "engine"})
 EXEMPT_MODULES = frozenset({
     "sdp",
     "rtp",
+    "rtx",
     "ice",
     "dtls",
     "srtp",

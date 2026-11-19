@@ -179,10 +179,21 @@ option(NIMRTC_MODULE_VIDEO_STATS
        "Build video stats module (per-stream statistics)" ON)
 option(NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK
        "Build video RTCP feedback module (PLI/FIR/SLI generation & parsing)" ON)
+# v1.3 Q3 (video plan T1): the RFC 4588 retransmission payload format.
+# A small, self-contained module -- the OSN framing and the `apt=`
+# SDP parameter -- that both ends of a retransmission use.
+option(NIMRTC_MODULE_RTX
+       "Build RTX module (RFC 4588 retransmission payload format)" ON)
 option(NIMRTC_MODULE_VIDEO_PIPELINE
        "Build video pipeline module (VideoReceiver/VideoSender glue)" ON)
 option(NIMRTC_MODULE_VIDEO_SINK
        "Build video sink module (headless / pinned render sinks)" ON)
+# v1.3 Q6 (remote-desktop plan R3): the render-clock module — the video
+# half of the A/V-sync correction.  The engine reaches it through the
+# `plugins::IVideoSyncController` seam (Layout Invariant 4), so this
+# module is a *policy* the engine wires, not an implementation it names.
+option(NIMRTC_MODULE_VIDEO_SYNC
+       "Build video sync module (render clock: present / drop / delay)" ON)
 # Remote-desktop plan Track G (G3 / G4 / G7): the remote-desktop input
 # module — the input event codec, the pointer coalescer / rate limiter and
 # the input safety filter.  A module, not a seam: the control transport is
@@ -222,6 +233,15 @@ option(NIMRTC_MODULE_VIDEO_BITRATE_CONTROL
 # it stays decoupled and unit-testable.
 option(NIMRTC_MODULE_RD_QOE
        "Build remote-desktop QoE module (freeze / sharpness / latency / input-to-photon metrics)" ON)
+
+# v1.3 plan Q5 (the long soak across NAT + netem): the **network
+# simulation** module — the simulated NAT (an address-translating UDP
+# relay) and the deterministic impairment shaper (loss / delay / jitter /
+# reorder / rate).  It is a *test* facility, not an engine seam: the
+# soak harness and the relay's unit tests are its only consumers, so a
+# production build can leave it off.
+option(NIMRTC_MODULE_NET_SIM
+       "Build network simulation module (simulated NAT relay + impairment shaper)" ON)
 
 # Vendored libwebrtc-audio-processing-2.a (audio3a WebRTC APM wrapper) is
 # pre-built with MinGW/gcc in Release /MD mode.  When MSVC links it into a

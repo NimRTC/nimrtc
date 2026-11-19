@@ -50,6 +50,21 @@ on:
 # runner, etc.  NB: interop.yml uses "ci-e2e-${{ github.ref }}" so the two
 # workflows do NOT share a concurrency group (avoids cascading cancels on
 # rapid re-pushes).
+#
+# NB: the group deliberately does NOT carry the head SHA.  A pull
+# request's `github.ref` is `refs/pull/<n>/merge` for EVERY commit on
+# that pull request, so the group cannot tell two commits apart -- and a
+# re-run of an OLD commit's run enters the group of the CURRENT run and
+# cancels it.  That is an infinite loop (the `ci-retry` workflow does
+# exactly such a re-run for a starved job; the retry kills the current
+# run, the cancellation fires another retry, and the pull request can
+# never go green -- observed on PR #124).
+#
+# The fix belongs in the actor, not in the group: the group must stay
+# SHA-free so that a new push still cancels the run it supersedes (which
+# is what keeps a rapid sequence of pushes from burning a full
+# four-platform matrix each).  `tools/ci_retry_runner.py` therefore
+# refuses to re-run a run whose commit is no longer the head of its ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -445,6 +460,60 @@ jobs:
       - name: Check Markdown links and anchors
         run: python tools/check_md_links.py
 
+      # The README is the front page, and it makes two claims about the
+      # release: the badge says which version is published, and the
+      # "Latest release" paragraph says what it contains.  Both went
+      # stale for eleven days after v1.2.0 -- the badge still read
+      # v1.0.2 while the body of the same file described v1.2.0 as
+      # shipped.  Nothing caught it, because documentation drift is
+      # invisible to the compiler and to the test suite.
+      #
+      # This check compares the badge, the "Latest release" paragraph
+      # and the "Current main" paragraph in both languages against the
+      # newest released section of the changelog, and fails when they
+      # disagree.
+      - name: Check the README's release claims against the changelog
+        run: python tools/check_readme_release.py --verbose
+
+      - name: Self-test the README release guard
+        run: python tools/check_readme_release.py --self-test
+
+      # The release workflow's tag filter decides whether a `git push` can
+      # start a release.  GitHub evaluates `on.push.tags` patterns as
+      # ECMAScript regexes anchored at the start of the ref, and the
+      # pattern the repository shipped (`v[0-9]+.[0-9]+.[0-9]+*`) stood for
+      # more than its author meant: a push of `chore/release-1.2-followup`
+      # started the whole release workflow, which fails in preflight in
+      # 0 s (run 44478642313, 2026-11-19).  The guard is a one-second check
+      # that the filter matches every tag form the project cuts and no
+      # branch in the repository.
+      #
+      # It runs wherever this job runs -- `main`, `release/**` and every PR
+      # into `main` -- and NOT on a working branch, because `ci-fast.yml`
+      # is what a working branch gets and it does not run the docs job.
+      # That is the right place for it: the filters live in the tree, and
+      # a working branch's push already cannot start `release.yml` once the
+      # filters are correct.  During the window where a bad filter is being
+      # pushed for the first time, this check would catch it on the PR, one
+      # push later than ideal and before the merge.
+      - name: Check the release workflow's tag filter
+        run: python tools/check_release_tag_filter.py --self-test
+
+      # A `${{ }}` block is evaluated by GitHub's expression language, not
+      # by bash and not by YAML.  A shell expansion inside one -- writing an
+      # expression block whose body is `tag` followed by a shell
+      # dot-suffix-strip -- is invisible locally: the YAML parses and the
+      # string is legal bash.  It shows up only after a push, as a workflow
+      # that starts and produces zero jobs because the file did not parse.
+      # That happened on 2026-11-19: commit `d6c3e38c` put such a block in
+      # release.yml's ancestry step, and every subsequent push ran the
+      # release workflow for 0 s with no jobs.  (This comment deliberately
+      # does not quote the broken block -- quoting it here would break this
+      # file in exactly the same way, which is also why the guard scans
+      # comments.)
+      - name: Check that every workflow expression is an expression
+        run: python tools/check_workflow_expressions.py --self-test
+
       # The plugin catalogue in docs/plugin_author_guide.md section 4 is
       # a promise about the code: every knob it names must exist in
       # EngineConfig, every macro it names must exist in the registry,
@@ -485,6 +554,22 @@ jobs:
 
       - name: Self-test the engine-layering guard
         run: python tools/check_engine_layering.py --self-test
+
+      # v1.3 plan Q5: the impaired-soak recorder is the thing that
+      # decides whether a 24 h run counts as evidence, so it has to be
+      # able to fail.  The self-test pins the three verdicts (PASS /
+      # FAIL / INCONCLUSIVE), the dirty-tree rule and the 24 h duration
+      # bar, against a synthetic evidence file in the temp directory.
+      - name: Self-test the impaired-soak recorder
+        run: python3 tools/run_soak_impaired.py --self-test
+
+      # v1.3 plan Q7: the hardware-encode recorder decides whether the
+      # GPU path counts as evidence, so it has to be able to fail.  The
+      # self-test pins the PASS / FAIL / SKIP verdicts and the
+      # empty-window rule against a synthetic evidence file in the temp
+      # directory.
+      - name: Self-test the hardware-encode recorder
+        run: python3 tools/run_hardware_e2e.py --self-test
 
       # v1.2 Track S / S8: the `Engine::Stats` field reference is a
       # *derived* document.  It is generated from `engine.hpp` by

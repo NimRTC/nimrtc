@@ -653,11 +653,30 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //       the delta -- a `src/core/` type, because every layer has
     //       to speak it: Layout Invariant 1)
     //
+    // v1.3 Q3 (video plan T1) bump: +1 public header (190 -> 191) for
+    // the RFC 4588 retransmission payload format -- the two-octet OSN
+    // header and the `apt=` SDP parameter, the one place both ends of
+    // a retransmission agree on the framing:
+    //   - rtx/rtx.hpp (the retransmission payload format -- the OSN
+    //     framing and the `apt=` / `rtx-time=` parameters)
+    //
+    // v1.3 Q6 (remote-desktop plan R3) bump: +3 public headers
+    // (191 -> 194) for the render clock -- the video half of the
+    // A/V-sync correction:
+    //   - plugins/video_sync.hpp (the IVideoSyncController seam -- the
+    //     one the engine drives, so the engine never names a concrete
+    //     module: Layout Invariant 4 / ADR-025)
+    //   - video_sync/render_clock.hpp (the module's public API -- the
+    //     clock itself: the tolerance band, the present / drop / delay
+    //     mapping and the bounded-hold bookkeeping)
+    //   - video_sync/video_sync.hpp (the module's public API -- the
+    //     registration entry point the default-registrar table calls)
+    //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 190;
+    constexpr std::size_t kBaselineHeaderCount = 196;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

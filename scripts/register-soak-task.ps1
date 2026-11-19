@@ -73,12 +73,20 @@ catch {
 # measured on another branch is excluded from the window by the
 # collector's own rule, so a checkout on the wrong branch wastes a
 # day; say so loudly rather than letting it pass unnoticed.
+#
+# The expected branch is `main`: the window is measured there, and the
+# release gate then checks that the tagged commit DESCENDS FROM every
+# commit that was measured (the ancestry rule -- see
+# `docs/plan/soak-runbook.md` §4.3.1).  A checkout on a release branch
+# is not wrong in itself, but the days it records will not be credited
+# unless that branch is an ancestor of the tagged commit.
 $branch = (& git -C $repo rev-parse --abbrev-ref HEAD 2>$null)
-if ($branch -and $branch -ne 'release/1.1') {
+if ($branch -and $branch -ne 'main') {
     Write-Warning @"
-The checkout is on '$branch', not on 'release/1.1'.  Days measured here
-will be recorded as 'measured on another tree' and will NOT count towards
-the v1.1 window.  Switch the checkout before the task fires.
+The checkout is on '$branch', not on 'main'.  Days measured here will be
+recorded as 'measured on another tree' and will NOT count towards the
+window unless the tagged commit descends from this branch.  Switch the
+checkout to 'main' before the task fires.
 "@
 }
 

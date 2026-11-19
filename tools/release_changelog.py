@@ -66,6 +66,41 @@ CANONICAL_ORDER = (
     "Tooling",
 )
 
+#: The `### Status:` label for a release whose version carries **no**
+#: SemVer pre-release identifier.
+#:
+#: The label used to be the hard-coded string "Release candidate" for
+#: every release, whatever the version was.  That was wrong twice over:
+#: `v1.0.0`, `v1.0.1` and `v1.0.2` were all cut as stable releases
+#: (their own sections say "Stable"), and `v1.1.0` / `v1.2.0` were
+#: published as stable GitHub Releases -- non-prerelease, marked
+#: "Latest" -- while their sections still claimed to be candidates.
+#: The label is now *derived* from the version, so it cannot drift from
+#: the tag again.
+STATUS_STABLE = "Stable"
+
+#: The `### Status:` label for a release whose version carries a
+#: pre-release identifier (`-rc.N`, `-alpha.N`, `-beta.N`).
+#:
+#: Per `RELEASING.md` §2.2 those tags are candidates by construction:
+#: the pre-release identifier *is* the statement of what the tag is.
+STATUS_CANDIDATE = "Release candidate"
+
+
+def status_label(version: str) -> str:
+    """The `### Status:` label for `version`.
+
+    A version with a SemVer pre-release identifier (`1.2.0-rc.1`) is a
+    candidate; a version without one (`1.2.0`) is a stable release.
+
+    The rule is deliberately mechanical rather than a judgement call:
+    the label has to be derivable from the thing it describes, because
+    a hand-written label is exactly the thing that went stale.
+    """
+    # `version` is `X.Y.Z` or `X.Y.Z-<pre-release>`.  Anything after the
+    # `-` is a pre-release identifier; nothing after it is not.
+    return STATUS_CANDIDATE if "-" in version else STATUS_STABLE
+
 
 def read_text(path: Path) -> str:
     return path.read_bytes().decode("utf-8-sig")
@@ -190,7 +225,7 @@ def render(
     out.append(f"## [{version}] - {date}")
     out.append("")
     if status:
-        out.append("### Status: Release candidate")
+        out.append(f"### Status: {status_label(version)}")
         out.append("")
         for para in status.strip().split("\n\n"):
             out.append("> " + para.replace("\n", "\n> "))
@@ -237,7 +272,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="only report whether the structure is well-formed",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the tool's own tests and exit",
+    )
     args = parser.parse_args(argv)
+
+    if args.self_test:
+        return self_test()
 
     text = read_text(CHANGELOG_PATH)
     lines = text.split("\n")
@@ -291,5 +334,62 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def self_test() -> int:
+    """Self-test the status-label rule.
+
+    The rule under test is the one that went stale: the label has to
+    follow the version, because a hard-coded label called `v1.1.0` and
+    `v1.2.0` -- both published as stable GitHub Releases -- "Release
+    candidate".
+    """
+    failures: list[str] = []
+
+    def check(cond: bool, what: str) -> None:
+        if not cond:
+            failures.append(what)
+
+    # A plain version is a stable release.
+    for version in ("1.0.0", "1.0.1", "1.0.2", "1.1.0", "1.2.0", "2.0.0"):
+        check(
+            status_label(version) == STATUS_STABLE,
+            f"{version} must be labelled {STATUS_STABLE!r}, "
+            f"got {status_label(version)!r}",
+        )
+
+    # A version with a pre-release identifier is a candidate.
+    for version in ("0.9.0-rc1", "0.14.0-rc.1", "0.14.0-beta.1", "1.0.0-alpha.1"):
+        check(
+            status_label(version) == STATUS_CANDIDATE,
+            f"{version} must be labelled {STATUS_CANDIDATE!r}, "
+            f"got {status_label(version)!r}",
+        )
+
+    # The rendered section must carry the derived label, not a constant.
+    rendered = render("", [], "1.2.0", "2026-11-18", "The release.", "")
+    check(
+        "### Status: Stable" in rendered,
+        "a stable version must render the Stable label",
+    )
+    check(
+        "### Status: Release candidate" not in rendered,
+        "a stable version must not render the candidate label",
+    )
+    rendered = render("", [], "1.2.0-rc.1", "2026-11-18", "The release.", "")
+    check(
+        "### Status: Release candidate" in rendered,
+        "a candidate version must render the candidate label",
+    )
+
+    if failures:
+        for f in failures:
+            print(f"release_changelog.py: FAIL -- {f}", file=sys.stderr)
+        return 1
+
+    print("release_changelog.py: self-test passed")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        sys.exit(self_test())
     sys.exit(main())

@@ -95,7 +95,23 @@
           "not exist in a personal-account repository).",
           "",
           "`required_review_thread_resolution` is on: a review comment",
-          "left unresolved is not a review that happened."
+          "left unresolved is not a review that happened.",
+          "",
+          "`require_extra_approval_for_unattributed_changes` is on, and",
+          "the 2026-11-19 review is right that it does NOT bite here:",
+          "it only demands a second approval when an approval exists in",
+          "the first place, so with `required_approving_review_count: 0`",
+          "the owner's own merges never trigger it.  That is the price",
+          "of a single-collaborator repository, not a misconfiguration,",
+          "and it is recorded here so nobody later believes the gate",
+          "reviewed the code when it only wrapped it in a PR.  What",
+          "actually stands between a careless merge and `main` is the",
+          "twelve required checks plus `strict_required_status_checks_policy`",
+          "-- not a human reviewer.  The review-history gap (18 PRs",
+          "merged on 11-18 with 0 review comments) is a process fact,",
+          "not a ruleset one; the fix is a second account that can",
+          "approve, at which point this becomes 1 and the extra-approval",
+          "rule starts doing its job."
         ]
       }
     },

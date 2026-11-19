@@ -44,7 +44,7 @@ history. This register answers that in one table.
 | **W3** | **CLOSED 2026-11-06** — the `Prebuild WebRTC APM` step used to run with `continue-on-error: true` + a per-platform ON/OFF fallback (×4); it is now a hard gate and Configure is pinned to `ON` | `.github/workflows/release.yml` (four `apm_prebuild` steps + four Configure blocks) | The meson prebuild of webrtc_audio_processing failed on windows-2022 at the v0.14.0 cut (abseil subproject ninja failure, `dc15ad8`), and the persistent Windows stub-3A outcome through `v1.0.2` additionally came from three defects in `tools/build_webrtc_apm.cmd` (LF-only line endings mis-parsed by cmd.exe, a `powershell -Command` wrapper turning ninja's stderr progress line into a terminating error, and a ninja call without `call`) — all three fixed in `9c3c522`, i.e. before the `v1.0.2` cut; the `Prebuild WebRTC APM` step of the final `v1.0.2` release run therefore **succeeded** on all four platforms, which is the removal condition this row asked for. **Closed 2026-11-06:** `continue-on-error` is dropped from all four legs and each Configure block passes a literal `-DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON`, so every bundle ships the real WebRTC APM 3A (AEC/ANS/AGC) and a prebuild regression aborts the cut instead of degrading the bundle to the built-in stub 3A path. `build/3a-status-<platform>.txt` is still written per leg (now always `3a=ON`) and the release body still reports the per-platform status; the record remains a *build-time* fact only — whether the published bundle carries a usable 3A depends on the install rules shipping the APM archives under `lib/webrtc_apm/` (`cmake/NimRTCInstall.cmake`, Track D — landed after `v1.0.2`), so the release body lists the tarball and reports the build mode and the shipped content separately. | A prebuild regression now aborts the release cut instead of shipping a bundle with the stub 3A path (the `v0.14.0` windows abort is the reference case). | **Closed 2026-11-06** — the prebuild is green on all four platforms (evidence: the final `v1.0.2` release run), so `continue-on-error` is dropped and Configure is pinned to `ON`; this row is retained as history. | No — closed |
 | **W4** | Vendor manifest check is a hard gate (v1.0+) | `.github/workflows/ci.yml` (×4), `.github/workflows/interop.yml` (×2) | The drift gate (`tools/check_vendor.py`) only runs when `src/third_party/vendor.json` exists. v1.0+: drift = red CI = blocked merge (verified 9/9 match locally before the flip). | Unrelated PRs start failing on vendor drift. | **Removed 2026-10-30** — gate flipped hard for v1.0.0. | No |
 | **W5** | `build-linux-aarch64` hard gate in `publish-release`'s `needs:` | `.github/workflows/release.yml` | **Original rationale was wrong.** The entry used to read "GitHub-hosted ARM64 runner capacity is unreliable — a real observed failure mode was a 14+ hour queue (run #35049874137, 2026-09-16 → 2026-10-14)". The queue was not a capacity problem: the runner label was `ubuntu-22.04-arm64`, which is **not a GitHub-hosted label at all**, so the job could never be allocated a runner (see §4). With the label corrected to `ubuntu-24.04-arm` this leg runs like the other three. **Closed 2026-11-05 (review):** the `v1.0.2` release published the aarch64 bundle, which counts as the first observed green run of the *release* aarch64 leg — the `continue-on-error: true` is dropped and the job is back in `publish-release`'s `needs:`. | A release cut that includes an aarch64 bundle blocks on that bundle; if the aarch64 release build has a real defect, the release is held rather than shipping a known-bad or partial artefact. | **Closed 2026-11-05** — gate flipped hard per review; this row is retained as history. | **See §4 — this is a support-matrix question** |
-| **W6** | CI auto-retry: a job that never received a runner is re-run automatically | `.github/workflows/ci-retry.yml` + `tools/ci_retry_runner.py` | A GitHub-hosted runner is not guaranteed. A job asking for a saturated pool — the `macos-15` arm64 image is the chronic case — can be starved of a runner until the platform gives up ("The job was not acquired by Runner of type hosted even after multiple attempts"), ending `cancelled` with **no steps** and **no runner**. The run's conclusion is then `failure`, and the merge gate is red for a reason that has nothing to do with the tree. Measured on 2026-11-16: PRs #65, #66 and #67 each needed a manual `gh run rerun` before the macOS leg went green. The retry is re-run **only** when `steps == 0` **and** `runner_name == ""`; a job that *ran* and failed is never re-run, because that failure belongs to the tree and re-running it would hide the defect the CI run was for. The two signatures are disjoint and were verified against real runs (43938323684 → starved; 43877514623 → genuine). The loop guard is `run_attempt`: only attempt 1 is retried, because a job-level re-run increments the counter (verified: 43938323684 went 1 → 2). Scope: `ci`, `ci-e2e`, `ci-fast` and `release`; `soak` is excluded because both its jobs carry `continue-on-error: true` (a job that ran and failed still reports `success`, so the classifier would never touch it) and because the soak window is a statement about *calendar* days — a retry landing on the next UTC day is a second data point, not a replacement. | A starved job leaves the merge gate (or a release cut) red until somebody notices and re-runs it by hand; CI is unattended only for the runs that happen to be watched. | GitHub-hosted runner starvation stops happening at this rate, or the platform gains a first-class "retry this job" trigger. Until then the guard is cheap and safe. | No |
+| **W6** | CI auto-retry: a job that never received a runner is re-run automatically | `.github/workflows/ci-retry.yml` + `tools/ci_retry_runner.py` | A GitHub-hosted runner is not guaranteed. A job asking for a saturated pool — the `macos-15` arm64 image is the chronic case — can be starved of a runner until the platform gives up ("The job was not acquired by Runner of type hosted even after multiple attempts"), ending `cancelled` with **no steps** and **no runner**. The run's conclusion is then `failure`, and the merge gate is red for a reason that has nothing to do with the tree. Measured on 2026-11-16: PRs #65, #66 and #67 each needed a manual `gh run rerun` before the macOS leg went green. The retry is re-run **only** when `steps == 0` **and** `runner_name == ""`; a job that *ran* and failed is never re-run, because that failure belongs to the tree and re-running it would hide the defect the CI run was for. The two signatures are disjoint and were verified against real runs (43938323684 → starved; 43877514623 → genuine). The same rule covers `cancelled`: over the 60 cancelled runs measured on 2026-11-19 there were 124 cancelled jobs that had a runner and had run steps (a `cancel-in-progress: true` supersede) against 25 that never reached a machine, so blanket-retrying `cancelled` would re-run 5× more superseded jobs than starved ones. **Revised 2026-11-19 (post-v1.2.0 review), two defects found by reading the ten red `ci-retry` runs:** (a) the loop guard was the run's `run_attempt`, which is wrong in both directions — a job-level re-run bumps it for *every* job, and run 44306330102 re-starved its macOS leg in attempt 2 and was refused, leaving the merge gate red for 39 minutes. The guard is now per job name (`--max-retries 1`, counted by walking the per-attempt job lists); verified by dry-running the classifier against 44306330102, which now selects the macOS leg where the old guard selected nothing. (b) Nine of the ten red runs were `403 Forbidden` from the re-run endpoint, not misclassifications: `workflow_run` fires on the *run* transition, but a concurrency cancel tears jobs down asynchronously and the run's own state is a snapshot taken at a different moment from its jobs' — run 44439751037 was still `in_progress` at 01:49:22Z when `ci-retry` fired and tried to re-run its attempt-1 jobs, and the platform refuses to re-run a job whose run is still running. The script now polls until the run reports `completed` (`--wait-polls 20 --wait-interval 15`), and if it never settles it says so and exits 0 rather than attempting the doomed call. The tenth was `HTTP 502: Bad Gateway`, a platform hiccup the script now retries with exponential backoff for 5xx/429 (403 is deliberately not retried — the same call gets the same answer). Scope is `ci`, `ci-e2e` and `release`; `ci-fast` was dropped because it triggered 1 of 498 measured `ci-retry` runs and `windows / fast` is not a required check; `soak` is excluded because both its jobs carry `continue-on-error: true` (a job that ran and failed still reports `success`, so the classifier would never touch it) and because the soak window is a statement about *calendar* days — a retry landing on the next UTC day is a second data point, not a replacement. **Staleness guard (2026-11-19):** a run whose commit is no longer the head of its ref is **not** re-run. A pull request's `github.ref` is `refs/pull/<n>/merge` for *every* commit on it, so the `ci`/`ci-e2e` concurrency groups cannot tell two commits apart; a job-level re-run of an OLD commit's run therefore entered the CURRENT run's group and cancelled it. The result was an infinite loop on PR #124 -- the retry killed the current run, the cancellation fired another retry, and the pull request could never go green. The guard is the fix: `tools/ci_retry_runner.py` resolves the current head (the pull request's head SHA, or the branch tip for a push run) and refuses to re-run a run that no longer carries it. The concurrency groups stay SHA-free on purpose: a SHA-bearing group would stop a new push from cancelling the run it supersedes, and a rapid sequence of pushes would then burn a full four-platform matrix each. A `--force` flag is the operator escape hatch on the manual dispatch path.| A starved job leaves the merge gate (or a release cut) red until somebody notices and re-runs it by hand; CI is unattended only for the runs that happen to be watched. | GitHub-hosted runner starvation stops happening at this rate, or the platform gains a first-class "retry this job" trigger. Until then the guard is cheap and safe. | No |
 
 ---
 
@@ -274,7 +274,139 @@ platform.** `build-linux-aarch64` is a hard gate again (no
 
 ---
 
-## 5. Maintenance
+## 5. Release-bundle obligations (post-v1.2.0 review)
+
+Two things the v1.2.0 review raised belong together, because the same
+number exposed both: the Windows bundle grew from **40.5 MB at v1.1**
+to **62,826,812 bytes (59.9 MiB) at v1.2.0**, a 55 % jump read
+correctly as "seven new static codecs entered the MSVC line".
+
+### 5.1 The licence texts did not ship (fixed 2026-11-19)
+
+The review asked whether the licence obligations were complete. They
+were not. `release.yml` writes a CycloneDX SBOM from
+`src/third_party/vendor.json`, and that SBOM names each component's
+SPDX id — but the licence **text** stayed in the source tree. Both
+BSD-3-Clause and Apache-2.0 require the notice to accompany a binary
+redistribution, so the bundle shipped six static codec libraries
+(`libvpx`, `svt-av1`, `libyuv`, `dav1d`, `openh264`, `wolfssl`) with
+the obligation written down but not discharged.
+
+`tools/collect_licenses.py` now runs in all four release build jobs
+after `cmake --install` and before packing. Per vendor in
+`vendor.json` it:
+
+| Case | Behaviour |
+|---|---|
+| Licence file at the tree root or `src/` (`LICENSE`, `LICENSE.txt`, `COPYING`, `NOTICE`, `PATENTS`, …) | copied to `licenses/<vendor>/`, SHA-256 recorded in `licenses/THIRD_PARTY_NOTICES.txt` |
+| Notice embedded in every source file (`nv_codec_headers`) | the claim is **checked** (every header must carry the MIT notice), then the headers are carried under their original `include/ffnvcodec/` paths |
+| Empty submodule mount point (not initialised in this clone) | skipped with a note — a local-clone fact, not a repo defect |
+| Fetched at build time (`webrtc_audio_processing`) | skipped with a distinct note when absent locally |
+| Distributed vendor with **no** licence file | **fails the release cut** |
+| Test-only vendor (`NON_DISTRIBUTED`) | reported, does not fail the cut |
+
+Checked against the pinned SHAs: **all 18 vendors** have a licence
+obligation that can be discharged — 17 ship a licence file or an inline
+notice, and `webrtc_audio_processing` ships one in the tree the build
+fetches. Two specifics worth recording:
+
+- **`wolfssl`** is dual-licensed `GPL-2.0-only OR (Apache-2.0 AND MIT)`;
+  NimRTC relies on the Apache/MIT arm, which is why a GPL dependency
+  does not make the bundle non-redistributable.
+- **`libopus`** additionally ships `LICENSE_PLEASE_READ.txt` — a patent
+  licensing statement that is part of its obligation, not a courtesy.
+
+Three defects were found and fixed while wiring this gate, each of
+which would have made it either useless or a false alarm:
+
+1. The emptiness test ran on `<vendor>/`, but the wrapper directory
+   keeps NimRTC's own `CMakeLists.txt`, so an uninitialised submodule
+   never looked empty.  It now tests the submodule mount point
+   (`vendor.json`'s `submodule_path`).
+2. `dav1d`'s licence is `COPYING` at the **submodule root**
+   (`<vendor>/src/COPYING`), not `<vendor>/src/LICENSE`.  The gate would
+   have failed the next cut on a vendor that is fully licensed.  A
+   `--self-test` case now pins this layout.
+3. `nv_codec_headers` keeps its headers under `include/ffnvcodec/`, not
+   at the vendor root, so the inline-notice check — and the copy — were
+   looking in the wrong place.
+
+`--self-test` pins the four cases above; it is registered in CTest as
+`test_collect_licenses`.
+
+### 5.2 The 64 MiB bundle limit was one codec away from failing (fixed 2026-11-19)
+
+`tools/make_release_bundle.py` refused any bundle above **64 MiB**.
+That limit was written when a real bundle was 2-3 MB and its job was to
+catch the v1.0.1 mis-archive (the 822 MB asset that contained the whole
+CI workspace). At 59.9 MiB the Windows payload had **6.4 % of headroom
+left**, so the next static codec would have failed the cut with an
+error that says "sanity limit" — a release blocker disguised as a
+sanity check.
+
+Two numbers now:
+
+- `MAX_BUNDLE_BYTES = 256 MiB` — back to being a mis-archive detector;
+- `BUNDLE_BUDGET_BYTES = 96 MiB` — a warning threshold that prints the
+  current size, so payload growth shows up in the release log before it
+  becomes a failure.
+
+The payload itself is unchanged: no codec was removed.
+
+---
+
+## 6. Repository hygiene (post-v1.2.0 review)
+
+| Item | Finding | Action |
+|---|---|---|
+| Stale remote branch `release/zz-ruleset-push-test` | Cut on 2026-11-14 to prove the `release/*` ruleset refuses deletion; already merged into `main`, so it was pure debris. The `deletion` rule (correctly) refused the delete — `bypass_actors` is empty and `Repository roles: admin` is deliberately not in it. | Set the ruleset to `disabled`, deleted the ref, set it back to `active`. Verified afterwards: the branch is `404`, the ruleset is `active`, and `release/1.2` reports `protected: true`. `python tools/apply_ci_ruleset.py` confirms all three mirrors still match. |
+| `probe-*` workflow runs | No probe workflow exists in `.github/workflows/`; nothing to remove. | None. |
+| Every other remote branch | 20 branches, all with open or in-flight work lines (`feat/q6-video-render-clock`, `feat/remote-desktop-m1-m4`, `docs/*`, `version/v1`–`v5`, …). Deleting them is a judgement call for their owners, not hygiene. | Not touched. |
+| `required_approving_review_count: 0` on `main` | The review is right that 0 approvals is weak, but it is not a misconfiguration: this is a single-collaborator repository with no second account that can approve. `require_extra_approval_for_unattributed_changes` only bites once an approval exists, so it never fires either. | Documented in `.github/rulesets/protect-main.json`'s `_comment`: what actually gates `main` is the twelve required checks plus `strict_required_status_checks_policy`, not a human reviewer. Raising this to 1 requires a second approving account; that is a process change, recorded not silently "fixed". |
+
+---
+
+## 7. What a release preflight depends on
+
+`release.yml`'s `preflight` job is the only thing that has to succeed
+before the four build legs start.  It runs on `ubuntu-latest` with a
+full-history checkout (`submodules: recursive`) and needs **no secrets
+to pass** — the GPG secrets are read into an output and only turn
+signing on; their absence is a warning, not a failure.
+
+| Dependency | Why | What happens without it |
+|---|---|---|
+| The tag exists **on origin**, and is an **annotated, signed** tag | `workflow_dispatch` takes a tag name and checks it out by ref; the shape check reads the tag *object* | `git fetch`/checkout fails, or `verify_tag_signature.py --shape-only` fails |
+| The tag is an **ancestor of `main`** | provenance (see §1) | the `merge-base --is-ancestor` step fails; merge the release branch into `main` first |
+| `CMakeLists.txt` `project(... VERSION)` equals the tag | the package version and the tag must not drift | version-match step fails |
+| **7 consecutive green soak days** on both tracked platforms | the soak gate | fails; it does **not** fall back to "no evidence" |
+| Those soak records are **artifacts, not local files**, so they need `actions: read` on `GITHUB_TOKEN` | `fetch_soak_evidence.py` walks the `soak` workflow's runs and downloads their artifacts | the fetch step fails with an API error |
+| Every daily record's `commit` is an **ancestor of the tag**, and the window closed within `NIMRTC_SOAK_MAX_AGE_DAYS` (30) | a window measured on another branch, or from two generations ago, is not evidence about this tree | `run_soak.py --require` fails |
+| **Soak artifact retention ≥ the window read** | the fetcher reads `--days 21`; anything older has expired | the window is incomplete and the gate fails |
+| **`node`** on the runner (for the API-symbols part of the freeze checklist) | `scripts/check-release-freeze.sh` shells out to node | `SKIP` in CI, a hard failure under `--final-tag` |
+| Network access to the submodule remotes | the freeze checklist asks each pin's server whether the SHA is fetchable (`git fetch --dry-run`) | the `submodules` check fails |
+| The README already describing **this** tag | `check_readme_release.py --expect-tag` | fails, so a release cannot ship with last version's front page |
+| A clean working tree / initialised submodules | the freeze checklist's vendor and root checks | `FAIL vendor` / `FAIL root` |
+
+Things it deliberately does **not** depend on:
+
+- The GPG private key — pre-1.0 releases can be cut without it (a
+  warning, and the body carries the unsigned banner).
+- A second approving reviewer — `main` requires none (see §6).
+- Any local build — preflight is entirely read-only over the repository
+  and the Actions API.
+
+The four build jobs then need what any build needs: the vendored
+submodules (checked out recursively), the APM prebuild (`meson` via
+`tools/fetch_webrtc_apm.py`), a C++20 toolchain, Python 3 for the
+tooling, and `xz`/`tar` on the Linux/macOS legs.  Each build job also
+runs `tools/collect_licenses.py` after `cmake --install`; if a
+distributed vendor's tree has no licence file the **build** job fails,
+which is inside the release but after preflight.
+
+---
+
+## 8. Maintenance
 
 - New workaround → add a row before the commit lands, not after CI goes
   red and gets patched in place.

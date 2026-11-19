@@ -264,6 +264,19 @@ struct NIMRTC_API_STABLE VideoFrameInfo {
     std::uint32_t frame_seq     = 0;       ///< per-SSRC frame counter
     std::uint32_t rtp_timestamp = 0;       ///< 32-bit media clock
     std::int64_t  render_time_us = 0;      ///< local monotonic at render()
+
+    /** The instant at which this frame must reach the display, in
+     *  microseconds on the **local monotonic** clock.
+     *
+     *  This is the *presentation deadline* the render clock computed
+     *  (v1.3 Q6, remote-desktop plan R3): when the picture is ahead of
+     *  the sound it has to be **held** back until the sound catches up,
+     *  and this field is the instant the hold ends.
+     *
+     *  Zero means "no deadline" — present the frame as soon as the
+     *  presentation clock reaches it.  A sink that ignores the field
+     *  keeps working unchanged. */
+    std::int64_t  present_at_us = 0;
 };
 
 /**

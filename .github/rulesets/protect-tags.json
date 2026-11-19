@@ -1,0 +1,70 @@
+{
+  "_comment": [
+    "The protection for the release TAGS, mirrored from the GitHub",
+    "Ruleset.",
+    "",
+    "Apply it with:",
+    "    python tools/apply_ci_ruleset.py --apply --mirror \\",
+    "        .github/rulesets/protect-tags.json",
+    "",
+    "Why this exists",
+    "---------------",
+    "",
+    "A release tag is the only thing that says which commit a",
+    "published artefact was built from.  Two operations destroy that",
+    "link, and neither is visible afterwards:",
+    "",
+    "  * deleting the tag, and",
+    "  * moving the tag to a different commit (a force-update).",
+    "",
+    "Neither is possible to undo in any way a consumer can observe:",
+    "the artefact is already published, the release page already",
+    "points at the old SHA, and the tag now says something else.",
+    "",
+    "The `v1.2.0` case shows the shape of the risk.  The tag was cut",
+    "on `release/1.2`, that branch was `protected: false`, and the",
+    "repository's only ruleset covered `refs/heads/main` -- so",
+    "nothing stopped a force-push of the branch that carried the tag.",
+    "The tag itself survived (it is a separate ref), but the branch",
+    "it was cut from could have been rewritten underneath it, and the",
+    "release branch is what a `1.2.x` maintenance line is based on.",
+    "",
+    "The rules here are deliberately minimal -- no `pull_request`, no",
+    "`required_status_checks`: a tag is not a branch, and a tag's",
+    "signature and form are already checked by",
+    "`tools/verify_tag_signature.py` (run by `release.yml`'s",
+    "preflight, in `--shape-only` mode)."
+  ],
+  "name": "protect-release-tags",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "refs/tags/v*"
+      ],
+      "_comment": [
+        "The release tags only: `v1.0.0`, `v1.2.0`, ...  The",
+        "pattern covers every SemVer release tag, including the ones",
+        "cut later, with no further configuration."
+      ]
+    }
+  },
+  "rules": [
+    {
+      "type": "deletion",
+      "_comment": "A release tag cannot be deleted."
+    },
+    {
+      "type": "non_fast_forward",
+      "_comment": [
+        "A release tag cannot be moved to another commit.  This is",
+        "the rule that keeps \"the artefact was built from this",
+        "commit\" true for as long as the tag exists."
+      ]
+    }
+  ],
+  "id": 27606897
+}

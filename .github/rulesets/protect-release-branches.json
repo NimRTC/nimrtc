@@ -1,0 +1,84 @@
+{
+  "_comment": [
+    "The protection for the `release/*` lines, mirrored from the GitHub",
+    "Ruleset.",
+    "",
+    "Apply it with:",
+    "    python tools/apply_ci_ruleset.py --apply",
+    "",
+    "Why this is a SEPARATE ruleset from `protect-main.json`",
+    "-------------------------------------------------------",
+    "",
+    "`protect-main.json` used to cover `refs/heads/release/*` as well,",
+    "and that combination was unusable: `ci.yml` and `interop.yml`",
+    "declare `pull_request: branches: [main]`, which filters on the",
+    "PR's *base* branch, so a pull request into `release/1.1`",
+    "triggered neither workflow.  Measured: such a PR reported zero",
+    "checks and was `blocked`, while a direct push was refused with",
+    "\"Changes must be made through a pull request\".  The release",
+    "branches therefore could not be updated at all -- while",
+    "RELEASING.md 3.2 requires hot-fixes to be cherry-picked onto",
+    "`release/X.Y`.",
+    "",
+    "So this ruleset asks for the part that is always satisfiable and",
+    "drops the part that is not:",
+    "",
+    "  * `deletion`       -- a release line cannot be deleted.",
+    "  * `non_fast_forward` -- a release line cannot be rewritten.",
+    "",
+    "The second rule is the one that closes the hole the 2026-11-18",
+    "review found.  `release/1.2` carried the published `v1.2.0` tag",
+    "as its head, was `protected: false`, and the only ruleset in the",
+    "repository covered `refs/heads/main` -- so a single force-push",
+    "would have silently severed the link between the published",
+    "artefact and the commit it was built from, with nothing to stop",
+    "it and nothing to notice afterwards.",
+    "",
+    "There is deliberately NO `pull_request` rule here.  A release",
+    "line receives cherry-picked hot-fixes by a maintainer (RELEASING.md",
+    "3.2), and requiring a pull request would make the branch",
+    "un-updatable -- the deadlock described above.  There is also no",
+    "`required_status_checks` rule: those checks are evaluated when a",
+    "pull request merges, not on a direct push, and no pull request",
+    "into a release line runs the matrix (the workflows filter on",
+    "`main`).  Requiring them would therefore block every merge into",
+    "the line without ever being satisfiable.",
+    "",
+    "The tag-protection ruleset is `protect-tags.json`."
+  ],
+  "name": "protect-release-branches",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "refs/heads/release/*"
+      ],
+      "_comment": [
+        "The release lines only.",
+        "",
+        "`refs/heads/release/*` covers `release/1.0`, `release/1.1`,",
+        "`release/1.2` and any line cut later.  The pattern is",
+        "deliberate: a new release line is protected the moment it is",
+        "cut, with no further configuration, which is what stops the",
+        "next release from having to be remembered."
+      ]
+    }
+  },
+  "rules": [
+    {
+      "type": "deletion",
+      "_comment": "A release line cannot be deleted."
+    },
+    {
+      "type": "non_fast_forward",
+      "_comment": [
+        "No force-push: a published release line's history is the",
+        "evidence of which commit the artefact came from."
+      ]
+    }
+  ],
+  "id": 27606891
+}

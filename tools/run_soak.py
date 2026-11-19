@@ -39,10 +39,17 @@ make a green result hard to fake:
     window with gaps cannot be mistaken for a clean one.
   * Every record carries the tree it was measured on (`git_ref` and
     `git_commit`), and a day only counts towards the window when it was
-    measured on the candidate branch.  The tag is cut from
-    `release/1.1`, so evidence taken from `main` -- which already
-    carries the v1.2.0 audio body -- is evidence about a different
-    program and must not be credited to the release.
+    measured on the candidate tree.  Two rules express that, and the
+    release gate uses the second one:
+      - `--expect-ref` -- the day's `git_ref` must be exactly this
+        string.  The strictest form, and the wrong one for a window
+        measured on a branch that moves.
+      - `--expect-ancestor-of` -- the commit the day was measured on
+        must be an ANCESTOR of the candidate commit.  This is what
+        makes a window measured on `main` usable for a tag cut later:
+        the tagged tree descends from every commit that was measured.
+        A day measured on a tree the candidate does NOT descend from
+        proves nothing about it, and is not green.
 
 Usage
 -----
@@ -51,6 +58,8 @@ Usage
     python tools/run_soak.py --summary
     python tools/run_soak.py --summary --json
     python tools/run_soak.py --summary --expect-ref release/1.1
+    python tools/run_soak.py --summary --expect-ancestor-of v1.3.0 \
+        --max-window-age-days 30
 
 The default out-dir is `build/soak/`.  Evidence never goes to the
 project root: the root is kept free of scratch files by policy, and a
@@ -107,6 +116,16 @@ PLATFORMS = ("windows", "linux-x86_64")
 # v1.2.0 audio body -- is evidence about a different program and is not
 # credited to the window.
 DEFAULT_EXPECT_REF = "release/1.1"
+
+# The looser form of the same rule: a day counts when the commit it was
+# measured on is an ANCESTOR of the tree that gets tagged.  This is what
+# lets a window be measured on a moving branch (`main`) while still
+# proving that the tagged tree descends from what was measured.
+#
+# It is deliberately a *separate* switch rather than a replacement for
+# `--expect-ref`: the two rules answer different questions, and a
+# release that wants the stronger guarantee has to ask for it by name.
+# `--expect-ancestor-of` is a commit-ish, not a branch name.
 
 
 class ToolError(Exception):
@@ -506,6 +525,181 @@ def _day_is_on_ref(cases, expect_ref):
     return True
 
 
+def _git_ancestors(commit, candidate):
+    """Whether `commit` is an ancestor of (or equal to) `candidate`.
+
+    This is the ancestry form of the "which tree" rule.  It answers a
+    different question from `_day_is_on_ref`: not "was the day measured
+    on this branch", but "does the tree that gets tagged descend from
+    the tree the day was measured on".
+
+    The second question is the one a moving-branch release needs.  A
+    window measured on `main` while `main` advanced is still evidence
+    about the release, provided the tag is cut from a descendant of
+    every commit that was measured -- the tag then contains everything
+    the window proved, plus whatever came after it.
+
+    The converse is what makes the rule safe rather than permissive:
+    a day measured on a tree that the candidate does NOT descend from
+    proves nothing about the candidate.  That is the case the exact
+    branch-name rule catches too, and it is the case that made the
+    `release/1.1` window worthless once `release/1.1` fell two
+    generations behind `main`.
+
+    Returns None when the question cannot be answered -- a record with
+    no commit, a repository that does not contain the commit, or a git
+    that is not there -- because "cannot tell" must not be read as
+    "yes".
+    """
+    if not commit or not candidate:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor",
+             commit, candidate],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    # 128: the object is unknown to this repository.  Not an answer.
+    return None
+
+
+def resolve_commitish(ref):
+    """Resolve a commit-ish (SHA, tag, branch) into a commit SHA.
+
+    Returns None when the ref cannot be resolved -- an unknown branch,
+    a repository that does not contain it, or no git at all.  The caller
+    treats None as "the question cannot be answered", which is not the
+    same as "yes".
+    """
+    if not ref:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--verify",
+             "%s^{commit}" % ref],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    value = decode(proc.stdout).strip()
+    return value or None
+
+
+def commit_date(commit):
+    """The committer date of a commit, as a `YYYY-MM-DD` string.
+
+    Returns None when the date cannot be read.  The date is what makes
+    "the window must be recent" checkable: a seven-day streak that
+    ended six months ago is not evidence about today's release, however
+    green it was.
+    """
+    if not commit:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "show", "-s", "--format=%cs", commit],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    value = decode(proc.stdout).strip()
+    return value or None
+
+
+def stale_platforms(summary, reference_day, max_age_days):
+    """The platforms whose window ended too long before `reference_day`.
+
+    The streak counts seven *consecutive* green days, but it says
+    nothing about WHEN they were.  A window that closed in March is
+    not evidence about a release cut in November -- the code has moved
+    since.  So the gate also requires the window to have closed
+    recently.
+
+    `reference_day` is a `YYYY-MM-DD` string (the candidate commit's
+    date).  Returns a list of "platform (last green day, age in days)"
+    strings, empty when every window is recent enough.
+    """
+    stale = []
+    for plat in PLATFORMS:
+        info = summary.get(plat, {})
+        green_days = info.get("green_days") or []
+        if not green_days:
+            # A platform with no green day at all is already unsatisfied
+            # by the streak rule; it is not reported here as well, so
+            # the two reasons are not confused.
+            continue
+        last = max(green_days)
+        try:
+            age = (datetime.strptime(reference_day, "%Y-%m-%d")
+                   - datetime.strptime(last, "%Y-%m-%d")).days
+        except (TypeError, ValueError):
+            continue
+        if age > max_age_days:
+            stale.append("%s (last green day %s, %d days before the "
+                         "candidate)" % (plat, last, age))
+    return stale
+
+
+def _day_is_ancestor_of(cases, candidate, resolver=None):
+    """Whether every record of a day was measured on an ancestor of `candidate`.
+
+    Returns a verdict of "yes", "no" or "unknown":
+
+    * "yes"    -- every record carries a commit that is an ancestor of
+      the candidate.  The day is evidence about the tagged tree.
+    * "no"     -- at least one record carries a commit that is NOT an
+      ancestor, or carries no commit at all.  The day proves nothing
+      about the candidate.
+    * "unknown" -- the question could not be answered for at least one
+      record (the commit is not in this repository, or git failed).
+
+    "unknown" is kept apart from "no" on purpose: a day measured on a
+    commit this clone does not have is a *readable* record whose
+    relation to the candidate is unknown, and the gate must not treat
+    it as either evidence or a failure.  The summary reports it, and
+    the release gate treats it as NOT green -- the same conservative
+    reading as an unidentified tree.
+    """
+    if not candidate:
+        # The rule is not in force (no `--expect-ancestor-of` was
+        # given), so it raises no objection.  This is different from
+        # the "unknown" verdict below, which is what happens when the
+        # rule IS in force but the question could not be answered.
+        return "yes"
+    resolve = resolver or _git_ancestors
+    verdicts = []
+    for records in cases.values():
+        for rec in records:
+            commit = rec.get("git_commit")
+            if not commit:
+                # A record that does not say which commit it was
+                # measured on cannot be placed in the candidate's
+                # history at all.  It is not an ancestor of anything.
+                verdicts.append("unknown")
+                continue
+            verdict = resolve(commit, candidate)
+            if verdict is None:
+                verdicts.append("unknown")
+            elif verdict:
+                verdicts.append("yes")
+            else:
+                verdicts.append("no")
+    if not verdicts:
+        return "unknown"
+    if "no" in verdicts:
+        return "no"
+    if "unknown" in verdicts:
+        return "unknown"
+    return "yes"
+
+
 def _day_is_clean(cases):
     """Whether every record of a day was measured on a clean tree.
 
@@ -552,12 +746,23 @@ def _day_cleanliness(cases):
     return "clean"
 
 
-def summarise(records, required_cases, expect_ref=None):
+def summarise(records, required_cases, expect_ref=None,
+              expect_ancestor_of=None, resolver=None):
     """Compute the per-platform streaks and the gaps.
 
     `expect_ref` is the tree the window is a statement about.  When it
     is given, a day only counts as green if every one of its records
     was measured on that tree.
+
+    `expect_ancestor_of` is the ancestry form of the same rule: a day
+    counts as green when the commit it was measured on is an ancestor
+    of the candidate commit.  It is the rule a release cut from a
+    moving branch needs -- see `_day_is_ancestor_of`.
+
+    Both may be given at once, in which case a day has to satisfy
+    BOTH.  That is the strictest reading, and it is the one the
+    release gate uses: the window must have been measured on the
+    candidate branch AND on a tree the candidate descends from.
     """
     per_platform = {}
     for record in records:
@@ -583,17 +788,30 @@ def summarise(records, required_cases, expect_ref=None):
         wrong_ref_days = []
         dirty_days = []
         unknown_days = []
+        unrelated_days = []
+        undecidable_days = []
         for day in sorted(days):
             cases = days[day]
             on_ref = _day_is_on_ref(cases, expect_ref)
             if not on_ref:
                 wrong_ref_days.append({"day": day, "refs": _day_refs(cases)})
+            ancestry = _day_is_ancestor_of(cases, expect_ancestor_of,
+                                           resolver=resolver)
+            if ancestry == "no":
+                unrelated_days.append({"day": day, "refs": _day_refs(cases)})
+            elif ancestry == "unknown":
+                undecidable_days.append({"day": day, "refs": _day_refs(cases)})
             cleanliness = _day_cleanliness(cases)
             if cleanliness == "dirty":
                 dirty_days.append({"day": day})
             elif cleanliness == "unknown":
                 unknown_days.append({"day": day})
-            if _day_is_green(cases, required_cases) and on_ref and cleanliness == "clean":
+            green = (_day_is_green(cases, required_cases)
+                     and on_ref
+                     and cleanliness == "clean"
+                     and ancestry != "no"
+                     and ancestry != "unknown")
+            if green:
                 green_dates.append(day)
             else:
                 entry = {
@@ -610,6 +828,10 @@ def summarise(records, required_cases, expect_ref=None):
                     # day is the tree it was measured on, and the report
                     # has to say so rather than imply a case failure.
                     entry["wrong_ref"] = _day_refs(cases)
+                if ancestry == "no":
+                    entry["unrelated_tree"] = _day_refs(cases)
+                elif ancestry == "unknown":
+                    entry["undecidable_tree"] = _day_refs(cases)
                 if cleanliness != "clean":
                     entry["tree_state"] = cleanliness
                 not_green.append(entry)
@@ -689,6 +911,8 @@ def summarise(records, required_cases, expect_ref=None):
             "wrong_ref_days": wrong_ref_days,
             "dirty_tree_days": dirty_days,
             "unknown_cleanliness_days": unknown_days,
+            "unrelated_tree_days": unrelated_days,
+            "undecidable_tree_days": undecidable_days,
         }
 
     # Every tracked platform appears in the summary, even when it has
@@ -707,14 +931,21 @@ def summarise(records, required_cases, expect_ref=None):
             "not_green_days": [],
             "measured_refs": [],
             "wrong_ref_days": [],
+            "dirty_tree_days": [],
+            "unknown_cleanliness_days": [],
+            "unrelated_tree_days": [],
+            "undecidable_tree_days": [],
         })
     return summary
 
 
-def print_summary(summary, required_cases, expect_ref=None):
+def print_summary(summary, required_cases, expect_ref=None,
+                  expect_ancestor_of=None):
     print("soak summary (cases: %s)" % ", ".join(required_cases))
     if expect_ref:
         print("window is measured on: %s" % expect_ref)
+    if expect_ancestor_of:
+        print("window must descend from: %s" % expect_ancestor_of)
     print()
     for plat in sorted(summary):
         info = summary[plat]
@@ -743,6 +974,20 @@ def print_summary(summary, required_cases, expect_ref=None):
             for entry in info["unknown_cleanliness_days"]:
                 print("        %s  the collector did not record whether the "
                       "working tree was clean" % entry["day"])
+        if info.get("unrelated_tree_days"):
+            print("    days measured on a tree the candidate does NOT descend "
+                  "from: %d (these do not count as green)"
+                  % len(info["unrelated_tree_days"]))
+            for entry in info["unrelated_tree_days"]:
+                print("        %s  measured on: %s"
+                      % (entry["day"], ", ".join(entry["refs"])))
+        if info.get("undecidable_tree_days"):
+            print("    days whose relation to the candidate is unknown: %d "
+                  "(these do not count as green)"
+                  % len(info["undecidable_tree_days"]))
+            for entry in info["undecidable_tree_days"]:
+                print("        %s  measured on: %s (the commit is not "
+                      "resolvable here)" % (entry["day"], ", ".join(entry["refs"])))
         if info["inconclusive_days"]:
             print("    inconclusive days     : %d (these do not count as green)"
                   % len(info["inconclusive_days"]))
@@ -763,6 +1008,16 @@ def print_summary(summary, required_cases, expect_ref=None):
                 if entry.get("wrong_ref"):
                     print("        %s  measured on another tree: %s"
                           % (entry["day"], ", ".join(entry["wrong_ref"])))
+                    continue
+                if entry.get("unrelated_tree"):
+                    print("        %s  measured on a tree the candidate does "
+                          "not descend from: %s"
+                          % (entry["day"], ", ".join(entry["unrelated_tree"])))
+                    continue
+                if entry.get("undecidable_tree"):
+                    print("        %s  the tree's relation to the candidate "
+                          "could not be established: %s"
+                          % (entry["day"], ", ".join(entry["undecidable_tree"])))
                     continue
                 if entry.get("tree_state") == "dirty":
                     print("        %s  measured on an unclean tree" % entry["day"])
@@ -1103,6 +1358,105 @@ def _self_test():
     check(not info["dirty_tree_days"],
           "a day whose cleanliness is unknown is not reported as dirty")
 
+    # 20. The ancestry rule: a day measured on a commit that the
+    #     candidate DESCENDS FROM is green, even though the branch name
+    #     may differ.  This is the rule that makes a window measured on
+    #     a moving `main` usable for a tag cut from a later descendant.
+    def always_ancestor(commit, candidate):
+        return True
+
+    recs = [_record(day, case, "PASS", ref="main", commit="c%d" % i)
+            for i, day in enumerate(seven) for case in cases]
+    info = summarise(recs, cases, expect_ref="main",
+                     expect_ancestor_of="candidate",
+                     resolver=always_ancestor)["windows"]
+    check(info["consecutive_green_days"] == 7,
+          "days measured on ancestors of the candidate are green "
+          "(streak %d, expected 7)" % info["consecutive_green_days"])
+
+    # 21. A day measured on a tree the candidate does NOT descend from
+    #     proves nothing about the candidate, even when the case passed.
+    def never_ancestor(commit, candidate):
+        return False
+
+    info = summarise(recs, cases, expect_ref="main",
+                     expect_ancestor_of="candidate",
+                     resolver=never_ancestor)["windows"]
+    check(info["consecutive_green_days"] == 0,
+          "days measured on an unrelated tree are not green "
+          "(streak %d, expected 0)" % info["consecutive_green_days"])
+    check(len(info["unrelated_tree_days"]) == 7,
+          "every unrelated-tree day is reported as such "
+          "(got %d, expected 7)" % len(info["unrelated_tree_days"]))
+    check(gate_unsatisfied(summarise(recs, cases, expect_ref="main",
+                                     expect_ancestor_of="candidate",
+                                     resolver=never_ancestor), 7) != [],
+          "a window measured on an unrelated tree fails the gate")
+
+    # 22. "Cannot tell" is not "yes": a record whose commit cannot be
+    #     resolved is not evidence, and the gate must refuse it.
+    def unknown_ancestor(commit, candidate):
+        return None
+
+    info = summarise(recs, cases, expect_ref="main",
+                     expect_ancestor_of="candidate",
+                     resolver=unknown_ancestor)["windows"]
+    check(info["consecutive_green_days"] == 0,
+          "a day whose ancestry cannot be established is not green "
+          "(streak %d, expected 0)" % info["consecutive_green_days"])
+    check(len(info["undecidable_tree_days"]) == 7,
+          "an undecidable day is reported as undecidable, not as unrelated "
+          "(got %d, expected 7)" % len(info["undecidable_tree_days"]))
+    check(gate_unsatisfied(summarise(recs, cases, expect_ref="main",
+                                     expect_ancestor_of="candidate",
+                                     resolver=unknown_ancestor), 7) != [],
+          "a window whose ancestry cannot be established fails the gate")
+
+    # 23. The two rules compose: a day that satisfies the ancestry rule
+    #     but was measured on ANOTHER branch is still not green, because
+    #     the release gate asks for both.
+    info = summarise(recs, cases, expect_ref="release/1.1",
+                     expect_ancestor_of="candidate",
+                     resolver=always_ancestor)["windows"]
+    check(info["consecutive_green_days"] == 0,
+          "the ancestry rule does not override the branch rule "
+          "(streak %d, expected 0)" % info["consecutive_green_days"])
+
+    # 24. A record with no commit at all cannot satisfy the ancestry
+    #     rule: the tree cannot be placed in the candidate's history.
+    recs = [_record(day, case, "PASS", ref="main") for day in seven
+            for case in cases]
+    info = summarise(recs, cases, expect_ref="main",
+                     expect_ancestor_of="candidate",
+                     resolver=always_ancestor)["windows"]
+    check(info["consecutive_green_days"] == 0,
+          "a day with no recorded commit is not green under the ancestry rule "
+          "(streak %d, expected 0)" % info["consecutive_green_days"])
+
+    # 25. The freshness rule: a seven-day streak that closed long
+    #     before the candidate is not evidence about it.  This is the
+    #     rule that stops a window measured two generations ago from
+    #     satisfying today's release.
+    recent = ["2026-11-%02d" % d for d in range(1, 8)]
+    recs = [_record(day, case, "PASS", plat="windows", ref="main")
+            for day in recent for case in cases]
+    recs += [_record(day, case, "PASS", plat="linux-x86_64", ref="main")
+             for day in recent for case in cases]
+    fresh_summary = summarise(recs, cases, expect_ref="main")
+    check(stale_platforms(fresh_summary, "2026-11-08", 30) == [],
+          "a window that closed within the limit is not stale")
+    check(stale_platforms(fresh_summary, "2026-12-20", 30) != [],
+          "a window that closed long before the candidate is stale")
+    check(stale_platforms(fresh_summary, "2026-12-20", 365) == [],
+          "a window within a year of the candidate is not stale")
+
+    # 26. A platform with no green day is not reported as stale: it is
+    #     already unsatisfied by the streak rule, and reporting both
+    #     reasons would confuse the two.
+    empty_summary = summarise([], cases, expect_ref="main")
+    check(stale_platforms(empty_summary, "2026-11-20", 30) == [],
+          "a platform with no green day is not reported as stale")
+
     print()
     print("self-test: %d failure(s)" % failures)
     return 0 if failures == 0 else 1
@@ -1139,8 +1493,23 @@ def main(argv=None) -> int:
                              "measured on any other tree is not green "
                              "(default: %s; pass an empty string to disable)"
                              % DEFAULT_EXPECT_REF)
+    parser.add_argument("--expect-ancestor-of", default=None,
+                        help="a commit-ish (a SHA, a tag, a branch) that the "
+                             "measured tree must be an ancestor of; a day "
+                             "measured on a tree the candidate does not "
+                             "descend from is not green.  This is the rule "
+                             "a release cut from a moving branch needs: the "
+                             "window is measured on `main`, and the tag is "
+                             "cut from a descendant of every commit that was "
+                             "measured")
     parser.add_argument("--self-test", action="store_true",
                         help="run the built-in self-test and exit")
+    parser.add_argument("--max-window-age-days", type=int, default=None,
+                        help="the window must have closed within this many "
+                             "days of the candidate commit; a seven-day "
+                             "streak from six months ago is not evidence "
+                             "about today's release.  Disabled when not "
+                             "given.")
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -1152,17 +1521,36 @@ def main(argv=None) -> int:
 
     if args.summary:
         records = load_records(out_dir)
-        summary = summarise(records, required_cases, expect_ref=args.expect_ref)
+        # The ancestry rule is stated in terms of a commit, so a
+        # branch-or-tag given on the command line is resolved here.
+        # An unresolvable ref is NOT silently ignored: it becomes an
+        # explicit failure, because a gate that silently drops its own
+        # strongest rule is worse than one that refuses to run.
+        ancestor_commit = None
+        if args.expect_ancestor_of:
+            ancestor_commit = resolve_commitish(args.expect_ancestor_of)
+            if ancestor_commit is None:
+                sys.stderr.write(
+                    "error: cannot resolve --expect-ancestor-of %r to a "
+                    "commit; the window's ancestry rule cannot be applied, so "
+                    "the summary would not mean what it claims to\n"
+                    % args.expect_ancestor_of)
+                return 2
+        summary = summarise(records, required_cases, expect_ref=args.expect_ref,
+                            expect_ancestor_of=ancestor_commit)
         if args.json:
             print(json.dumps({
                 "out_dir": str(out_dir),
                 "cases": required_cases,
                 "expect_ref": args.expect_ref,
+                "expect_ancestor_of": args.expect_ancestor_of,
+                "expect_ancestor_commit": ancestor_commit,
                 "records": len(records),
                 "platforms": summary,
             }, indent=2, sort_keys=True))
         else:
-            print_summary(summary, required_cases, expect_ref=args.expect_ref)
+            print_summary(summary, required_cases, expect_ref=args.expect_ref,
+                          expect_ancestor_of=ancestor_commit)
             if not summary:
                 print("no evidence found under %s" % out_dir)
         # The summary is a report by default: it exits 0 even when the
@@ -1183,6 +1571,27 @@ def main(argv=None) -> int:
                     "window NOT satisfied: %s\n"
                     % ", ".join(unsatisfied))
                 return 1
+            # The freshness rule.  A seven-day streak says the window was
+            # green; it does not say WHEN.  A window that closed six
+            # months ago is not evidence about a release cut today, so
+            # the gate also asks how long ago the window closed.
+            if args.max_window_age_days is not None:
+                reference = (commit_date(ancestor_commit) if ancestor_commit
+                             else datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+                if reference is None:
+                    sys.stderr.write(
+                        "error: cannot establish the candidate commit's date, "
+                        "so the window's freshness cannot be checked; the gate "
+                        "would not mean what it claims to\n")
+                    return 1
+                stale = stale_platforms(summary, reference,
+                                         args.max_window_age_days)
+                if stale:
+                    sys.stderr.write(
+                        "window is TOO OLD: %s\n" % ", ".join(stale))
+                    return 1
+                print("window closed within %d day(s) of the candidate (%s)"
+                      % (args.max_window_age_days, reference))
             print("window satisfied: %d consecutive green days on %s"
                   % (required_days, ", ".join(PLATFORMS)))
         return 0

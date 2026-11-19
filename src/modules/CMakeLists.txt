@@ -261,6 +261,27 @@ if(NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK
     add_subdirectory(video_rtcp_feedback)
 endif()
 
+# v1.3 Q3 (video plan T1): the RFC 4588 retransmission payload format.
+#
+# Self-contained: it depends on nimrtc::core only (byte spans and
+# results).  It is a *format* module -- the two-octet OSN header and the
+# `apt=` SDP parameter.
+#
+# Two consumers link it:
+#
+#   * the video pipeline, which frames and unwraps the retransmission
+#     payload; and
+#   * the engine, which needs the `apt=` parameter to *negotiate* the
+#     retransmission stream and the `rtx/90000` encoding name to write
+#     the `a=rtpmap:` line.
+#
+# The engine's dependency is the same kind as its `rtp` / `sdp` one: a
+# wire contract, not a replaceable implementation (ADR-025 / the L4
+# exception in AGENTS.md).
+if(NIMRTC_MODULE_RTX AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rtx/CMakeLists.txt")
+    add_subdirectory(rtx)
+endif()
+
 if(NIMRTC_MODULE_VIDEO_PIPELINE
         AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/video_pipeline/CMakeLists.txt")
     if(NOT NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK)
@@ -268,11 +289,28 @@ if(NIMRTC_MODULE_VIDEO_PIPELINE
             "NIMRTC_MODULE_VIDEO_PIPELINE requires NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK "
             "(the v1.3 Q3 feedback bridge encodes NACK/PLI for the video pipeline)")
     endif()
+    if(NOT NIMRTC_MODULE_RTX)
+        message(FATAL_ERROR
+            "NIMRTC_MODULE_VIDEO_PIPELINE requires NIMRTC_MODULE_RTX "
+            "(the v1.3 Q3 retransmission payload format: RFC 4588)")
+    endif()
     add_subdirectory(video_pipeline)
 endif()
 
 if(NIMRTC_MODULE_VIDEO_SINK)
     add_subdirectory(video_sink)
+endif()
+
+# -----------------------------------------------------------------------------
+# v1.3 Q6 (remote-desktop plan R3): the render-clock module — the video half
+# of the A/V-sync correction.
+#
+# Self-contained: it depends on nimrtc::core + nimrtc::plugins (the seam it
+# implements) and on nothing else.  The engine wiring — resolving the clock
+# through the registry and feeding it the ADR-017 skew — lives in the engine.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SYNC)
+    add_subdirectory(video_sync)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -349,6 +387,20 @@ endif()
 # -----------------------------------------------------------------------------
 if(NIMRTC_MODULE_AUDIO_DEVICE)
     add_subdirectory(audio_device)
+endif()
+
+# -----------------------------------------------------------------------------
+# v1.3 plan Q5 — the network simulation module (the simulated NAT + the
+# impairment shaper).
+#
+# A *test* facility, not an engine seam: its only consumers are the soak
+# harness (`examples/soak-p2p`) and its own unit tests.  It stands apart
+# from the engine on purpose — L4 forbids the engine from including a
+# concrete module, and the soak is a host which drives two engines, so it
+# may link the module directly the same way `examples/` may link any module.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_NET_SIM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/net_sim/CMakeLists.txt")
+    add_subdirectory(net_sim)
 endif()
 
 # CTest discovery: enable_testing() at this level so that each module's

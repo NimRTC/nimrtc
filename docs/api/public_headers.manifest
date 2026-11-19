@@ -9,7 +9,7 @@
 #
 # Regenerate with: python scripts/check_api_manifest.py --write
 #
-# count: 190
+# count: 196
 
 src/core/include/nimrtc/core/api_version.hpp
 src/core/include/nimrtc/core/bytes.hpp
@@ -67,6 +67,8 @@ src/modules/jb/include/nimrtc/jb/jb_plugin.hpp
 src/modules/jb/include/nimrtc/jb/jitter_buffer.hpp
 src/modules/jb_strategy/include/nimrtc/jb_strategy/adaptive_delay.hpp
 src/modules/net_feedback/include/nimrtc/net_feedback/net_feedback.hpp
+src/modules/net_sim/include/nimrtc/net_sim/impairment.hpp
+src/modules/net_sim/include/nimrtc/net_sim/nat_relay.hpp
 src/modules/nvcodec/include/nimrtc/nvcodec/hw_composite_codec.hpp
 src/modules/nvcodec/include/nimrtc/nvcodec/nv_backends.hpp
 src/modules/nvcodec/include/nimrtc/nvcodec/nv_codec_kind.hpp
@@ -98,6 +100,7 @@ src/modules/rtp/include/nimrtc/rtp/rtcp_xr.hpp
 src/modules/rtp/include/nimrtc/rtp/rtp_plugin.hpp
 src/modules/rtp/include/nimrtc/rtp/timeline.hpp
 src/modules/rtp/include/nimrtc/rtp/xr_report_plugin.hpp
+src/modules/rtx/include/nimrtc/rtx/rtx.hpp
 src/modules/sched/include/nimrtc/sched/sched.hpp
 src/modules/sctp/include/nimrtc/sctp/dcep.hpp
 src/modules/sctp/include/nimrtc/sctp/sctp_plugin.hpp
@@ -156,6 +159,8 @@ src/modules/video_sink/include/nimrtc/video_sink/video_sync.hpp
 src/modules/video_source/include/nimrtc/video_source/video_source.hpp
 src/modules/video_source/include/nimrtc/video_source/video_source_plugin.hpp
 src/modules/video_stats/include/nimrtc/video_stats/video_stats.hpp
+src/modules/video_sync/include/nimrtc/video_sync/render_clock.hpp
+src/modules/video_sync/include/nimrtc/video_sync/video_sync.hpp
 src/modules/vp9/include/nimrtc/vp9/codec_plugin.hpp
 src/modules/vp9/include/nimrtc/vp9/decoder.hpp
 src/modules/vp9/include/nimrtc/vp9/hw_backends.hpp
@@ -200,4 +205,5 @@ src/plugins/include/nimrtc/plugins/video_codec.hpp
 src/plugins/include/nimrtc/plugins/video_pipeline.hpp
 src/plugins/include/nimrtc/plugins/video_sink.hpp
 src/plugins/include/nimrtc/plugins/video_source.hpp
+src/plugins/include/nimrtc/plugins/video_sync.hpp
 src/plugins/include/nimrtc/plugins/xr_report.hpp

@@ -1095,6 +1095,22 @@ nimrtc_add_engine_video_feedback_test(test_engine_video_feedback
 endif()
 
 # ----------------------------------------------------------------------------
+# v1.3 Q3 — engine-level RFC 4588 (RTX) retransmission stream.
+#
+# The `rtx` module's tests cover the *format* (the two-octet OSN header,
+# the `apt=` parameter); the video pipeline's tests cover the *mechanism*
+# (the sender frames a retransmission, the receiver unwraps it).  This
+# target covers the two halves only the engine can do: the **negotiation**
+# (the `a=rtpmap:` / `a=fmtp:` / `a=ssrc-group:FID` lines) and the
+# **wire** (a NACK answered on the RTX payload type, an inbound
+# retransmission unwrapped rather than decoded).
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
+nimrtc_add_engine_video_feedback_test(test_engine_video_rtx
+                                       test_engine_video_rtx.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
 # Phase 4.2 / D2 — the engine ↔ `video_stats` module wiring.
 #
 # The module owns the per-stream video quality counters (freeze detection,
@@ -1413,6 +1429,42 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
 endif()
 
 # ----------------------------------------------------------------------------
+# v1.3 plan Q4 / video plan T2 — the receive-side feedback bound.
+#
+# The bound itself (the NACK cap, the global key-frame rate limit, the
+# pending report's age) lives in the engine's private
+# `engine_feedback_guard.hpp` / `.cpp`, so the test includes that header
+# directly and compiles the implementation into its own target — the same
+# pattern as `test_engine_rate_window.cpp` (the rate window's rule).
+#
+# The clock is injected, so the 30 s synthetic-loss acceptance run is
+# deterministic and takes microseconds of real time.
+# ----------------------------------------------------------------------------
+add_executable(test_engine_feedback_guard
+    test_engine_feedback_guard.cpp
+    "${CMAKE_SOURCE_DIR}/src/engine/src/engine_feedback_guard.cpp")
+target_link_libraries(test_engine_feedback_guard PRIVATE
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main)
+target_include_directories(test_engine_feedback_guard PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_engine_feedback_guard PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_engine_feedback_guard LENIENT)
+add_test(NAME test_engine_feedback_guard
+    COMMAND $<TARGET_FILE:test_engine_feedback_guard>)
+set_tests_properties(test_engine_feedback_guard PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_feedback_guard
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
+endif()
+
+# ----------------------------------------------------------------------------
 # The windowed outbound rate measurement — the *rule*, on its own.
 #
 # The rule lives in the engine's private `engine_rate_window.hpp` (the same
@@ -1495,6 +1547,12 @@ function(nimrtc_add_engine_video_sync_test name source)
         nimrtc::h264
         nimrtc::datachannel
         GTest::gtest_main)
+    # v1.3 Q6: the render-clock module.  The engine reaches it through the
+    # `plugins::IVideoSyncController` seam, so the engine's test links the
+    # module the same way it would link any other plugin.
+    if(TARGET nimrtc::video_sync)
+        target_link_libraries(${name} PRIVATE nimrtc::video_sync)
+    endif()
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
@@ -1616,6 +1674,80 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
         DISCOVERY_TIMEOUT 10)
   endif()
   nimrtc_copy_wolfssl_certs(test_engine_video_e2e_loopback)
+endif()
+
+# ----------------------------------------------------------------------------
+# The engine-level *hardware* encode test (v1.3 plan Q7 / O-6).
+#
+# The software e2e test above proves the media path with OpenH264.  This
+# one proves the same chain with the engine pinned to `video_codec_backend
+# = "hardware"` — a pin the engine honours by *failing* rather than
+# falling back (plan B2) — and asserts from the stats that a hardware
+# backend answered (`video_codec_hardware_accelerated`, `video_codec_
+# backend` neither "software-stub" nor "openh264") and that the picture
+# still arrives pixel-correct.  It skips on a host with no hardware
+# encoder; the dedicated evidence run is `examples/hw-e2e` +
+# `tools/run_hardware_e2e.py` + `.github/workflows/hardware.yml`.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_FRAME AND NIMRTC_MODULE_H264)
+  add_executable(test_engine_video_hw_loopback test_engine_video_hw_loopback.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_hw_loopback PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::h264
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_hw_loopback PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_hw_loopback PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_hw_loopback PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_hw_loopback LENIENT)
+  add_test(NAME test_engine_video_hw_loopback
+      COMMAND $<TARGET_FILE:test_engine_video_hw_loopback>)
+  set_tests_properties(test_engine_video_hw_loopback PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_hw_loopback
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_video_hw_loopback)
 endif()
 
 # Phase 3 / C3 — the GPU zero-copy video send path.  The test needs the
@@ -2162,7 +2294,7 @@ target_link_libraries(test_registry_contract PRIVATE
 # symbol only exists when the module is compiled in.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input rd_qoe)
+              rd_input rd_qoe video_sync)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_registry_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -2247,7 +2379,7 @@ target_link_libraries(test_plugin_id_contract PRIVATE
 # only when it was actually built.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input rd_qoe)
+              rd_input rd_qoe video_sync)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_plugin_id_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -3318,8 +3450,19 @@ endif()
 # `tools/ci_retry_runner.py --self-test` pins that classification: the
 # starved shape, the genuine-failure shape, the cancelled-but-scheduled
 # shape (a runner was assigned, so it was a superseded run rather than a
-# starved queue), and the unknown shape (an API response that omits the
-# `steps` field is not evidence of starvation).
+# starved queue), the concurrency-cancel shape that dominates the
+# repository (cancelled *after* steps ran -- 124 of 149 jobs over the
+# last 60 cancelled runs on 2026-11-19), and the unknown shape (an API
+# response that omits the `steps` field is not evidence of starvation).
+#
+# It also pins the two bugs the 2026-11-19 review exposed.  The loop
+# guard is now per job name rather than the run's `run_attempt`: run
+# 44306330102 re-starved its macOS leg in attempt 2, the run-level guard
+# refused the retry, and the merge gate stayed red.  And the script
+# polls until the run reports `completed` before re-running anything:
+# nine `ci-retry` runs went red with `403 Forbidden` because
+# `workflow_run` fired while the run was still `in_progress` after a
+# concurrency cancel.  Both are asserted in the self-test.
 #
 # Registered as a ctest case for the same reason as the merge-gate
 # guard: a developer sees it next to the other gates, and `ctest` alone
@@ -3337,6 +3480,22 @@ if(NIMRTC_BUILD_TESTS)
         set_tests_properties(test_ci_retry_runner PROPERTIES
             TIMEOUT 60
             LABELS "ci;guard")
+
+        # The licence collector is the release's BSD-3 / Apache-2 gate: it
+        # is what stops a bundle shipping a static codec library without
+        # its licence text.  Before it existed, the v1.2.0 Windows bundle
+        # carried six static codecs (+55 % over v1.1) and no licence text
+        # at all -- the SBOM named each SPDX id, but the notices did not
+        # travel.  Its self-test pins that a distributed vendor with no
+        # licence file fails the cut while an uninitialised submodule does
+        # not.
+        add_test(NAME test_collect_licenses
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/collect_licenses.py"
+                         --self-test)
+        set_tests_properties(test_collect_licenses PROPERTIES
+            TIMEOUT 60
+            LABELS "ci;guard;release")
     else()
         message(STATUS
             "Python3 interpreter not found — skipping the CI auto-retry "
@@ -3409,6 +3568,104 @@ if(NIMRTC_BUILD_TESTS)
             "Python3 interpreter not found — skipping the release-body "
             "guard (tools/release_body.py).  CI runs it as a dedicated "
             "step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The README-release guard.
+#
+# The README's version badge, its "Latest release" paragraph and its
+# "Current `main`" paragraph all make claims about which release is
+# published, and those claims went stale for eleven days after
+# `v1.2.0`: the badge still read `v1.0.2` while the body of the same
+# file said `v1.2.0` was shipped.  Documentation drift is invisible to
+# the compiler and to the test suite, so only an explicit check can
+# catch it.
+#
+# The self-test is what makes the guard worth having: it builds a
+# synthetic tree with each drift shape and asserts the checker still
+# distinguishes them, so the guard cannot silently degrade into a
+# no-op.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_readme_release
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_readme_release.py"
+                         --self-test)
+        set_tests_properties(test_readme_release PROPERTIES
+            TIMEOUT 60
+            LABELS "release;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the README-release "
+            "guard (tools/check_readme_release.py).  CI runs it as a "
+            "dedicated step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The release tag-filter guard.
+#
+# `release.yml` fires on `push.tags`, and GitHub evaluates those patterns as
+# ECMAScript regexes anchored at the *start* of the ref, where `*` and `+`
+# quantify the preceding *character*.  The pattern the repository shipped,
+# `v[0-9]+.[0-9]+.[0-9]+*`, read as the regex its author meant and behaved
+# as "v, any run of digits, any character, ...": on 2026-11-19 a push of
+# `chore/release-1.2-followup` started the whole release workflow, whose
+# preflight has no tag and failed in 0 s (run 44478642313).
+#
+# The mistake cannot be seen in review -- the pattern looks right -- and it
+# does not fail until a branch is pushed.  The guard evaluates the workflow's
+# patterns with ECMAScript semantics against the release tag forms and the
+# repository's real branch names, so it fails at the point of the edit.
+# Node is the engine (Python's `re` rejects the pattern shape outright).
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_release_tag_filter
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_release_tag_filter.py"
+                         --self-test)
+        set_tests_properties(test_release_tag_filter PROPERTIES
+            TIMEOUT 180
+            LABELS "release;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the release tag-filter "
+            "guard (tools/check_release_tag_filter.py).  CI runs it as a "
+            "dedicated step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The workflow-expression guard.
+#
+# `${{ ... }}` is GitHub's expression language, not bash and not YAML.  A
+# shell expansion inside one -- `${{ tag%.* }}`, added by `d6c3e38c` to the
+# ancestry step -- parses as YAML, reads as legal bash to every editor, and
+# makes the *whole workflow* refuse to run: it started and produced zero
+# jobs on every push after it landed (runs 44478642313, 44481029254).
+# Nothing local said a word.  The guard scans every workflow's expression
+# blocks for characters and expansions the language does not have.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_workflow_expressions
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_workflow_expressions.py"
+                         --self-test)
+        set_tests_properties(test_workflow_expressions PROPERTIES
+            TIMEOUT 60
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the workflow-expression "
+            "guard (tools/check_workflow_expressions.py).  CI runs it as a "
+            "dedicated step.")
     endif()
 endif()
 

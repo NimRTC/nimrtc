@@ -43,11 +43,34 @@ import os
 import sys
 import tarfile
 
-# Refuse to build a bundle larger than this.  The real Windows bundle is
-# ~2-3 MB; the broken one was 822 MB.  The guard is deliberately generous so
-# that a legitimate growth of the payload does not break the release, while
-# still catching "the wrong directory got archived".
-MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+# Refuse to build a bundle larger than this.
+#
+# The limit has two jobs, and they conflict.  Its *original* job was to
+# catch "the wrong directory got archived": the v1.0.1 Windows bundle
+# contained the whole CI workspace and was 822 MB, against a real payload
+# of 2-3 MB, so 64 MiB looked unambiguous.  But the payload has since
+# grown for legitimate reasons:
+#
+#   v1.1     40.5 MB   (four static codec libraries on the MSVC line)
+#   v1.2.0   62,826,812 bytes = 59.9 MiB   (+55 %; the review read this
+#             as "seven new static codecs entered the MSVC line", which
+#             is correct)
+#
+# At 59.9 MiB against a 64 MiB cap there was 6.4 % of headroom left, so
+# the *next* codec would have failed the cut with an error that says
+# "sanity limit" instead of "your bundle is genuinely too big".  The
+# limit is therefore raised so it is once again a mis-archive detector
+# rather than a payload ceiling, and a separate, explicit check reports
+# the size against `BUNDLE_BUDGET_BYTES` so growth is visible in the
+# release log before it becomes a failure.
+MAX_BUNDLE_BYTES = 256 * 1024 * 1024
+
+# The size the Windows bundle is *expected* to stay under.  Crossing it
+# does not fail the cut -- it prints a warning with the percentage, so a
+# trend is visible in the build log and a deliberate decision can be
+# made (split the codecs into separate assets, or stop shipping the
+# ones nobody uses) before the hard limit is reached.
+BUNDLE_BUDGET_BYTES = 96 * 1024 * 1024
 
 
 def collect(staging: str) -> list[tuple[str, str]]:
@@ -89,15 +112,24 @@ def main(argv: list[str] | None = None) -> int:
             archive.add(absolute, arcname=relative)
 
     size = os.path.getsize(output)
+    mib = size / (1024.0 * 1024.0)
     print(f"bundle: {output}")
     print(f"entries: {len(entries)}")
-    print(f"size: {size} bytes")
+    print(f"size: {size} bytes ({mib:.1f} MiB)")
     for absolute, relative in entries[:10]:
         print(f"  {relative}")
 
+    if size > BUNDLE_BUDGET_BYTES:
+        print(f"warning: bundle is {mib:.1f} MiB, over the "
+              f"{BUNDLE_BUDGET_BYTES / 1048576.0:.0f} MiB budget -- still "
+              f"below the {MAX_BUNDLE_BYTES / 1048576.0:.0f} MiB hard limit, "
+              f"but the payload is growing.", file=sys.stderr)
+
     if size > MAX_BUNDLE_BYTES:
-        print(f"error: bundle is {size} bytes, over the "
-              f"{MAX_BUNDLE_BYTES}-byte sanity limit", file=sys.stderr)
+        print(f"error: bundle is {mib:.1f} MiB, over the "
+              f"{MAX_BUNDLE_BYTES / 1048576.0:.0f} MiB sanity limit.  Either "
+              f"the wrong directory was archived, or the payload needs to be "
+              f"split.", file=sys.stderr)
         return 1
     return 0
 

@@ -442,6 +442,20 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // starts from a clean slate.
     impl_->video_state.video_stats.ensure_created();
 
+    // ---- The receive-side feedback bound (v1.3 plan Q4 / video plan T2) ---
+    //
+    // The guard's bounds come from the host's configuration, so a host
+    // that knows its peer is on a fast link can tighten the key-frame
+    // rate, and a host debugging the receive path can lift it.  The
+    // defaults are the ones the acceptance test pins.
+    {
+        detail::FeedbackGuard::Config fb{};
+        fb.min_pli_interval_us = config_.video_feedback_min_pli_interval_us;
+        fb.max_nack_seqs       = config_.video_feedback_max_nack_seqs;
+        fb.max_report_age_us   = config_.video_feedback_max_report_age_us;
+        impl_->video_state.feedback_guard.set_config(fb);
+    }
+
     // Plan J6 / S7: the freeze *finding* and the freeze *accounting* live
     // in two different modules -- the `video_stats` sink owns the
     // definition of a freeze (the threshold and the idle detection),
@@ -1241,6 +1255,56 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // Decode + render if the codec and sink are available.
                 if (!video_codec_ || !video_sink_) return;
 
+                // ---- The render clock (remote-desktop plan E5) ---------------
+                //
+                // The clock decides *before* the frame is decoded: a
+                // frame that has to be dropped is dropped without
+                // paying for the decode, and a frame that has to be
+                // held is held before the decode so the hold does
+                // not add to the decode's latency.
+                //
+                // The decision is taken **once**, here, and not once per
+                // delivery path: the GPU path can fall through to the CPU
+                // path, and a clock consulted twice for one frame would
+                // double-count every decision.
+                //
+                // The hold is *not* taken here: it is turned into a
+                // presentation deadline (`present_at_us`) that travels
+                // with the frame to the sink, and the sink's presenter
+                // waits for it.  Waiting on the engine's thread would
+                // block the whole receive path — the picture has to be
+                // held by the *presenter*, which is the thread that owns
+                // the display.
+                //
+                // The clock needs the picture's capture instant on the
+                // *peer's* timeline -- the same one the audio reference
+                // lives on -- so that the difference between the two is
+                // a real skew.  The frame's own `capture_ts_us` is a
+                // *local monotonic arrival* stamp (the jitter buffer
+                // stamps it on arrival), and subtracting it from the
+                // peer's Unix-timeline audio reference would compare
+                // two unrelated clocks.
+                //
+                // `video_capture_time_us()` is the video half of the very
+                // reconstruction the audio half uses
+                // (`audio_capture_time_us()`), so both sides of the
+                // comparison now come from one seam.
+                const std::int64_t peer_capture_us =
+                    video_capture_time_us(
+                        impl_->video_state.remote_video_ssrc_,
+                        enc.info.rtp_timestamp);
+
+                std::int64_t hold_us = 0;
+                if (!apply_render_sync(peer_capture_us, &hold_us)) {
+                    impl_->video_state.video_stats.on_frame_dropped(
+                        detail::VideoDropReason::kDecoderError);
+                    // Plan J3: the frame never reached the viewer.
+                    note_frame_dropped();
+                    return;
+                }
+                const std::int64_t present_at_us =
+                    hold_us > 0 ? (detail::steady_now_us() + hold_us) : 0;
+
                 // ---- The delivery path (remote-desktop plan E1) --------------
                 //
                 // Two routes, decided at `open()` time (see
@@ -1256,24 +1320,9 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // fallback every codec implements.
                 if (impl_->video_state.video_render_path ==
                     detail::VideoRenderPath::kGpuSurface) {
-                    // ---- The render clock (remote-desktop plan E5) ---------
-                    //
-                    // The clock decides *before* the frame is decoded: a
-                    // frame that has to be dropped is dropped without
-                    // paying for the decode, and a frame that has to be
-                    // held is held before the decode so the hold does
-                    // not add to the decode's latency.
-                    std::int64_t hold_us = 0;
-                    if (!apply_render_sync(
-                            static_cast<std::int64_t>(enc.info.capture_ts_us),
-                            &hold_us)) {
-                        impl_->video_state.video_stats.on_frame_dropped(
-                            detail::VideoDropReason::kDecoderError);
-                        return;
-                    }
-
                     const plugins::Status gpu_rc = render_decoded_gpu_frame(
-                        enc, static_cast<std::int64_t>(enc.info.capture_ts_us));
+                        enc, static_cast<std::int64_t>(enc.info.capture_ts_us),
+                        present_at_us);
                     if (gpu_rc == plugins::kOk) {
                         ++impl_->video_state.video_rx_gpu_frames;
                         impl_->video_state.video_stats.on_frame_decoded(
@@ -1303,27 +1352,6 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
 
                 // ---- Resolve the decoded geometry ------------------------------
                 //
-                // ---- The render clock (remote-desktop plan E5) ---------------
-                //
-                // The CPU path asks the render clock *before* the decode,
-                // for the same reason the GPU path does: a frame that has
-                // to be dropped should not pay for the decode, and a
-                // frame that has to be held should be held before the
-                // decode so the hold does not add to the decode's own
-                // latency.
-                {
-                    std::int64_t hold_us = 0;
-                    if (!apply_render_sync(
-                            static_cast<std::int64_t>(enc.info.capture_ts_us),
-                            &hold_us)) {
-                        impl_->video_state.video_stats.on_frame_dropped(
-                            detail::VideoDropReason::kDecoderError);
-                        // Plan J3: the frame never reached the viewer.
-                        note_frame_dropped();
-                        return;
-                    }
-                }
-
                 //
                 // The decode buffers must match the *actual* geometry of
                 // the incoming frame, not a hard-coded 640×480.  Two
@@ -1435,6 +1463,10 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 sink_frame.capture_ts_us = enc.info.capture_ts_us;
                 sink_frame.frame_seq     = enc.info.frame_seq;
                 sink_frame.rtp_timestamp = enc.info.rtp_timestamp;
+                // The A/V-sync hold (v1.3 Q6): the presentation deadline
+                // travels with the frame, so the sink's presenter waits
+                // for it before it puts the picture on the screen.
+                sink_frame.present_at_us = present_at_us;
 
                 // Plan J1: the render stage's timer starts here.
                 const auto render_start = std::chrono::steady_clock::now();
@@ -1511,7 +1543,8 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
 
 plugins::Status NimRTCEngine::render_decoded_gpu_frame(
         const plugins::EncodedVideoFrame& enc,
-        std::int64_t capture_ts_us) noexcept {
+        std::int64_t capture_ts_us,
+        std::int64_t present_at_us) noexcept {
     if (!video_codec_ || !video_sink_) return plugins::kErrNotReady;
 
     // The surface comes from the codec's own output pool — the codec
@@ -1561,6 +1594,10 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
     info.capture_ts_us = capture_ts_us;
     info.frame_seq     = enc.info.frame_seq;
     info.rtp_timestamp = enc.info.rtp_timestamp;
+    // The A/V-sync hold (v1.3 Q6): the presentation deadline travels
+    // with the frame, so the sink's presenter waits for it before it
+    // puts the picture on the screen.
+    info.present_at_us = present_at_us;
 
     // Plan J1: the GPU path's decode + render costs.
     const auto gpu_start = std::chrono::steady_clock::now();
@@ -2759,12 +2796,20 @@ void NimRTCEngine::request_keyframe_on_decode_failure() noexcept {
 
     auto& vstate = impl_->video_state;
 
-    // ---- The throttle ------------------------------------------------------
+    // ---- The door's own throttle -----------------------------------------
     //
     // The interval matches the key-frame limiter's own default (250 ms —
     // RFC 5104 §4.3.1.1's "about 4 Hz"), so the two ends of the loop agree
     // on the rate: the request is sent at most four times a second, and
     // the peer produces at most four IDRs a second in answer.
+    //
+    // v1.3 Q4: this is the *door's* throttle, not the only one.  The
+    // feedback guard holds the **global** limit, which covers the loss
+    // door as well — before Q4 the loss door had no limit of its own,
+    // so a stream that both lost packets and failed to decode asked for
+    // key frames at twice the rate.  This throttle still earns its
+    // keep: it keeps the log quiet, because the failure repeats on
+    // every P-frame.
     constexpr std::int64_t kMinRequestIntervalUs = 250'000;
 
     const std::int64_t now_us = static_cast<std::int64_t>(
@@ -2783,6 +2828,10 @@ void NimRTCEngine::request_keyframe_on_decode_failure() noexcept {
     // loss report uses (`queue_video_feedback()`), so the RTCP bytes
     // are produced by the receiver plugin and the engine only carries
     // them.  The engine never builds an RTCP packet itself.
+    //
+    // The *source* is what tells the two doors apart in the statistics:
+    // this is the decode-failure door (the bitstream is undecodable),
+    // not the loss door (the picture never arrived).
     plugins::VideoFeedbackReport report{};
     report.want_keyframe = true;
 
@@ -2790,7 +2839,7 @@ void NimRTCEngine::request_keyframe_on_decode_failure() noexcept {
         "engine[video]: the decoder refused a frame — requesting a key "
         "frame from the peer");
 
-    queue_video_feedback(report);
+    queue_video_feedback_from_decode_failure(report);
 }
 
 
@@ -2846,16 +2895,51 @@ void NimRTCEngine::notify_video_keyframe_requested() noexcept {
 
 void NimRTCEngine::queue_video_feedback(
     const plugins::VideoFeedbackReport& report) noexcept {
+    queue_video_feedback_impl(report, detail::FeedbackSource::kLoss);
+}
+
+
+void NimRTCEngine::queue_video_feedback_from_decode_failure(
+    const plugins::VideoFeedbackReport& report) noexcept {
+    queue_video_feedback_impl(report, detail::FeedbackSource::kDecodeFailure);
+}
+
+
+void NimRTCEngine::queue_video_feedback_impl(
+    const plugins::VideoFeedbackReport& report,
+    detail::FeedbackSource source) noexcept {
     if (report.missing_seqs.empty() && !report.want_keyframe) return;
 
+    auto& vstate = impl_->video_state;
+
+    // ---- The bound (v1.3 plan Q4 / video plan T2) -----------------------
+    //
+    // The guard is the *single* authority on what may go out: it caps
+    // the NACK list, applies the global key-frame rate limit, and ages
+    // the pending report out.  The engine only carries the result.
+    const detail::FeedbackGuard::QueueResult qr =
+        vstate.feedback_guard.queue(report, source);
+
+    // ---- The counters ----------------------------------------------------
+    //
+    // `video_keyframes_q` counts the key-frame requests the receiver
+    // *raised* (the demand), and `video_feedback_tx_pli` counts the
+    // ones that actually went on the wire.  Before Q4 the two were the
+    // same number, because every request went out; now the rate limit
+    // can hold one back, so they are two different facts.
+    if (report.want_keyframe) ++vstate.video_keyframes_q;
+    if (qr.pli_allowed) ++vstate.video_feedback_tx_pli;
+
     // v1.1 V1: outbound feedback queued (NACK seqs + keyframe requests).
-    impl_->video_state.video_nack_seqs_queued += report.missing_seqs.size();
-    if (report.want_keyframe) ++impl_->video_state.video_keyframes_q;
+    //
+    // Only the sequence numbers that actually made it into the report
+    // are counted as queued — the dropped ones did not enter the queue.
+    vstate.video_nack_seqs_queued += qr.nack_seqs_added;
 
     // Plan Track S / S2: the retransmission requests count against the
     // source they are about — the peer's video stream.
     impl_->inbound_state.note_nacks(
-        impl_->video_state.remote_video_ssrc_, report.missing_seqs.size());
+        vstate.remote_video_ssrc_, qr.nack_seqs_added);
 
     // Phase 4.2 / D2: record the feedback we are about to send.  A NACK
     // means the *peer* lost picture data on the **inbound** stream (the
@@ -2865,45 +2949,37 @@ void NimRTCEngine::queue_video_feedback(
     //
     // A key-frame request means the peer is already resynchronising
     // because a reference frame never arrived.
-    if (!report.missing_seqs.empty()) {
-        impl_->video_state.video_stats.on_rtcp_feedback(
+    if (qr.nack_seqs_added > 0) {
+        vstate.video_stats.on_rtcp_feedback(
             detail::VideoFeedbackKind::kNACK);
         // Plan Track S / S4: the per-type breakdown, outbound direction.
         // This NACK describes *our* inbound stream — packets arriving at
         // the peer damaged — so it is the mirror image of the
         // `video_feedback_rx_nack` counter above.
-        ++impl_->video_state.video_feedback_tx_nack;
+        ++vstate.video_feedback_tx_nack;
     }
-    if (report.want_keyframe) {
-        impl_->video_state.video_stats.on_rtcp_feedback(
+    if (qr.pli_allowed) {
+        vstate.video_stats.on_rtcp_feedback(
             detail::VideoFeedbackKind::kPLI);
-        ++impl_->video_state.video_feedback_tx_pli;
     }
-
-    // Merge into the pending report: two gaps detected back to back must
-    // not cost two round trips, and a NACK list plus a key-frame request
-    // belong in the same feedback packet anyway.
-    if (!impl_->video_state.has_pending_video_feedback_) {
-        impl_->video_state.pending_video_feedback_ = report;
-        impl_->video_state.has_pending_video_feedback_ = true;
-        return;
-    }
-    impl_->video_state.pending_video_feedback_.missing_seqs.insert(
-        impl_->video_state.pending_video_feedback_.missing_seqs.end(),
-        report.missing_seqs.begin(), report.missing_seqs.end());
-    impl_->video_state.pending_video_feedback_.want_keyframe =
-        impl_->video_state.pending_video_feedback_.want_keyframe || report.want_keyframe;
 }
 
 
 void NimRTCEngine::flush_video_feedback() noexcept {
-    if (!impl_->video_state.has_pending_video_feedback_) return;
+    auto& vstate = impl_->video_state;
+
     // Take the report out of the queue *before* sending: a send failure
     // must not make the engine retry the same report forever.
-    const plugins::VideoFeedbackReport report =
-        impl_->video_state.pending_video_feedback_;
-    impl_->video_state.pending_video_feedback_ = plugins::VideoFeedbackReport{};
-    impl_->video_state.has_pending_video_feedback_ = false;
+    //
+    // The guard also *ages* the report out: a report that sat in the
+    // queue while the link was down says nothing about the picture any
+    // more, so it is dropped rather than sent (and counted).
+    plugins::VideoFeedbackReport report{};
+    if (!vstate.feedback_guard.take(report)) {
+        // Nothing to send — either there was never a pending report, or
+        // the one there was had expired.
+        return;
+    }
 
     if (!video_receiver_) return;
     if (!ice_t_ || !is_ice_connected()) return;
@@ -3168,6 +3244,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_feedback_applied  = impl_->video_state.video_feedback_applied;
     out.video_keyframes_applied = impl_->video_state.video_keyframes_applied;
 
+    // The RFC 4588 retransmission counters (v1.3 plan Q3).  They are
+    // separate from the media counters because a retransmission is *not*
+    // new media: it is a re-send of a packet that was already counted,
+    // and a session whose media bitrate looked inflated by its own
+    // retransmissions would misreport its own load.
+    out.video_rtx_packets_sent     = impl_->video_state.rtx_packets_sent;
+    out.video_rtx_packets_received = impl_->video_state.rtx_packets_received;
+
     // Plan Track S / S4: the same feedback, broken down by type, so a
     // host can tell *what the peer is asking for* rather than only that
     // something arrived.  `video_feedback_applied` stays as the total.
@@ -3179,6 +3263,20 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         impl_->video_state.video_feedback_rx_transport_cc;
     out.video_feedback_tx_pli  = impl_->video_state.video_feedback_tx_pli;
     out.video_feedback_tx_nack = impl_->video_state.video_feedback_tx_nack;
+
+    // v1.3 plan Q4 / video plan T2: the receive-side feedback bound.
+    // The guard is the single authority on these numbers, so they are
+    // read from it rather than counted a second time here.
+    {
+        const auto& c = impl_->video_state.feedback_guard.counters();
+        out.video_feedback_pli_requests            = c.pli_requests;
+        out.video_feedback_pli_allowed             = c.pli_allowed;
+        out.video_feedback_pli_suppressed          = c.pli_suppressed;
+        out.video_feedback_pli_from_loss           = c.pli_from_loss;
+        out.video_feedback_pli_from_decode_failure = c.pli_from_decode_failure;
+        out.video_feedback_nack_seqs_dropped       = c.nack_seqs_dropped;
+        out.video_feedback_reports_expired        = c.reports_expired;
+    }
 
     // Remote-desktop plan H4: the per-stream statistics list.  The flat
     // `video_*` fields above describe the **default** stream; the list
@@ -3720,119 +3818,232 @@ void NimRTCEngine::wire_default_sender() noexcept {
                     : config_.video_sender_tuning.payload_type;
             const std::uint8_t pt = negotiated_pt != 0 ? negotiated_pt : local_pt;
 
-            detail::RtpPacketSpec spec;
-            spec.ssrc         = config_.video_sender_tuning.ssrc;
-            spec.seq          = seq;
-            spec.timestamp    = rtp_ts;
-            spec.payload_type = pt;
-            spec.marker       = marker;
-
-            // ---- Cross-end timeline: stamp abs-send-time (ADR-017) --------
-            // Same contract as the audio path: only when the seam is
-            // on *and* the extension id was negotiated (the id is set
-            // by create_offer() / set_remote_description()).  The
-            // monotonic reading is taken once and serves both the
-            // abs-send-time encoder and the Sender Report's
-            // instant-vs-timestamp pairing.
-            if (config_.timeline_enabled) {
-                const std::int64_t steady_us =
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        core::SteadyClock::now().time_since_epoch()).count();
-                impl_->video_state.video_last_send_unix_us =
-                    impl_->timeline.boot_epoch_offset_us + steady_us;
-                if (impl_->timeline.local_abs_send_time_id != 0) {
-                    spec.abs_send_time_ext_id = impl_->timeline.local_abs_send_time_id;
-                    spec.abs_send_time_24mhz = detail::RtpPacketizer::encode_abs_send_time_24(
-                        std::chrono::microseconds{steady_us},
-                        impl_->timeline.boot_epoch_offset_us);
-                }
-            }
-
-            spec.payload = core::ByteSpan(payload.data(), payload.size());
-
-            // ---- Serialise into the reusable scratch (Phase 3 / C4) ------
-            //
-            // Same reasoning as the audio path: `pb.build()` would
-            // allocate a fresh buffer per video packet.  The scratch is
-            // read immediately below — the bytes are copied into the
-            // scheduler's pooled outbound buffer — so it never escapes
-            // this callback.
-            const std::size_t built_size = detail::RtpPacketizer::compute_size(spec);
-            if (impl_->scratch.video_rtp_scratch.size() < built_size) {
-                impl_->scratch.video_rtp_scratch.resize(built_size);
-            }
-            const std::size_t built_written =
-                detail::RtpPacketizer::build_into(spec,
-                    impl_->scratch.video_rtp_scratch.data(),
-                    impl_->scratch.video_rtp_scratch.size());
-            if (built_written == 0) {
-                if (on_error_) {
-                    on_error_(core::kVideoEncodeFailed,
-                              "video send: the RTP packet could not be built");
-                }
-                return;
-            }
-
-            // ---- Assemble full RTP packet ----------------------------------
-            // The buffer comes from the scheduler's packet pool (P1
-            // hardening, 2026-11-09): it is handed back to the pool
-            // once the packet has been drained and dispatched, so the
-            // steady-state send path performs no heap allocation.
-            //
-            // Phase 3: when there is NO scheduler (the "transport"
-            // profile, where the engine writes straight to ICE) the
-            // packet used to be built in a fresh local vector — one
-            // heap allocation per packet, forever.  The transport
-            // `send()` is a synchronous write (the bytes do not
-            // escape the call), so the engine's own scratch buffer
-            // can hold it.
-            std::vector<std::uint8_t>& rtp_pkt = scheduler_
-                ? impl_->scratch.video_pkt_pooled
-                : impl_->scratch.video_pkt_scratch;
-            if (scheduler_) {
-                rtp_pkt = scheduler_->acquire_packet_buffer(
-                    built_written + kSrtpAuthTagBytes);
-            }
-            rtp_pkt.assign(impl_->scratch.video_rtp_scratch.begin(),
-                           impl_->scratch.video_rtp_scratch.begin() +
-                               static_cast<std::ptrdiff_t>(built_written));
-
-            // ---- SRTP protect (if DTLS is connected) ----------------------
-            if (impl_->security.srtp_installed && impl_->srtp) {
-                auto* sess = impl_->srtp->get_session(
-                    config_.video_sender_tuning.ssrc, /*outgoing=*/true);
-                if (!sess) {
-                    // SRTP not ready — drop this packet silently.
-                    return;
-                }
-                core::ByteSpan span(rtp_pkt.data(), rtp_pkt.size());
-                auto enc = sess->protect_rtp(span,
-                    config_.video_sender_tuning.ssrc, rtp_ts);
-                if (!enc) return;
-                rtp_pkt.assign(enc.value().data(),
-                               enc.value().data() + enc.value().size());
-            }
-
-            // ---- Enqueue to scheduler (move, P0#3) or send directly -------
+            // The priority: a key frame is worth more than a delta frame,
+            // so it takes the scheduler's higher-priority slot.
             plugins::Priority prio = plugins::Priority::kVideo;
-            if (marker && impl_->video_state.video_keyframe_pending_.load(std::memory_order_acquire)) {
+            if (marker &&
+                impl_->video_state.video_keyframe_pending_.load(std::memory_order_acquire)) {
                 prio = plugins::Priority::kVideoKeyframe;
-                impl_->video_state.video_keyframe_pending_.store(false, std::memory_order_release);
+                impl_->video_state.video_keyframe_pending_.store(false,
+                                                                 std::memory_order_release);
             }
 
-            // v1.1 V1: count emitted RTP packets/bytes (post-protect size).
-            ++impl_->video_state.video_packets_sent;
-            impl_->video_state.video_bytes_sent += rtp_pkt.size();
-
-            if (scheduler_) {
-                scheduler_->enqueue_owned(prio,
-                                          std::move(rtp_pkt),
-                                          plugins::Addr{});
-            } else if (ice_t_) {
-                plugins::BufferView bv{rtp_pkt.data(), rtp_pkt.size()};
-                ice_t_->send(bv, {});
-            }
+            send_video_rtp_packet(payload, rtp_ts, seq, marker, pt,
+                                  config_.video_sender_tuning.ssrc, prio,
+                                  /*count_bytes=*/true);
         });
+}
+
+// ---------------------------------------------------------------------------
+// The shared outbound video packet path
+// ---------------------------------------------------------------------------
+//
+// The default stream's packet callback and the RFC 4588 retransmission
+// callback both end up here: build the RTP header, protect it with
+// SRTP, hand it to the scheduler.
+//
+// They *must* end up in the same place.  A retransmission that differs
+// from the original in any way the peer does not expect — a different
+// extension, a different sequence space, a different SSRC handling —
+// is a retransmission the peer drops, and the loss the retransmission
+// was meant to repair stays unrepaired.
+void NimRTCEngine::send_video_rtp_packet(plugins::BufferView payload,
+                                          std::uint32_t rtp_ts,
+                                          std::uint16_t seq,
+                                          bool marker,
+                                          std::uint8_t payload_type,
+                                          std::uint32_t ssrc,
+                                          plugins::Priority prio,
+                                          bool count_bytes) noexcept {
+    if (impl_ == nullptr) return;
+
+    detail::RtpPacketSpec spec;
+    spec.ssrc         = ssrc;
+    spec.seq          = seq;
+    spec.timestamp    = rtp_ts;
+    spec.payload_type = payload_type;
+    spec.marker       = marker;
+
+    // ---- Cross-end timeline: stamp abs-send-time (ADR-017) ------------
+    // Same contract as the audio path: only when the seam is on *and*
+    // the extension id was negotiated (the id is set by create_offer() /
+    // set_remote_description()).  The monotonic reading is taken once and
+    // serves both the abs-send-time encoder and the Sender Report's
+    // instant-vs-timestamp pairing.
+    if (config_.timeline_enabled) {
+        const std::int64_t steady_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                core::SteadyClock::now().time_since_epoch()).count();
+        impl_->video_state.video_last_send_unix_us =
+            impl_->timeline.boot_epoch_offset_us + steady_us;
+        if (impl_->timeline.local_abs_send_time_id != 0) {
+            spec.abs_send_time_ext_id = impl_->timeline.local_abs_send_time_id;
+            spec.abs_send_time_24mhz = detail::RtpPacketizer::encode_abs_send_time_24(
+                std::chrono::microseconds{steady_us},
+                impl_->timeline.boot_epoch_offset_us);
+        }
+    }
+
+    spec.payload = core::ByteSpan(payload.data(), payload.size());
+
+    // ---- Serialise into the reusable scratch (Phase 3 / C4) ----------
+    //
+    // Same reasoning as the audio path: `pb.build()` would allocate a
+    // fresh buffer per video packet.  The scratch is read immediately
+    // below — the bytes are copied into the scheduler's pooled outbound
+    // buffer — so it never escapes this call.
+    const std::size_t built_size = detail::RtpPacketizer::compute_size(spec);
+    if (impl_->scratch.video_rtp_scratch.size() < built_size) {
+        impl_->scratch.video_rtp_scratch.resize(built_size);
+    }
+    const std::size_t built_written =
+        detail::RtpPacketizer::build_into(spec,
+            impl_->scratch.video_rtp_scratch.data(),
+            impl_->scratch.video_rtp_scratch.size());
+    if (built_written == 0) {
+        if (on_error_) {
+            on_error_(core::kVideoEncodeFailed,
+                      "video send: the RTP packet could not be built");
+        }
+        return;
+    }
+
+    // ---- Assemble full RTP packet --------------------------------------
+    // The buffer comes from the scheduler's packet pool (P1 hardening,
+    // 2026-11-09): it is handed back to the pool once the packet has
+    // been drained and dispatched, so the steady-state send path
+    // performs no heap allocation.
+    //
+    // Phase 3: when there is NO scheduler (the "transport" profile,
+    // where the engine writes straight to ICE) the packet used to be
+    // built in a fresh local vector — one heap allocation per packet,
+    // forever.  The transport `send()` is a synchronous write (the bytes
+    // do not escape the call), so the engine's own scratch buffer can
+    // hold it.
+    std::vector<std::uint8_t>& rtp_pkt = scheduler_
+        ? impl_->scratch.video_pkt_pooled
+        : impl_->scratch.video_pkt_scratch;
+    if (scheduler_) {
+        rtp_pkt = scheduler_->acquire_packet_buffer(
+            built_written + kSrtpAuthTagBytes);
+    }
+    rtp_pkt.assign(impl_->scratch.video_rtp_scratch.begin(),
+                   impl_->scratch.video_rtp_scratch.begin() +
+                       static_cast<std::ptrdiff_t>(built_written));
+
+    // ---- SRTP protect (if DTLS is connected) ---------------------------
+    //
+    // The session is the one for *this* packet's SSRC.  The SRTP context
+    // installs its sessions with the wildcard policy (RFC 3711 §3.1:
+    // the context is per-(SSRC, direction)), so the retransmission
+    // stream's own SSRC gets its own session on the first packet — no
+    // key derivation change is needed for the second SSRC.
+    if (impl_->security.srtp_installed && impl_->srtp) {
+        auto* sess = impl_->srtp->get_session(ssrc, /*outgoing=*/true);
+        if (!sess) {
+            // SRTP not ready — drop this packet silently.
+            return;
+        }
+        core::ByteSpan span(rtp_pkt.data(), rtp_pkt.size());
+        auto enc = sess->protect_rtp(span, ssrc, rtp_ts);
+        if (!enc) return;
+        rtp_pkt.assign(enc.value().data(),
+                       enc.value().data() + enc.value().size());
+    }
+
+    // ---- Enqueue to scheduler (move, P0#3) or send directly ------------
+    if (count_bytes) {
+        // v1.1 V1: count emitted RTP packets/bytes (post-protect size).
+        ++impl_->video_state.video_packets_sent;
+        impl_->video_state.video_bytes_sent += rtp_pkt.size();
+    }
+
+    if (scheduler_) {
+        scheduler_->enqueue_owned(prio, std::move(rtp_pkt), plugins::Addr{});
+    } else if (ice_t_) {
+        plugins::BufferView bv{rtp_pkt.data(), rtp_pkt.size()};
+        ice_t_->send(bv, {});
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The RFC 4588 retransmission path (v1.3 plan Q3)
+// ---------------------------------------------------------------------------
+//
+// With RTX negotiated, a NACK is answered by sending the original
+// packet's payload on the *retransmission* payload type, behind the
+// two-octet OSN header (RFC 4588 §4.1).
+//
+// The sender plugin does the framing — it owns the retransmission
+// cache and knows the original's payload — and hands the framed payload
+// here.  This side owns the RTP header, and RFC 4588 §4.1 is explicit
+// about what it must carry:
+//
+//   * the **timestamp** is the original's (a retransmission belongs to
+//     the frame it came from);
+//   * the **marker bit** is the original's;
+//   * the **sequence number** is the retransmission stream's *own*
+//     number — the original's number is inside the OSN header, not in
+//     the RTP header (RFC 4588 §4: the retransmission stream has its
+//     own sequence number space);
+//   * the **payload type** is the retransmission payload type;
+//   * the **SSRC** is the retransmission stream's own SSRC (RFC 4588
+//     §5.2).
+void NimRTCEngine::wire_rtx_sender() noexcept {
+    if (!video_sender_) return;
+
+    video_sender_->set_rtx_packet_callback(
+        [this](const plugins::VideoSenderRtxPacket& p) {
+            const std::uint8_t rtx_pt = impl_->video_state.rtx_payload_type;
+            if (rtx_pt == 0) return;   // not negotiated — nothing to send on
+
+            const std::uint32_t rtx_ssrc = impl_->video_state.rtx_ssrc;
+            if (rtx_ssrc == 0) return;
+
+            ++impl_->video_state.rtx_packets_sent;
+
+            send_video_rtp_packet(p.payload, p.rtp_timestamp, p.rtx_seq,
+                                  p.marker, rtx_pt, rtx_ssrc,
+                                  plugins::Priority::kVideo,
+                                  /*count_bytes=*/false);
+        });
+
+    // The sender only takes the RFC 4588 path when the engine says the
+    // retransmission stream was negotiated — otherwise it re-sends the
+    // original packet (the pre-RTX behaviour).
+    video_sender_->set_rtx_enabled(impl_->video_state.rtx_negotiated);
+}
+
+// ---------------------------------------------------------------------------
+// Applying the negotiated retransmission stream
+// ---------------------------------------------------------------------------
+//
+// RTX is negotiated, so the plugins have to be told about it *after*
+// every description exchange — and told again when the negotiation
+// changes, including when it changes to "no RTX at all".
+void NimRTCEngine::apply_negotiated_video_rtx() noexcept {
+    // ---- The receiver: which payload type carries retransmissions ------
+    //
+    // The receiver unwraps the OSN header and restores the original's
+    // sequence number.  It must not do that for a payload type that is
+    // not the negotiated retransmission one — the OSN of an ordinary
+    // packet would be garbage, and the restored sequence number would
+    // be nonsense.
+    if (video_receiver_) {
+        video_receiver_->set_rtx_payload_type(
+            impl_->video_state.rtx_negotiated
+                ? impl_->video_state.rtx_payload_type
+                : 0);
+    }
+
+    // ---- The sender: the RFC 4588 path and its outbound callback -------
+    //
+    // The callback is wired unconditionally (so a *later* negotiation
+    // can turn the feature on without rebuilding the sender), but the
+    // sender only *takes* the RFC 4588 path when it is enabled.
+    if (video_sender_) {
+        wire_rtx_sender();
+    }
 }
 
 // ---------------------------------------------------------------------------

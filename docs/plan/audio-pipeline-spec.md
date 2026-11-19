@@ -1,4 +1,4 @@
-﻿# Audio Pipeline Specification — receive path, send path, and the P1 public SDK
+# Audio Pipeline Specification — receive path, send path, and the P1 public SDK
 
 > **What this document is.** The binding specification for the NimRTC audio
 > pipeline: what the receive path must do (decode, conceal, keep the clock),
@@ -903,7 +903,7 @@ the module level. C-1, C-2 and C-3 stay on the P2 line.
   only the audio playout is aligned. That keeps the item bounded and
   preserves DEC-3 (no built-in resampler) and X-7 (no change to the
   video pipeline). The video side's own render clock remains the video
-  plan's item R3 (`v1.4.0`); it consumes the same skew later.
+  plan's item R3, now scheduled as **Q6 of `v1.3.0`**; it consumes the same skew.
 * **The seam.** The engine drives the receiver through the plugin
   interface and never through a concrete module header (L4), so the
   receiver gains exactly one method:

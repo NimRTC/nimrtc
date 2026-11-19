@@ -159,6 +159,27 @@ class NIMRTC_API_STABLE IVideoCodec;
 // public header includes no engine-internal header).
 namespace nimrtc::engine::detail {
 struct VideoStream;
+
+/**
+ * @brief Which door raised a receiver feedback report.
+ *
+ * The two doors mean different things:
+ *
+ *   - **the loss door** — the jitter buffer saw a frame it could not
+ *     assemble, so the picture is incomplete;
+ *   - **the decode-failure door** — the decoder refused a frame that
+ *     assembled perfectly, so the bitstream is undecodable.
+ *
+ * Before v1.3 Q4 both doors vanished into the same merged pending
+ * report, so a host could not tell "the network is lossy" from "the
+ * decoder cannot decode what it is being sent" — the two call for
+ * completely different fixes.
+ *
+ * The definition (and the enumerators) live in the engine-private
+ * `src/engine/src/engine_feedback_guard.hpp`; this is only the
+ * forward declaration the public header needs.
+ */
+enum class FeedbackSource : std::uint8_t;
 } // namespace nimrtc::engine::detail
 
 namespace nimrtc::engine {
@@ -648,6 +669,35 @@ struct NIMRTC_API_STABLE EngineConfig {
          *  estimate instead of being fixed). */
         bool          adaptive_playout    = false;
     } video_receiver_tuning;
+
+    // ---- The receive-side feedback bound (v1.3 plan Q4 / video plan T2) --
+    //
+    // The receiver's feedback to the peer is *bounded* by default: the
+    // NACK list is capped, the key-frame request is rate-limited, and a
+    // pending report that has gone stale is dropped rather than sent.
+    //
+    // The defaults are the ones the v1.3 plan's acceptance test pins
+    // (a 30 s synthetic-loss run must not produce a key-frame storm),
+    // so a host normally leaves them alone.  They are configurable
+    // because a host that *knows* its peer is on a fast, reliable link
+    // may want a tighter key-frame rate, and a host that is debugging
+    // the receive path may want to see the unthrottled demand.
+    //
+    // Setting `min_pli_interval_us` to 0 disables the key-frame rate
+    // limit; setting `max_nack_seqs` to a negative value makes the
+    // NACK list unbounded.
+
+    /** The minimum interval between two key-frame requests we send, in
+     *  microseconds.  Default = 250000 (4 Hz).  0 disables the limit. */
+    std::int64_t video_feedback_min_pli_interval_us = 250'000;
+
+    /** The maximum number of NACK sequence numbers one feedback report
+     *  may carry.  Default = 64.  A negative value means "unbounded". */
+    std::int64_t video_feedback_max_nack_seqs = 64;
+
+    /** The maximum age of a pending feedback report, in microseconds.
+     *  Default = 1000000 (1 s).  0 means "never expire". */
+    std::int64_t video_feedback_max_report_age_us = 1'000'000;
 
     /** Defaults forwarded to plugins::VideoSenderConfig when the engine
      *  instantiates the video sender plugin. */
@@ -4257,6 +4307,57 @@ public:
         std::uint64_t video_feedback_tx_pli  = 0;
         /** NACK we sent the peer. */
         std::uint64_t video_feedback_tx_nack = 0;
+        // ---- The receive-side feedback bound (v1.3 plan Q4 / video plan T2)
+        //
+        // The receiver's feedback used to be *merged* into one pending
+        // report without a bound, so a lossy peer could make it grow
+        // without limit — and the two reasons the receiver asks for a key
+        // frame (the network dropped a picture / the decoder cannot
+        // decode what it is being sent) were indistinguishable.  These
+        // counters make the bound and the two doors observable.
+        //
+        // All cumulative since `open()`.
+        //
+        //   * `..._pli_requests` — the **demand**: every key-frame request
+        //     the receiver raised, whichever door raised it.
+        //   * `..._pli_allowed` — what the rate limit let through, and
+        //     therefore what went on the wire (the same thing
+        //     `video_feedback_tx_pli` counts, kept under a name that
+        //     says what it means next to the others).
+        //   * `..._pli_suppressed` — what the rate limit dropped.
+        //
+        // The two doors are counted separately, because they call for
+        // completely different fixes:
+        //
+        //   * `..._pli_from_loss` — the jitter buffer saw a frame it
+        //     could not assemble (the *network* dropped a picture);
+        //   * `..._pli_from_decode_failure` — the decoder refused a
+        //     frame that assembled perfectly (the *bitstream* is
+        //     undecodable — a missing parameter set, say).
+        //
+        // The last two bound the other two directions of the feedback:
+        //
+        //   * `..._nack_seqs_dropped` — the NACK sequence numbers the
+        //     per-report cap discarded (the list would otherwise grow
+        //     with the loss);
+        //   * `..._reports_expired` — the pending reports dropped for
+        //     being too old to be worth a round trip.
+        /** Key-frame requests the receiver raised (the demand). */
+        std::uint64_t video_feedback_pli_requests = 0;
+        /** Key-frame requests the rate limit let through. */
+        std::uint64_t video_feedback_pli_allowed = 0;
+        /** Key-frame requests the rate limit dropped. */
+        std::uint64_t video_feedback_pli_suppressed = 0;
+        /** Key-frame requests raised by the loss door (a frame the
+         *  jitter buffer could not assemble). */
+        std::uint64_t video_feedback_pli_from_loss = 0;
+        /** Key-frame requests raised by the decode-failure door (the
+         *  decoder refused a frame that assembled perfectly). */
+        std::uint64_t video_feedback_pli_from_decode_failure = 0;
+        /** NACK sequence numbers the per-report cap discarded. */
+        std::uint64_t video_feedback_nack_seqs_dropped = 0;
+        /** Pending feedback reports dropped for being too old to send. */
+        std::uint64_t video_feedback_reports_expired = 0;
         // ---- The key-frame storm limiter (remote-desktop plan B14) ------
         // The counters make the limiter observable: a host that sees
         // `video_keyframes_deferred` climbing knows the peer is asking
@@ -5222,8 +5323,31 @@ private:
     /** Merge a receiver feedback report into the pending one.  The
      *  reports are put on the wire by `flush_video_feedback()` from
      *  `tick()` — the receiver raises them from inside the ICE receive
-     *  path, and sending from there would re-enter the transport. */
+     *  path, and sending from there would re-enter the transport.
+     *
+     *  v1.3 Q4: the merge is *bounded* — the NACK list is capped, the
+     *  key-frame request passes a global rate limit, and the pending
+     *  report ages out.  The bound lives in the engine-private
+     *  `detail::FeedbackGuard` collaborator, which this method is the
+     *  only door into for the **loss** door (the jitter buffer could
+     *  not assemble a frame). */
     void queue_video_feedback(const plugins::VideoFeedbackReport& report) noexcept;
+    /** The same, for the **decode-failure** door.
+     *
+     *  The two doors mean different things and are counted separately:
+     *  the loss door says "the network dropped a picture", the
+     *  decode-failure door says "the decoder cannot decode what it is
+     *  being sent".  The two call for completely different fixes, and
+     *  before v1.3 Q4 they vanished into the same merged report. */
+    void queue_video_feedback_from_decode_failure(
+        const plugins::VideoFeedbackReport& report) noexcept;
+    /** The shared body of the two doors above.
+     *
+     *  Private: the *source* is an engine-private type, so it cannot
+     *  appear in the public header's signature. */
+    void queue_video_feedback_impl(
+        const plugins::VideoFeedbackReport& report,
+        detail::FeedbackSource source) noexcept;
     /** Ask the peer for a new key frame because the decoder refused a
      *  picture.
      *

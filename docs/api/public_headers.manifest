@@ -9,7 +9,7 @@
 #
 # Regenerate with: python scripts/check_api_manifest.py --write
 #
-# count: 190
+# count: 193
 
 src/core/include/nimrtc/core/api_version.hpp
 src/core/include/nimrtc/core/bytes.hpp
@@ -156,6 +156,8 @@ src/modules/video_sink/include/nimrtc/video_sink/video_sync.hpp
 src/modules/video_source/include/nimrtc/video_source/video_source.hpp
 src/modules/video_source/include/nimrtc/video_source/video_source_plugin.hpp
 src/modules/video_stats/include/nimrtc/video_stats/video_stats.hpp
+src/modules/video_sync/include/nimrtc/video_sync/render_clock.hpp
+src/modules/video_sync/include/nimrtc/video_sync/video_sync.hpp
 src/modules/vp9/include/nimrtc/vp9/codec_plugin.hpp
 src/modules/vp9/include/nimrtc/vp9/decoder.hpp
 src/modules/vp9/include/nimrtc/vp9/hw_backends.hpp
@@ -200,4 +202,5 @@ src/plugins/include/nimrtc/plugins/video_codec.hpp
 src/plugins/include/nimrtc/plugins/video_pipeline.hpp
 src/plugins/include/nimrtc/plugins/video_sink.hpp
 src/plugins/include/nimrtc/plugins/video_source.hpp
+src/plugins/include/nimrtc/plugins/video_sync.hpp
 src/plugins/include/nimrtc/plugins/xr_report.hpp

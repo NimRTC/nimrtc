@@ -6,11 +6,11 @@
  * Four features live here:
  *
  *   - **E5 — the render clock.**  The engine asks the
- *     `VideoSyncController` what to do with each decoded frame, and
- *     publishes the counters.  The skew the controller consumes is the
- *     one the ADR-017 timeline already produces
- *     (`last_sender_recv_skew_us()`), so the engine does **not** grow a
- *     second skew model (RD-9).
+ *     `plugins::IVideoSyncController` what to do with each decoded
+ *     frame, and publishes the counters.  The skew the controller
+ *     consumes comes from the ADR-017 capture instants *only* -- both
+ *     operands are the peer's own reconstructed capture instants, so
+ *     the engine does **not** grow a second skew model (RD-9).
  *   - **E6 — the input echo.**  The engine owns the *switch*, the
  *     *staleness* rule and the *rate limit*; the payload is opaque
  *     (the host decides what an input event looks like).
@@ -64,19 +64,113 @@ plugins::VideoScaleMode to_scale_mode(VideoAspectPolicy policy) noexcept {
 // E5 — the render clock
 // ---------------------------------------------------------------------------
 
+uint32_t NimRTCEngine::resolve_video_sync_controller() noexcept {
+    if (impl_ == nullptr) return 0;
+
+    // An empty id is the **explicit opt-out**: the host asked for no
+    // render clock, so every frame is presented unchanged — exactly the
+    // pre-v1.3 behaviour.
+    if (config_.video_sync_controller_name.empty()) return 0;
+
+    // The default id names the built-in clock, which lives in the
+    // `video_sync` module — an **optional** module.  A build without it
+    // has no such factory, and that is *not* an error: the picture is
+    // simply presented unchanged.  The engine degrades gracefully rather
+    // than failing `open()`, because "this build has no render-clock
+    // module" is a property of the build, not a mistake by the host.
+    //
+    // Every *other* id is a hard error: a typo'd id would otherwise
+    // silently disable the correction the host asked for, which is
+    // exactly the failure mode a default is supposed to prevent.
+    const auto* factory =
+        core::PluginRegistry::instance().get_video_sync_controller(
+            config_.video_sync_controller_name);
+    if (factory == nullptr) {
+        if (config_.video_sync_controller_name == "render-clock") {
+            core::log::Logger::instance().warn(
+                "engine: the render clock 'render-clock' is not in this "
+                "build (the video_sync module is optional) -- the picture "
+                "is presented unchanged; set "
+                "EngineConfig::video_sync_controller_name to \"\" to "
+                "silence this");
+            return 0;
+        }
+        const std::string msg =
+            std::string{"engine: the render clock '"} +
+            config_.video_sync_controller_name +
+            "' could not be resolved through the registry";
+        core::log::Logger::instance().error(msg);
+        if (on_error_) on_error_(core::kEngineConfig, msg);
+        return core::kEngineConfig;
+    }
+
+    // The engine's public surface is in **milliseconds**; the seam's
+    // configuration is in **microseconds**.
+    plugins::VideoSyncConfig cfg;
+    cfg.tolerance_us = static_cast<std::int64_t>(
+        impl_->render.sync_tolerance_ms) * 1000;
+    cfg.max_delay_us  = static_cast<std::int64_t>(
+        impl_->render.sync_max_delay_ms) * 1000;
+    cfg.enabled = true;
+
+    auto controller = factory->create(cfg);
+    if (!controller) {
+        const std::string msg =
+            std::string{"engine: the render clock '"} +
+            config_.video_sync_controller_name +
+            "' produced no controller";
+        core::log::Logger::instance().error(msg);
+        if (on_error_) on_error_(core::kEngineConfig, msg);
+        return core::kEngineConfig;
+    }
+    if (controller->open() != plugins::kOk) {
+        core::log::Logger::instance().error(
+            "engine: the render clock '" +
+            config_.video_sync_controller_name + "' refused to open");
+        return core::kEngineConfig;
+    }
+
+    impl_->render.sync = std::move(controller);
+    return 0;
+}
+
 void NimRTCEngine::set_video_sync_tolerance(std::int32_t tolerance_ms,
                                             std::int32_t max_delay_ms) noexcept {
     if (impl_ == nullptr) return;
-    detail::VideoSyncConfig cfg = impl_->render.sync.config();
-    cfg.tolerance_ms = tolerance_ms < 0 ? 0 : tolerance_ms;
-    cfg.max_delay_ms  = max_delay_ms  < 0 ? 0 : max_delay_ms;
-    impl_->render.sync.configure(cfg);
+
+    // The engine's public surface is in **milliseconds**; the seam's
+    // configuration is in **microseconds**.  The conversion happens here
+    // and only here, so the two vocabularies never mix.
+    impl_->render.sync_tolerance_ms = tolerance_ms < 0 ? 0 : tolerance_ms;
+    impl_->render.sync_max_delay_ms  = max_delay_ms  < 0 ? 0 : max_delay_ms;
+
+    if (!impl_->render.sync) return;
+
+    plugins::VideoSyncConfig cfg;
+    cfg.tolerance_us = static_cast<std::int64_t>(
+        impl_->render.sync_tolerance_ms) * 1000;
+    cfg.max_delay_us  = static_cast<std::int64_t>(
+        impl_->render.sync_max_delay_ms) * 1000;
+    cfg.enabled = impl_->render.sync->enabled();
+    impl_->render.sync->configure(cfg);
+}
+
+void NimRTCEngine::set_video_sync_enabled(bool enabled) noexcept {
+    if (impl_ == nullptr) return;
+    if (!impl_->render.sync) return;
+    impl_->render.sync->set_enabled(enabled);
+}
+
+bool NimRTCEngine::video_sync_enabled() const noexcept {
+    return impl_ != nullptr && impl_->render.sync &&
+           impl_->render.sync->enabled();
 }
 
 VideoSyncStats NimRTCEngine::video_sync_stats() const noexcept {
     VideoSyncStats out;
     if (impl_ == nullptr) return out;
-    const auto& c = impl_->render.sync.counters();
+    if (!impl_->render.sync) return out;
+    const auto c = impl_->render.sync->counters();
     out.frames_presented    = c.frames_presented;
     out.frames_dropped_sync = c.frames_dropped;
     out.frames_delayed      = c.frames_delayed;
@@ -85,10 +179,17 @@ VideoSyncStats NimRTCEngine::video_sync_stats() const noexcept {
     return out;
 }
 
-bool NimRTCEngine::apply_render_sync(std::int64_t capture_ts_us,
+void NimRTCEngine::set_video_sync_audio_reference_us(
+        std::int64_t peer_capture_us) noexcept {
+    if (impl_ == nullptr) return;
+    impl_->render.audio_playout_capture_us = peer_capture_us;
+}
+
+bool NimRTCEngine::apply_render_sync(std::int64_t peer_capture_us,
                                      std::int64_t* delay_us) noexcept {
     if (delay_us) *delay_us = 0;
     if (impl_ == nullptr) return true;
+    if (!impl_->render.sync) return true;
 
     // ---- The reference (plan E5) ------------------------------------------
     //
@@ -103,43 +204,61 @@ bool NimRTCEngine::apply_render_sync(std::int64_t capture_ts_us,
     const std::int64_t audio_capture_us =
         impl_->render.audio_playout_capture_us;
     if (audio_capture_us == 0) return true;
-    if (capture_ts_us == 0) return true;
+    if (peer_capture_us == 0) return true;
 
-    // The inter-clock skew (the difference between the peer's capture
-    // clock and our own) is the one the Sender Report tracker already
-    // reconstructed.  The engine does **not** derive a second one
-    // (RD-9) — it consumes this one.
+    // The skew comes from the ADR-017 capture instants *only* -- the
+    // audio plan's rule for the video side (C-4, WP-14).  Both
+    // operands are the peer's own measurements, reconstructed by the
+    // same seam, so their difference is already the skew.
     //
-    // A session that has not received a Sender Report yet has no skew,
-    // and the picture is presented unchanged.
-    const auto skew = last_sender_recv_skew_us();
-    if (!skew.has_value()) return true;
-
-    // The skew between the *picture* and the *sound*: the picture was
-    // captured at `capture_ts_us` and the sound that belongs with it is
-    // at the speaker now (`audio_capture_us`).  A positive value means
-    // the picture is older than the sound — the picture has to wait.
+    // There is deliberately **no** inter-clock-skew term here.  That
+    // term measures the *rate* difference between the two ends' wall
+    // clocks; adding it to a difference of two instants the peer
+    // measured corrected a drift that the difference no longer had --
+    // and it made the whole decision conditional on a Sender Report
+    // having arrived, so a session without one skipped the correction
+    // entirely.
+    // The skew between the *picture* and the *sound*, on the seam's
+    // convention (`video_capture_us - audio_playout_capture_us`):
+    //
+    //   - **positive** — the picture was captured *later* than the sound
+    //     that is at the speaker now, so the picture is *ahead* of the
+    //     sound: it has to be **held** back until the sound catches up;
+    //   - **negative** — the picture was captured *earlier*, so it is
+    //     *behind* the sound: the moment the operator heard is already
+    //     gone, and the frame is **dropped**.
+    //
+    // The sign is the one the `video_sync` module's clock and the
+    // shipped `video_sink` model both use — see
+    // `plugins::IVideoSyncController::decide()`.
+    //
+    // Both operands are now on the *peer's* timeline: `peer_capture_us`
+    // and `audio_capture_us` are both the ADR-017 reconstruction of the
+    // peer's own capture instant, in Unix microseconds.  Subtracting
+    // them is therefore a real difference between two instants the peer
+    // measured, and not a difference between two unrelated clocks.
     const std::int64_t picture_skew_us =
-        audio_capture_us - capture_ts_us + *skew;
+        peer_capture_us - audio_capture_us;
 
-    const detail::VideoSyncOutcome outcome =
-        impl_->render.sync.decide(picture_skew_us, capture_ts_us);
+    const plugins::VideoSyncDecision outcome =
+        impl_->render.sync->decide(picture_skew_us, peer_capture_us);
 
-    switch (outcome.decision) {
-        case detail::VideoSyncDecision::kDrop:
-            // The picture is *ahead* of the sound: showing it would put
-            // the image on the screen before the audio it belongs to.
+    switch (outcome.action) {
+        case plugins::VideoSyncAction::kDrop:
+            // The picture is *behind* the sound: showing it now would
+            // put an image on the screen for a moment the operator has
+            // already heard past.  The frame is dropped.
             return false;
 
-        case detail::VideoSyncDecision::kDelay:
-            // The picture is *behind* the sound: hold it for the
+        case plugins::VideoSyncAction::kDelay:
+            // The picture is *ahead* of the sound: hold it for the
             // difference.  The hold is bounded by the controller's cap
             // (and by the debt it has already promised), so it cannot
             // grow without bound.
             if (delay_us) *delay_us = outcome.delay_us;
             return true;
 
-        case detail::VideoSyncDecision::kPresent:
+        case plugins::VideoSyncAction::kPresent:
         default:
             return true;
     }

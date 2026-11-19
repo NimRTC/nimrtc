@@ -1255,6 +1255,56 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // Decode + render if the codec and sink are available.
                 if (!video_codec_ || !video_sink_) return;
 
+                // ---- The render clock (remote-desktop plan E5) ---------------
+                //
+                // The clock decides *before* the frame is decoded: a
+                // frame that has to be dropped is dropped without
+                // paying for the decode, and a frame that has to be
+                // held is held before the decode so the hold does
+                // not add to the decode's latency.
+                //
+                // The decision is taken **once**, here, and not once per
+                // delivery path: the GPU path can fall through to the CPU
+                // path, and a clock consulted twice for one frame would
+                // double-count every decision.
+                //
+                // The hold is *not* taken here: it is turned into a
+                // presentation deadline (`present_at_us`) that travels
+                // with the frame to the sink, and the sink's presenter
+                // waits for it.  Waiting on the engine's thread would
+                // block the whole receive path — the picture has to be
+                // held by the *presenter*, which is the thread that owns
+                // the display.
+                //
+                // The clock needs the picture's capture instant on the
+                // *peer's* timeline -- the same one the audio reference
+                // lives on -- so that the difference between the two is
+                // a real skew.  The frame's own `capture_ts_us` is a
+                // *local monotonic arrival* stamp (the jitter buffer
+                // stamps it on arrival), and subtracting it from the
+                // peer's Unix-timeline audio reference would compare
+                // two unrelated clocks.
+                //
+                // `video_capture_time_us()` is the video half of the very
+                // reconstruction the audio half uses
+                // (`audio_capture_time_us()`), so both sides of the
+                // comparison now come from one seam.
+                const std::int64_t peer_capture_us =
+                    video_capture_time_us(
+                        impl_->video_state.remote_video_ssrc_,
+                        enc.info.rtp_timestamp);
+
+                std::int64_t hold_us = 0;
+                if (!apply_render_sync(peer_capture_us, &hold_us)) {
+                    impl_->video_state.video_stats.on_frame_dropped(
+                        detail::VideoDropReason::kDecoderError);
+                    // Plan J3: the frame never reached the viewer.
+                    note_frame_dropped();
+                    return;
+                }
+                const std::int64_t present_at_us =
+                    hold_us > 0 ? (detail::steady_now_us() + hold_us) : 0;
+
                 // ---- The delivery path (remote-desktop plan E1) --------------
                 //
                 // Two routes, decided at `open()` time (see
@@ -1270,24 +1320,9 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // fallback every codec implements.
                 if (impl_->video_state.video_render_path ==
                     detail::VideoRenderPath::kGpuSurface) {
-                    // ---- The render clock (remote-desktop plan E5) ---------
-                    //
-                    // The clock decides *before* the frame is decoded: a
-                    // frame that has to be dropped is dropped without
-                    // paying for the decode, and a frame that has to be
-                    // held is held before the decode so the hold does
-                    // not add to the decode's latency.
-                    std::int64_t hold_us = 0;
-                    if (!apply_render_sync(
-                            static_cast<std::int64_t>(enc.info.capture_ts_us),
-                            &hold_us)) {
-                        impl_->video_state.video_stats.on_frame_dropped(
-                            detail::VideoDropReason::kDecoderError);
-                        return;
-                    }
-
                     const plugins::Status gpu_rc = render_decoded_gpu_frame(
-                        enc, static_cast<std::int64_t>(enc.info.capture_ts_us));
+                        enc, static_cast<std::int64_t>(enc.info.capture_ts_us),
+                        present_at_us);
                     if (gpu_rc == plugins::kOk) {
                         ++impl_->video_state.video_rx_gpu_frames;
                         impl_->video_state.video_stats.on_frame_decoded(
@@ -1317,27 +1352,6 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
 
                 // ---- Resolve the decoded geometry ------------------------------
                 //
-                // ---- The render clock (remote-desktop plan E5) ---------------
-                //
-                // The CPU path asks the render clock *before* the decode,
-                // for the same reason the GPU path does: a frame that has
-                // to be dropped should not pay for the decode, and a
-                // frame that has to be held should be held before the
-                // decode so the hold does not add to the decode's own
-                // latency.
-                {
-                    std::int64_t hold_us = 0;
-                    if (!apply_render_sync(
-                            static_cast<std::int64_t>(enc.info.capture_ts_us),
-                            &hold_us)) {
-                        impl_->video_state.video_stats.on_frame_dropped(
-                            detail::VideoDropReason::kDecoderError);
-                        // Plan J3: the frame never reached the viewer.
-                        note_frame_dropped();
-                        return;
-                    }
-                }
-
                 //
                 // The decode buffers must match the *actual* geometry of
                 // the incoming frame, not a hard-coded 640×480.  Two
@@ -1449,6 +1463,10 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 sink_frame.capture_ts_us = enc.info.capture_ts_us;
                 sink_frame.frame_seq     = enc.info.frame_seq;
                 sink_frame.rtp_timestamp = enc.info.rtp_timestamp;
+                // The A/V-sync hold (v1.3 Q6): the presentation deadline
+                // travels with the frame, so the sink's presenter waits
+                // for it before it puts the picture on the screen.
+                sink_frame.present_at_us = present_at_us;
 
                 // Plan J1: the render stage's timer starts here.
                 const auto render_start = std::chrono::steady_clock::now();
@@ -1525,7 +1543,8 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
 
 plugins::Status NimRTCEngine::render_decoded_gpu_frame(
         const plugins::EncodedVideoFrame& enc,
-        std::int64_t capture_ts_us) noexcept {
+        std::int64_t capture_ts_us,
+        std::int64_t present_at_us) noexcept {
     if (!video_codec_ || !video_sink_) return plugins::kErrNotReady;
 
     // The surface comes from the codec's own output pool — the codec
@@ -1575,6 +1594,10 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
     info.capture_ts_us = capture_ts_us;
     info.frame_seq     = enc.info.frame_seq;
     info.rtp_timestamp = enc.info.rtp_timestamp;
+    // The A/V-sync hold (v1.3 Q6): the presentation deadline travels
+    // with the frame, so the sink's presenter waits for it before it
+    // puts the picture on the screen.
+    info.present_at_us = present_at_us;
 
     // Plan J1: the GPU path's decode + render costs.
     const auto gpu_start = std::chrono::steady_clock::now();

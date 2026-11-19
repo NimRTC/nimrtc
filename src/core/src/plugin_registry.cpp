@@ -221,6 +221,16 @@ void PluginRegistry::register_qoe_collector(
     qoe_collector_.register_one(id, f);
 }
 
+// v1.3 Q6 (remote-desktop plan R3): the render-clock slot.  The built-in
+// clock lives in `src/modules/video_sync/` and registers under
+// "render-clock"; the engine resolves it through
+// `EngineConfig::video_sync_controller_name`.
+void PluginRegistry::register_video_sync_controller(
+    std::string_view id,
+    const plugins::IVideoSyncControllerFactory* f) {
+    video_sync_controller_.register_one(id, f);
+}
+
 void PluginRegistry::register_control_channel(
         std::string_view id,
         const plugins::IControlChannelFactory* f) {

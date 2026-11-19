@@ -276,6 +276,18 @@ if(NIMRTC_MODULE_VIDEO_SINK)
 endif()
 
 # -----------------------------------------------------------------------------
+# v1.3 Q6 (remote-desktop plan R3): the render-clock module — the video half
+# of the A/V-sync correction.
+#
+# Self-contained: it depends on nimrtc::core + nimrtc::plugins (the seam it
+# implements) and on nothing else.  The engine wiring — resolving the clock
+# through the registry and feeding it the ADR-017 skew — lives in the engine.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SYNC)
+    add_subdirectory(video_sync)
+endif()
+
+# -----------------------------------------------------------------------------
 # Remote-desktop control plane — the input module (plan Track G).
 #
 # Self-contained: it depends on nimrtc::core only, and it registers no

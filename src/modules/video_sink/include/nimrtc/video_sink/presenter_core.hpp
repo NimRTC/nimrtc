@@ -95,6 +95,18 @@ struct NIMRTC_API_STABLE PresentedFrame {
     /** The frame's capture timestamp (microseconds, monotonic). */
     std::int64_t capture_ts_us = 0;
 
+    /** The instant at which the frame must reach the display, in
+     *  microseconds on the **local monotonic** clock.
+     *
+     *  This is the presentation deadline the render clock computed
+     *  (v1.3 Q6, remote-desktop plan R3).  When the picture is ahead of
+     *  the sound it has to be held back until the sound catches up, and
+     *  the presenter waits for this instant before it presents.
+     *
+     *  Zero means "no deadline" — present the frame at the presentation
+     *  clock's own pace. */
+    std::int64_t present_at_us = 0;
+
     /** The frame's timeline metadata (frame id, RTP timestamp, ...). */
     plugins::VideoFrameInfo info{};
 };

@@ -436,6 +436,58 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A `Benchmark G2 control plane (plan E6)` step now runs in both the Windows
   and the Linux CI legs, and the artifact is uploaded with them, because a
   benchmark that only runs on one developer's machine is not a gate.
+- **An H.265 mid-stream parameter-set change is asserted on the hardware
+  decoder (v1.3 plan item `Q1b`).**
+  Q1 proved the H.264 mechanism on the software decoder.  Q1b is the
+  H.265 counterpart, and it is asserted where H.265 actually runs here 鈥?  on **NVDEC**, against a stream produced by **NVENC**:
+
+  - `src/modules/nvcodec/src/hevc_pts.{hpp,cpp}` is a new private helper
+    that parses `profile_tier_level` and the SPS geometry fields
+    (ITU-T H.265 搂7.3.3, 搂7.3.2.2.1) **independently of the driver**, and
+    summarises an Annex-B access unit into `plugins::HevcPtsSummary`:
+    the visible size, FNV-1a hashes of the **VPS / SPS / PPS** RBSPs, and the
+    profile idc with its compatibility flags.  The summary is what lets a
+    test tell "the parameter sets changed" from "the stream never
+    changed".
+  - `IVideoEncoder::last_hevc_pts()` / `IVideoDecoder::last_hevc_pts()`
+    expose the summary of the last keyframe each seam handled.
+  - `HwPtsSwitch.GeometryChangeDecodesOnTheSameNvdecSession` holds one
+    NVDEC instance created for 320脳240, switches the sender to 640脳480
+    (NVENC re-initialises and emits an IRAP with inline VPS / SPS / PPS),
+    and asserts the **first** decode call after the switch returns `kOk`
+    with a 640脳480 picture, the decoder's SPS hash equal to the
+    encoder's, and the receiver's key-frame-request counter still at
+    zero 鈥?i.e. no PLI on the wire.
+  -   `HwPtsSwitch.ParameterSetChangeAtTheSameGeometryIsNoticed` covers
+  MAIN 鈫?MAIN10 at the same size, the case a width/height comparison
+  cannot see.
+
+  The private parser reads `general_reserved_zero_44bits` (a 44-bit
+  field, longer than any machine word) without truncation, skips the
+  sub-layer ordering-info block with the 搂7.3.3 rule that
+  `maxNumSubLayersMinus1 > 0` is followed by `8 - maxNumSubLayersMinus1`
+  `reserved_zero_2bits` words, and decodes `ue(v)` as
+  `(1 << leading) - 1 + suffix`.  Each of those is a place a hand-rolled
+  bit reader silently desynchronises and reports a plausible-but-wrong
+  geometry; the summary's SPS hash is what makes such a desync visible.
+
+  Both cases run against the real driver and skip cleanly on a host
+  without the hardware; the software-decoder half stays deferred (there
+  is still no software H.265 decoder to assert on, and the skip says so).
+
+- **A single H.264 NAL unit packet is forwarded according to the
+  receiver's declared framing, not re-framed unconditionally.**
+  `ReceiverConfig::h264_annex_b` now decides the single-NAL path: with
+  the flag **off** (the default) the packet is handed to the decoder
+  byte for byte, which is the RFC 6184 搂5.1 shape 鈥?a bare NAL unit
+  arrives as `NaluFormat::kRaw`.  With the flag **on**, a bare unit gets
+  an Annex-B start code and a unit that already carries one is forwarded
+  as-is, so a frame assembled from a bare SPS + PPS + slice is still a
+  parsable Annex-B frame.  Previously the receiver synthesised framing
+  unconditionally, which silently changed the default contract.  The
+  flag's semantics are now documented in the header rather than only in
+  the plan.
+
 - **A mid-stream parameter-set change is now *proven* to decode on its own
   (v1.3 plan item `Q1`, video plan `R2`).**
   The survey behind the v1.3 plan found that the *sender* already did the

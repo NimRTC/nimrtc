@@ -68,6 +68,23 @@ NIMRTC_API_STABLE bool nvenc_codec_available(NvCodec codec) noexcept;
 NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoCodec>
 make_nvenc_codec(NvCodec codec, plugins::VideoCodecConfig cfg);
 
+/** Q1b (`1.3.x` line) — create an NVENC encoder for @p codec with an
+ *  explicit H.265 profile.
+ *
+ *  Exists for the *assertion*, not for hosts: a test that has to make
+ *  the parameter sets change while the geometry stays the same needs
+ *  two streams initialised for different profiles, and NVENC is the
+ *  only H.265 producer in the tree.  A host has no reason to call it,
+ *  which is why the profile type is declared here but defined in the
+ *  module's private `src/hevc_profile.hpp`.
+ *
+ *  @p profile is ignored for every codec except H.265.  A host whose
+ *  silicon has no MAIN10 encoder gets its probe's answer (nullptr on
+ *  `kMain10`), never a silent MAIN session. */
+NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoCodec>
+make_nvenc_codec_for_profile(NvCodec codec, plugins::VideoCodecConfig cfg,
+                             H265Profile profile);
+
 /** True iff this host can decode @p codec with NVDEC. */
 NIMRTC_API_STABLE bool nvdec_codec_available(NvCodec codec) noexcept;
 

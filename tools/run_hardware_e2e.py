@@ -438,7 +438,26 @@ def _self_test() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    # 8. An empty window is not a green window.
+    # 8. `--days 0` is today's window — the one the workflow surfaces,
+    #    so it has to include the record the run just appended.
+    tmp = Path(tempfile.mkdtemp(prefix="nimrtc-hw-e2e-selftest-"))
+    try:
+        entry = {"schema": SCHEMA, "date": _dt.date.today().isoformat(),
+                 "status": "PASS", "failures": [],
+                 "driver": {"driver_version": "999.99"}}
+        path = tmp / "windows-today.jsonl"
+        path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+        original = EVIDENCE_DIR
+        try:
+            globals()["EVIDENCE_DIR"] = tmp
+            check(summary(0, expect_green=True) == 0,
+                  "--days 0 includes the record written today")
+        finally:
+            globals()["EVIDENCE_DIR"] = original
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # 9. An empty window is not a green window.
     tmp = Path(tempfile.mkdtemp(prefix="nimrtc-hw-e2e-selftest-"))
     try:
         original = EVIDENCE_DIR
@@ -509,8 +528,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="build the hw-e2e target before running it")
     ap.add_argument("--build-dir", default="build",
                     help="the CMake build directory (default: build)")
-    ap.add_argument("--config", default="Debug",
-                    help="the CMake configuration (default: Debug)")
+    ap.add_argument("--config", default="Release",
+                    help="the CMake configuration (default: Release — the "
+                         "hardware path is measured on an optimised build)")
     ap.add_argument("--width", type=int, default=1920)
     ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--frames", type=int, default=3)
@@ -520,7 +540,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--summary", action="store_true",
                     help="print the archived window instead of running")
     ap.add_argument("--days", type=int, default=30,
-                    help="how many days the summary covers (default: 30)")
+                    help="how many days the summary covers, counting today "
+                         "inclusively (default: 30; 0 = today's records only, "
+                         "which is the record this run just appended)")
     ap.add_argument("--expect-green", action="store_true",
                     help="fail when the window has no PASS record")
     ap.add_argument("--self-test", action="store_true",

@@ -276,6 +276,12 @@ endif()
 # pipeline + rtp (the wire).  The nvcodec module is linked *optionally*:
 # a build without it still runs, as long as the h264 module's NVENC /
 # VideoToolbox entries exist.
+if(NOT NIMRTC_MODULE_VIDEO_PIPELINE)
+    # The wire the harness measures is the *shipped* pipeline; a
+    # configuration without it would fall back to nothing, so the target
+    # simply is not offered.
+    return()
+endif()
 if(TARGET nimrtc::h264 AND TARGET nimrtc::video_pipeline
    AND TARGET nimrtc::rtp AND TARGET nimrtc::video_payload
    AND TARGET nimrtc::video_frame)

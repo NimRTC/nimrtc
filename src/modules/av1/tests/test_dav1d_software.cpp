@@ -34,6 +34,7 @@
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/av1/codec_plugin.hpp>
 #include <nimrtc/av1/hw_backends.hpp>
+#include <nimrtc/plugins/hw_video_backend.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 
@@ -89,14 +90,25 @@ constexpr std::uint32_t kWidth  = 64;
 constexpr std::uint32_t kHeight = 64;
 
 /** The `dav1d_av1` decoder backend, or nullptr when the vendored dav1d
- *  is not linked into this build. */
+ *  is not linked into this build.
+ *
+ *  The lookup is by *id* rather than through `select_decoder_backend()`
+ *  so the test is deterministic on a host that also has a GPU: the
+ *  NVENC / NVDEC entries have a much higher priority and would win the
+ *  generic selection — and the NVDEC AV1 decoder cannot decode this
+ *  test's 64x64 low-overhead OBU stream at all (`cuvidCreateDecoder`
+ *  fails on it), so a generic selection makes this suite fail on every
+ *  machine with an NVIDIA GPU.
+ *
+ *  This mirrors what the H.264 suite does for OpenH264
+ *  (`test_openh264_software.cpp`: `openh264_backend()`). */
 const plugins::VideoDecoderBackend* dav1d_backend() {
-    plugins::VideoCodecConfig cfg;
-    cfg.codec        = plugins::VideoCodecKind::kAV1;
-    cfg.width        = kWidth;
-    cfg.height       = kHeight;
-    cfg.pixel_format = plugins::VideoPixelFormat::kI420;
-    return nimrtc::av1::select_decoder_backend(cfg);
+    nimrtc::av1::register_default_video_backends();
+    for (const auto* be : plugins::HwVideoBackendRegistry::instance()
+                             .list_decoders(plugins::VideoCodecKind::kAV1)) {
+        if (be->id == "dav1d_av1") return be;
+    }
+    return nullptr;
 }
 
 /** Decode until a picture comes out.

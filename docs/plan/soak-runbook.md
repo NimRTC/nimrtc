@@ -62,7 +62,7 @@ it was measured on:
 
 | Field | Meaning |
 |---|---|
-| `git_ref` | the branch the tree was on (`release/1.1` for the v1.1 window) |
+| `git_ref` | the branch the tree was on (`main` for the current window) |
 | `git_commit` | the commit the tree was at |
 | `git_dirty` | whether the working tree carried uncommitted changes |
 
@@ -225,7 +225,7 @@ GitHub-hosted runners:
 | Schedule | `cron: '23 3 * * *'` (daily; `workflow_dispatch` runs one platform on demand) |
 | Jobs | `linux-x86_64` (ubuntu-22.04) and `windows` (windows-2022) |
 | What it runs | `python tools/run_soak.py --platform <platform> --case d,e` on a fresh Debug build |
-| Which tree it measures | `SOAK_REF` — `release/1.1` by default, overridable with the `ref` dispatch input |
+| Which tree it measures | `SOAK_REF` — `main` by default, overridable with the `ref` dispatch input. The release gate then requires every measured day to be an **ancestor** of the tagged commit |
 | Where the record lands | `build/soak/<platform>-<YYYY-MM-DD>.jsonl`, uploaded as the artifact `soak-<platform>-<run id>` (90-day retention) |
 | Where it accumulates | in the artifacts — one artifact per run, which is where the record of the window lives |
 | What the Step Summary shows | the whole window: the workflow pulls the earlier days' artifacts back into `build/soak/` before it summarises |
@@ -252,29 +252,76 @@ Summary. Those branches are gone; the artifacts replace them.
 
 ### 4.3.1 Which tree the window measures
 
-The window must measure **the tree that gets tagged**, which for
-`v1.1.0` is `release/1.1` — *not* `main`. `main` already carries the
-v1.2.0 audio body, so evidence collected from `main` would be evidence
-about a different program than the release candidate. The workflow
-therefore checks out `SOAK_REF`, which defaults to `release/1.1`:
+The window must measure **a tree the release descends from**, and the
+rule that expresses that is the **ancestry rule**: a day counts only
+when the commit it was measured on is an ancestor of the commit the
+release is cut from.
+
+That is a different question from "which branch was it measured on",
+and the difference is the whole point. A window measured on `main`
+while `main` advanced is still evidence about the release, provided
+the tagged commit descends from every commit that was measured — the
+tag then contains everything the window proved, plus whatever came
+after it. A window measured on an *unrelated* tree proves nothing, and
+that is exactly the failure the old default produced.
+
+The workflow therefore checks out `SOAK_REF`, which defaults to
+`main`:
 
 ```yaml
 env:
-  SOAK_REF: ${{ inputs.ref || 'release/1.1' }}
+  SOAK_REF: ${{ inputs.ref || 'main' }}
 ```
 
 A scheduled run has no `inputs`, so it takes the same default; a
 manual run can point it elsewhere with `workflow_dispatch` → `ref`.
 
+> **Why the default used to be `release/1.1`, and why it was wrong.**
+> The window was pinned to the release branch, which seemed strict
+> and was in fact useless: `release/1.1` had fallen 202 commits and
+> 300 files behind `main`, so a ten-day window measured a tree nobody
+> was going to ship, and the release tag is cut from a descendant of
+> `main`. Pinning to a *stale* branch is not strictness — it is a
+> window about a different program.
+
+**The release reads the window.** The release workflow's preflight
+fetches these artifacts and runs the gate:
+
+```bash
+python tools/fetch_soak_evidence.py --days 21 --out build/soak
+python tools/run_soak.py \
+  --summary --require --require-days 7 \
+  --expect-ref "" \
+  --expect-ancestor-of v1.3.0 \
+  --max-window-age-days 30
+```
+
+Three things are checked, and all three have to hold:
+
+| Check | Flag | What it rules out |
+|---|---|---|
+| The window is **green** | `--require --require-days 7` | A window that is short, gapped, failing or inconclusive |
+| The window is about **this** tree | `--expect-ancestor-of <tag>` | A window measured on a tree the tag does not descend from |
+| The window is **recent** | `--max-window-age-days 30` | A window that closed two generations ago |
+
+The third one matters as much as the first: a seven-day streak says
+the window *was* green, and says nothing about *when*. A window that
+closed in March is not evidence about a release cut in November.
+
+`--expect-ref ""` disables the branch-name rule on purpose — the
+window is measured on `main`, which moves, so the branch name is not
+the right test. The ancestry rule is the right one, and it is the
+stricter of the two in the only direction that matters.
+
 **The Windows half of the window has the same requirement, and it is
 not automatic.** The local Scheduled Task (§4.1) runs the collector
 against *the working tree of the checkout it was registered against* —
-it does not check out a ref. If that checkout is on `main` (because
-the v1.2 body is being worked on), the day's records carry
-`git_ref = "main"` and the summary reports the day as *measured on
-another tree*: it does not count towards the window, and it is listed
-explicitly rather than silently dropped. Nothing is lying and nothing
-has to be deleted by hand.
+it does not check out a ref. If that checkout is on a branch other
+than the candidate's, the day's records carry that branch's name and
+the summary reports the day as *measured on another tree*: it does not
+count towards the window, and it is listed explicitly rather than
+silently dropped. Nothing is lying and nothing has to be deleted by
+hand.
 
 Two consequences follow:
 
@@ -293,9 +340,14 @@ before letting a day be recorded:
 git -C d:\MyOpen\NimRTC rev-parse --abbrev-ref HEAD
 ```
 
-Nothing else has to be done when the branch is not the candidate one:
-the day is already excluded from the window by the `git_ref` rule, and
-the CI leg of the same platform covers the day regardless.
+Both jobs record the verdict in their **conclusion**, not only in the
+evidence file. The steps that produce the evidence carry
+`continue-on-error: true` (a failing acceptance case is evidence, and
+the collector has already written the record), and a final step turns a
+non-green day into a red job. The steps that produce the evidence's
+*preconditions* — the checkout, the build, the dependency install —
+do not carry it: a job that could not build is a hole in the window,
+and a hole has to be visible.
 
 Both jobs run with `continue-on-error: true`: a red acceptance run is
 **evidence** (the collector records `FAIL`, which breaks the streak),
@@ -342,10 +394,11 @@ Useful flags: `--platform windows` fetches one platform's half only,
 `--since 2026-11-01` sets the earliest run date by hand, and
 `--dry-run` lists what would be fetched without writing anything.
 
-The summary defaults to `--expect-ref release/1.1`, so a day measured
-on any other tree is excluded from the window and listed under "days
-measured on another tree". Pass `--expect-ref ""` to switch the check
-off (for example when summarising evidence for a different release).
+The summary's `--expect-ref` rule excludes a day measured on any other
+tree and lists it under "days measured on another tree". The release
+gate passes `--expect-ref ""` and relies on `--expect-ancestor-of`
+instead (§4.3.1), because the window is measured on a branch that
+moves.
 
 Run the fetch **before** every `--summary --require`: the summary only
 sees what is in `build/soak/`.

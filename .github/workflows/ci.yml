@@ -445,6 +445,60 @@ jobs:
       - name: Check Markdown links and anchors
         run: python tools/check_md_links.py
 
+      # The README is the front page, and it makes two claims about the
+      # release: the badge says which version is published, and the
+      # "Latest release" paragraph says what it contains.  Both went
+      # stale for eleven days after v1.2.0 -- the badge still read
+      # v1.0.2 while the body of the same file described v1.2.0 as
+      # shipped.  Nothing caught it, because documentation drift is
+      # invisible to the compiler and to the test suite.
+      #
+      # This check compares the badge, the "Latest release" paragraph
+      # and the "Current main" paragraph in both languages against the
+      # newest released section of the changelog, and fails when they
+      # disagree.
+      - name: Check the README's release claims against the changelog
+        run: python tools/check_readme_release.py --verbose
+
+      - name: Self-test the README release guard
+        run: python tools/check_readme_release.py --self-test
+
+      # The release workflow's tag filter decides whether a `git push` can
+      # start a release.  GitHub evaluates `on.push.tags` patterns as
+      # ECMAScript regexes anchored at the start of the ref, and the
+      # pattern the repository shipped (`v[0-9]+.[0-9]+.[0-9]+*`) stood for
+      # more than its author meant: a push of `chore/release-1.2-followup`
+      # started the whole release workflow, which fails in preflight in
+      # 0 s (run 44478642313, 2026-11-19).  The guard is a one-second check
+      # that the filter matches every tag form the project cuts and no
+      # branch in the repository.
+      #
+      # It runs wherever this job runs -- `main`, `release/**` and every PR
+      # into `main` -- and NOT on a working branch, because `ci-fast.yml`
+      # is what a working branch gets and it does not run the docs job.
+      # That is the right place for it: the filters live in the tree, and
+      # a working branch's push already cannot start `release.yml` once the
+      # filters are correct.  During the window where a bad filter is being
+      # pushed for the first time, this check would catch it on the PR, one
+      # push later than ideal and before the merge.
+      - name: Check the release workflow's tag filter
+        run: python tools/check_release_tag_filter.py --self-test
+
+      # A `${{ }}` block is evaluated by GitHub's expression language, not
+      # by bash and not by YAML.  A shell expansion inside one -- writing an
+      # expression block whose body is `tag` followed by a shell
+      # dot-suffix-strip -- is invisible locally: the YAML parses and the
+      # string is legal bash.  It shows up only after a push, as a workflow
+      # that starts and produces zero jobs because the file did not parse.
+      # That happened on 2026-11-19: commit `d6c3e38c` put such a block in
+      # release.yml's ancestry step, and every subsequent push ran the
+      # release workflow for 0 s with no jobs.  (This comment deliberately
+      # does not quote the broken block -- quoting it here would break this
+      # file in exactly the same way, which is also why the guard scans
+      # comments.)
+      - name: Check that every workflow expression is an expression
+        run: python tools/check_workflow_expressions.py --self-test
+
       # The plugin catalogue in docs/plugin_author_guide.md section 4 is
       # a promise about the code: every knob it names must exist in
       # EngineConfig, every macro it names must exist in the registry,

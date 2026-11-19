@@ -389,6 +389,20 @@ if(NIMRTC_MODULE_AUDIO_DEVICE)
     add_subdirectory(audio_device)
 endif()
 
+# -----------------------------------------------------------------------------
+# v1.3 plan Q5 — the network simulation module (the simulated NAT + the
+# impairment shaper).
+#
+# A *test* facility, not an engine seam: its only consumers are the soak
+# harness (`examples/soak-p2p`) and its own unit tests.  It stands apart
+# from the engine on purpose — L4 forbids the engine from including a
+# concrete module, and the soak is a host which drives two engines, so it
+# may link the module directly the same way `examples/` may link any module.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_NET_SIM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/net_sim/CMakeLists.txt")
+    add_subdirectory(net_sim)
+endif()
+
 # CTest discovery: enable_testing() at this level so that each module's
 # tests subdirectory (added via add_subdirectory(tests) in the module's
 # own CMakeLists.txt) appears in the src/modules/CTestTestfile.cmake.

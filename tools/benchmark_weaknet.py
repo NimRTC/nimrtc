@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 NimRTC contributors.
 # SPDX-License-Identifier: MIT
-"""Portable weak-network baseline (v1.1 Q4).
+"""Portable weak-network baseline (v1.1 Q4; the v1.3 plan's Q5 adds a tier).
 
 Why in-process instead of `tc qdisc netem`: netem is Linux-only and needs
 root + a real interface. CI runs on Windows/macOS/Linux and the bench must
 be reproducible on a laptop with no privileges. So this tool puts a small
-userspace shaper between two loopback UDP sockets and applies the three
+userspace shaper between two loopback UDP sockets and applies the
 v1.1-plan Q4 tiers deterministically (seeded RNG):
 
   - loss-5pct    : 5% uniform drop, 5 ms base delay
   - jitter-100ms : 20 ms base + uniform 0..100 ms jitter
   - cap-1mbps    : 1 Mbps token-pace, 5 ms base delay
+
+The v1.3 plan's Q5 adds a fourth, opt-in tier, because the v1.1 list never
+used netem's `reorder` knob and Q5 names reordering as one of the three
+impairments the soak must survive:
+
+  - reorder-10pct: 10% of packets held back 25 ms so they arrive after
+                   their successors, 5 ms base delay
+
+(The same tier exists in `tools/benchmark_weaknet_netem.sh` as
+`netem ... reorder 10% 50%`, and in-process as
+`net_sim::ImpairmentConfig::reorder_pct`.)
 
 A rate-limited link delays a packet by its base delay *plus* the time
 the link needs to put the packet on the wire (its serialization time),
@@ -85,6 +96,15 @@ TIERS = (
     {"id": "loss-5pct", "loss": 0.05, "base_ms": 5.0, "jitter_ms": 0.0, "cap_mbps": 0.0},
     {"id": "jitter-100ms", "loss": 0.0, "base_ms": 20.0, "jitter_ms": 100.0, "cap_mbps": 0.0},
     {"id": "cap-1mbps", "loss": 0.0, "base_ms": 5.0, "jitter_ms": 0.0, "cap_mbps": 1.0},
+    # The v1.3 plan's Q5 addition (plan §1.5 item 2): netem's `reorder`
+    # knob, which the v1.1 tier list did not use.  10 % of packets are
+    # held back 25 ms so they arrive *after* their successors -- the
+    # netem `reorder 10% 50%` shape (10 % of packets, half of those
+    # actually overtaken).  The portable counterpart is
+    # `net_sim::ImpairmentConfig::reorder_pct`; see
+    # `src/modules/net_sim/`.
+    {"id": "reorder-10pct", "loss": 0.0, "base_ms": 5.0, "jitter_ms": 0.0,
+     "cap_mbps": 0.0, "reorder_pct": 10.0, "reorder_extra_ms": 25.0},
     # The "恶劣模式" (harsh-mode) tier: the 100 ms jitter tier with 5%
     # loss on top — the plan §7.2 weak-network demo shape (5% 丢包 +
     # 100ms 抖动).  It is *opt-in*: a default run does not measure it.
@@ -93,9 +113,15 @@ TIERS = (
 
 #: The tiers a default run measures.  The harsh tier is excluded: it only
 #: runs when ``--tier`` names it, so existing default runs are unchanged
-#: (spec requirement 3: the harsh mode is off unless selected).
+#: (spec requirement 3: the harsh mode is off unless selected).  The
+#: reorder tier is also opt-in for the same reason -- and because in
+#: netem mode it is attached by ``tools/benchmark_weaknet_netem.sh``,
+#: which lists it explicitly.
 HARSH_TIER_ID = "harsh-5pct-100ms"
-DEFAULT_TIERS = tuple(t for t in TIERS if t["id"] != HARSH_TIER_ID)
+REORDER_TIER_ID = "reorder-10pct"
+DEFAULT_TIERS = tuple(
+    t for t in TIERS if t["id"] not in (HARSH_TIER_ID, REORDER_TIER_ID)
+)
 
 # ---------------------------------------------------------------------------
 # Wire accounting for the capped tier.

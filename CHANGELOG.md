@@ -380,6 +380,66 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the Linux CI legs, and the artifact is uploaded with them, because a
   benchmark that only runs on one developer's machine is not a gate.
 
+- **The soak can now impair the network and drive the engine (v1.3 plan
+  item `Q5`).**
+  The v1.2 release gate's soak window measured a **clean** network, and
+  the impairment tooling that existed measured the **transport floor** —
+  raw datagrams in, raw datagrams out.  Neither drove the engine, and
+  neither used netem's `reorder` knob at all, even though the plan names
+  *reordering* as one of the three impairments the soak must survive.
+
+  Three pieces land together, and the point of the combination is that
+  the impairments now hit the **real RTP path**:
+
+  - **`src/modules/net_sim/`** — the impairment model
+    (`net_sim::ImpairmentConfig`: loss / delay / jitter / reorder / rate,
+    seeded and therefore deterministic) and the **simulated NAT**
+    (`net_sim::NatRelay`, an address-translating UDP relay with two
+    sockets).  Neither peer ever sees the other's real address, so the
+    pair looks like two peers behind a NAT exactly as the SDP presents
+    it.  This is the plan's Q5-1 default: the **real TURN/TLS leg is
+    deferred to v1.4.0** and is recorded as a known gap, not papered
+    over.
+  - **`examples/soak-p2p`** — the engine-level harness: **two real
+    `NimRTCEngine`s** (ICE + DTLS + SRTP + RTP) streaming audio across
+    the relay, with the impairment profile applied to every packet the
+    relay forwards.  It prints one JSON object with the parameters it
+    was given and the counters it measured.
+  - **`tools/run_soak_impaired.py`** — the recorder.  It runs the
+    harness, folds its JSON together with the **git provenance** of the
+    tree (`git_ref`, `git_commit`, `git_dirty`), **re-derives** the green
+    criteria from the archived numbers, and appends one record to
+    `build/soak-impaired/<platform>.jsonl`.  The netem parameters travel
+    with the result, which is what the v1.2 plan's DoD asks for:
+    *"soak runs are archived with their netem parameters."*
+
+  **The recorder does not trust the harness**, and that is the part
+  worth naming.  The green criteria are re-derived from the archived
+  numbers rather than read from the harness's own `"green"` field, so a
+  harness bug that faked a pass is still caught by the archive; a run
+  that could not be measured is `INCONCLUSIVE` and **never** `PASS`
+  (a broken runner must not be able to look like a green day); and a
+  green run on a dirty tree is marked, because a dirty tree is not the
+  commit it claims.  Each of those three rules is pinned by
+  `tools/run_soak_impaired.py --self-test`, which runs in CI.
+
+  The verdict is a **property of the run**, not of a reference number:
+  the media path carried media, memory stayed inside Q2's bound (at most
+  4 s of PCM), the feedback rate stayed inside Q4's bound, the loss was
+  recovered, and a 100 %-loss profile actually dropped something — a
+  profile that never drops would make the soak a lie.
+
+  `reorder` is now a tier in the kernel-side tooling too
+  (`tools/benchmark_weaknet_netem.sh`: netem `reorder 10% 50%`) and in
+  its portable counterpart (`tools/benchmark_weaknet.py`: the
+  `reorder-10pct` tier), so the two implementations of the same profile
+  list stay in step.
+
+  The operating procedure is `docs/plan/soak-impaired-runbook.md`; the
+  gate is `python tools/run_soak_impaired.py --summary --expect-q5`,
+  which accepts only a run of at least **24 h** under loss **and**
+  jitter **and** reorder on a clean tree.
+
 
 ## [1.2.0] - 2026-11-18
 

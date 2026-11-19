@@ -548,6 +548,14 @@ jobs:
       - name: Self-test the impaired-soak recorder
         run: python3 tools/run_soak_impaired.py --self-test
 
+      # v1.3 plan Q7: the hardware-encode recorder decides whether the
+      # GPU path counts as evidence, so it has to be able to fail.  The
+      # self-test pins the PASS / FAIL / SKIP verdicts and the
+      # empty-window rule against a synthetic evidence file in the temp
+      # directory.
+      - name: Self-test the hardware-encode recorder
+        run: python3 tools/run_hardware_e2e.py --self-test
+
       # v1.2 Track S / S8: the `Engine::Stats` field reference is a
       # *derived* document.  It is generated from `engine.hpp` by
       # `tools/dump_stats_fields.py`, and this step fails when the file

@@ -193,6 +193,43 @@ test('越界检测不削弱：并集里出现写集外路径时判「越界」�
 });
 
 // ---------------------------------------------------------------------------
+// 验收标准 3（补）：产物缺失检测必须真的会报警
+//
+// 为什么要补这条：变异测试发现 —— 原有断言全部是
+//   assert.deepEqual(v.missing, [], ...)
+// 即「产物都在树上时 missing 为空」。**从来没有一条断言检查
+// 「产物不在树上时 missing 非空」**。
+// 于是把 `const missing = required.filter(...)` 改成 `const missing = [].filter(...)`
+// （产物缺失检测彻底失效）时，本套件仍然全绿 —— 这条路径从未被负向测过。
+//
+// 这条测试把「缺失检测」钉成负向断言：故意让产物不在树上，
+// 必须判出 missing 非空、ok=false。
+// ---------------------------------------------------------------------------
+test('产物缺失检测会报警：required 不在树上时 missing 非空且 ok=false（标准 3 补）', () => {
+    // 纯函数层：产物一个都不在树上 → 必须如实报出 missing。
+    const r = ws.evaluateChanged({
+        changed: ['mod.txt'],
+        allow: ['mod.txt'],
+        required: ['missing-product.hpp', 'another-missing.hpp'],
+        present: [],              // 产物一个都不在树上
+    });
+    assert.equal(r.ok, false, '产物缺失时必须判失败');
+    assert.deepEqual(r.missing,
+        ['missing-product.hpp', 'another-missing.hpp'],
+        '产物缺失必须被如实列出（不能恒为空）');
+
+    // 对照：产物都在树上 → missing 为空、ok=true。
+    const ok = ws.evaluateChanged({
+        changed: ['mod.txt'],
+        allow: ['mod.txt'],
+        required: ['mod.txt'],
+        present: ['mod.txt'],
+    });
+    assert.equal(ok.ok, true, '产物齐全时不应判失败');
+    assert.deepEqual(ok.missing, [], '产物齐全时 missing 应为空');
+});
+
+// ---------------------------------------------------------------------------
 // 验收标准 5：判据确定性
 // ---------------------------------------------------------------------------
 test('判据确定性：同一仓库状态连跑两次结果一致（标准 5）', () => {

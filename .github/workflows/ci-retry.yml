@@ -229,6 +229,13 @@ jobs:
           # `workflow_run.id` is the run that just completed.  The
           # manual dispatch path may override it with a specific run.
           TARGET_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          # The automatic path never forces: the staleness guard in the
+          # script is what keeps a retry of a superseded run from
+          # cancelling the CURRENT run through the shared concurrency
+          # group (an infinite loop observed on PR #124).  Only the
+          # manual dispatch path may override it, and it opts in
+          # explicitly.
+          FORCE_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
         run: |
           set -euo pipefail
 
@@ -248,6 +255,7 @@ jobs:
             --max-retries 1 \
             --wait-polls 20 \
             --wait-interval 15 \
+            ${FORCE_FLAG} \
             | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Surface the verdict
@@ -264,6 +272,10 @@ jobs:
             echo "Only jobs that never received a runner are re-run. A job"
             echo "that ran and failed (or was cancelled after it started)"
             echo "is left alone, because that failure belongs to the tree."
+            echo ""
+            echo "A run whose commit is no longer the head of its ref is"
+            echo "not re-run either: the re-run would enter the current"
+            echo "run's concurrency group and cancel it."
           } >> "${GITHUB_STEP_SUMMARY}"
         env:
           TARGET_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}

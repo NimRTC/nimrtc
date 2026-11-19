@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to NimRTC are documented in this file.
 
@@ -230,6 +230,69 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is a stub, so there is nothing to assert on yet.  It is recorded as an
   explicit follow-up in the v1.3 plan's §6, not silently skipped.
 
+- **Retransmissions now travel on their own RFC 4588 stream (v1.3 plan
+  item `Q3`, video plan `T1`).**
+  A NACK used to be answered by re-sending the *original* packet — same
+  sequence number, same payload type.  RFC 4588 §4.1 is explicit that
+  this is **not** RTX: a retransmission "SHALL be sent on a different
+  payload type" so the receiver can tell it apart and restore the
+  original's sequence number.  The consequence is that the receiver has
+  to *un-RTX* — unwrap the header, restore the number, and splice the
+  payload back into the frame it belongs to — because the receiver's
+  frame assembly is keyed on the sequence number.
+
+  The retransmission stream now exists end to end:
+
+  - **A new format module, `src/modules/rtx/`.**  It owns the two-octet
+    OSN header (RFC 4588 §4.1), the byte order, and the `apt=` /
+    `rtx-time=` SDP parameters (RFC 4588 §8.1).  It is a *format* module
+    — it builds no RTP headers and sends nothing — so both ends agree on
+    the bytes by construction rather than by convention.
+  - **The SDP advertises it.**  The offer carries
+    `a=rtpmap:<pt> rtx/90000`, `a=fmtp:<pt> apt=<vpt>`, and
+    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>` with the retransmission
+    SSRC's own `a=ssrc:` line (RFC 5576 §4.2).  The answer echoes the
+    offer's numbers (RFC 3264 §6.1).
+  - **The sender frames it.**  The retransmission ring builds the OSN
+    header, and the retransmission stream keeps its **own**
+    sequence-number space (RFC 4588 §4) — a retransmission does not
+    reuse the original's number on the wire.
+  - **The receiver unwraps it.**  The OSN is read out, the *original*
+    sequence number is restored, the payload is spliced into the frame it
+    belongs to, and the packet is erased from the pending-NACK list — or
+    the receiver would ask for it again, and again.
+  - **The scope boundary holds.**  A peer that offers no RTX payload
+    type gets no RTX stream, and the sender falls back to re-sending the
+    original packet.  Both shapes are pinned by the tests.
+
+  Three details the RFCs forced, each of which is a place a
+  plausible-looking implementation gets it wrong:
+
+  - **The header is two octets, not three.**  RFC 4588 §4.1 defines no
+    marker byte; the `0x90` some descriptions of RTX mention is not in
+    the RFC, and a peer that sent one would have its sequence number
+    restored `0x9000` too large.  (The v1.3 plan's own description was
+    corrected.)
+  - **The FID group lists the media SSRC first** —
+    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>`.  RFC 5576 §4.2's FID
+    semantics relate a *primary* source to its *dependent* ones, and the
+    primary comes first.  The reverse order is a real interop hazard: a
+    receiver that follows the convention would treat the media stream as
+    the repair flow and drop the picture.
+  - **One payload type serves both directions.**  RFC 8843 (Unified Plan)
+    gives an m-section a *single* payload-type list, so the RTX payload
+    type is a property of the m-section rather than of a direction —
+    which is also how Chrome negotiates it.  The `apt=` parameter then
+    says which payload type *within* the section the retransmission
+    protects.
+
+  The public surface grows additively: `EngineConfig::video_sender_tuning`
+  gains `rtx_payload_type` / `rtx_ssrc` / `rtx_time_ms`, `Stats` gains
+  `video_rtx_packets_sent` / `video_rtx_packets_received`, and the
+  plugin seams gain `set_rtx_enabled()` / `set_rtx_packet_callback()` /
+  `set_rtx_payload_type()` / `push_rtp_rtx()` — all with defaults that
+  leave a non-RTX plugin working exactly as before.
+
 - **The receiver's feedback to the peer is bounded, and the two reasons
   for a key-frame request are now distinguishable (v1.3 plan item `Q4`,
   video plan `T2`).**
@@ -296,68 +359,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   key-frame requests may go out in 30 s, both for a 30 % loss profile and
   for the adversarial "every frame is lost" one (901 requests raised).
   `tests/test_engine_video_feedback.cpp` covers the engine-level half.
-- **Retransmissions now travel on their own RFC 4588 stream (v1.3 plan
-  item `Q3`, video plan `T1`).**
-  A NACK used to be answered by re-sending the *original* packet — same
-  sequence number, same payload type.  RFC 4588 §4.1 is explicit that
-  this is **not** RTX: a retransmission "SHALL be sent on a different
-  payload type" so the receiver can tell it apart and restore the
-  original's sequence number.  The consequence is that the receiver has
-  to *un-RTX* — unwrap the header, restore the number, and splice the
-  payload back into the frame it belongs to — because the receiver's
-  frame assembly is keyed on the sequence number.
-
-  The retransmission stream now exists end to end:
-
-  - **A new format module, `src/modules/rtx/`.**  It owns the two-octet
-    OSN header (RFC 4588 §4.1), the byte order, and the `apt=` /
-    `rtx-time=` SDP parameters (RFC 4588 §8.1).  It is a *format* module
-    — it builds no RTP headers and sends nothing — so both ends agree on
-    the bytes by construction rather than by convention.
-  - **The SDP advertises it.**  The offer carries
-    `a=rtpmap:<pt> rtx/90000`, `a=fmtp:<pt> apt=<vpt>`, and
-    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>` with the retransmission
-    SSRC's own `a=ssrc:` line (RFC 5576 §4.2).  The answer echoes the
-    offer's numbers (RFC 3264 §6.1).
-  - **The sender frames it.**  The retransmission ring builds the OSN
-    header, and the retransmission stream keeps its **own**
-    sequence-number space (RFC 4588 §4) — a retransmission does not
-    reuse the original's number on the wire.
-  - **The receiver unwraps it.**  The OSN is read out, the *original*
-    sequence number is restored, the payload is spliced into the frame it
-    belongs to, and the packet is erased from the pending-NACK list — or
-    the receiver would ask for it again, and again.
-  - **The scope boundary holds.**  A peer that offers no RTX payload
-    type gets no RTX stream, and the sender falls back to re-sending the
-    original packet.  Both shapes are pinned by the tests.
-
-  Three details the RFCs forced, each of which is a place a
-  plausible-looking implementation gets it wrong:
-
-  - **The header is two octets, not three.**  RFC 4588 §4.1 defines no
-    marker byte; the `0x90` some descriptions of RTX mention is not in
-    the RFC, and a peer that sent one would have its sequence number
-    restored `0x9000` too large.  (The v1.3 plan's own description was
-    corrected.)
-  - **The FID group lists the media SSRC first** —
-    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>`.  RFC 5576 §4.2's FID
-    semantics relate a *primary* source to its *dependent* ones, and the
-    primary comes first.  The reverse order is a real interop hazard: a
-    receiver that follows the convention would treat the media stream as
-    the repair flow and drop the picture.
-  - **One payload type serves both directions.**  RFC 8843 (Unified Plan)
-    gives an m-section a *single* payload-type list, so the RTX payload
-    type is a property of the m-section rather than of a direction —
-    which is also how Chrome negotiates it.  The `apt=` parameter then
-    says which payload type *within* the section the retransmission
-    protects.
-
-  The public surface grows additively: `EngineConfig::video_sender_tuning`
-  gains `rtx_payload_type` / `rtx_ssrc` / `rtx_time_ms`, `Stats` gains
-  `video_rtx_packets_sent` / `video_rtx_packets_received`, and the
-  plugin seams gain `set_rtx_enabled()` / `set_rtx_packet_callback()` /
-  `set_rtx_payload_type()` / `push_rtp_rtx()` — all with defaults that
-  leave a non-RTX plugin working exactly as before.
 
 - **The audio jitter buffer's memory is bounded, and the bound is
   reported (v1.3 plan item `Q2`, video plan `R4`).**
@@ -610,38 +611,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which accepts only a run of at least **24 h** under loss **and**
   jitter **and** reorder on a clean tree.
 
-- **The picture is now aligned to the sound (v1.3 plan item `Q6`, video
-  plan `R3` -- the video half).**
-  The audio half of R3 shipped in `v1.2.0`: the engine aligns audio
-  playout against the capture timeline, and the correction is
-  switchable.  The **video** half did not exist -- the renderer had a
-  display path but no clock to render against, and the skew the
-  sender-report tracker produced was *visible* but nothing acted on it.
-
-  A new `video_sync` module holds the render clock and the correction
-  policy, and the engine drives it through a new
-  `plugins::IVideoSyncController` seam -- so the engine orchestrates the
-  plugin and never names a concrete module (Layout Invariant 4 /
-  ADR-025).  The renderer is now **told** the presentation instant; it
-  does not derive one.
-
-  A video frame cannot be stretched, so the clock's actions are
-  *present at the clock's instant*, *drop*, or *delay* -- chosen from
-  the measured skew and the jitter buffer's current occupancy.  The
-  jitter buffer keeps the playout deadline; the render clock owns the
-  presentation instant *within* it, which is what keeps the buffer's
-  memory bound stable.
-
-  **There is still only one skew model.**  The clock has no capture-time
-  accumulator of its own: it reads the ADR-017 mapping the audio half
-  already reads.  That constraint was the one most likely to be
-  violated by accident, so it is stated where a future change would
-  look at it.
-
-  The synthetic-skew test feeds the mapping a known offset and asserts
-  a deterministic correction, so it fails on the pre-change code rather
-  than passing vacuously.
-
 - **The hardware codec path is now exercised end-to-end by something
   that re-runs (v1.3 plan item `Q7`, video plan `O-6`).**
   The standard CI matrix has no encoder-capable GPU, so the hardware
@@ -687,28 +656,40 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   record is `SKIPPED` — which is the honest outcome, not a failure of
   the tree.
 
+- **The CI auto-retry workflow no longer re-runs a superseded run — and a
+  pull request can now reach a green state.**
+  `ci-retry.yml` re-runs the jobs of a CI run that the platform starved of
+  a runner.  It re-runs them at the *job* level, and a job-level re-run is a
+  new attempt of that run — which enters the concurrency group of the
+  **current** run, because a pull request's `github.ref` is
+  `refs/pull/<n>/merge` for every commit on it.  With
+  `cancel-in-progress: true`, the retry therefore cancelled the very run it
+  was meant to repair; the cancellation fired another retry, and the pull
+  request could never go green.  Observed on PR #124: the `ci` run was
+  cancelled within 48 seconds of starting, over and over.
+
+  The fix is a staleness guard in `tools/ci_retry_runner.py`: the run's
+  commit is compared against the current head of its ref (the pull
+  request's head SHA, or the branch tip for a push run), and a run that no
+  longer carries it is reported rather than re-run — it could not turn the
+  merge gate green anyway.  The guard is pinned by the script's self-test,
+  which runs in CI on every push.  A `--force` flag is the operator escape
+  hatch on the manual dispatch path.
+
+  The concurrency groups are deliberately left SHA-free: a SHA-bearing group
+  would stop a new push from cancelling the run it supersedes, and a rapid
+  sequence of pushes would then burn a full four-platform matrix each.
+
 
 ## [1.2.0] - 2026-11-18
 
-### Status: Stable
+### Status: Release candidate
 
 > **The source version is `1.2.0`** (`project(VERSION)` in `CMakeLists.txt`,
 > `NIMRTC_API_VERSION` = 10200, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
 > `v1.2.0` is the release that closes the `v1.2` plan
 > (`docs/plan/v1.2-next-plan.md`): **Track E** (the convergence gates) and
 > **Track S** (the observability surface) are both complete.
->
-> **The label was corrected on 2026-11-19.** This section was written by
-> `tools/release_changelog.py`, which hard-coded the heading
-> `### Status: Release candidate` for every release it produced. The
-> version carries no SemVer pre-release identifier (`RELEASING.md` §2.2),
-> the tag was cut as `v1.2.0`, and the GitHub Release is published as a
-> non-prerelease "Latest" release -- so the section said "candidate" while
-> the release said "stable". The generator now derives the label from the
-> version (a pre-release identifier means a candidate; no identifier means
-> stable), and `tools/release_changelog.py --self-test` pins the rule.
-> The same defect is in the `[1.1.0]` section below, which was also
-> published as a stable release; it is corrected there too.
 
 > Track E -- every gate is green:
 
@@ -6844,7 +6825,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.1.0] - 2026-11-07
 
-### Status: Stable
+### Status: Release candidate
 
 > **The source version is `1.1.0`** (`project(VERSION)` in `CMakeLists.txt`,
 > `NIMRTC_API_VERSION` = 10100, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
@@ -6858,14 +6839,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > built; the GitHub Release stays a **draft** until the last remaining
 > release-hardening gate — the 7-day soak — closes (see "Known
 > limitations"). The published stable cut is still `v1.0.2`.
->
-> **The label was corrected on 2026-11-19.** This section carried the
-> hard-coded `### Status: Release candidate` heading that
-> `tools/release_changelog.py` wrote for every release. The version carries
-> no SemVer pre-release identifier, the tag was cut as `v1.1.0`, and the
-> GitHub Release was published on 2026-11-09 as a non-prerelease — so the
-> section said "candidate" while the release said "stable". The generator
-> now derives the label from the version.
 
 ### Fixed
 

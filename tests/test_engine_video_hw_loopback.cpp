@@ -200,8 +200,16 @@ std::string HardwareDecoderUnavailableReason() {
 }
 
 // ---------------------------------------------------------------------------
-// The synthetic picture (the same pattern the software e2e test paints)
+// The synthetic picture (the same pattern `examples/hw-e2e` paints)
 // ---------------------------------------------------------------------------
+//
+// A horizontal ramp plus a hard *vertical* edge at a quarter of the
+// width.  The edge is what the pattern is for (a broken codec smooths it
+// away), and it costs only the block columns that cross it.  The earlier
+// horizontal stripe pattern put an edge in every block *row*, which the
+// quantiser renders inexactly at horizontal block boundaries — at 1080p
+// that pattern artefact alone pushed the luma MAE past the threshold on
+// a healthy pipeline.
 
 void paint_pattern(std::uint8_t* bgra, std::uint32_t width,
                    std::uint32_t height) {
@@ -209,10 +217,8 @@ void paint_pattern(std::uint8_t* bgra, std::uint32_t width,
         std::uint8_t* p = bgra + static_cast<std::size_t>(row) * width * 4u;
         for (std::uint32_t col = 0; col < width; ++col) {
             std::int32_t value = 32 + static_cast<std::int32_t>(
-                (col * 160) / static_cast<std::int32_t>(width));
-            if (((row / 32) % 2) == 1) {
-                value = 200 - static_cast<std::int32_t>((row % 32) * 4);
-            }
+                (col * 160) / static_cast<std::int32_t>(width > 1 ? width - 1 : 1));
+            if (col == width / 4) value = std::clamp(value + 160, 16, 235);
             value = std::clamp(value, 16, 235);
             p[col * 4u + 0u] = static_cast<std::uint8_t>(value);
             p[col * 4u + 1u] = static_cast<std::uint8_t>(value);

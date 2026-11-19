@@ -69,7 +69,6 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -741,114 +740,6 @@ LoopbackResult run_loopback() {
             result.luma   = first.luma;
             result.width  = first.width;
             result.height = first.height;
-        }
-        // ---- The diagnostic ------------------------------------------------
-        //
-        // Every rendered frame is compared against the reference, and the
-        // per-frame numbers are printed.  A picture that is merely *shifted*
-        // or *re-ranged* still correlates perfectly, so a low correlation
-        // means the decoded picture has a different *shape* — and the
-        // per-frame numbers say whether that is one bad frame or every
-        // frame.
-        const std::vector<std::uint8_t> reference = reference_luma();
-        std::printf("[hw-loopback] rendered frames: %zu\n", result.rx_frames);
-        std::printf("[hw-loopback] rx: decoded=%llu rendered=%llu "
-                    "dropped_jb=%llu dropped_decoder=%llu bytes=%llu\n",
-                    static_cast<unsigned long long>(result.rx_frames_decoded),
-                    static_cast<unsigned long long>(result.rx_frames_rendered),
-                    static_cast<unsigned long long>(result.rx_frames_dropped_jb),
-                    static_cast<unsigned long long>(
-                        result.rx_frames_dropped_decoder),
-                    static_cast<unsigned long long>(result.rx_bytes_received));
-        for (std::size_t i = 0; i < sink->frames().size(); ++i) {
-            const RecordedFrame& f = sink->frames()[i];
-            if (f.luma.size() != reference.size()) {
-                std::printf("[hw-loopback] frame %zu: geometry %ux%u (the "
-                            "reference is %ux%u)\n",
-                            i, f.width, f.height, kWidth, kHeight);
-                continue;
-            }
-            const double mae = mean_abs_error(reference, f.luma);
-            const double corr = pearson_correlation(reference, f.luma);
-            std::uint64_t min_v = 255, max_v = 0, sum = 0;
-            for (const std::uint8_t v : f.luma) {
-                if (v < min_v) min_v = v;
-                if (v > max_v) max_v = v;
-                sum += v;
-            }
-            std::printf("[hw-loopback] frame %zu: mae=%.3f corr=%.4f "
-                        "min=%llu max=%llu mean=%.2f\n",
-                        i, mae, corr,
-                        static_cast<unsigned long long>(min_v),
-                        static_cast<unsigned long long>(max_v),
-                        static_cast<double>(sum) /
-                            static_cast<double>(f.luma.size()));
-        }
-        // The row profile of the *first* frame: a column-wise dump makes a
-        // shift, a re-range and a scrambled picture distinguishable at a
-        // glance.
-        if (!sink->frames().empty() &&
-            sink->frames().front().luma.size() == reference.size()) {
-            const std::vector<std::uint8_t>& luma = sink->frames().front().luma;
-            std::printf("[hw-loopback] row 0 profile (col: ref->got):");
-            for (std::uint32_t col = 0; col < kWidth; col += kWidth / 16u) {
-                std::printf(" %u:%u->%u", col,
-                            static_cast<unsigned>(reference[col]),
-                            static_cast<unsigned>(luma[col]));
-            }
-            std::printf("\n[hw-loopback] near the edge column:\n");
-            for (std::uint32_t col = kWidth / 4u - 8u;
-                 col < kWidth / 4u + 8u; ++col) {
-                std::printf(" %u:%u->%u", col,
-                            static_cast<unsigned>(reference[col]),
-                            static_cast<unsigned>(luma[col]));
-            }
-            std::printf("\n");
-
-            // ---- The exact transition ----------------------------------
-            //
-            // Where does the picture turn black?  The boundary tells the
-            // story: a boundary on a 16-pixel boundary is a macroblock
-            // edge (a lost or undecoded slice), a boundary that is not
-            // aligned is a copy or stride bug, and no boundary at all
-            // means the whole row is wrong.
-            //
-            // The scan is per *row* of a few sampled rows, because a
-            // horizontal ramp means every row has the same profile.
-            for (const std::uint32_t row : {0u, kHeight / 2u, kHeight - 1u}) {
-                const std::uint8_t* r =
-                    luma.data() + static_cast<std::size_t>(row) * kWidth;
-                const std::uint8_t* ref =
-                    reference.data() + static_cast<std::size_t>(row) * kWidth;
-                std::size_t first_bad = kWidth;
-                std::size_t bad_count  = 0;
-                for (std::uint32_t col = 0; col < kWidth; ++col) {
-                    const int diff = std::abs(static_cast<int>(r[col]) -
-                                              static_cast<int>(ref[col]));
-                    if (diff > 8) {
-                        if (first_bad == kWidth) first_bad = col;
-                        ++bad_count;
-                    }
-                }
-                std::printf("[hw-loopback] row %u: first bad column %zu, "
-                            "%zu bad columns\n",
-                            row,
-                            first_bad == kWidth ? kWidth : first_bad,
-                            bad_count);
-                if (first_bad < kWidth) {
-                    const std::size_t lo = first_bad > 4 ? first_bad - 4 : 0;
-                    const std::size_t hi =
-                        (first_bad + 12 < kWidth) ? first_bad + 12 : kWidth;
-                    std::printf("[hw-loopback] row %u around the boundary:",
-                                row);
-                    for (std::size_t col = lo; col < hi; ++col) {
-                        std::printf(" %zu:%u->%u", col,
-                                    static_cast<unsigned>(ref[col]),
-                                    static_cast<unsigned>(r[col]));
-                    }
-                    std::printf("\n");
-                }
-            }
         }
     }
 

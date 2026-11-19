@@ -77,7 +77,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -463,16 +462,6 @@ public:
             return false;
         }
 
-        // ---- TEMP DIAGNOSTIC --------------------------------------------
-        {
-            std::printf("[vt-dec] access unit (%zu B) nalus:", size);
-            const auto nalus = vt_detail::scan_annex_b(codec_, data, size);
-            for (const auto& n : nalus) {
-                std::printf(" t%u/l%zu", static_cast<unsigned>(n.type), n.size);
-            }
-            std::printf("\n");
-        }
-
         // ---- The sample buffer -----------------------------------------
         CMBlockBufferRef block = nullptr;
         OSStatus st = CMBlockBufferCreateWithMemoryBlock(
@@ -791,27 +780,6 @@ public:
         if (!copy_surface_to_i420(pixel_buffer, y_plane, u_plane, v_plane, w, h)) {
             stats_.decode_errors++;
             return plugins::kErrInternal;
-        }
-
-        // ---- TEMP DIAGNOSTIC --------------------------------------------
-        //
-        // The decoded surface's own geometry and pixel format, and the
-        // luma row that was copied out of it.  Together with the
-        // encoder's surface row this says whether the picture was lost
-        // in the *bitstream* or in the *copy* out of the surface.
-        {
-            std::printf("[vt-dec] surface %ux%u fmt=%u whole_pitch=%zu "
-                        "plane0_pitch=%zu row0:",
-                        static_cast<unsigned>(CVPixelBufferGetWidth(pixel_buffer)),
-                        static_cast<unsigned>(CVPixelBufferGetHeight(pixel_buffer)),
-                        static_cast<unsigned>(
-                            CVPixelBufferGetPixelFormatType(pixel_buffer)),
-                        CVPixelBufferGetBytesPerRow(pixel_buffer),
-                        CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0));
-            for (std::uint32_t col = 0; col < w; col += w / 16u) {
-                std::printf(" %u:%u", col, static_cast<unsigned>(y_plane[col]));
-            }
-            std::printf("\n");
         }
 
         if (cpu_buf) {

@@ -74,8 +74,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -755,23 +753,6 @@ public:
             return plugins::kErrInternal;
         }
 
-        // ---- TEMP DIAGNOSTIC --------------------------------------------
-        //
-        // The picture that reaches the encoder, the surface it is copied
-        // into, and the access unit that comes out — all three in one
-        // line, so the failure can be attributed to the staging, to the
-        // session, or to the bitstream.
-        {
-            const std::uint8_t* sy = cpu->plane(0);
-            const std::uint32_t ss =
-                static_cast<std::uint32_t>(cpu->layout().strides[0]);
-            std::printf("[vt-enc] src %ux%u stride=%u row0:", w, h, ss);
-            for (std::uint32_t col = 0; col < w; col += w / 16u) {
-                std::printf(" %u:%u", col, static_cast<unsigned>(sy[col]));
-            }
-            std::printf("\n");
-        }
-
         {
             const auto& layout = cpu->layout();
             const std::uint32_t stride_y =
@@ -910,39 +891,6 @@ public:
             }
         }
         CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
-
-        // ---- TEMP DIAGNOSTIC --------------------------------------------
-        //
-        // What actually landed in the surface: the pixel buffer's own
-        // geometry, its pixel format, and the luma row that was written
-        // into it.  Compared against the source row above, this says
-        // whether the loss happened *before* the encoder (in the
-        // staging) or *after* it (in the bitstream or the decoder).
-        {
-            const CVReturn relock = CVPixelBufferLockBaseAddress(pixel_buffer, 0);
-            if (relock == kCVReturnSuccess) {
-                const auto* pb = static_cast<const std::uint8_t*>(
-                    CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0));
-                const std::size_t pb_pitch =
-                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
-                std::printf("[vt-enc] surface %ux%u fmt=%u whole_pitch=%zu "
-                            "plane0_pitch=%zu row0:",
-                            static_cast<unsigned>(CVPixelBufferGetWidth(pixel_buffer)),
-                            static_cast<unsigned>(CVPixelBufferGetHeight(pixel_buffer)),
-                            static_cast<unsigned>(
-                                CVPixelBufferGetPixelFormatType(pixel_buffer)),
-                            CVPixelBufferGetBytesPerRow(pixel_buffer),
-                            pb_pitch);
-                if (pb) {
-                    for (std::uint32_t col = 0; col < w; col += w / 16u) {
-                        std::printf(" %u:%u", col,
-                                    static_cast<unsigned>(pb[col]));
-                    }
-                }
-                std::printf("\n");
-                CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
-            }
-        }
 
         const plugins::Status st = encode_pixel_buffer(pixel_buffer, output,
                                                        output_capacity,
@@ -1096,43 +1044,6 @@ private:
             NIMRTC_LOG_ERROR("vt: the compressed bitstream is neither Annex-B "
                              "nor a well-formed length-prefixed stream");
             return plugins::kErrCorrupt;
-        }
-
-        if (!annex_b.empty()) {
-            // ---- TEMP DIAGNOSTIC ----------------------------------------
-            {
-                std::printf("[vt-enc] annex-b access unit (%zu B):",
-                            annex_b.size());
-                std::size_t pos = 0;
-                int n = 0;
-                while (pos + 3 < annex_b.size() && n < 12) {
-                    if (annex_b[pos] == 0 && annex_b[pos+1] == 0 &&
-                        annex_b[pos+2] == 0 && annex_b[pos+3] == 1) {
-                        const std::size_t hdr = pos + 4;
-                        if (hdr >= annex_b.size()) break;
-                        std::printf(" type%u", static_cast<unsigned>(annex_b[hdr] & 0x1F));
-                        // find the end of this NAL
-                        std::size_t e = hdr;
-                        while (e + 3 < annex_b.size() &&
-                               !(annex_b[e]==0 && annex_b[e+1]==0 &&
-                                 annex_b[e+2]==0 && annex_b[e+3]==1)) ++e;
-                        std::printf("(len%zu)", e - hdr);
-                        pos = e;
-                        ++n;
-                    } else {
-                        ++pos;
-                    }
-                }
-                std::printf("\n");
-                // Dump the bitstream so it can be decoded offline.
-                if (const char* path = std::getenv("NIMRTC_VT_DUMP")) {
-                    std::FILE* f = std::fopen(path, "ab");
-                    if (f) {
-                        std::fwrite(annex_b.data(), 1, annex_b.size(), f);
-                        std::fclose(f);
-                    }
-                }
-            }
         }
 
         // ---- The parameter sets ----------------------------------------

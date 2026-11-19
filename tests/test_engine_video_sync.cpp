@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file tests/test_engine_video_sync.cpp
  * @brief The engine-level half of remote-desktop plan Track E — the
  *        render clock (E5), the input echo (E6), the presentation (E7)
@@ -9,18 +9,20 @@
  * The four features of Track E split into a *pure decision* and an
  * *engine wiring*:
  *
- *   | feature | the decision                      | the wiring            |
- *   |---------|----------------------------------|-----------------------|
- *   | E5      | `detail::VideoSyncController`    | the engine's render path |
- *   | E6      | `detail::InputEchoController`    | the engine's echo seam   |
- *   | E7      | `detail::compute_scale_to_fit`   | the engine's sink config |
- *   | E9      | (none — it is a record)          | the engine's render path |
+ *   | feature | the decision                        | the wiring              |
+ *   |---------|-------------------------------------|-------------------------|
+ *   | E5      | `nimrtc::video_sync::RenderClock`   | the engine's render path |
+ *   | E6      | `detail::InputEchoController`       | the engine's echo seam   |
+ *   | E7      | `detail::compute_scale_to_fit`      | the engine's sink config |
+ *   | E9      | (none — it is a record)             | the engine's render path |
  *
- * The decisions are tested **directly** — they are engine-private
- * header-only collaborators with no clock, no allocation and no
- * thread, so a unit test is the honest way to pin them.  The wiring is
- * tested **through the engine's public API**, which is the surface a
- * host actually uses.
+ * The decisions are tested **directly** — they are pure collaborators
+ * with no clock, no allocation and no thread, so a unit test is the
+ * honest way to pin them.  E5's decision moved to the `video_sync`
+ * module in v1.3 (Q6) and is tested there
+ * (`src/modules/video_sync/tests/test_render_clock.cpp`); what is
+ * tested *here* is the engine's **wiring** through its public API,
+ * which is the surface a host actually uses.
  *
  * The test compiles the engine's *private* header directory into its
  * include path, exactly as `test_video_render_path` does.  That
@@ -28,6 +30,7 @@
  * (constraint L4).
  *
  * @see docs/plan/remote-desktop-plan.md §Track E.
+ * @see docs/plan/v1.3-plan.md §3 Q6.
  */
 
 #include <gtest/gtest.h>
@@ -44,7 +47,6 @@
 // are not installed and no public header includes them).
 #include "input_echo_controller.hpp"
 #include "video_aspect_fit.hpp"
-#include "video_sync_controller.hpp"
 
 namespace {
 
@@ -58,181 +60,6 @@ using nimrtc::engine::VideoSyncStats;
 
 namespace ns = nimrtc::engine::detail;
 namespace np = nimrtc::plugins;
-
-// ===========================================================================
-// E5 — the render clock's *decision* (the pure collaborator)
-// ===========================================================================
-
-TEST(VideoSyncDecision, ASkewInsideTheBandIsPresented) {
-    ns::VideoSyncController c;
-    ns::VideoSyncConfig cfg;
-    cfg.tolerance_ms = 40;
-    c.configure(cfg);
-
-    // 0 us of skew — dead on.
-    EXPECT_EQ(c.decide(0, 1000).decision, ns::VideoSyncDecision::kPresent);
-
-    // Exactly on the band edge — still inside (the band is inclusive).
-    EXPECT_EQ(c.decide(40'000, 1000).decision, ns::VideoSyncDecision::kPresent);
-    EXPECT_EQ(c.decide(-40'000, 1000).decision, ns::VideoSyncDecision::kPresent);
-
-    // Just inside the band.
-    EXPECT_EQ(c.decide(39'999, 1000).decision, ns::VideoSyncDecision::kPresent);
-    EXPECT_EQ(c.decide(-39'999, 1000).decision, ns::VideoSyncDecision::kPresent);
-}
-
-TEST(VideoSyncDecision, AVideoAheadOfTheAudioIsDropped) {
-    ns::VideoSyncController c;
-    ns::VideoSyncConfig cfg;
-    cfg.tolerance_ms = 40;
-    c.configure(cfg);
-
-    // Negative skew = the video is *ahead*: the picture would be shown
-    // before the sound it belongs to.
-    const auto out = c.decide(-100'000, 1000);
-    EXPECT_EQ(out.decision, ns::VideoSyncDecision::kDrop);
-    EXPECT_EQ(out.delay_us, 0) << "a drop never asks for a hold";
-    EXPECT_EQ(out.skew_us, -100'000);
-}
-
-TEST(VideoSyncDecision, AVideoBehindTheAudioIsDelayed) {
-    ns::VideoSyncController c;
-    ns::VideoSyncConfig cfg;
-    cfg.tolerance_ms = 40;
-    c.configure(cfg);
-
-    // Positive skew = the video is *behind*: the picture has to wait.
-    const auto out = c.decide(100'000, 1000);
-    EXPECT_EQ(out.decision, ns::VideoSyncDecision::kDelay);
-    EXPECT_GT(out.delay_us, 0);
-    // The hold is the skew *minus* the tolerance band.
-    EXPECT_EQ(out.delay_us, 100'000 - 40'000);
-}
-
-TEST(VideoSyncDecision, TheCountersMoveWithTheDecisions) {
-    ns::VideoSyncController c;
-    ns::VideoSyncConfig cfg;
-    cfg.tolerance_ms = 40;
-    c.configure(cfg);
-
-    // `decide()` is `[[nodiscard]]`; the decisions are checked through
-    // the counters below, so the return value is explicitly discarded.
-    (void)c.decide(0, 1);                 // present
-    (void)c.decide(-100'000, 2);          // drop
-    (void)c.decide(100'000, 3);           // delay
-    (void)c.decide(10'000, 4);            // present
-
-    const auto& k = c.counters();
-    EXPECT_EQ(k.frames_presented, 2u);
-    EXPECT_EQ(k.frames_dropped, 1u);
-    EXPECT_EQ(k.frames_delayed, 1u);
-    EXPECT_EQ(k.total_delay_us, 60'000);
-    EXPECT_EQ(k.last_skew_us, 10'000);
-}
-
-TEST(VideoSyncDecision, TheDelayIsAlwaysBoundedByTheCap) {
-    ns::VideoSyncController c;
-    ns::VideoSyncConfig cfg;
-    cfg.tolerance_ms    = 40;
-    cfg.max_delay_ms    = 100;   // the cap
-    c.configure(cfg);
-
-    // A skew far beyond the cap: the hold is clamped.
-    const auto out = c.decide(5'000'000, 1000);
-    EXPECT_EQ(out.decision, ns::VideoSyncDecision::kDelay);
-    EXPECT_EQ(out.delay_us, 100'000) << "the hold must never exceed the cap";
-
-    // And it stays bounded no matter how many spikes arrive.
-    for (int i = 0; i < 100; ++i) {
-        const auto spike = c.decide(5'000'000, 1000 + i);
-        EXPECT_LE(spike.delay_us, c.max_delay_us());
-        EXPECT_GE(spike.delay_us, 0);
-    }
-    EXPECT_LE(c.counters().total_delay_us, 101LL * 100'000);
-}
-
-TEST(VideoSyncDecision, ASkewSpikeDoesNotAccumulateUnboundedDelay) {
-    ns::VideoSyncController c;
-    ns::VideoSyncConfig cfg;
-    cfg.tolerance_ms = 40;
-    cfg.max_delay_ms = 200;
-    c.configure(cfg);
-
-    // The first spike promises a hold.
-    const auto first = c.decide(1'000'000, 1);
-    EXPECT_GT(first.delay_us, 0);
-
-    // The controller is told the hold actually happened.
-    c.note_delay_applied(first.delay_us);
-
-    // A second spike must not stack the previous debt on top of the
-    // new one — the debt was consumed.
-    const auto second = c.decide(1'000'000, 2);
-    EXPECT_LE(second.delay_us, c.max_delay_us());
-    EXPECT_EQ(second.delay_us, first.delay_us);
-}
-
-TEST(VideoSyncDecision, ADropCancelsThePendingDebt) {
-    ns::VideoSyncController c;
-    ns::VideoSyncConfig cfg;
-    cfg.tolerance_ms = 40;
-    // The cap is deliberately *not* binding here: the point of the test
-    // is what the drop does to the *debt*, and a cap that clamped the
-    // answer would hide the difference between "the debt was cancelled"
-    // and "the answer was clamped".
-    cfg.max_delay_ms = 2'000;   // 2 s — far above the 1 s skew below
-    c.configure(cfg);
-
-    (void)c.decide(1'000'000, 1);   // delay — the debt is now pending
-    EXPECT_EQ(c.decide(-1'000'000, 2).decision, ns::VideoSyncDecision::kDrop);
-    // The debt was cancelled by the drop, so the next delay is the skew
-    // minus the band again (not less) — and with a non-binding cap that
-    // value is exactly the skew minus the band.
-    const auto after = c.decide(1'000'000, 3);
-    EXPECT_EQ(after.delay_us, 1'000'000 - 40'000)
-        << "a drop must clear the pending debt, so the next hold is the "
-           "full skew minus the band";
-    EXPECT_LE(after.delay_us, c.max_delay_us())
-        << "and it is still bounded by the controller's cap";
-}
-
-TEST(VideoSyncDecision, TheHistoryRingKeepsTheRecentDecisions) {
-    ns::VideoSyncController c;
-    ns::VideoSyncConfig cfg;
-    cfg.tolerance_ms = 40;    // the band is 40 ms, so ±1 us is *inside* it
-    c.configure(cfg);
-
-    // The skews must be outside the band for the decisions to differ.
-    (void)c.decide(0, 1);                 // present (inside the band)
-    (void)c.decide(-100'000, 2);          // drop   (video ahead)
-    (void)c.decide(100'000, 3);           // delay  (video behind)
-
-    // Slot 0 is the most recent.
-    EXPECT_EQ(c.history_decision(0), ns::VideoSyncDecision::kDelay);
-    EXPECT_EQ(c.history_decision(1), ns::VideoSyncDecision::kDrop);
-    EXPECT_EQ(c.history_decision(2), ns::VideoSyncDecision::kPresent);
-    EXPECT_EQ(c.history_skew_us(0), 100'000);
-    EXPECT_EQ(c.history_skew_us(1), -100'000);
-}
-
-TEST(VideoSyncDecision, TheDecisionIsDeterministic) {
-    // The same inputs must give the same answer — the controller has no
-    // clock and no hidden state beyond its own counters.
-    ns::VideoSyncController a;
-    ns::VideoSyncController b;
-    ns::VideoSyncConfig cfg;
-    cfg.tolerance_ms = 25;
-    a.configure(cfg);
-    b.configure(cfg);
-
-    for (int i = 0; i < 10; ++i) {
-        const std::int64_t skew = (i % 3 == 0) ? 0 : ((i % 3 == 1) ? 50'000 : -50'000);
-        const auto oa = a.decide(skew, i);
-        const auto ob = b.decide(skew, i);
-        EXPECT_EQ(oa.decision, ob.decision);
-        EXPECT_EQ(oa.delay_us, ob.delay_us);
-    }
-}
 
 // ===========================================================================
 // E6 — the input echo's *decision* (the pure collaborator)
@@ -379,7 +206,7 @@ TEST_F(EngineVideoSync, TheToleranceBandRoundTrips) {
 
     // The band is a configuration, and it is *effective*: the render
     // clock uses it.  (The observable form of that is the decision the
-    // controller makes — covered by the unit tests above.)
+    // clock makes — covered by the module's own unit tests.)
     engine.set_video_sync_tolerance(25, 120);
 
     engine.close();
@@ -399,6 +226,207 @@ TEST_F(EngineVideoSync, AFrameIsRenderedWhenThereIsNoAudioReference) {
 
     const np::VideoSourceFrame frame{};
     EXPECT_EQ(sink->render(frame), np::kOk);
+
+    engine.close();
+}
+
+// ---------------------------------------------------------------------------
+// E5 — the correction's switch (v1.3 Q6, decision Q6-1)
+// ---------------------------------------------------------------------------
+
+TEST_F(EngineVideoSync, TheVideoCorrectionIsOnByDefault) {
+    // The audio half is switchable, and the video half matching it keeps
+    // the two symmetric: a caller that turned the audio correction off
+    // should not get a video correction it cannot also turn off.
+    NimRTCEngine engine(make_config());
+    ASSERT_EQ(engine.open(), 0u);
+
+    EXPECT_TRUE(engine.video_sync_enabled());
+
+    engine.close();
+}
+
+TEST_F(EngineVideoSync, TheVideoCorrectionCanBeTurnedOff) {
+    NimRTCEngine engine(make_config());
+    ASSERT_EQ(engine.open(), 0u);
+
+    engine.set_video_sync_enabled(false);
+    EXPECT_FALSE(engine.video_sync_enabled());
+
+    engine.set_video_sync_enabled(true);
+    EXPECT_TRUE(engine.video_sync_enabled());
+
+    engine.close();
+}
+
+TEST_F(EngineVideoSync, TheCountersSurviveTheSwitch) {
+    // Turning the correction off must not reset the counters — a host
+    // that turns it off still wants to read how much it had done.
+    NimRTCEngine engine(make_config());
+    ASSERT_EQ(engine.open(), 0u);
+
+    const auto before = engine.video_sync_stats();
+    engine.set_video_sync_enabled(false);
+    const auto after = engine.video_sync_stats();
+
+    EXPECT_EQ(after.frames_presented, before.frames_presented);
+    EXPECT_EQ(after.frames_dropped_sync, before.frames_dropped_sync);
+    EXPECT_EQ(after.frames_delayed, before.frames_delayed);
+
+    engine.close();
+}
+
+// ---------------------------------------------------------------------------
+// E5 -- the timeline (v1.3 Q6)
+//
+// The render clock's *decision* is tested in the `video_sync` module,
+// which only ever sees a skew the engine computed.  What the module's
+// tests cannot see is whether the engine computed that skew from two
+// instants that belong to the *same* clock.  These tests pin that.
+//
+// The failure they guard against is concrete: the engine used to
+// compare the peer's Unix-timeline capture instant (the audio
+// reference) with the frame's *local monotonic arrival* stamp (the
+// jitter buffer's stamp).  The two are unrelated clocks, so the
+// difference was epoch-sized -- every frame looked hundreds of seconds
+// behind the sound, and the clock dropped all of them.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A peer's capture instant, in Unix microseconds -- the shape the
+// ADR-017 seam produces.  The value is deliberately an *epoch-scale*
+// number: a local monotonic clock would never produce one, so a test
+// that pins it also pins which clock the engine is reading.
+constexpr std::int64_t kPeerCaptureUs = 1'700'000'000'000'000LL;
+
+}  // namespace
+
+TEST_F(EngineVideoSync, APictureOnThePeersTimelineIsAlignedNotDropped) {
+    // A picture captured at the *same* instant as the sound is within
+    // the tolerance band, so the clock presents it.
+    //
+    // With the defect, the picture's operand was a local monotonic
+    // stamp -- a small number near zero -- while the audio reference
+    // was an epoch-scale number.  The difference was then ~-1.7e15 us:
+    // "the picture is a trillion microseconds behind the sound", so the
+    // clock dropped the frame.  This test fails on the defect and
+    // passes on the fix.
+    NimRTCEngine engine(make_config());
+    ASSERT_EQ(engine.open(), 0u);
+
+    engine.set_video_sync_tolerance(40, 200);
+
+    // The sound that is at the speaker, on the peer's timeline.
+    engine.set_video_sync_audio_reference_us(kPeerCaptureUs);
+
+    // The picture, captured at the very same instant, on the same
+    // timeline.
+    std::int64_t delay_us = -1;
+    const bool presented =
+        engine.apply_render_sync(kPeerCaptureUs, &delay_us);
+
+    EXPECT_TRUE(presented) << "a picture captured at the same instant as "
+                               "the sound must be presented, not dropped";
+    EXPECT_EQ(delay_us, 0) << "a picture inside the tolerance band is "
+                              "presented without a hold";
+
+    engine.close();
+}
+
+TEST_F(EngineVideoSync, APictureAheadOfTheSoundIsHeld) {
+    // The picture was captured 100 ms *after* the sound that is at the
+    // speaker, so it is ahead and has to wait for the sound to catch up.
+    NimRTCEngine engine(make_config());
+    ASSERT_EQ(engine.open(), 0u);
+
+    engine.set_video_sync_tolerance(40, 200);
+
+    engine.set_video_sync_audio_reference_us(kPeerCaptureUs);
+
+    std::int64_t delay_us = 0;
+    const bool presented = engine.apply_render_sync(
+        kPeerCaptureUs + 100'000,  // 100 ms ahead
+        &delay_us);
+
+    EXPECT_TRUE(presented) << "a picture ahead of the sound is held, not "
+                              "dropped";
+    EXPECT_GT(delay_us, 0) << "a picture ahead of the sound must be held "
+                              "for the difference";
+
+    engine.close();
+}
+
+TEST_F(EngineVideoSync, APictureBehindTheSoundIsDropped) {
+    // The picture was captured 100 ms *before* the sound that is at the
+    // speaker: the moment the operator heard is already gone, so the
+    // frame is dropped.
+    NimRTCEngine engine(make_config());
+    ASSERT_EQ(engine.open(), 0u);
+
+    engine.set_video_sync_tolerance(40, 200);
+
+    engine.set_video_sync_audio_reference_us(kPeerCaptureUs);
+
+    std::int64_t delay_us = 0;
+    const bool presented = engine.apply_render_sync(
+        kPeerCaptureUs - 100'000,  // 100 ms behind
+        &delay_us);
+
+    EXPECT_FALSE(presented) << "a picture behind the sound must be "
+                               "dropped -- the moment is already gone";
+    EXPECT_EQ(delay_us, 0) << "a dropped frame asks for no hold";
+
+    engine.close();
+}
+
+TEST_F(EngineVideoSync, TheDecisionFollowsTheDifferenceNotTheMagnitude) {
+    // The clock reacts to the *difference* between the two instants.
+    // Two frames whose operands differ by the same amount -- but sit at
+    // wildly different points on the timeline -- must get the same
+    // decision.  This is the property the defect broke: the decision
+    // used to depend on the operands' *magnitude*.
+    NimRTCEngine engine(make_config());
+    ASSERT_EQ(engine.open(), 0u);
+
+    engine.set_video_sync_tolerance(40, 200);
+
+    // An epoch-scale pair.
+    engine.set_video_sync_audio_reference_us(kPeerCaptureUs);
+    std::int64_t epoch_delay_us = 0;
+    const bool epoch_presented = engine.apply_render_sync(
+        kPeerCaptureUs + 100'000, &epoch_delay_us);
+
+    // The same difference, at a small absolute value.
+    engine.set_video_sync_audio_reference_us(50'000);
+    std::int64_t small_delay_us = 0;
+    const bool small_presented = engine.apply_render_sync(
+        50'000 + 100'000, &small_delay_us);
+
+    EXPECT_EQ(epoch_presented, small_presented)
+        << "the decision must depend on the difference between the two "
+           "instants, not on where they sit on the timeline";
+    EXPECT_EQ(epoch_delay_us, small_delay_us)
+        << "the hold must be the same for the same difference";
+
+    engine.close();
+}
+
+TEST_F(EngineVideoSync, WithoutAnAudioReferenceEveryPictureIsPresented) {
+    // With no sound to align against there is nothing to compare, so
+    // the picture must not be dropped -- whatever its own instant is.
+    NimRTCEngine engine(make_config());
+    ASSERT_EQ(engine.open(), 0u);
+
+    engine.set_video_sync_tolerance(40, 200);
+
+    std::int64_t delay_us = -1;
+    const bool presented =
+        engine.apply_render_sync(kPeerCaptureUs, &delay_us);
+
+    EXPECT_TRUE(presented) << "without a sound there is nothing to align "
+                              "against, so the picture must be presented";
+    EXPECT_EQ(delay_us, 0);
 
     engine.close();
 }

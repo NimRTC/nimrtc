@@ -96,13 +96,44 @@ at most `MAX_RETRIES` re-runs across the run's attempts, counted by
 walking the per-attempt job lists.  A job that starts running on its
 second try stops being starved and needs no further bookkeeping.
 
+## The staleness guard
+
+A run belongs to a *commit*, not to a branch.  Once the branch has moved
+on, the run for the previous commit is dead weight: its result can no
+longer make the merge gate green, because the gate reads the checks of
+the pull request's **current** head.
+
+Retrying such a run is therefore not merely useless -- it is actively
+harmful.  `ci.yml` groups its runs by
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+
+and a pull request's `github.ref` is `refs/pull/<n>/merge` for *every*
+commit on that pull request.  A job-level re-run of an OLD run is a new
+attempt of that run, and that attempt enters the very same concurrency
+group as the CURRENT run.  With `cancel-in-progress: true` it cancels
+the current run in turn.  The retry therefore destroys the run it was
+meant to repair, the repair fires again, and the pull request never
+reaches a green state -- an infinite loop that no amount of waiting
+fixes.  (Observed on PR #124: the `ci` run of the current head was
+cancelled within 48 s of starting, over and over.)
+
+The guard is therefore: **only retry a run that is still the head of
+its ref.**  A stale run is reported and left alone.
+
 ## Usage
 
     python tools/ci_retry_runner.py --repo owner/name --run-id 12345
     python tools/ci_retry_runner.py --repo owner/name --run-id 12345 --dry-run
+    python tools/ci_retry_runner.py --repo owner/name --run-id 12345 --force
     python tools/ci_retry_runner.py --self-test
 
 The token comes from `GITHUB_TOKEN` (or `GH_TOKEN`).
+
+`--force` skips the staleness guard.  It exists for the manual
+dispatch path, where an operator has named the run explicitly and takes
+responsibility for the consequence.
 
 Exit code 0 when the run needed no retry or the retry was requested
 successfully, 1 on an unrecoverable API error.  Exit code 0 also when
@@ -308,6 +339,57 @@ def rerun_job(repo: str, job_id: int, token: str, retries: int = 4) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The staleness guard
+# ---------------------------------------------------------------------------
+
+def current_head_sha(repo: str, run: dict, token: str) -> str:
+    """The SHA a run would have to carry to still be the head of its ref.
+
+    For a pull-request run the head is the pull request's head commit;
+    for a branch run it is the tip of the branch.  An empty string means
+    "unknown" -- the caller then refuses to retry, because a retry whose
+    target cannot be established is exactly the retry that must not be
+    performed blindly.
+    """
+    event = run.get("event")
+    if event == "pull_request":
+        pulls = run.get("pull_requests") or []
+        if not pulls:
+            return ""
+        number = pulls[0].get("number")
+        if not number:
+            return ""
+        # The pull request is fetched rather than read off the run
+        # payload: the payload's `pull_requests` block is a snapshot
+        # taken when the run was created, and the snapshot is exactly
+        # what is stale here.
+        url = "%s/repos/%s/pulls/%d" % (API_ROOT, repo, number)
+        body = _request("GET", url, token)
+        return ((body.get("head") or {}).get("sha")) or ""
+
+    branch = run.get("head_branch")
+    if not branch:
+        return ""
+    url = "%s/repos/%s/commits/%s" % (API_ROOT, repo, branch)
+    body = _request("GET", url, token)
+    return body.get("sha") or ""
+
+
+def is_stale(run: dict, head_sha: str) -> bool:
+    """Whether the run has been superseded by a newer commit.
+
+    A run with no known head SHA cannot be shown to be current, and the
+    safe answer is "stale": retrying it is what breaks the merge gate.
+    """
+    if not head_sha:
+        return True
+    run_sha = run.get("head_sha")
+    if not run_sha:
+        return True
+    return run_sha != head_sha
+
+
+# ---------------------------------------------------------------------------
 # Waiting for the run to settle
 # ---------------------------------------------------------------------------
 
@@ -339,8 +421,8 @@ def wait_until_completed(repo: str, run_id: int, token: str,
 
 def process(repo: str, run_id: int, token: str, dry_run: bool,
             max_retries: int, wait_polls: int = 20,
-            wait_interval: float = 15.0, sleep=time.sleep,
-            log=print) -> int:
+            wait_interval: float = 15.0, force: bool = False,
+            sleep=time.sleep, log=print) -> int:
     run = wait_until_completed(repo, run_id, token, wait_polls,
                                wait_interval, sleep=sleep, log=log)
     attempt = run.get("run_attempt") or 1
@@ -373,6 +455,37 @@ def process(repo: str, run_id: int, token: str, dry_run: bool,
     if not starved:
         log("nothing to retry: no job was starved of a runner")
         return 0
+
+    # The staleness guard.  A run for a commit that is no longer the head
+    # of its ref cannot turn the merge gate green, and re-running it
+    # cancels the *current* run through the shared concurrency group --
+    # see the module docstring.  Report it and stop.
+    #
+    # `--force` is the operator's escape hatch: an explicit, manual
+    # instruction to re-run this run regardless.  It is never used by
+    # the automatic path.
+    try:
+        head_sha = current_head_sha(repo, run, token)
+    except Fatal as error:
+        # The head could not be established, so the run cannot be shown
+        # to be current.  Not retrying is the safe direction: a retry
+        # that was not warranted cancels the current run.  The operator
+        # can still force it with --force.
+        log("could not determine the current head of %s (%s) -- not "
+            "retrying (use --force to override)"
+            % (run.get("head_branch") or run.get("event"), error))
+        return 0
+
+    if is_stale(run, head_sha) and not force:
+        log("run %d is stale: it ran %s, the head is now %s -- not "
+            "retrying (a retry of a superseded run cancels the current "
+            "one through the shared concurrency group)"
+            % (run_id, run.get("head_sha") or "<unknown>",
+               head_sha or "<unknown>"))
+        return 0
+
+    if force and is_stale(run, head_sha):
+        log("WARNING: --force: retrying the stale run %d anyway" % run_id)
 
     eligible, exhausted = [], []
     for job in starved:
@@ -520,6 +633,19 @@ def self_test() -> int:
     expect(len(selected) == 1 and selected[0]["name"] == "macos-clang / arm64",
            "only the starved job may be selected for a retry")
 
+    # --- The staleness guard --------------------------------------------
+    # A run whose commit is no longer the head of its ref must not be
+    # retried: the retry enters the current run's concurrency group and
+    # cancels it (the infinite loop observed on PR #124).
+    expect(is_stale({"head_sha": "old"}, "new") is True,
+           "a run from a superseded commit must be stale")
+    expect(is_stale({"head_sha": "same"}, "same") is False,
+           "a run from the head commit must not be stale")
+    expect(is_stale({}, "new") is True,
+           "a run with no head SHA must be treated as stale")
+    expect(is_stale({"head_sha": "new"}, "") is True,
+           "a run whose current head cannot be established must be stale")
+
     # --- The per-job retry budget ---------------------------------------
     # The bug the run-level `run_attempt` guard caused: run 44306330102
     # had the macOS leg starved in attempt 1, was re-run, and the SAME
@@ -645,6 +771,10 @@ def main() -> int:
                              "yet completed (default: 20)")
     parser.add_argument("--wait-interval", type=float, default=15.0,
                         help="seconds between those polls (default: 15)")
+    parser.add_argument("--force", action="store_true",
+                        help="retry even when the run is stale (manual "
+                             "escape hatch; never used by the automatic "
+                             "workflow_run path)")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -661,7 +791,7 @@ def main() -> int:
     try:
         return process(args.repo, args.run_id, token, args.dry_run,
                        args.max_retries, args.wait_polls,
-                       args.wait_interval)
+                       args.wait_interval, force=args.force)
     except Fatal as error:
         print("ERROR: %s" % error)
         return 1

@@ -426,6 +426,27 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  Ignored when `qoe_collector_name` is empty. */
     plugins::QoeConfig qoe_config;
 
+    /** The plugin id of the render clock — the video half of the
+     *  A/V-sync correction (v1.3 Q6, remote-desktop plan R3).
+     *
+     *  The `video_sync` module registers its factory under this id.  It
+     *  is the default value, so a session that says nothing about the
+     *  A/V sync still gets the correction — the picture is held back or
+     *  dropped to match the sound.
+     *
+     *  **Empty means "no render clock"**: every frame is presented
+     *  unchanged, which is the pre-v1.3 behaviour.  That is the
+     *  explicit way to opt out.
+     *
+     *  A **named** id that does not resolve is a hard error at
+     *  `open()` time — the engine does not silently fall back.
+     *
+     *  The one exception is the default id itself: when the
+     *  `video_sync` module is not in the build there is no factory to
+     *  resolve, and that is *not* an error — the picture is presented
+     *  unchanged.  The module is optional by construction. */
+    std::string video_sync_controller_name = "render-clock";
+
     /** The transport the control channel rides (plan G1 / G2).
      *
      *  - `kDtlsAppData` — the media stack's DTLS application-data seam
@@ -706,6 +727,26 @@ struct NIMRTC_API_STABLE EngineConfig {
         std::uint8_t  payload_type = 102;
         std::uint16_t mtu          = 1200;
         std::uint16_t initial_seq  = 0;
+
+        // ---- The RFC 4588 retransmission stream (v1.3 plan Q3) ----------
+        //
+        // A retransmission travels on its own payload type, with its own
+        // SSRC, and its own sequence-number space (RFC 4588 §4).  The
+        // three values below describe that stream; 0 means "the engine
+        // picks one that does not collide with the media stream".
+
+        /** The retransmission payload type.  0 = the engine picks a free
+         *  one (the first dynamic payload type above the media one). */
+        std::uint8_t  rtx_payload_type = 0;
+
+        /** The retransmission SSRC.  0 = the engine derives one from the
+         *  media SSRC (RFC 4588 §5.2 wants it *distinct*). */
+        std::uint32_t rtx_ssrc = 0;
+
+        /** How long (in milliseconds) the sender keeps a packet
+         *  available for retransmission — the `rtx-time` SDP parameter
+         *  (RFC 4588 §8.1).  0 = do not advertise the parameter. */
+        std::uint32_t rtx_time_ms = 0;
     } video_sender_tuning;
 
     // ---- Video geometry ---------------------------------------------------
@@ -3708,8 +3749,9 @@ public:
      *
      * The band is the whole policy: a skew whose magnitude is at or
      * below it means the picture and the sound already agree, so the
-     * frame is presented unchanged.  Beyond it the frame is dropped
-     * (the video is ahead) or held back (the video is behind).
+     * frame is presented unchanged.  Beyond it the frame is held back
+     * (the picture is *ahead* of the sound) or dropped (the picture is
+     * *behind* it).
      *
      * @param tolerance_ms  The band, in milliseconds.  0 = every frame
      *                     is synchronised exactly, which in practice
@@ -3723,6 +3765,64 @@ public:
     NIMRTC_API_STABLE void set_video_sync_tolerance(
         std::int32_t tolerance_ms,
         std::int32_t max_delay_ms = 0) noexcept;
+
+    /**
+     * @brief Turn the video half of the A/V-sync correction on or off.
+     *
+     * The video correction is **on by default** (v1.3 Q6, decision Q6-1):
+     * the audio half is switchable, and the video half matching it keeps
+     * the two symmetric — a caller that turned the audio correction off
+     * should not get a video correction it cannot also turn off.
+     *
+     * Turning it off does not reset the counters, so a host can turn it
+     * off and still read how much the correction had done.
+     */
+    NIMRTC_API_STABLE void set_video_sync_enabled(bool enabled) noexcept;
+
+    /** Whether the video half of the A/V-sync correction is on. */
+    NIMRTC_API_STABLE bool video_sync_enabled() const noexcept;
+
+    /** The render clock's own entry point (plan E5).
+     *
+     * The engine's receive path calls this once per inbound frame,
+     * before the frame is decoded: a frame that has to be dropped is
+     * dropped without paying for the decode, and a frame that has to
+     * be held is held before the decode so the hold does not add to
+     * the decode's latency.
+     *
+     * @param peer_capture_us  The frame's capture instant **on the
+     *                         peer's timeline** (Unix microseconds), as
+     *                         reconstructed by the ADR-017 seam.  It
+     *                         must be the *same* timeline the audio
+     *                         reference lives on, or the difference
+     *                         between the two is an artefact of two
+     *                         unrelated clocks rather than a skew.
+     *                         0 when the seam has not reconstructed it
+     *                         yet -- the frame is then presented
+     *                         unchanged.
+     * @param delay_us       Set to the hold time the clock asked for,
+     *                        in microseconds.  Zero for a present.
+     * @return false when the clock said to **drop** the frame (the
+     *          video was behind the audio); true otherwise. */
+    NIMRTC_API_UNSTABLE
+    bool apply_render_sync(std::int64_t peer_capture_us,
+                           std::int64_t* delay_us) noexcept;
+
+    /** Set the audio side of the A/V comparison (plan E5).
+     *
+     * The engine normally learns this from the audio delivery path,
+     * where the ADR-017 reconstruction produced the peer's capture
+     * instant for the frame that is now at the speaker.  A host that
+     * drives the engine by hand -- or a test that wants a *known*
+     * reference -- can set it directly.
+     *
+     * The value is the **peer's capture instant, in Unix microseconds**:
+     * the same timeline `apply_render_sync()`'s picture operand lives
+     * on.  0 clears the reference, and the render path then presents
+     * every frame unchanged (there is nothing to align against).
+     */
+    NIMRTC_API_UNSTABLE
+    void set_video_sync_audio_reference_us(std::int64_t peer_capture_us) noexcept;
 
     /**
      * @brief The render clock's counters (plan E5).
@@ -4264,6 +4364,11 @@ public:
         std::uint64_t video_keyframes_q        = 0;  // keyframe reqs queued
         std::uint64_t video_feedback_applied   = 0;  // inbound RTCP actions
         std::uint64_t video_keyframes_applied  = 0;  // inbound keyframe reqs
+        // ---- The RFC 4588 retransmission stream (v1.3 plan Q3) -----------
+        /** Retransmission packets we put on the wire (RFC 4588). */
+        std::uint64_t video_rtx_packets_sent     = 0;
+        /** Retransmission packets we received and unwrapped (RFC 4588). */
+        std::uint64_t video_rtx_packets_received = 0;
         // ---- RTCP feedback, by type (plan Track S / S4, additive) --------
         //
         // `video_feedback_applied` above counts every feedback action as
@@ -5592,6 +5697,64 @@ private:
      *  sender has to be rebuilt and rewired. */
     void wire_default_sender() noexcept;
 
+    /** Build, protect and enqueue one outbound video RTP packet.
+     *
+     *  The shared half of every outbound video path: the default
+     *  stream's packet callback and the RFC 4588 retransmission
+     *  callback.  Both stamp an RTP header, protect it with SRTP and
+     *  hand it to the scheduler, and both must do it *identically* —
+     *  a retransmission that differs from the original in any way the
+     *  peer does not expect is a retransmission the peer drops.
+     *
+     *  @param payload      The RTP payload.
+     *  @param rtp_ts       The media-clock timestamp.
+     *  @param seq          The sequence number.
+     *  @param marker       The marker bit.
+     *  @param payload_type The payload type to stamp.
+     *  @param ssrc         The SSRC to stamp.
+     *  @param prio         The scheduler priority.
+     *  @param count_bytes  Whether the packet counts towards the
+     *                      outbound video byte / packet counters.  A
+     *                      retransmission is a *re-send* of a packet
+     *                      that was already counted, so it must not
+     *                      inflate the media bitrate. */
+    void send_video_rtp_packet(plugins::BufferView payload,
+                               std::uint32_t rtp_ts,
+                               std::uint16_t seq,
+                               bool marker,
+                               std::uint8_t payload_type,
+                               std::uint32_t ssrc,
+                               plugins::Priority prio,
+                               bool count_bytes) noexcept;
+
+    /** The RFC 4588 retransmission stream's outbound path.
+     *
+     *  The sender plugin builds the OSN-framed payload and hands it
+     *  here; this stamps the retransmission RTP header (the *media*
+     *  SSRC's own SSRC, the retransmission stream's own sequence
+     *  number, the original's timestamp and marker) and puts it on the
+     *  wire.
+     *
+     *  RFC 4588 §4.1: the RTP header of a retransmission carries the
+     *  original's **timestamp** and **marker bit**, and the
+     *  retransmission stream's own **sequence number** — the original's
+     *  sequence number is inside the OSN header, not in the RTP header.
+     */
+    void wire_rtx_sender() noexcept;
+
+    /** Apply the negotiated retransmission stream to the video plugins.
+     *
+     *  Called after every description exchange, because RTX is a
+     *  *negotiated* property: the sender may only take the RFC 4588
+     *  path once the peer agreed to the retransmission stream, and the
+     *  receiver may only unwrap packets once it knows which payload
+     *  type carries them.
+     *
+     *  It is also what makes a renegotiation *shrink* the feature: a
+     *  peer that stops offering RTX leaves `rtx_negotiated` false, and
+     *  the sender falls back to re-sending the original packet. */
+    void apply_negotiated_video_rtx() noexcept;
+
     /** Encode one frame and push it through the given stream's sender. */
     plugins::Status encode_and_send_video_frame_for(
         const plugins::VideoSourceFrame& frame,
@@ -5634,31 +5797,20 @@ private:
      *  @param enc         The assembled encoded frame.
      *  @param capture_ts_us  The frame's capture timestamp (for the
      *                        sink's timeline metadata).
+     *  @param present_at_us  The instant the picture must reach the
+     *                        display — a *local monotonic* deadline
+     *                        produced by the render clock's hold (v1.3
+     *                        Q6).  0 = no deadline.
      *  @return kOk when the frame reached the sink; an error code when
      *          the GPU path could not deliver it (the caller then falls
      *          back to the CPU staging path). */
     plugins::Status render_decoded_gpu_frame(
         const plugins::EncodedVideoFrame& enc,
-        std::int64_t capture_ts_us) noexcept;
+        std::int64_t capture_ts_us,
+        std::int64_t present_at_us = 0) noexcept;
 
     // ---- The receive-side render state (remote-desktop plan E5 / E6 /
     // E7 / E9) ---------------------------------------------------
-
-    /** Ask the render clock what to do with one decoded frame
-     *  (remote-desktop plan E5).
-     *
-     *  The skew the clock consumes is the one the ADR-017 timeline
-     *  already produced (`last_sender_recv_skew_us()`) — the engine
-     *  does not derive a second one (RD-9).
-     *
-     *  @param capture_ts_us  The frame's capture timestamp (the peer's
-     *                        clock), carried through for the record.
-     *  @param delay_us       Set to the hold time the clock asked for,
-     *                        in microseconds.  Zero for a present.
-     *  @return false when the clock said to **drop** the frame (the
-     *          video was ahead of the audio); true otherwise. */
-    bool apply_render_sync(std::int64_t capture_ts_us,
-                           std::int64_t* delay_us) noexcept;
 
     /** Record one displayed frame (remote-desktop plan E9).
      *
@@ -6044,6 +6196,27 @@ private:
      *  an integrator error.
      */
     uint32_t resolve_qoe_collector() noexcept;
+
+    /**
+     * @brief Resolve the render clock through the registry seam (v1.3 Q6).
+     *
+     * The correction *policy* lives in the `video_sync` module, and the
+     * engine may not name a concrete module (Layout Invariant 4 /
+     * ADR-025).  So the engine resolves a
+     * `plugins::IVideoSyncController` through the registry's video-sync
+     * slot, whose default id is the built-in `"render-clock"`.
+     *
+     * The module is **optional**: a build without it has no factory
+     * under the default id, and that is *not* an error — the picture is
+     * simply presented unchanged, which is exactly what the pre-v1.3
+     * engine did.  The engine degrades gracefully (with a warning)
+     * instead of failing `open()`.
+     *
+     * A *named* id that does not resolve IS an error — the engine does
+     * not silently fall back, because a typo'd id would otherwise mask
+     * an integrator error.
+     */
+    uint32_t resolve_video_sync_controller() noexcept;
 
     /**
      * @brief Report that a frame reached the viewer.

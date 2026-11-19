@@ -1095,6 +1095,22 @@ nimrtc_add_engine_video_feedback_test(test_engine_video_feedback
 endif()
 
 # ----------------------------------------------------------------------------
+# v1.3 Q3 — engine-level RFC 4588 (RTX) retransmission stream.
+#
+# The `rtx` module's tests cover the *format* (the two-octet OSN header,
+# the `apt=` parameter); the video pipeline's tests cover the *mechanism*
+# (the sender frames a retransmission, the receiver unwraps it).  This
+# target covers the two halves only the engine can do: the **negotiation**
+# (the `a=rtpmap:` / `a=fmtp:` / `a=ssrc-group:FID` lines) and the
+# **wire** (a NACK answered on the RTX payload type, an inbound
+# retransmission unwrapped rather than decoded).
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
+nimrtc_add_engine_video_feedback_test(test_engine_video_rtx
+                                       test_engine_video_rtx.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
 # Phase 4.2 / D2 — the engine ↔ `video_stats` module wiring.
 #
 # The module owns the per-stream video quality counters (freeze detection,
@@ -1531,6 +1547,12 @@ function(nimrtc_add_engine_video_sync_test name source)
         nimrtc::h264
         nimrtc::datachannel
         GTest::gtest_main)
+    # v1.3 Q6: the render-clock module.  The engine reaches it through the
+    # `plugins::IVideoSyncController` seam, so the engine's test links the
+    # module the same way it would link any other plugin.
+    if(TARGET nimrtc::video_sync)
+        target_link_libraries(${name} PRIVATE nimrtc::video_sync)
+    endif()
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
@@ -1652,6 +1674,80 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
         DISCOVERY_TIMEOUT 10)
   endif()
   nimrtc_copy_wolfssl_certs(test_engine_video_e2e_loopback)
+endif()
+
+# ----------------------------------------------------------------------------
+# The engine-level *hardware* encode test (v1.3 plan Q7 / O-6).
+#
+# The software e2e test above proves the media path with OpenH264.  This
+# one proves the same chain with the engine pinned to `video_codec_backend
+# = "hardware"` — a pin the engine honours by *failing* rather than
+# falling back (plan B2) — and asserts from the stats that a hardware
+# backend answered (`video_codec_hardware_accelerated`, `video_codec_
+# backend` neither "software-stub" nor "openh264") and that the picture
+# still arrives pixel-correct.  It skips on a host with no hardware
+# encoder; the dedicated evidence run is `examples/hw-e2e` +
+# `tools/run_hardware_e2e.py` + `.github/workflows/hardware.yml`.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_FRAME AND NIMRTC_MODULE_H264)
+  add_executable(test_engine_video_hw_loopback test_engine_video_hw_loopback.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_hw_loopback PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::h264
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_hw_loopback PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_hw_loopback PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_hw_loopback PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_hw_loopback LENIENT)
+  add_test(NAME test_engine_video_hw_loopback
+      COMMAND $<TARGET_FILE:test_engine_video_hw_loopback>)
+  set_tests_properties(test_engine_video_hw_loopback PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_hw_loopback
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_video_hw_loopback)
 endif()
 
 # Phase 3 / C3 — the GPU zero-copy video send path.  The test needs the
@@ -2198,7 +2294,7 @@ target_link_libraries(test_registry_contract PRIVATE
 # symbol only exists when the module is compiled in.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input rd_qoe)
+              rd_input rd_qoe video_sync)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_registry_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -2283,7 +2379,7 @@ target_link_libraries(test_plugin_id_contract PRIVATE
 # only when it was actually built.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input rd_qoe)
+              rd_input rd_qoe video_sync)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_plugin_id_contract PRIVATE nimrtc::${_mod})
     endif()

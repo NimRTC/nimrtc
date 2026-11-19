@@ -242,6 +242,25 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
     /** RTP timestamp (32-bit, media clock). */
     std::uint32_t rtp_timestamp = 0;
 
+    /** The instant at which this frame must reach the display, in
+     *  microseconds on the **local monotonic** clock.
+     *
+     *  This is the *presentation deadline* the render clock computed
+     *  (v1.3 Q6, remote-desktop plan R3).  When the picture is ahead of
+     *  the sound it has to be **held** back until the sound catches up,
+     *  and this field is the instant the hold ends.
+     *
+     *  Zero means "no deadline" — the frame is presented as soon as the
+     *  sink's presentation clock reaches it.  A sink that ignores this
+     *  field keeps working unchanged; a sink that honours it shows the
+     *  picture at the instant the A/V sync asked for.
+     *
+     *  @note The clock domain is the **local** monotonic clock
+     *        (`std::chrono::steady_clock`), not the peer's capture
+     *        timeline: this is a *scheduling* deadline for the local
+     *        presenter, and it is produced by the local engine. */
+    TimestampUs   present_at_us = 0;
+
     /** The colour description of the picture (remote-desktop plan C5).
      *
      *  A desktop compositor delivers **full-range** pixels; a camera in

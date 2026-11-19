@@ -215,6 +215,16 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     // them.  The opt-out is an empty `qoe_collector_name`.
     if (const uint32_t rc = resolve_qoe_collector(); rc != 0) return rc;
 
+    // ---- The render clock (v1.3 Q6 / remote-desktop plan R3) -----------
+    //
+    // The A/V-sync *policy* lives in the `video_sync` module and is
+    // reached through the registry's video-sync slot
+    // (`EngineConfig::video_sync_controller_name`), so the engine never
+    // includes a concrete module's header (Layout Invariant 4).  The
+    // module is optional: a build without it presents every frame
+    // unchanged, which is the pre-v1.3 behaviour.
+    if (const uint32_t rc = resolve_video_sync_controller(); rc != 0) return rc;
+
     return 0;
 }
 

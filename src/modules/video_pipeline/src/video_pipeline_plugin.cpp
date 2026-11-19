@@ -153,6 +153,7 @@ ReceiverConfig to_concrete_receiver_cfg(const plugins::VideoReceiverConfig& p) n
     c.ssrc          = p.ssrc;
     c.payload_type  = p.payload_type;
     c.expect_fu_a   = p.expect_fu_a;
+    c.rtx_payload_type = p.rtx_payload_type;
 
     video_jb::Config jb{};
     jb.mode = video_jb::Mode::kLowLatency;
@@ -178,6 +179,7 @@ to_plugin_receiver_cfg(const ReceiverConfig& c) noexcept {
     p.ssrc         = c.ssrc;
     p.payload_type = c.payload_type;
     p.expect_fu_a  = c.expect_fu_a;
+    p.rtx_payload_type = c.rtx_payload_type;
     p.max_inflight_frames = c.jitter_buffer_config.max_inflight_frames;
     p.max_jitter_buffer_ms = c.jitter_buffer_config.max_wait_ms;
     p.emit_nacks          = c.jitter_buffer_config.emit_nacks;
@@ -194,6 +196,7 @@ SenderConfig to_concrete_sender_cfg(const plugins::VideoSenderConfig& p) noexcep
     c.mtu           = p.mtu;
     c.packetization_mode = to_concrete_pmode(p.packetization_mode);
     c.initial_seq   = p.initial_seq;
+    c.rtx_payload_type = p.rtx_payload_type;
     return c;
 }
 
@@ -206,6 +209,7 @@ to_plugin_sender_cfg(const SenderConfig& c) noexcept {
     p.mtu          = c.mtu;
     p.packetization_mode = to_plugin_pmode(c.packetization_mode);
     p.initial_seq  = c.initial_seq;
+    p.rtx_payload_type = c.rtx_payload_type;
     return p;
 }
 
@@ -221,6 +225,8 @@ to_plugin_receiver_stats(const ReceiverStats& s) noexcept {
     out.nack_entries_emitted = s.nack_entries_emitted;
     out.sequence_gaps_seen   = s.sequence_gaps_seen;
     out.keyframe_requests_emitted = s.keyframe_requests_emitted;
+    out.rtx_packets_received       = s.rtx_packets_received;
+    out.rtx_packets_malformed      = s.rtx_packets_malformed;
     return out;
 }
 
@@ -236,6 +242,7 @@ to_plugin_sender_stats(const SenderStats& s) noexcept {
     out.frames_marked_as_keyframe    = s.frames_marked_as_keyframe;
     out.packets_retransmitted        = s.packets_retransmitted;
     out.packets_retransmit_missed    = s.packets_retransmit_missed;
+    out.rtx_packets_emitted          = s.rtx_packets_emitted;
     out.keyframe_requests            = s.keyframe_requests;
     out.keyframes_granted            = s.keyframes_granted;
     out.keyframes_deferred           = s.keyframes_deferred;
@@ -350,6 +357,21 @@ plugins::Status ReceiverAdapter::push_rtp(const plugins::VideoRtpPacket& packet,
     return ok ? plugins::kOk : plugins::kErrInvalidParam;
 }
 
+void ReceiverAdapter::set_rtx_payload_type(std::uint8_t rtx_pt) noexcept {
+    if (!concrete_) return;
+    concrete_->set_rtx_payload_type(rtx_pt);
+}
+
+plugins::Status ReceiverAdapter::push_rtp_rtx(
+        const plugins::VideoRtpPacket& packet,
+        plugins::TimestampUs now_us) noexcept {
+    if (!concrete_) return plugins::kErrNotReady;
+    const auto v = to_concrete_rtp(packet);
+    const bool ok =
+        concrete_->push_rtp_rtx(v, static_cast<std::int64_t>(now_us));
+    return ok ? plugins::kOk : plugins::kErrInvalidParam;
+}
+
 std::vector<std::uint16_t> ReceiverAdapter::pop_nack_entries() noexcept {
     if (!concrete_) return {};
     return concrete_->pop_nack_entries();
@@ -396,6 +418,7 @@ plugins::Status SenderAdapter::open() noexcept {
 void SenderAdapter::close() noexcept {
     if (concrete_) concrete_.reset();
     user_pkt_cb_ = {};
+    user_rtx_cb_ = {};
 }
 
 void SenderAdapter::set_packet_callback(plugins::VideoSenderPacketCallback cb) noexcept {
@@ -424,6 +447,36 @@ plugins::Status SenderAdapter::push_frame(const plugins::EncodedVideoFrame& fram
 
 void SenderAdapter::force_keyframe() noexcept {
     if (concrete_) concrete_->force_keyframe();
+}
+
+void SenderAdapter::set_rtx_packet_callback(
+    plugins::VideoSenderRtxCallback cb) noexcept {
+    // The callback has to be *kept* — the lambda the concrete sender
+    // holds only reads `user_rtx_cb_` when it fires, so a callback that
+    // is never stored here would silently swallow every retransmission.
+    user_rtx_cb_ = std::move(cb);
+    if (!concrete_) return;
+    concrete_->set_rtx_packet_callback(
+        [this](const nimrtc::video_pipeline::SenderRtxPacket& p) {
+            if (!user_rtx_cb_) return;
+            plugins::VideoSenderRtxPacket out;
+            out.payload       = p.payload;
+            out.rtp_timestamp = p.rtp_timestamp;
+            out.marker        = p.marker;
+            out.original_seq  = p.original_seq;
+            out.rtx_seq       = p.rtx_seq;
+            user_rtx_cb_(out);
+        });
+}
+
+void SenderAdapter::set_rtx_enabled(bool enabled) noexcept {
+    if (!concrete_) return;
+    concrete_->set_rtx_enabled(enabled);
+}
+
+bool SenderAdapter::rtx_enabled() const noexcept {
+    if (!concrete_) return false;
+    return concrete_->rtx_enabled();
 }
 
 int SenderAdapter::apply_feedback_rtcp(plugins::BufferView rtcp) noexcept {

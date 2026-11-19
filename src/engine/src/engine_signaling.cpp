@@ -6,6 +6,7 @@
  * behaviour unchanged. Shares engine_impl.hpp.
  */
 #include "engine_impl.hpp"
+#include "video_rtx_negotiation.hpp"
 
 namespace nimrtc::engine {
 
@@ -523,10 +524,11 @@ std::string NimRTCEngine::create_offer() noexcept {
         // derived it from the codec family (H.264 → 102, H.265 → 116,
         // AV1 → 45) and the host's explicit choice, so the SDP, the
         // RTP header and the receive pipeline all agree.
-        const std::string vpt =
-            std::to_string(impl_->video_state.video_payload_type != 0
-                               ? impl_->video_state.video_payload_type
-                               : config_.video_sender_tuning.payload_type);
+        const std::uint8_t video_pt_num =
+            impl_->video_state.video_payload_type != 0
+                ? impl_->video_state.video_payload_type
+                : config_.video_sender_tuning.payload_type;
+        const std::string vpt = std::to_string(video_pt_num);
         video.formats         = {vpt};
         video.direction       = dir;
         video.mid             = mid;
@@ -620,6 +622,93 @@ std::string NimRTCEngine::create_offer() noexcept {
                       "%u cname:nimrtc-video",
                       static_cast<unsigned>(config_.video_sender_tuning.ssrc));
         video.extra_attrs.emplace_back("ssrc", ssrc_line);
+
+        // ---- The RFC 4588 retransmission stream (v1.3 plan Q3) -----------
+        //
+        // The retransmission stream is *optional* and *negotiated*.  The
+        // offer advertises it; the peer accepts it by echoing the
+        // payload type and the `apt=` parameter (RFC 3264 §6.1).  A peer
+        // that does not echo them simply has no retransmission stream,
+        // and the sender falls back to re-sending the original packet
+        // (the pre-RTX behaviour).
+        //
+        // Three lines are needed, and they are three *different* facts:
+        //
+        //   * `a=rtpmap:<rtx_pt> rtx/90000` — the retransmission
+        //     payload type exists and runs on the video clock
+        //     (RFC 4588 §8);
+        //   * `a=fmtp:<rtx_pt> apt=<vpt>` — it protects the media
+        //     payload type (RFC 4588 §8.1).  This is the line the
+        //     *receiver* reads to learn where the retransmissions go;
+        //   * `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>` — the
+        //     retransmission stream has its own SSRC, and the group
+        //     binds it to the media one (RFC 5576 §4.2).
+        //
+        // The retransmission SSRC must also have its own
+        // `a=ssrc:` line (RFC 5576 §4.2: every SSRC named in an
+        // `a=ssrc-group` MUST be defined by a corresponding `a=ssrc:`
+        // line in the same media description), and it carries the
+        // *same* CNAME as the media stream — one CNAME per participant
+        // (RFC 3550 §8.2).
+        {
+            // The payload type has to be free in the *session's* number
+            // space, not just in the video m-line's: with BUNDLE
+            // (RFC 8843 §9.1) every bundled m-section shares one RTP
+            // session, so a collision with the audio (or DTMF) payload
+            // type would make the receiver's demux ambiguous.
+            std::vector<std::uint8_t> used;
+            used.push_back(static_cast<std::uint8_t>(
+                config_.audio_codec.payload_type));
+            used.push_back(static_cast<std::uint8_t>(
+                impl_->video_state.video_payload_type != 0
+                    ? impl_->video_state.video_payload_type
+                    : config_.video_sender_tuning.payload_type));
+            if (config_.dtmf_enabled && dtmf_codec_) {
+                used.push_back(static_cast<std::uint8_t>(
+                    config_.dtmf_payload_type));
+            }
+
+            const std::uint8_t rtx_pt =
+                config_.video_sender_tuning.rtx_payload_type != 0
+                    ? config_.video_sender_tuning.rtx_payload_type
+                    : detail::resolve_rtx_payload_type(used);
+
+            if (rtx_pt == 0) {
+                core::log::Logger::instance().warn(
+                    "engine[video]: the dynamic payload-type range is "
+                    "exhausted — the retransmission stream is not offered");
+            } else {
+                const std::uint32_t media_ssrc = config_.video_sender_tuning.ssrc;
+                const std::uint32_t rtx_ssrc =
+                    config_.video_sender_tuning.rtx_ssrc != 0
+                        ? config_.video_sender_tuning.rtx_ssrc
+                        : detail::derive_rtx_ssrc(media_ssrc);
+
+                // Remember the values: the answer path echoes them, and
+                // the packet path stamps them.
+                impl_->video_state.rtx_payload_type = rtx_pt;
+                impl_->video_state.rtx_ssrc          = rtx_ssrc;
+
+                const std::string rtx_pt_str = std::to_string(rtx_pt);
+                video.formats.push_back(rtx_pt_str);
+
+                sdp::MediaDescription::RtpMap rtx_map;
+                rtx_map.encoding   = detail::rtx_rtpmap_body();
+                rtx_map.clock_rate = rtx::kVideoClockRateHz;
+                rtx_map.channels   = 1;
+                video.rtpmap[rtx_pt_str] = rtx_map;
+
+                video.fmtp[rtx_pt_str] = detail::rtx_fmtp_body(
+                    video_pt_num, config_.video_sender_tuning.rtx_time_ms);
+
+                video.extra_attrs.emplace_back(
+                    "ssrc-group",
+                    detail::rtx_fid_group_body(rtx_ssrc, media_ssrc));
+                video.extra_attrs.emplace_back(
+                    "ssrc",
+                    detail::rtx_ssrc_cname_body(rtx_ssrc, "nimrtc-video"));
+            }
+        }
 
         // a=content-hint:<motion|detail|text>  (RFC 8692 §3)
         //
@@ -1456,6 +1545,129 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                           "decode — the video track is disabled");
             }
         }
+
+        // ---- The RFC 4588 retransmission stream (v1.3 plan Q3) -----------
+        //
+        // The retransmission stream is negotiated *independently* of the
+        // codec: RFC 4588 §8.1 says the `apt=` parameter is what binds
+        // the retransmission payload type to the payload type it
+        // protects, so a peer may offer an RTX payload type whose `apt=`
+        // names a codec we did not pick.
+        //
+        // One number serves both directions.  RFC 8843 (Unified Plan)
+        // gives an m-section a *single* payload-type list, so the
+        // retransmission payload type is a property of the m-section,
+        // not of a direction — the `apt=` parameter then says which
+        // payload type *within* the section the retransmission protects.
+        // That is also how Chrome negotiates it: one `a=rtpmap:<pt>
+        // rtx/90000` + `a=fmtp:<pt> apt=<vpt>` pair, used for both
+        // directions.
+        //
+        // The `apt=` parameter is the *association* (RFC 4588 §8.1), so
+        // it is the only thing that says "this retransmission belongs to
+        // that media stream".  A payload type that declares `rtx` but
+        // carries no `apt=` is malformed and is ignored.
+        {
+            // The *offered* number — the one our own offer carried, when
+            // we are the offerer.  It is the only number the peer is
+            // allowed to echo (RFC 3264 §6.1), so it is saved before
+            // the state is reset.
+            const std::uint8_t offered_rtx_pt =
+                impl_->video_state.rtx_payload_type;
+
+            impl_->video_state.rtx_negotiated = false;
+            impl_->video_state.remote_rtx_ssrc = 0;
+            impl_->video_state.rtx_payload_type = 0;
+
+            std::uint8_t peer_rtx_pt = 0;
+            for (const auto& fmt : remote_video->formats) {
+                std::uint8_t pt = 0;
+                if (!detail::parse_payload_type(fmt, pt)) continue;
+                auto rit = remote_video->rtpmap.find(fmt);
+                if (rit == remote_video->rtpmap.end()) continue;
+                if (detail::decoder_id_for_encoding(rit->second.encoding) !=
+                    rtx::kEncodingName) {
+                    continue;
+                }
+                auto fit = remote_video->fmtp.find(fmt);
+                if (fit == remote_video->fmtp.end()) continue;
+
+                const auto apt = rtx::parse_apt(fit->second);
+                if (!apt.has_value()) {
+                    core::log::Logger::instance().warn(
+                        "engine[rtx]: the peer's retransmission payload type " +
+                        std::to_string(pt) +
+                        " carries no apt= parameter — the retransmission "
+                        "stream is ignored");
+                    continue;
+                }
+
+                // The peer's retransmission protects the payload type its
+                // `apt=` names.  We can only unwrap it if that is the
+                // media stream we actually receive — otherwise the
+                // restored sequence number belongs to a stream we do not
+                // track, and unwrapping it would corrupt our bookkeeping.
+                if (*apt != chosen) continue;
+
+                peer_rtx_pt = pt;
+                break;
+            }
+
+            if (peer_rtx_pt != 0) {
+                // RFC 3264 §6.1: the answer may only use payload types
+                // the offer contained.  When we are the offerer, the
+                // retransmission payload type we advertised is the only
+                // one the peer may echo — a *different* number in the
+                // answer is a protocol violation, and accepting it would
+                // make our SDP and our wire disagree.
+                if (remote_is_answer &&
+                    offered_rtx_pt != 0 &&
+                    peer_rtx_pt != offered_rtx_pt) {
+                    core::log::Logger::instance().warn(
+                        "engine[rtx]: the peer answered with a "
+                        "retransmission payload type (" +
+                        std::to_string(peer_rtx_pt) +
+                        ") that our offer did not contain (" +
+                        std::to_string(offered_rtx_pt) +
+                        ") — the retransmission stream is not negotiated");
+                    impl_->video_state.rtx_payload_type = 0;
+                    impl_->video_state.rtx_negotiated   = false;
+                } else {
+                    impl_->video_state.rtx_payload_type = peer_rtx_pt;
+                    impl_->video_state.rtx_negotiated   = true;
+
+                    // Our *own* retransmission SSRC: the offerer derived
+                    // it when it wrote the offer, and the answerer
+                    // derives it now — it is the SSRC the answer's
+                    // `a=ssrc-group:FID` line names.
+                    if (impl_->video_state.rtx_ssrc == 0) {
+                        impl_->video_state.rtx_ssrc =
+                            detail::derive_rtx_ssrc(config_.video_sender_tuning.ssrc);
+                    }
+
+                    // The peer's retransmission SSRC: the peer names it
+                    // in its `a=ssrc-group:FID` line (RFC 5576 §4.2) —
+                    // the *second* SSRC of the group is the repair flow
+                    // of the first.
+                    impl_->video_state.remote_rtx_ssrc =
+                        detail::remote_rtx_ssrc_of(
+                            *remote_video, config_.video_sender_tuning.ssrc);
+
+                    core::log::Logger::instance().info(
+                        "engine[rtx]: the retransmission stream is negotiated "
+                        "on payload type " + std::to_string(peer_rtx_pt));
+                }
+            } else {
+                // No retransmission stream: the sender re-sends the
+                // original packet (the pre-RTX behaviour) and the receiver
+                // never unwraps anything.
+                //
+                // The *offerer's* number is cleared too — the peer did
+                // not echo it, so it was not accepted (RFC 3264 §6.1).
+                impl_->video_state.rtx_payload_type = 0;
+                impl_->video_state.rtx_negotiated   = false;
+            }
+        }
     }
 
     // ---- The audio-level extension id (B-14) ---------------------------
@@ -1481,6 +1693,13 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         }
         break;
     }
+
+    // ---- Apply the negotiated retransmission stream (v1.3 plan Q3) ----
+    //
+    // The video plugins have to be told *after* the negotiation, and
+    // told again on every renegotiation — including when the peer stops
+    // offering RTX, which turns the feature back off.
+    apply_negotiated_video_rtx();
 
     // Apply ICE credentials + candidates through the plugin seam.
     //
@@ -2126,6 +2345,36 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                     if (types.empty()) continue;
                     am.rtcp_fb.push_back(selected + " " + std::string(types));
                 }
+
+                // ---- The RFC 4588 retransmission stream (v1.3 plan Q3) ---
+                //
+                // The answer echoes the offer's retransmission payload
+                // type and its `apt=` parameter (RFC 3264 §6.1: the
+                // answer may only use payload types the offer contained,
+                // and the answerer must use the offerer's number).
+                //
+                // The `rtx-time` parameter is *ours* to state: it says
+                // how long we keep a packet available for retransmission,
+                // and the peer needs it to know how long to keep asking.
+                // The `apt=` parameter is the offerer's, and it is
+                // echoed verbatim.
+                if (impl_->video_state.rtx_negotiated &&
+                    impl_->video_state.rtx_payload_type != 0) {
+                    const std::string rtx_pt =
+                        std::to_string(impl_->video_state.rtx_payload_type);
+                    am.formats.push_back(rtx_pt);
+
+                    auto rtx_it = rm.rtpmap.find(rtx_pt);
+                    if (rtx_it != rm.rtpmap.end()) am.rtpmap[rtx_pt] = rtx_it->second;
+
+                    // The `apt=` names the *media* payload type, which the
+                    // answer has just negotiated — so the two cannot
+                    // disagree.  The `rtx-time` is ours.
+                    am.fmtp[rtx_pt] = detail::rtx_fmtp_body(
+                        static_cast<std::uint8_t>(
+                            impl_->video_state.negotiated_video.payload_type),
+                        config_.video_sender_tuning.rtx_time_ms);
+                }
             } else {
                 // Nothing the peer offered is decodable here, so the
                 // m-line is rejected (RFC 3264 §6.1: a rejected m-line
@@ -2141,6 +2390,31 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                           "%u cname:nimrtc-video",
                           static_cast<unsigned>(config_.video_sender_tuning.ssrc));
             am.extra_attrs.emplace_back("ssrc", ssrc_line);
+
+            // ---- The retransmission SSRC (RFC 4588 §5.2 / RFC 5576 §4.2)
+            //
+            // The retransmission stream has its **own** SSRC, and the
+            // `a=ssrc-group:FID` line binds it to the media stream.  The
+            // group lists the *primary* source first, so the media SSRC
+            // comes first and the repair SSRC second — the convention
+            // Chrome and libwebrtc use.
+            //
+            // RFC 5576 §4.2 also requires every SSRC named in the group
+            // to have its own `a=ssrc:` line in the same media
+            // description, and the CNAME identifies the *participant*
+            // (RFC 3550 §8.2), so the retransmission stream carries the
+            // same CNAME as the media stream.
+            if (impl_->video_state.rtx_negotiated &&
+                impl_->video_state.rtx_ssrc != 0) {
+                const std::uint32_t media_ssrc = config_.video_sender_tuning.ssrc;
+                const std::uint32_t rtx_ssrc   = impl_->video_state.rtx_ssrc;
+                am.extra_attrs.emplace_back(
+                    "ssrc-group",
+                    detail::rtx_fid_group_body(rtx_ssrc, media_ssrc));
+                am.extra_attrs.emplace_back(
+                    "ssrc",
+                    detail::rtx_ssrc_cname_body(rtx_ssrc, "nimrtc-video"));
+            }
         }
 
         // ---- Cross-end timeline extmap (ADR-017) --------------------------

@@ -112,6 +112,10 @@ struct NIMRTC_API_STABLE ReceiverConfig {
     /** RTP payload type (e.g. 102 for H.264 in WebRTC). */
     std::uint8_t           payload_type  = 0;
 
+    /** The RFC 4588 retransmission payload type, or 0 when RTX was not
+     *  negotiated.  See `plugins::VideoReceiverConfig::rtx_payload_type`. */
+    std::uint8_t           rtx_payload_type = 0;
+
     /** Forwarded to the underlying video jitter buffer. */
     video_jb::Config       jitter_buffer_config{};
 
@@ -134,6 +138,10 @@ struct NIMRTC_API_STABLE ReceiverStats {
     /** Number of key-frame requests the receiver raised because picture
      *  data was lost (v1.1 Q3). */
     std::uint64_t keyframe_requests_emitted = 0;
+    /** Retransmission packets received and unwrapped (RFC 4588). */
+    std::uint64_t rtx_packets_received = 0;
+    /** Retransmission packets that could not be unwrapped. */
+    std::uint64_t rtx_packets_malformed = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -221,6 +229,35 @@ public:
      *  @return true if the packet was accepted; false on malformed input. */
     bool push_rtp(const rtp::PacketView& packet, std::int64_t now_us) noexcept;
 
+    // ---- RFC 4588 retransmission (the receive side) --------------------
+    //
+    // The retransmission arrives on its own payload type, with its own
+    // sequence number, and carries the original packet's payload behind
+    // the two-octet OSN header (RFC 4588 §4.1).  Unwrapping it and
+    // putting the payload back under the *original* sequence number is
+    // the whole point: the jitter buffer's frame assembly is keyed on
+    // that number, so a retransmission that kept its own number would
+    // look like the first packet of a brand-new frame.
+
+    /** Tell the receiver which payload type carries retransmissions.
+     *
+     *  @param rtx_pt The retransmission payload type, or 0 to disable
+     *                the RTX path (the default). */
+    void set_rtx_payload_type(std::uint8_t rtx_pt) noexcept;
+
+    /** Feed one RFC 4588 retransmission packet.
+     *
+     *  @param packet  The retransmission packet.  `seq` is the
+     *                 retransmission stream's own sequence number;
+     *                 `rtp_timestamp` and `marker` are the *original*
+     *                 packet's (RFC 4588 §4.1).
+     *  @param now_us  Monotonic-clock arrival time (microseconds).
+     *  @return true when the packet was unwrapped and the original
+     *          sequence number restored; false when the payload was too
+     *          short to carry the OSN header, or when no RTX payload
+     *          type was configured. */
+    bool push_rtp_rtx(const rtp::PacketView& packet, std::int64_t now_us) noexcept;
+
     /** Pop the accumulated NACK list (missing packet sequence numbers). */
     std::vector<std::uint16_t> pop_nack_entries() noexcept;
 
@@ -263,6 +300,10 @@ struct NIMRTC_API_STABLE SenderConfig {
      *  of the most recently sent packets.  0 disables the cache (the
      *  sender then answers every NACK with a miss). */
     std::size_t             retransmit_cache_packets = 256;
+
+    /** The RFC 4588 retransmission payload type, or 0 when RTX was not
+     *  negotiated.  See `plugins::VideoSenderConfig::rtx_payload_type`. */
+    std::uint8_t            rtx_payload_type = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -282,6 +323,8 @@ struct NIMRTC_API_STABLE SenderStats {
     /** NACKs that could not be answered because the packet had already
      *  left the retransmission cache (v1.1 Q3). */
     std::uint64_t packets_retransmit_missed    = 0;
+    /** Packets re-sent as RFC 4588 retransmissions. */
+    std::uint64_t rtx_packets_emitted           = 0;
     // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
     /** Key-frame requests the limiter was offered. */
     std::uint64_t keyframe_requests             = 0;
@@ -317,6 +360,57 @@ using NIMRTC_API_STABLE SenderPacketCallback =
                        std::uint32_t rtp_timestamp,
                        std::uint16_t seq,
                        bool marker)>;
+
+// ---------------------------------------------------------------------------
+// The RFC 4588 retransmission seam (the sender side)
+// ---------------------------------------------------------------------------
+
+/** One retransmission packet the sender wants put on the wire.
+ *
+ *  RFC 4588 §4.1 shapes the packet in three ways:
+ *
+ *   * the **payload** is the two-octet OSN header followed by the
+ *     original packet's payload;
+ *   * the **timestamp** and the **marker bit** are the *original*
+ *     packet's;
+ *   * the **sequence number** is *not* here — the retransmission stream
+ *     has its own sequence space (RFC 4588 §4), and the SSRC and the
+ *     payload type are the engine's (they come out of the negotiation).
+ */
+struct NIMRTC_API_STABLE SenderRtxPacket {
+    /** The RFC 4588 §4.1 retransmission payload. */
+    core::ByteSpan payload{};
+
+    /** The **original** packet's RTP timestamp. */
+    std::uint32_t rtp_timestamp = 0;
+
+    /** The **original** packet's marker bit. */
+    bool          marker = false;
+
+    /** The **original** packet's sequence number (the OSN the payload's
+     *  header carries). */
+    std::uint16_t original_seq = 0;
+
+    /** The retransmission stream's **own** sequence number.
+     *
+     *  RFC 4588 §4: "the retransmission stream ... is assigned its own
+     *  sequence number space".  So a retransmission does NOT reuse the
+     *  original's number on the wire — the original's number is inside
+     *  the OSN header, and the header's own number is what the
+     *  receiver's jitter buffer tracks for the RTX stream itself.
+     *
+     *  The sender plugin owns this counter (it owns the media stream's
+     *  sequence space too), so the engine does not have to keep a
+     *  second one in step with it. */
+    std::uint16_t rtx_seq = 0;
+};
+
+/** Callback fired once per retransmission packet.
+ *
+ *  Fired synchronously on the thread that fed the RTCP feedback to the
+ *  sender.  The span is only valid for the duration of the callback. */
+using NIMRTC_API_STABLE SenderRtxCallback =
+    std::function<void(const SenderRtxPacket& packet)>;
 
 // ---------------------------------------------------------------------------
 // VideoSender
@@ -385,6 +479,27 @@ public:
 
     /** Number of packets currently held in the retransmission cache. */
     std::size_t cached_packet_count() const noexcept;
+
+    // ---- RFC 4588 retransmission (the sender side) --------------------
+    //
+    // With RTX negotiated, a NACK is answered by sending the original
+    // packet's payload on the *retransmission* payload type, wrapped in
+    // the two-octet OSN header (RFC 4588 §4.1).  Without it, the sender
+    // re-sends the original packet as-is — which is what the pre-RTX
+    // path did, and which RFC 4588 §4.1 explicitly is *not* RTX.
+
+    /** Register the callback that carries the retransmission packets.
+     *
+     *  The engine registers it when RTX was negotiated.  When no
+     *  callback is registered the sender falls back to re-sending the
+     *  original packet. */
+    void set_rtx_packet_callback(SenderRtxCallback cb) noexcept;
+
+    /** Enable or disable the RFC 4588 retransmission path. */
+    void set_rtx_enabled(bool enabled) noexcept;
+
+    /** True iff the RFC 4588 retransmission path is on. */
+    bool rtx_enabled() const noexcept;
 
     // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
     //

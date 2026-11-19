@@ -794,8 +794,19 @@ public:
         }
 
         // ---- TEMP DIAGNOSTIC --------------------------------------------
+        //
+        // The decoded surface's own geometry and pixel format, and the
+        // luma row that was copied out of it.  Together with the
+        // encoder's surface row this says whether the picture was lost
+        // in the *bitstream* or in the *copy* out of the surface.
         {
-            std::printf("[vt-dec] decoded luma row0:");
+            std::printf("[vt-dec] surface %ux%u fmt=%u pitch=%zu row0:",
+                        static_cast<unsigned>(CVPixelBufferGetWidth(pixel_buffer)),
+                        static_cast<unsigned>(CVPixelBufferGetHeight(pixel_buffer)),
+                        static_cast<unsigned>(
+                            CVPixelBufferGetPixelFormatType(pixel_buffer)),
+                        static_cast<std::size_t>(
+                            CVPixelBufferGetBytesPerRow(pixel_buffer)));
             for (std::uint32_t col = 0; col < w; col += w / 16u) {
                 std::printf(" %u:%u", col, static_cast<unsigned>(y_plane[col]));
             }

@@ -761,6 +761,23 @@ public:
             return plugins::kErrInternal;
         }
 
+        // ---- TEMP DIAGNOSTIC --------------------------------------------
+        //
+        // The picture that reaches the encoder, the surface it is copied
+        // into, and the access unit that comes out — all three in one
+        // line, so the failure can be attributed to the staging, to the
+        // session, or to the bitstream.
+        {
+            const std::uint8_t* sy = cpu->plane(0);
+            const std::uint32_t ss =
+                static_cast<std::uint32_t>(cpu->layout().strides[0]);
+            std::printf("[vt-enc] src %ux%u stride=%u row0:", w, h, ss);
+            for (std::uint32_t col = 0; col < w; col += w / 16u) {
+                std::printf(" %u:%u", col, static_cast<unsigned>(sy[col]));
+            }
+            std::printf("\n");
+        }
+
         {
             auto* dst = static_cast<std::uint8_t*>(base);
             const auto& layout = cpu->layout();
@@ -875,13 +892,34 @@ public:
         CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
 
         // ---- TEMP DIAGNOSTIC --------------------------------------------
+        //
+        // What actually landed in the surface: the pixel buffer's own
+        // geometry, its pixel format, and the luma row that was written
+        // into it.  Compared against the source row above, this says
+        // whether the loss happened *before* the encoder (in the
+        // staging) or *after* it (in the bitstream or the decoder).
         {
-            const std::uint8_t* sy = cpu->plane(0);
-            std::printf("[vt-enc] input luma row0:");
-            for (std::uint32_t col = 0; col < w; col += w / 16u) {
-                std::printf(" %u:%u", col, static_cast<unsigned>(sy[col]));
+            const CVReturn relock = CVPixelBufferLockBaseAddress(pixel_buffer, 0);
+            if (relock == kCVReturnSuccess) {
+                const auto* pb = static_cast<const std::uint8_t*>(
+                    CVPixelBufferGetBaseAddress(pixel_buffer));
+                const std::size_t pb_pitch =
+                    CVPixelBufferGetBytesPerRow(pixel_buffer);
+                std::printf("[vt-enc] surface %ux%u fmt=%u pitch=%zu row0:",
+                            static_cast<unsigned>(CVPixelBufferGetWidth(pixel_buffer)),
+                            static_cast<unsigned>(CVPixelBufferGetHeight(pixel_buffer)),
+                            static_cast<unsigned>(
+                                CVPixelBufferGetPixelFormatType(pixel_buffer)),
+                            pb_pitch);
+                if (pb) {
+                    for (std::uint32_t col = 0; col < w; col += w / 16u) {
+                        std::printf(" %u:%u", col,
+                                    static_cast<unsigned>(pb[col]));
+                    }
+                }
+                std::printf("\n");
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
             }
-            std::printf("\n");
         }
 
         const plugins::Status st = encode_pixel_buffer(pixel_buffer, output,

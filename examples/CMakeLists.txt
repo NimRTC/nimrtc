@@ -256,3 +256,47 @@ if(NIMRTC_MODULE_NET_SIM AND TARGET nimrtc::net_sim)
     # them the program dies with STATUS_DLL_NOT_FOUND before `main()`.
     nimrtc_stage_runtime(soak-p2p)
 endif()
+
+# ---------------------------------------------------------------------------
+# `hw-e2e` — the hardware-encode end-to-end harness (v1.3 plan Q7 / O-6)
+# ---------------------------------------------------------------------------
+#
+# Q7's bar is *"the hardware encode path is exercised end-to-end by
+# something re-runnable, and the result is asserted from the stats"*.
+# `hw-e2e` drives the shipped H.264 backend table pinned to hardware
+# (`select_encoder_backend` with `backend_policy = kHardware`), encodes
+# 1080p frames through `IVideoEncoder`, carries the bitstream through
+# the shipped `VideoSender` / `VideoReceiver` (STAP-A / FU-A) and
+# `rtp::PacketBuilder` / `rtp::Parser`, decodes it back and compares the
+# luma against the source.  It prints one JSON record that
+# `tools/run_hardware_e2e.py` archives; on a host with no hardware
+# encoder it skips honestly (exit 77).
+#
+# It needs the h264 module (the backend table) and the reference
+# pipeline + rtp (the wire).  The nvcodec module is linked *optionally*:
+# a build without it still runs, as long as the h264 module's NVENC /
+# VideoToolbox entries exist.
+if(TARGET nimrtc::h264 AND TARGET nimrtc::video_pipeline
+   AND TARGET nimrtc::rtp AND TARGET nimrtc::video_payload
+   AND TARGET nimrtc::video_frame)
+    add_executable(hw-e2e hw-e2e/hw-e2e.cpp)
+    nimrtc_apply_options(hw-e2e)
+    target_link_libraries(hw-e2e PRIVATE
+        nimrtc::h264            # the backend table the engine's factory uses
+        nimrtc::video_pipeline  # the shipped sender / receiver
+        nimrtc::video_payload   # h264 packetization (pulled in by the pipeline)
+        nimrtc::rtp             # PacketBuilder / Parser
+        nimrtc::video_frame     # the frame vocabulary
+        nimrtc::core
+        nimrtc::plugins
+        nimrtc::engine          # the registrar table (register_all_default_plugins)
+        nimrtc::datachannel     # the registrar table references it
+        nimrtc::web_transport   # ditto
+    )
+    if(TARGET nimrtc::nvcodec)
+        target_link_libraries(hw-e2e PRIVATE nimrtc::nvcodec)
+    endif()
+
+    # The msquic runtime DLL and the Chrome-friendly DTLS cert.
+    nimrtc_stage_runtime(hw-e2e)
+endif()

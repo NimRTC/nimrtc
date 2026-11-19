@@ -1,0 +1,146 @@
+name: hardware
+
+# The v1.3 plan's Q7 (O-6) evidence collector.
+#
+# The gap Q7 closes is coverage: the standard CI matrix has no
+# encoder-capable GPU, so the *hardware* codec path was validated by
+# hand.  This workflow runs it on a **self-hosted, GPU-capable** runner
+# — the same shape `soak.yml` uses — and files the result as an artifact
+# the PR gate can point at.
+#
+# The chain the job exercises (docs/plan/v1.3-plan.md §3 Q7):
+#
+#   a frame is captured → encoded by the hardware codec (NVENC /
+#   VideoToolbox / VA-API ... the tree's backend table decides) →
+#   packetized (STAP-A / FU-A) → carried as RTP → depacketized →
+#   decoded → rendered → and the pipeline reported hardware encoding.
+#
+# Two independent recorders run on the runner:
+#
+#   1. `tools/run_hardware_e2e.py` — runs `examples/hw-e2e` (the
+#      codec-level end-to-end harness), re-derives the green criteria
+#      from the archived numbers, and appends a record with the driver
+#      stamp and the tree's git provenance;
+#   2. `ctest -R test_engine_video_hw_loopback` — the *engine-level*
+#      test that drives two `NimRTCEngine`s with `video_codec_backend =
+#      "hardware"` and asserts `Stats::video_codec_hardware_accelerated`.
+#
+# The record is the evidence.  A run on a runner that has lost its GPU
+# is a **SKIPPED** record, and `--require-hardware` makes that a red
+# job — a silently missing GPU is exactly the failure mode a
+# hardware-evidence job exists to catch.
+#
+# The job only runs on the self-hosted runner (label `gpu-nvenc`): on a
+# hosted runner it would skip, and a green check that means "nothing
+# ran" is worse than no check at all.  `workflow_dispatch` is the
+# manual trigger; the release process runs it before cutting `v1.3.0`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tree to measure (default: the branch this workflow runs on)'
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - 'src/modules/nvcodec/**'
+      - 'src/modules/h264/**'
+      - 'examples/hw-e2e/**'
+      - 'tests/test_engine_video_hw_loopback.cpp'
+      - 'tools/run_hardware_e2e.py'
+      - '.github/workflows/hardware.yml'
+  schedule:
+    # Weekly, so a driver update on the runner is noticed without a PR.
+    - cron: '41 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-hardware
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The self-hosted, GPU-capable runner.
+  # ---------------------------------------------------------------------------
+  hw-e2e:
+    name: hardware / hw-e2e (self-hosted GPU)
+    # The label is the *contract*: a runner without an encoder-capable GPU
+    # must not pick this job up.  A hosted runner never matches, so the
+    # job stays "queued" rather than pretending to pass.
+    runs-on: [self-hosted, windows, gpu-nvenc]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Stamp the machine (driver + GPU)
+        # The evidence record carries its own stamp; printing it up front
+        # keeps the job log self-contained when something goes wrong
+        # *before* the harness runs.
+        shell: pwsh
+        run: |
+          nvidia-smi --query-gpu=name,driver_version --format=csv
+
+      - name: Configure (NVENC + NVDEC on, examples on)
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -DNIMRTC_PLUGINS_NVENC=ON `
+            -DNIMRTC_PLUGINS_NVDEC=ON `
+            -DNIMRTC_BUILD_EXAMPLES=ON `
+            -DNIMRTC_BUILD_TESTS=ON
+
+      - name: Build hw-e2e + the engine-level hardware test
+        shell: pwsh
+        run: |
+          cmake --build build --config Debug -j --target hw-e2e test_engine_video_hw_loopback
+
+      - name: The codec-level end-to-end run (recorded evidence)
+        id: hw_e2e
+        shell: pwsh
+        run: |
+          # `--require-hardware`: a runner that lost its GPU must fail
+          # here, not skip — this job exists to prove the GPU path ran.
+          python tools/run_hardware_e2e.py --build --require-hardware
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: The engine-level hardware test
+        # ctest's exit code is the verdict: the test skips only when the
+        # host has no hardware encoder, which `--require-hardware` above
+        # has already turned into a failure — so a green ctest here means
+        # the engine ran the pinned hardware path end to end.
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Debug -R test_engine_video_hw_loopback `
+            --output-on-failure
+
+      - name: Surface the evidence summary
+        if: always()
+        shell: pwsh
+        run: |
+          # Tee the summary into the Step Summary so the run page shows
+          # the window (driver, ref, verdict) without downloading the
+          # artifact.
+          python tools/run_hardware_e2e.py --summary --days 90 |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Upload the evidence record
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hardware-evidence-${{ github.run_id }}
+          path: build/hardware/*.jsonl
+          retention-days: 365
+          if-no-files-found: error

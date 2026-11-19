@@ -422,7 +422,7 @@ Security fixes skip the normal cadence:
 
 ## 4. CMake / package manager integration
 
-> **Status (as of the Track D landing on `main`, post-`v1.0.2`):**
+> **Status (as of the `v1.2.0` cut):**
 > install rules are implemented behind `NIMRTC_INSTALL` (default OFF).
 > `cmake/NimRTCInstall.cmake` centralises the coverage — public headers
 > to `<prefix>/include/`, every built `nimrtc_*` STATIC archive (plus
@@ -434,10 +434,13 @@ Security fixes skip the normal cadence:
 > (staging holds `include/` + `lib/` + `lib/cmake/NimRTC/`; minimal
 > `find_package(NimRTC 1.0 REQUIRED)` consumer linking `nimrtc::engine`
 > builds and runs exit 0). Linux downstream proof runs in `ci.yml` on every
-> push via the install + downstream-proof leg, so the
-> published `v1.0.2` bundles still ship only the vendored third-party
-> stack — the layout below remains the target contract for those
-> published assets until `v1.1.0` cuts.
+> push via the install + downstream-proof leg.
+> The **published `v1.2.0` bundles carry this layout** — verified against the
+> released `nimrtc-1.2.0-linux-x86_64-gcc.tar.xz`: `include/nimrtc/**` (204
+> public headers), `lib/libnimrtc_*.a`, `lib/cmake/NimRTC/NimRTCConfig.cmake`
+> and `NimRTCConfigVersion.cmake`, plus `lib/webrtc_apm/` with the real AEC/ANS/AGC
+> and `apm_link_order.txt`. The `v1.0.2` bundles shipped only the vendored
+> third-party stack; that gap is closed.
 
 The target layout is: NimRTC installs CMake config files under
 `lib/cmake/NimRTC/NimRTCConfig.cmake` plus a version file
@@ -497,7 +500,8 @@ This section is appended at release time. Each entry cross-references the
 | `v1.0.0`       | 2026-10-30 | Source milestone only (lightweight tag `f740f2e`); **never published** as a GitHub Release. Superseded by `v1.0.1`. | n/a — superseded |
 | `v1.0.1`       | 2026-11-02 | First **published** stable release; source milestone `v1.0.0` + Case D forward-DTLS fix + CI e2e-on-push. SemVer guarantees apply from this tag. See `CHANGELOG.md` `[1.0.1]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1 |
 | `v1.0.2`       | 2026-11-02 | Patch release fixing the WebTransport ALPN mismatch, the oversized Windows bundle, and the missing signing public key. All four platform bundles ship with detached `.asc` signatures plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`). Known limitation: the bundles carry only the vendored third-party stack, not NimRTC's own headers/static lib/`NimRTCConfig.cmake` (§4) — tracked for `v1.1.0` (Track D). See `CHANGELOG.md` `[1.0.2]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2 |
-| `v1.1.0`       | 2026-11-08 | Feature release — the GM/T TLCP backend (GmSSL), the WebRTC APM 3A path, the v1.1 transport/strategy surface and the `nimrtc::engine` bundle that `v1.0.2` did not ship (Track D closed). The tag is annotated and SSH-signed (tag object `4177d00`, peeling to commit `50358b8`) and GitHub reports it as `verified: true`. The `release.yml` run [42463218202](https://github.com/NimRTC/nimrtc/actions/runs/42463218202) built all four platform bundles and left a **draft** release; the draft is published only once the 7-day soak window (§12.3.6 Gate 6) closes, earliest 2026-11-14. See `CHANGELOG.md` `[1.1.0]`. | pending — draft not yet published |
+| `v1.1.0`       | 2026-11-08 | Feature release — the GM/T TLCP backend (GmSSL), the WebRTC APM 3A path, the v1.1 transport/strategy surface and the `nimrtc::engine` bundle that `v1.0.2` did not ship (Track D closed). The tag is annotated and SSH-signed (tag object `4177d00`, peeling to commit `50358b8`) and GitHub reports it as `verified: true`. The `release.yml` run [42463218202](https://github.com/NimRTC/nimrtc/actions/runs/42463218202) built all four platform bundles and left a **draft** release; the draft was published on 2026-11-09 after the 7-day soak window (§12.3.6 Gate 6) closed. See `CHANGELOG.md` `[1.1.0]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.1.0 |
+| `v1.2.0`       | 2026-11-18 | The release that closes the `v1.2` plan: **Track E** (the eight convergence gates E1–E8) and **Track S** (the `getStats()` observability surface, S1–S8) are both complete, and the **remote-desktop** track ships with it. The tag is annotated and SSH-signed (tag object `e7d28e8f`, peeling to commit `6295ed47`); `tools/verify_tag_signature.py --tag v1.2.0` reports the signature verified against the ed25519 key `SHA256:3z9Lz53tKDBFwsXxiJMvFHhPm/jLdnJUrVaw/QVSxkA` (principal `realdesktop@163.com`). All four platform bundles ship with detached `.asc` signatures plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`) and an `sbom.json`. The bundles carry NimRTC's own headers, static libraries and `NimRTCConfig.cmake` (§4), plus the WebRTC APM archives in `lib/webrtc_apm/` — so `find_package(NimRTC)` works from a downloaded bundle. The published release body is the **digest** produced by `tools/release_body.py` (the full `## [1.2.0]` section is 367 858 characters, over GitHub's 125 000-character limit). Published 2026-11-18, not a prerelease. See `CHANGELOG.md` `[1.2.0]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.2.0 |
 
 ---
 

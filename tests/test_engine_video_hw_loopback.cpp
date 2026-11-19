@@ -70,6 +70,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -641,6 +642,14 @@ struct LoopbackResult {
     std::uint64_t rx_frames_rendered = 0;
     std::uint64_t rx_tx_frames_encoded = 0;
 
+    // The receiver's *loss* counters.  A frame that was dropped at the
+    // jitter buffer (or by the decoder) is a different failure from a
+    // frame that decoded into a partly black picture — and the two have
+    // to be told apart before the picture can be blamed on the codec.
+    std::uint64_t rx_frames_dropped_jb      = 0;
+    std::uint64_t rx_frames_dropped_decoder = 0;
+    std::uint64_t rx_bytes_received         = 0;
+
     // The TX engine's telemetry, copied before the engines are destroyed.
     std::string codec_backend;
     std::string codec_backend_preference;
@@ -717,6 +726,9 @@ LoopbackResult run_loopback() {
     const auto rx_stats = rx_engine.stats();
     result.rx_frames_decoded  = rx_stats.video_frames_decoded;
     result.rx_frames_rendered = rx_stats.video_frames_rendered;
+    result.rx_frames_dropped_jb      = rx_stats.video_frames_dropped_jb;
+    result.rx_frames_dropped_decoder = rx_stats.video_frames_dropped_decoder;
+    result.rx_bytes_received         = rx_stats.video_bytes_received;
     EXPECT_GE(rx_stats.video_frames_decoded, 1u)
         << "the decoder must have decoded the hardware bitstream";
 
@@ -740,6 +752,14 @@ LoopbackResult run_loopback() {
         // frame.
         const std::vector<std::uint8_t> reference = reference_luma();
         std::printf("[hw-loopback] rendered frames: %zu\n", result.rx_frames);
+        std::printf("[hw-loopback] rx: decoded=%llu rendered=%llu "
+                    "dropped_jb=%llu dropped_decoder=%llu bytes=%llu\n",
+                    static_cast<unsigned long long>(result.rx_frames_decoded),
+                    static_cast<unsigned long long>(result.rx_frames_rendered),
+                    static_cast<unsigned long long>(result.rx_frames_dropped_jb),
+                    static_cast<unsigned long long>(
+                        result.rx_frames_dropped_decoder),
+                    static_cast<unsigned long long>(result.rx_bytes_received));
         for (std::size_t i = 0; i < sink->frames().size(); ++i) {
             const RecordedFrame& f = sink->frames()[i];
             if (f.luma.size() != reference.size()) {
@@ -784,6 +804,51 @@ LoopbackResult run_loopback() {
                             static_cast<unsigned>(luma[col]));
             }
             std::printf("\n");
+
+            // ---- The exact transition ----------------------------------
+            //
+            // Where does the picture turn black?  The boundary tells the
+            // story: a boundary on a 16-pixel boundary is a macroblock
+            // edge (a lost or undecoded slice), a boundary that is not
+            // aligned is a copy or stride bug, and no boundary at all
+            // means the whole row is wrong.
+            //
+            // The scan is per *row* of a few sampled rows, because a
+            // horizontal ramp means every row has the same profile.
+            for (const std::uint32_t row : {0u, kHeight / 2u, kHeight - 1u}) {
+                const std::uint8_t* r =
+                    luma.data() + static_cast<std::size_t>(row) * kWidth;
+                const std::uint8_t* ref =
+                    reference.data() + static_cast<std::size_t>(row) * kWidth;
+                std::size_t first_bad = kWidth;
+                std::size_t bad_count  = 0;
+                for (std::uint32_t col = 0; col < kWidth; ++col) {
+                    const int diff = std::abs(static_cast<int>(r[col]) -
+                                              static_cast<int>(ref[col]));
+                    if (diff > 8) {
+                        if (first_bad == kWidth) first_bad = col;
+                        ++bad_count;
+                    }
+                }
+                std::printf("[hw-loopback] row %u: first bad column %zu, "
+                            "%zu bad columns\n",
+                            row,
+                            first_bad == kWidth ? kWidth : first_bad,
+                            bad_count);
+                if (first_bad < kWidth) {
+                    const std::size_t lo = first_bad > 4 ? first_bad - 4 : 0;
+                    const std::size_t hi =
+                        (first_bad + 12 < kWidth) ? first_bad + 12 : kWidth;
+                    std::printf("[hw-loopback] row %u around the boundary:",
+                                row);
+                    for (std::size_t col = lo; col < hi; ++col) {
+                        std::printf(" %zu:%u->%u", col,
+                                    static_cast<unsigned>(ref[col]),
+                                    static_cast<unsigned>(r[col]));
+                    }
+                    std::printf("\n");
+                }
+            }
         }
     }
 

@@ -39,9 +39,34 @@
 name: release
 
 on:
+  # Tag filter syntax: GitHub treats these patterns as ECMAScript regexes
+  # matched with `RegExp.test()` -- anchored at the *start* of the ref, not
+  # at the end -- and `*`/`+`/`?` quantify the preceding *character*, not the
+  # class before them.  Two failures follow from that, both observed:
+  #
+  #   * `v[0-9]+.[0-9]+.[0-9]+*` (the old filter) does not mean "digits";
+  #     it means "a run of digits, any character, a run of digits, ...", and
+  #     as a prefix test it matched the branch `chore/release-1.2-followup`,
+  #     firing the whole release workflow on a branch push (run 44478642313,
+  #     2026-11-19; preflight has no tag and fails in 0 s);
+  #   * anchoring with `$` fixes the suffix but not the ambiguity: "one run
+  #     of digits" cannot be told apart from "one run of digits followed by
+  #     a dash", so a pattern spanning four segments matched
+  #     `integrate/q3-q6-recover`.
+  #
+  # A filter that has to be read twice is not a gate.  This one is a list of
+  # the tag forms the project actually cuts, compared whole:
+  #
+  #   v1.2.0, v0.9.10                 -- a final release
+  #   v1.2.0-rc.1, v1.3.0-beta.2      -- a pre-release
+  #   v1.2.1-dev.20260101             -- an interim development tag
+  #
+  # `tools/check_release_tag_filter.py` pins this in CI: every form above
+  # must fire the workflow, and no branch in the repository may.
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+*"
+      - "v[0-9]*.[0-9]*.[0-9]"
+      - "v[0-9]*.[0-9]*.[0-9]-*"
   workflow_dispatch:
     inputs:
       tag:

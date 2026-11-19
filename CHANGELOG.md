@@ -9,6 +9,73 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.2.0`.
 
+- **A push to a branch can no longer start the release workflow, and a
+  guard keeps it that way (2026-11-19).**
+  Pushing `chore/release-1.2-followup` started the full `release`
+  workflow; its preflight has no tag to work with and failed in 0 s
+  (run `44478642313`).  The cause was in `on.push.tags`:
+  `v[0-9]+.[0-9]+.[0-9]+*`.  GitHub evaluates those patterns as
+  ECMAScript regexes anchored at the *start* of the ref, where `*` and
+  `+` quantify the preceding *character* — not the class before them —
+  so the pattern meant "v, a run of digits, any character, a run of
+  digits, …" and matched branch names as well as tags.
+
+  Anchoring with `$` was not enough: "one run of digits, then
+  anything" cannot distinguish `v1.2.0-rc.1` from `v1.2.0-post1`, and
+  a four-segment pattern matched `integrate/q3-q6-recover`.  The
+  filter is now two whole-ref patterns (`v[0-9]*.[0-9]*.[0-9]` and
+  `v[0-9]*.[0-9]*.[0-9]-*`), checked against the repository's real
+  tags (11 release / pre-release / dev forms, all must fire) and its
+  real branches (26 refs, none may).
+
+  `tools/check_release_tag_filter.py` is that check, wired into the
+  `docs / markdown links` job and registered as `test_release_tag_filter`.
+  Its engine is Node's `RegExp`, not Python's `re`: `re` rejects the
+  old pattern outright ("multiple repeat"), so a Python check could
+  never have evaluated the shape it exists to catch.
+
+- **The soak window, the tag ancestry and the README's release claims
+  are now read at cut time (post-v1.2.0 review).**
+  Three gates that were written down but never consulted:
+
+  - **The soak window was never read by `release.yml`.**  The v1.1
+    plan's "7-day soak before the tag" box was still empty two
+    releases later.  The preflight now requires a green window whose
+    every day was measured on a commit the tagged commit descends
+    from, and whose last day is within 30 days of the cut
+    (`run_soak.py --expect-ancestor-of` / `--max-window-age-days`,
+    `fetch_soak_evidence.py --require`).
+  - **A tag could be cut from a branch unreachable from `main`.**
+    `v1.2.0` had that shape: `compare/v1.2.0...main` reported
+    "diverged" with byte-identical trees, and `git describe` on `main`
+    could not find the tag.  It was repaired afterwards by merging the
+    release branch back.  The preflight now runs
+    `git merge-base --is-ancestor "$tag" origin/main` before releasing.
+  - **The README's badge went stale for eleven days** after `v1.0.2` →
+    `v1.2.0`: the badge still read `v1.0.2` while the body of the same
+    file described `v1.2.0` as shipped.
+    `tools/check_readme_release.py` compares the badge, the
+    "Latest release" paragraph and the "Current `main`" paragraph in
+    both languages against the newest changelog section, runs in the
+    `docs / markdown links` job, and gains `--expect-tag` for the
+    preflight's reverse question: does the README already describe the
+    tag being published?
+
+- **The release lines and the release tags are protected by rulesets
+  (post-v1.2.0 review).**
+  `release/1.2` carried the published `v1.2.0` tag as its head, was
+  `protected: false`, and the repository's only ruleset covered
+  `refs/heads/main` — one force-push would have severed the artifact
+  from the commit it was built from.  Two rulesets
+  (`protect-release-branches`, `protect-release-tags`) apply `deletion`
+  and `non_fast_forward` to `refs/heads/release/*` and `refs/tags/v*`.
+  They carry no `pull_request` rule and no required checks on purpose:
+  hot-fixes reach a release line by cherry-pick, and the PR-triggered
+  workflows do not run for a PR into `release/X.Y`, so a required
+  check there would be unsatisfiable.  `protect-main.json` also records
+  why `required_approving_review_count` stays 0 in a
+  single-collaborator repository.
+
 - **The release bundle now ships the third-party licence texts, and the
   bundle-size limit is no longer a hidden release blocker.**
   The v1.2.0 review noticed the Windows bundle grew from 40.5 MB to

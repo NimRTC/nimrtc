@@ -3509,3 +3509,38 @@ if(NIMRTC_BUILD_TESTS)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# The release tag-filter guard.
+#
+# `release.yml` fires on `push.tags`, and GitHub evaluates those patterns as
+# ECMAScript regexes anchored at the *start* of the ref, where `*` and `+`
+# quantify the preceding *character*.  The pattern the repository shipped,
+# `v[0-9]+.[0-9]+.[0-9]+*`, read as the regex its author meant and behaved
+# as "v, any run of digits, any character, ...": on 2026-11-19 a push of
+# `chore/release-1.2-followup` started the whole release workflow, whose
+# preflight has no tag and failed in 0 s (run 44478642313).
+#
+# The mistake cannot be seen in review -- the pattern looks right -- and it
+# does not fail until a branch is pushed.  The guard evaluates the workflow's
+# patterns with ECMAScript semantics against the release tag forms and the
+# repository's real branch names, so it fails at the point of the edit.
+# Node is the engine (Python's `re` rejects the pattern shape outright).
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_release_tag_filter
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_release_tag_filter.py"
+                         --self-test)
+        set_tests_properties(test_release_tag_filter PROPERTIES
+            TIMEOUT 180
+            LABELS "release;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the release tag-filter "
+            "guard (tools/check_release_tag_filter.py).  CI runs it as a "
+            "dedicated step.")
+    endif()
+endif()
+

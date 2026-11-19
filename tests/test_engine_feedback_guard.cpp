@@ -390,8 +390,11 @@ TEST(FeedbackGuard, a_thirty_second_lossy_run_does_not_storm) {
     // ---- The bound ------------------------------------------------------
     //
     // 30 s at 4 Hz is 120 intervals; the first request is immediate, so
-    // at most 121 requests may go out.
-    constexpr std::uint64_t kMaxAllowed = 121;
+    // at most 121 requests may go out.  The bound is *derived* from the
+    // interval rather than written as a literal, so the two cannot
+    // drift apart if the interval ever changes.
+    constexpr std::uint64_t kMaxAllowed =
+        static_cast<std::uint64_t>(kRunUs / kMinPliIntervalUs) + 1;
     EXPECT_LE(guard.counters().pli_allowed, kMaxAllowed)
         << "the rate limit let more key-frame requests through than the "
            "acceptance allows";

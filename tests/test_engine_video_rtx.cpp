@@ -759,6 +759,15 @@ TEST_F(EngineVideoRtx, an_inbound_retransmission_is_unwrapped_not_decoded) {
         << "the receiver did not push both the original and the "
            "retransmission into the jitter buffer";
 
+    // And the retransmission was *unwrapped*, not decoded: it carried
+    // the original's sequence number, so the jitter buffer saw a
+    // duplicate of sequence 100 and dropped it.  The decoder therefore
+    // saw at most one frame -- the original -- and not one frame per
+    // packet on the wire.
+    EXPECT_LE(codec->decode_calls() - decode_before, 1)
+        << "the retransmission was decoded as a frame of its own instead "
+           "of being unwrapped onto the original's sequence number";
+
     engine.close();
 }
 

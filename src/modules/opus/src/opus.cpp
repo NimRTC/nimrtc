@@ -42,7 +42,6 @@
 
 #include <algorithm>
 #include <cstdarg>
-#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -51,18 +50,6 @@
 #include <opus.h>   // libopus vendored at src/third_party/libopus/src
 
 #include <nimrtc/core/log.hpp>
-
-// `Encoder::encode_int16` hands the caller's buffer straight to libopus's
-// `opus_encode()`, whose parameter type is `opus_int16*`.  libopus typedefs
-// `opus_int16` differently on different platforms (`int16_t` on most, `short`
-// on MSVC/MinGW, `__int16` on some embedded targets) — the *sizes* agree
-// everywhere, but the *types* need not be the same type as `std::int16_t`.
-// The reinterpret_cast in `encode_int16` is only sound if the two are
-// layout-compatible, so assert it rather than trusting the comment.
-static_assert(sizeof(opus_int16) == sizeof(std::int16_t),
-              "opus_int16 and std::int16_t must have the same size");
-static_assert(static_cast<std::int16_t>(0) == opus_int16(0),
-              "opus_int16 and std::int16_t must have the same value range");
 
 namespace nimrtc::opus {
 

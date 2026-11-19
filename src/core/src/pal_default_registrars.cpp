@@ -163,6 +163,14 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
 #ifdef NIMRTC_HAS_VIDEO_SINK
     &nimrtc::video_sink::register_default_plugins,
 #endif
+#ifdef NIMRTC_HAS_VIDEO_SYNC
+    // v1.3 Q6 (remote-desktop plan R3): the render-clock module.  Its
+    // entry point populates the registry's video-sync slot
+    // (register_video_sync_controller) under the id "render-clock", so
+    // the engine can resolve the clock through the seam without naming
+    // a concrete module (Layout Invariant 4).
+    &nimrtc::video_sync::register_default_plugins,
+#endif
 #ifdef NIMRTC_HAS_VIDEO_SOURCE
     &nimrtc::video_source::register_default_plugins,
 #endif

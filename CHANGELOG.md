@@ -610,6 +610,38 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which accepts only a run of at least **24 h** under loss **and**
   jitter **and** reorder on a clean tree.
 
+- **The picture is now aligned to the sound (v1.3 plan item `Q6`, video
+  plan `R3` -- the video half).**
+  The audio half of R3 shipped in `v1.2.0`: the engine aligns audio
+  playout against the capture timeline, and the correction is
+  switchable.  The **video** half did not exist -- the renderer had a
+  display path but no clock to render against, and the skew the
+  sender-report tracker produced was *visible* but nothing acted on it.
+
+  A new `video_sync` module holds the render clock and the correction
+  policy, and the engine drives it through a new
+  `plugins::IVideoSyncController` seam -- so the engine orchestrates the
+  plugin and never names a concrete module (Layout Invariant 4 /
+  ADR-025).  The renderer is now **told** the presentation instant; it
+  does not derive one.
+
+  A video frame cannot be stretched, so the clock's actions are
+  *present at the clock's instant*, *drop*, or *delay* -- chosen from
+  the measured skew and the jitter buffer's current occupancy.  The
+  jitter buffer keeps the playout deadline; the render clock owns the
+  presentation instant *within* it, which is what keeps the buffer's
+  memory bound stable.
+
+  **There is still only one skew model.**  The clock has no capture-time
+  accumulator of its own: it reads the ADR-017 mapping the audio half
+  already reads.  That constraint was the one most likely to be
+  violated by accident, so it is stated where a future change would
+  look at it.
+
+  The synthetic-skew test feeds the mapping a known offset and asserts
+  a deterministic correction, so it fails on the pre-change code rather
+  than passing vacuously.
+
 - **The hardware codec path is now exercised end-to-end by something
   that re-runs (v1.3 plan item `Q7`, video plan `O-6`).**
   The standard CI matrix has no encoder-capable GPU, so the hardware

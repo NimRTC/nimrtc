@@ -1,25 +1,21 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.2-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.2.0-green.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#platform-support)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Latest release:** v1.0.2 (Stable) — patch release fixing the WebTransport ALPN mismatch and the oversized Windows bundle, and shipping the signing public key with the release (`v1.0.1` remains published and unchanged; the `v1.0.0` tag is retained as source milestone only and was never published as a GitHub Release). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC data exchange (DC-1) via the Chrome WebTransport JS API (`new WebTransport(url)`, not `RTCPeerConnection.createDataChannel()`) over QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; the `"sctp"` backend was retired from the public selectors in v1.2.0 (it was an in-process loopback socket that could never reach a peer). See [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
+> **Latest release:** v1.2.0 (Stable) — the release that closes the `v1.2` plan: **Track E** (the eight convergence gates) and **Track S** (the `getStats()` observability surface) are both complete, and the **remote-desktop** track (capture → encode → decode → present, with the `remote-desktop` Profile) ships with it. The tag is annotated and SSH-signed (`git tag -s -a`, ed25519) and verifies with `tools/verify_tag_signature.py`; every bundle ships a detached `.asc` plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10200, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC data exchange (DC-1) via the Chrome WebTransport JS API (`new WebTransport(url)`, not `RTCPeerConnection.createDataChannel()`) over QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; the `"sctp"` backend was retired from the public selectors in v1.2.0 (it was an in-process loopback socket that could never reach a peer). See [CHANGELOG.md](CHANGELOG.md) `## [1.2.0]` and [docs/plan/v1.2-next-plan.md](docs/plan/v1.2-next-plan.md).
 >
-> **Current `main` (post-v1.0.2, unreleased):** the trunk is ahead of the published tag by the
-> **v1.1** release, which consolidates the former v1.1 / v1.2 / v1.3 drafts into one
-> version target: the packaging + benchmark track, the transport / media / DTLS hardening
-> track, and the quality-line items (shared adaptive jitter strategy, `src/modules/jb_strategy`;
-> a simplified Goog-CC-style BWE — delay + loss hybrid estimation, **not** a full
-> trendline port; RTCP feedback loop; engine-level `ref_frame` and video stats; GMSSL vendoring
-> as a submodule + the SRTP backend seam; engine source split).
-> Local suite on Windows/MSVC Debug: **651/651 PASS** (measured 2026-11-04).
-> The packaging rules (`NIMRTC_INSTALL=ON` → `include/` + `lib/` + `lib/cmake/NimRTC/`) are landed
-> on `main` and will ship in the next release; the published v1.0.2 bundle does **not** contain
-> them yet. See [Current progress](#current-progress-v102-published--main-ahead) and
+> **Current `main` (post-v1.2.0, unreleased):** the trunk carries the **v1.3** track
+> (the audio jitter buffer's memory is bounded and the bound is reported; the receiver's
+> RTCP feedback is bounded and countable) plus the `v1.3` plan itself — see
+> [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md).
+> The **v1.2.0 bundles** do contain NimRTC's own headers, static library and
+> `NimRTCConfig.cmake`, so `find_package(NimRTC)` works from a downloaded bundle. See
+> [Current progress](#current-progress-v120-published--main-ahead) and
 > [Roadmap](#roadmap) for the full picture.
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md) · **Try the live demo**: [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/)
@@ -63,24 +59,16 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
-- **Current state:** **v1.0.2 is the latest published release** (Stable). The `main` trunk is
-  post-v1.0.2 and unreleased, carrying one consolidated **v1.1** release:
-  - **v1.1 — Quality + Packaging + Hardening:** reproducible transport-floor benchmarks
-    (`tools/benchmark_latency.py`, `tools/benchmark_dc.py`) with CI artifacts; install rules
-    (`NIMRTC_INSTALL=ON`) that produce `include/` + `lib/` + `lib/cmake/NimRTC/` so
-    `find_package(NimRTC)` works from an installed tree, and the WebRTC APM prebuilt shipped
-    alongside it; the transport-stack residuals (`ISctpSocket` lifecycle, ICE
-    `last_recv_packet()` demux, unified `make_transport_instance()`, p99 strategy validator,
-    non-standard video clock-rate negotiation, DTLS IPv6 `set_peer()`, NAT-rebinding
-    `rehandshake()`); and the quality line — the RFC 3550 jitter estimator and the
-    "base + 4·J" target-delay policy now live **once** in `src/modules/jb_strategy`, with the
-    audio (`jb`) and video (`video_jb`) front-ends sharing it (video-side adaptive playout is
-    opt-in via `EngineConfig::video_receiver_tuning.adaptive_playout`), plus a
-    simplified Goog-CC-style BWE (delay + loss hybrid estimation — **not** a full
-    trendline port), the RTCP feedback loop, engine-level `ref_frame` / video stats, GMSSL vendoring as a
-    submodule, the SRTP backend seam and the engine source split.
-  Public API is frozen per ADR-015 (`NIMRTC_API_VERSION` = 10002); breaking changes require a
-  MINOR/MAJOR bump. Local suite on Windows/MSVC Debug: **651/651 PASS**.
+- **Current state:** **v1.2.0 is the latest published release** (Stable). It closes the `v1.2`
+  plan — the eight convergence gates (**Track E**) and the `getStats()` observability surface
+  (**Track S**) are both complete, and the **remote-desktop** track (capture → encode → decode
+  → present, with the `remote-desktop` Profile and the `d3d11` / `metal` / `egl` renderers)
+  ships with it. The `main` trunk is post-v1.2.0 and unreleased, carrying the **v1.3** track:
+  - **v1.3 — Bounded receive path:** the audio jitter buffer's memory is **bounded** and the
+    bound is **reported**; the receiver's RTCP feedback is **bounded** and its two doors are
+    **countable**. See [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md).
+  Public API is frozen per ADR-015 (`NIMRTC_API_VERSION` = 10200); breaking changes require a
+  MINOR/MAJOR bump.
   **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy (DC-3), and `sfu-relay`
   benchmark (BENCH-1) were closed as NO on 2026-10-19 and remain off the critical path** per
   `docs/plan/v1.0-plan.md` §7 (SFU is not a project core goal).
@@ -138,34 +126,34 @@ No single feature here is brand new — but the **combination** is rare in the o
 
 > **Not a fit if:** you need a turnkey browser-grade SDK today, or you only target mobile (iOS/Android are roadmap, not a current-track item).
 
-## Download prebuilt v1.0.2
+## Download prebuilt v1.2.0
 
-Each platform bundle ships the **vendored third-party dependency stack** for
-that platform — the wolfSSL / libsrtp3 / libjuice / msquic headers and
-libraries — so you can inspect and link the same crypto, SRTP, ICE and QUIC
-primitives the engine uses without building them yourself.
+Each platform bundle ships **NimRTC itself** — the public headers, the static libraries and
+the CMake package config — alongside the **vendored third-party dependency stack** for that
+platform (the wolfSSL / libsrtp3 / libjuice / msquic headers and libraries), so you can
+inspect and link the same crypto, SRTP, ICE and QUIC primitives the engine uses without
+building them yourself.
 
-> **The v1.0.2 bundle does not yet contain NimRTC's own headers, static library, or
-> `NimRTCConfig.cmake`.** `find_package(NimRTC)` therefore does not work from the
-> downloaded v1.0.2 bundle, and linking NimRTC itself still requires a source
-> build (see [Quick Start](#quick-start) below). This is fixed on `main`: the
-> `NIMRTC_INSTALL=ON` rules now produce `include/` + `lib/` + `lib/cmake/NimRTC/`
-> (verified downstream on Windows; Linux downstream proof runs in `ci.yml` on every push), and the next release will ship them.
+> **The v1.2.0 bundle does contain NimRTC's own headers, static library and
+> `NimRTCConfig.cmake`.** `find_package(NimRTC)` therefore works from a downloaded bundle:
+> the install rules (`NIMRTC_INSTALL=ON`) produce `include/` + `lib/` + `lib/cmake/NimRTC/`,
+> verified downstream on Windows and on Linux via the `ci.yml` install + downstream-proof leg.
+> (This was *not* true of the v1.0.2 bundles, which carried only the vendored third-party
+> stack — see `CHANGELOG.md` `[1.0.2]`.)
 
-> **The v1.0.2 bundles also carry no WebRTC APM archives** — there is no
-> `lib/webrtc_apm/` directory in any of the four tarballs — so a downloaded
-> bundle provides no audio 3A at all. The release body states the per-platform
-> 3A status as "the build used the real WebRTC APM, but this bundle ships no APM
-> archives"; the archives are installed by the `main` install rules and will
-> appear in the next release.
+> **The v1.2.0 bundles do carry the WebRTC APM archives** — there is a `lib/webrtc_apm/`
+> directory in every one of the four tarballs, plus `apm_link_order.txt` — so a downloaded
+> bundle provides the real AEC/ANS/AGC, not the built-in stub 3A path. The release body
+> states the per-platform 3A status as "WebRTC APM (real 3A) bundled".
 
-- Release page: [v1.0.2](https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2)
-- Assets: `nimrtc-1.0.2-<platform>.tar.xz` + `.sha256` + `.asc` (`sbom.json` included)
+- Release page: [v1.2.0](https://github.com/NimRTC/nimrtc/releases/tag/v1.2.0)
+- Assets: `nimrtc-1.2.0-<platform>.tar.xz` + `.sha256` + `.asc` (`sbom.json` and
+  `nimrtc-signing-key.asc` included)
 
 ```bash
-tar -xJf nimrtc-1.0.2-linux-x86_64-gcc.tar.xz
-sha256sum -c nimrtc-1.0.2-linux-x86_64-gcc.tar.xz.sha256
-gpg --verify nimrtc-1.0.2-linux-x86_64-gcc.tar.xz.asc
+tar -xJf nimrtc-1.2.0-linux-x86_64-gcc.tar.xz
+sha256sum -c nimrtc-1.2.0-linux-x86_64-gcc.tar.xz.sha256
+gpg --verify nimrtc-1.2.0-linux-x86_64-gcc.tar.xz.asc
 ```
 
 Signing key fingerprint: `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`.
@@ -556,7 +544,7 @@ A pragmatic matrix for evaluators — read across the rows that matter to you:
 | **AI Agent / 3A-bypass hooks** | ✅ `pre/post-3a` PCM tap (P2) | ❌ APM is opaque | ❌ | ❌ | ❌ |
 | **ref_frame / frame-aligned timeline** | 🚧 P3 | ❌ | ❌ | ❌ | ❌ |
 | **Wire-level Chrome interop** | ✅ Case D green (media over DTLS-SRTP) + Case E green (data over Chrome WebTransport JS API) | ✅ | ✅ (Go-only) | ✅ via browser SDK | ✅ via browser SDK |
-| **Production maturity (2026)** | Stable (v1.0.2 published) | Production-grade | Production-grade | Production-grade | Production-grade |
+| **Production maturity (2026)** | Stable (v1.2.0 published) | Production-grade | Production-grade | Production-grade | Production-grade |
 
 **Where NimRTC wins outright:** aarch64 embedded, GM/T crypto path (DTLS layer), AI Agent hooks, single-trunk
 P2P+relay (where `relay` is the single-strategy gateway profile that compiles out L2 codecs; a from-scratch SFU module is not a deliverable — see `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19).
@@ -580,13 +568,12 @@ Profiles are **compile-time configurations**, not runtime dispatch. Format: see 
 | `relay-agent` | L0+L1+L3 | Relay + AI Agent hybrid (N:1), timeline re-calibration |
 | `teleop` | L0+L1+L2+L3 | Robot / embodied-AI teleoperation — intra-scheduler strict-priority ordering (DC-2 scope note applies) |
 | `live` | L0+L1+L2+L3 | One-way broadcast / live streaming |
-| `remote-desktop` | L0+L1+L2+L3 | Remote-desktop scene — screen content (`video_content_type="screen"`), 720p resolution floor, smoothness-first ladder, control plane on a separate `raw-udp-arq` stack. Landed on `main`, not yet published. |
+| `remote-desktop` | L0+L1+L2+L3 | Remote-desktop scene — screen content (`video_content_type="screen"`), 720p resolution floor, smoothness-first ladder, control plane on a separate `raw-udp-arq` stack. Shipped in v1.2.0. |
 
-> Full matrix (10 profiles — 9 shipped through v1.0.2 plus `remote-desktop`, which
-> landed on `main` — with per-field JB / 3A / BWE / DC settings) lives in
-> [`docs/profiles.md`](docs/profiles.md). `cloudgame` (cloud rendering / streaming) is a
-> **long-term candidate and is not in the shipped Profile set** — see
-> [`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md) §2 Track V.
+> Full matrix (10 profiles — all 10 shipped through v1.2.0 — with per-field JB / 3A / BWE /
+> DC settings) lives in [`docs/profiles.md`](docs/profiles.md). `cloudgame` (cloud rendering /
+> streaming) is a **long-term candidate and is not in the shipped Profile set** — see
+> [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md).
 >
 > The `profiles/` directory also carries two **unregistered** JSON files, `sfu.json` and
 > `sfu-agent.json`. They carry the `sfu_enabled` marker and the `sfu-relay` transport
@@ -616,21 +603,22 @@ authoritative plan documents are `docs/plan/v1.*-plan.md`.
 | Version | Label | Scope | Status |
 |---|---|---|---|
 | **v1.0.x** | Stable | WebTransport / msquic data plane (DC-1), intra-scheduler ordering (DC-2, see `sched.hpp` § Scope note), Chrome e2e Case D + E | ✅ **v1.0.2 published** 2026-11-03 |
-| **v1.1** | Quality + Packaging + Hardening | Reproducible transport-floor benchmarks with CI artifacts; install rules + `NimRTCConfig.cmake` so `find_package(NimRTC)` works from an installed tree; APM prebuilt shipped with it; release hardening (signed tags, four-platform release legs); transport-stack residuals (`ISctpSocket` lifecycle, ICE `last_recv_packet()` demux, unified `make_transport_instance()`, ARQ tech-preview labelling); media/RTP (SDP `a=rtpmap` video clock rate, p99 strategy validator); DTLS P2 (IPv6 `set_peer()`, NAT-rebinding `rehandshake()`, pump re-entrancy guard); weak-network quality chain (simplified Goog-CC-style BWE, unified adaptive JB, RTCP feedback loop, netem weak-network baselines); `ref_frame` and command-to-frame APIs promoted to the engine's public surface; engine-level video stats; GMSSL vendoring as a submodule + SRTP backend seam; engine source split | 🟡 landed on `main`, awaiting the release-hardening gates |
+| **v1.1** | Quality + Packaging + Hardening | Reproducible transport-floor benchmarks with CI artifacts; install rules + `NimRTCConfig.cmake` so `find_package(NimRTC)` works from an installed tree; APM prebuilt shipped with it; release hardening (signed tags, four-platform release legs); transport-stack residuals (`ISctpSocket` lifecycle, ICE `last_recv_packet()` demux, unified `make_transport_instance()`, ARQ tech-preview labelling); media/RTP (SDP `a=rtpmap` video clock rate, p99 strategy validator); DTLS P2 (IPv6 `set_peer()`, NAT-rebinding `rehandshake()`, pump re-entrancy guard); weak-network quality chain (simplified Goog-CC-style BWE, unified adaptive JB, RTCP feedback loop, netem weak-network baselines); `ref_frame` and command-to-frame APIs promoted to the engine's public surface; engine-level video stats; GMSSL vendoring as a submodule + SRTP backend seam; engine source split | ✅ **shipped in v1.2.0** 2026-11-18 |
+| **v1.2** | Convergence + Observability | The eight convergence gates (Track E): frozen public-header baseline, every adapter leaf compiled on macOS + Linux, the vendored AEC measured at 30.35 dB ERLE, both Chrome Case E planes asserted in CI, the DXGI zero-copy hand-off, the ABR behaviour measured on a saturated link, the vendored `usrsctp` tree removed, and the release notes themselves; plus the `getStats()` observability surface (Track S): the snapshot lifecycle, per-SSRC inbound RTP stats, the RTCP feedback broken down by type, the transport / data-channel / remote-desktop planes, and a **145-field stable field set** that CI derives from the header | ✅ **v1.2.0 published** 2026-11-18 |
+| **v1.3** | Bounded receive path | The audio jitter buffer's memory is bounded and the bound is reported; the receiver's RTCP feedback is bounded and its two doors are countable; the video-sync seam; the remaining engine decomposition | 🟡 landed on `main`, unreleased — see [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md) |
 | **v1.2+** | — | SM4-GCM SRTP implementation, `cloudgame` (long-term candidate), `takeover` (remote-vehicle takeover, P4) | ⏸️ planned |
 | — | Closed | In-process SFU module (`nimrtc_sfu`), DC forwarding policy (DC-3), `sfu-relay` benchmark (BENCH-1) | ❌ **NO** — closed 2026-10-19, BDFL: SFU is not a project core goal (`docs/plan/v1.0-plan.md` §7) |
 
 Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13 ·
-[`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md).
+[`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md).
 
 ---
 
-## Current progress (v1.0.2 published — main ahead)
+## Current progress (v1.2.0 published — main ahead)
 
-What you can do today. The table below covers what shipped **up to and including v1.0.2**
+What you can do today. The table below covers what shipped **up to and including v1.2.0**
 (the published release); the block after it lists the work that is **landed on `main` but not
-yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651 PASS**
-(2026-11-04; 3 tests skip when the real WebRTC APM is not part of the build).
+yet published**.
 
 | Capability | Status | Shipped in |
 |---|---|---|
@@ -669,13 +657,11 @@ yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651
 | H.265 (HEVC) video codec — end to end | ⚠️ **implemented, but hardware- or stub-only** — `src/modules/h265/` registers a video-codec plugin under the id `"h265"` (the spelling `EngineConfig::video_codec_name` uses). The RTP payload format is **RFC 7798** (single NAL unit, AP type 48, FU type 49 with a 6-bit `FuType`), and the SDP parameters are RFC 7798 too (`profile-id`, `level-id`, `tier-flag`, `tx-mode="SRST"`, `sprop-vps` / `sprop-sps` / `sprop-pps`). The **only real H.265 codec in the tree is the NVENC / NVDEC hardware path** (`NIMRTC_PLUGINS_NVENC=ON` / `NIMRTC_PLUGINS_NVDEC=ON`); there is **no bundled H.265 software codec** — without a hardware backend the module falls back to a *stub* that emits a synthetic bitstream, so "H.265 works" is only true on a machine with an NVIDIA GPU. | v1.2 |
 | AV1 video codec — end to end | ⚠️ **implemented, but hardware- or stub-only for encode** — `src/modules/av1/` registers a video-codec plugin under the id `"av1"`. The RTP payload format is **draft-ietf-payload-av1** (aggregation header, LEB128 lengths, Annex-B framing, OBU reassembly). The SDP side is the AV1 Unified Plan `a=fmtp:` body. The **real** AV1 paths are the **NVENC / NVDEC hardware** encode/decode and the vendored **dav1d software decoder** (`NIMRTC_PLUGINS_DAV1D=ON`); there is **no bundled AV1 software encoder** — the software encode path is the synthetic stub. | v1.2 |
 
-### Landed on `main`, not yet published
+### Shipped in v1.2.0 (landed on the trunk, then cut)
 
-These are in the trunk and are part of the **`v1.2.0`** release: `CHANGELOG.md`
-carries the `## [1.2.0] - 2026-11-18` section, and the tree's version is
-`1.2.0` with an empty `NIMRTC_API_VERSION_PRE_RELEASE`. The `v1.2.0` **tag**
-is not cut yet — the release-hardening track (four-platform release legs,
-signed tag) has not closed. See `RELEASING.md` §3.3 for the cut procedure.
+These shipped in the **`v1.2.0`** release: `CHANGELOG.md` carries the
+`## [1.2.0] - 2026-11-18` section, the tag is cut and signed, and the four platform bundles
+are published.
 
 | Capability | Status | Track |
 |---|---|---|
@@ -699,8 +685,18 @@ signed tag) has not closed. See `RELEASING.md` §3.3 for the cut procedure.
 | **Capture / encode budget benchmark** — [`tools/benchmark_capture_encode.py`](tools/benchmark_capture_encode.py) and the committed artifact [`docs/benchmarks/capture_encode_windows_x86_64.json`](docs/benchmarks/capture_encode_windows_x86_64.json) | ✅ landed | remote-desktop plan J5 |
 | OHOS Stage 1 toolchain proof (`debug.ohos-arm64` zero errors, no unresolved symbols) | ⏸️ blocked — no OHOS SDK on this host | v1.1 Track O1 |
 
-> v1.0.2 is the **published Stable** release — public API frozen per ADR-015
-> (`NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`);
+### Landed on `main`, not yet published
+
+These are in the trunk and are **not** in the published v1.2.0 bundle — the `v1.3` track.
+See [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md).
+
+| Capability | Status | Track |
+|---|---|---|
+| The audio jitter buffer's memory is **bounded**, and the bound is **reported** | ✅ landed | v1.3 |
+| The receiver's RTCP feedback is **bounded**, and its two doors are **countable** | ✅ landed | v1.3 |
+
+> v1.2.0 is the **published Stable** release — public API frozen per ADR-015
+> (`NIMRTC_API_VERSION` = 10200, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`);
 > WebTransport / msquic data plane (DC-1) + intra-scheduler ordering (DC-2, see `sched.hpp` § Scope note);
 > Chrome e2e Case E (DataChannel over the WebTransport JS API — `new WebTransport(url)`, **not** `RTCPeerConnection.createDataChannel()`; standard WebRTC DataChannel interop is **not** claimed; Firefox/Safari WebTransport support is incomplete) **PASS E1–E6** —
 > datagram + bidi-stream echo against `examples/demo-wtserver` via

@@ -52,6 +52,28 @@ python tools/check_md_links.py README.md  # specific files
 Exit code is non-zero when a link points at a missing file or an anchor
 that no heading produces.
 
+## The README's release claims
+
+| Script | Purpose |
+|--------|---------|
+| `check_readme_release.py` | Check the README's version badge, its "Latest release" paragraph and its "Current `main`" paragraph -- in both `README.md` and `README.zh.md` -- against the newest released section of `CHANGELOG.md` and the source version in `CMakeLists.txt`. Wired into CI as the `docs / markdown links` job. |
+
+```
+python tools/check_readme_release.py --verbose
+python tools/check_readme_release.py --self-test
+```
+
+The badge names the newest *released* version, not the source version:
+after a cut, `CMakeLists.txt` moves on to the next patch level while the
+newest published version stays where it was, so a badge that tracked the
+source version would advertise a release that does not exist.
+
+This check exists because the README's release claims went stale for
+eleven days after `v1.2.0`: the badge still read `v1.0.2`, the "Latest
+release" paragraph still described `v1.0.2`, and the body of the same
+file said `v1.2.0` was shipped. Documentation drift is invisible to the
+compiler and to the test suite, so only an explicit check can catch it.
+
 ## The plugin-catalogue contract
 
 | Script | Purpose |
@@ -169,6 +191,9 @@ pull request rather than a click in the web UI.
 |--------|---------|
 | `check_ci_ruleset.py` | Compares the ruleset mirror against the CI workflows and fails when the two disagree. Wired into CI as the `docs / markdown links` job and into CTest as `test_ci_ruleset`. |
 | `apply_ci_ruleset.py` | Writes the mirror to the GitHub repository (`--apply`), or reports the difference (`--check`). Needs a token with write access. |
+| `ci_retry_runner.py` | Re-runs the CI jobs that were **starved of a runner** (`steps == 0` and no runner assigned) and leaves every job that ran alone. Polls until the run reports `completed` before touching anything (a re-run issued at an `in_progress` run answers `403`), retries 5xx/429 with backoff, and keeps the loop guard per job name rather than per run attempt. `--self-test` pins all seven classifications plus the wait and budget behaviour; wired into CTest as `test_ci_retry_runner`. |
+| `collect_licenses.py` | Copies every vendored component's licence text into `licenses/` in the install staging tree and writes `licenses/THIRD_PARTY_NOTICES.txt` (SPDX id + SHA-256 per file). Both BSD-3-Clause and Apache-2.0 require the notice to travel with a binary redistribution; the SBOM named the SPDX ids but the texts never reached the bundle. Finds `LICENSE` / `COPYING` / `PATENTS` at the vendor root **or the submodule mount point** (`dav1d`'s is `src/COPYING`), verifies and carries inline notices (`nv_codec_headers`, headers under `include/ffnvcodec/`), and fails the release cut if a distributed vendor has none; an uninitialised submodule is skipped, not failed. `--self-test`; CTest `test_collect_licenses`. |
+| `make_release_bundle.py` | Packs **exactly** the install staging tree into a `.tar.xz` (the v1.0.1 Windows asset packed the whole CI workspace instead). Refuses an empty staging tree, warns above a 96 MiB budget, and fails above a 256 MiB mis-archive limit. |
 
 ```
 python tools/check_ci_ruleset.py --verbose

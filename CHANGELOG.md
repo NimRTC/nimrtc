@@ -9,6 +9,91 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.2.0`.
 
+- **The release bundle now ships the third-party licence texts, and the
+  bundle-size limit is no longer a hidden release blocker.**
+  The v1.2.0 review noticed the Windows bundle grew from 40.5 MB to
+  62.8 MB (+55 %) and asked whether the licence obligations were
+  complete.  They were not.  `release.yml` writes a CycloneDX SBOM from
+  `src/third_party/vendor.json`, and the SBOM carries each component's
+  SPDX identifier — but the licence **text** stayed in the source tree.
+  Both BSD-3-Clause and Apache-2.0 require the notice to accompany a
+  binary redistribution, so the bundle shipped six static codecs
+  (`libvpx`, `svt-av1`, `libyuv`, `dav1d`, `openh264`, `wolfssl`)
+  without discharging them.
+
+  `tools/collect_licenses.py` now runs in all four release build jobs
+  after `cmake --install` and before packing.  It copies every vendored
+  tree's `LICENSE` / `COPYING` / `PATENTS` / `NOTICE` into `licenses/`
+  in the staging tree, writes `licenses/THIRD_PARTY_NOTICES.txt`
+  (SPDX id, upstream URL, pinned commit, SHA-256 per file), carries the
+  `nv_codec_headers` headers whose MIT notice is embedded in every file
+  (after checking that claim), and **fails the cut** if a distributed
+  vendor has no licence file.  An uninitialised submodule is reported
+  as a local-clone fact, not a defect.  Checked against the pinned
+  SHAs, all 18 vendors have a dischargeable obligation: 17 ship a
+  licence file or an inline notice (`nv_codec_headers`,
+  `libopus`'s patent statement, …) and `webrtc_audio_processing`
+  ships one in the tree the build fetches.  Wiring the gate turned up
+  three defects in it: the emptiness test ran on `<vendor>/`, which
+  always holds NimRTC's wrapper `CMakeLists.txt`, so an uninitialised
+  submodule never looked empty; `dav1d`'s licence is `COPYING` at the
+  submodule root rather than `LICENSE`; and `nv_codec_headers` keeps
+  its headers under `include/ffnvcodec/`.  All three are fixed and
+  pinned by `--self-test`.
+
+  The same review's size number exposed a second problem.  The
+  Windows bundle is 62,826,812 bytes (59.9 MiB) and
+  `tools/make_release_bundle.py` refused anything above **64 MiB** — a
+  guard written when a real bundle was 2-3 MB to catch the v1.0.1
+  mis-archive.  At 59.9 MiB the next codec would have failed the cut
+  with an error that says "sanity limit".  The limit is now 256 MiB
+  (back to being a mis-archive detector), and a separate 96 MiB budget
+  prints a warning with the current size, so payload growth is visible
+  in the release log before it becomes a failure.
+
+- **`ci-retry` no longer goes red on its own, and no longer refuses a
+  legitimate retry (post-v1.2.0 review).**
+  Reading all ten red `ci-retry` runs between 11-17 and 11-19 found two
+  defects, neither of which was the one the review suspected:
+
+  - **Nine of the ten red runs were `403 Forbidden`, not
+    misclassification.**  `workflow_run` fires on the *run*
+    transition, but a `cancel-in-progress` cancel tears jobs down
+    asynchronously, and the run's own state is a snapshot taken at a
+    different moment from its jobs'.  Run `44439751037` was still
+    `in_progress` at `01:49:22Z` when its `ci-retry` fired and tried
+    to re-run its attempt-1 jobs; the platform refuses to re-run a
+    job whose run is still running.  The script now polls until the
+    run reports `completed` (up to 20 × 15 s), and if it never settles
+    it logs the state and exits 0 — a run that never settled is not a
+    `ci-retry` failure.  The tenth was `HTTP 502: Bad Gateway`, a
+    platform hiccup: `tools/ci_retry_runner.py` now retries 5xx and
+    429 with exponential backoff, and `403` is deliberately excluded
+    from that set because the same call would get the same answer.
+  - **The loop guard refused a real retry.**  The guard was the run's
+    `run_attempt`, so any attempt above 1 was refused.  Run
+    `44306330102` starved its macOS leg in attempt 1, was re-run, and
+    the same leg starved again in attempt 2 — the guard said "this run
+    has had its retry", the retry never happened, and the merge gate
+    stayed red.  A job-level re-run also bumps `run_attempt` for
+    *every* job, so the counter never described the job it was
+    guarding.  The guard is now per job name (`--max-retries 1`,
+    counted by walking the per-attempt job lists); dry-running the
+    classifier against `44306330102` selects the macOS leg, where the
+    old guard selected nothing.
+
+  The review suggested retrying every `cancelled` run.  Measured over
+  the 60 most recent cancelled runs, 124 cancelled jobs had a runner
+  and had run steps (a supersede or an operator stop) against 25 that
+  never reached a machine, so that change would re-run five times more
+  superseded jobs than starved ones.  `cancelled` is therefore handled
+  by the same `steps == 0 && runner_name == ""` rule as `failure`, and
+  the self-test now pins the concurrency-cancel shape explicitly.
+
+  `ci-fast` is dropped from the watched workflows: it triggered 1 of
+  the 498 measured `ci-retry` runs over the last 1200, and
+  `windows / fast` is not a required check.
+
 - **The receiver's feedback to the peer is bounded, and the two reasons
   for a key-frame request are now distinguishable (v1.3 plan item `Q4`,
   video plan `T2`).**
@@ -844,14 +929,18 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   against real runs of this repository (43938323684 → starved;
   43877514623 → genuine).
 
-  The loop guard is the run's attempt counter: only attempt 1 is
-  retried, because a job-level re-run increments it (verified against
-  the API: run 43938323684 went 1 → 2 after a job-level re-run).  The
-  classifier lives in `tools/ci_retry_runner.py` with a `--self-test`
-  that pins every classification, and the self-test runs both in CI and
-  as a ctest case (`test_ci_retry_runner`).
+  The loop guard is now per job name: `--max-retries 1` lets a job be
+  re-run once on top of the attempt it was first seen starved in, and
+  a third starvation is reported as a sustained outage instead of
+  retried forever.  (v1.0.0 shipped a run-level guard on `run_attempt`,
+  which was wrong in both directions — see the 2026-11-19 fix below.)
+  The classifier lives in `tools/ci_retry_runner.py` with a
+  `--self-test` that pins every classification, and the self-test runs
+  both in CI and as a ctest case (`test_ci_retry_runner`).
 
-  The scope covers `ci`, `ci-e2e`, `ci-fast` and `release`.  `release`
+  The scope covers `ci`, `ci-e2e` and `release`.  (`ci-fast` was
+  dropped on 2026-11-19: it triggered 1 of 498 measured `ci-retry`
+  runs, and `windows / fast` is not a required check.)  `release`
   needed three properties to be verified experimentally before it
   could be included, because a release cut is the most expensive
   thing the repository does and a partial one is worse than a red

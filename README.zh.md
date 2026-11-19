@@ -1,30 +1,34 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.2.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.3.0-green.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#平台支持)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#构建--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **最新发布版**：v1.2.0 稳定版 —— 收尾 `v1.2` 计划的发布：**Track E**（八道收敛门）与
-> **Track S**（`getStats()` 可观测性接口面）全部完成，**remote-desktop** 轨道（采集 → 编码 →
-> 解码 → 呈现，含 `remote-desktop` Profile）随之发布。标签为 annotated + SSH 签名
-> （`git tag -s -a`，ed25519），可用 `tools/verify_tag_signature.py` 验证；每个 bundle 都带
-> 分离签名 `.asc`，并随发布附带 `nimrtc-signing-key.asc` 公钥（指纹
+> **最新发布版**：v1.3.0 稳定版 —— 收尾 `v1.3` 计划的发布：**Track Q**（Q1–Q7）全部完成。
+> 本次发布的主张是 `v1.2.0` 明确不声称的那条轴：**在恶劣网络下优雅降级**。
+> **Q1 / Q1b** —— 码流中途的参数集变更可自行解码，H.264（软件）与 H.265（NVDEC）均已验证，
+> 无需关键帧往返，也不在链路上发 PLI。**Q2** —— 音频抖动缓冲的内存有界，且上界可上报。
+> **Q3** —— 重传走独立的 RFC 4588 流。**Q4** —— 接收侧反馈有界，两个请求关键帧的原因可区分。
+> **Q5** —— soak 可同时 impairments 网络并驱动引擎，跨模拟 NAT；24 小时窗口已归档并附 netem
+> 参数。**Q6** —— 画面与声音对齐（R3 的视频半边；音频半边在 `v1.2.0` 已发布）。
+> **Q7** —— 硬件编解码链路由可复跑的任务端到端验证（自托管 GPU runner），并归档 `PASS` 记录。
+> 标签为 annotated + SSH 签名（`git tag -s -a`，ed25519），可用 `tools/verify_tag_signature.py`
+> 验证；每个 bundle 都带分离签名 `.asc`，并随发布附带 `nimrtc-signing-key.asc` 公钥（指纹
 > `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`）。公共 API 按 ADR-015 冻结
-> （`NIMRTC_API_VERSION` = 10200，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）。Chrome ↔ NimRTC
-> 数据交换（DC-1）：走 Chrome WebTransport JS API（`new WebTransport(url)`，不是
-> `RTCPeerConnection.createDataChannel()`；标准 WebRTC DataChannel 互通未声称，Firefox/Safari
-> 对 WebTransport 支持不完整）**PASS E1–E6**。
-> 见 [CHANGELOG.md](CHANGELOG.md) `## [1.2.0]` 与 `docs/plan/v1.2-next-plan.md`。
+> （`NIMRTC_API_VERSION` = 10300，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）。
+> 发布门是**读出来的，不是假设的**：preflight 会在标签处校验七天 soak 窗口、确认标签是 `main`
+> 的祖先，并确认 README 已经描述了正在发布的版本。
+> 见 [CHANGELOG.md](CHANGELOG.md) `## [1.3.0]` 与 `docs/plan/v1.3-plan.md`。
 >
-> **当前 `main`（v1.2.0 之后，尚未发版）**：主干上挂着 **v1.3** 轨道（音频抖动缓冲的内存
-> 有界且上界可上报；接收侧 RTCP feedback 有界且两个入口可计数），以及 `v1.3` 计划文档本身
-> —— 见 [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md)。
-> **v1.2.0 的 bundle 里已经包含** NimRTC 自己的头文件、静态库与 `NimRTCConfig.cmake`，
+> **当前 `main`（v1.3.0 之后，尚未发版）**：主干上挂着 **v1.4** 计划
+> （Track N / D —— 真实 TURN + TLS、macOS 下游验证、原生 coturn CI 任务，以及 H.265
+> 参数集断言的软件半边）—— 见 [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md)。
+> **v1.3.0 的 bundle 里已经包含** NimRTC 自己的头文件、静态库与 `NimRTCConfig.cmake`，
 > 因此从下载的 bundle 就能直接 `find_package(NimRTC)`。
-> 详见 [当前进度](#当前进度v120-已发布--main-领先) 与 [路线图](#路线图)。
+> 详见 [当前进度](#当前进度v130-已发布--main-领先) 与 [路线图](#路线图)。
 >
 > 📖 **本文档为英文 README 的中文版本**。技术 canonical 文档以 [`docs/zh/architecture.md`](docs/zh/architecture.md) 为准（ADR-012）。中文 README 与英文 README 内容同步维护。
 >
@@ -68,14 +72,16 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 
 - **是什么**：一个可嵌入的 C++20 媒体引擎，从零开始实现的 WebRTC 替代品，**不是** libwebrtc 的 fork。
 - **存在的原因**：libwebrtc 体积庞大、难以嵌入、加密和编解码不透明。NimRTC 保留同等级协议兼容性的同时，把 monolith 替换成分层 + plugin 适配的引擎，可被检查、可被定制、可被部署在 aarch64 上。
-- **当前状态**：**v1.2.0 是最新已发布版本**（稳定版）。它收尾了 `v1.2` 计划 —— 八道收敛门
-  （**Track E**）与 `getStats()` 可观测性接口面（**Track S**）全部完成，**remote-desktop**
-  轨道（采集 → 编码 → 解码 → 呈现，含 `remote-desktop` Profile 与 `d3d11` / `metal` / `egl`
-  渲染器）随之发布。`main` 主干在 v1.2.0 之后、尚未发版，上面挂着 **v1.3** 轨道：
-  - **v1.3 —— 接收路径有界**：音频抖动缓冲的内存**有界**且上界**可上报**；接收侧 RTCP
-    feedback **有界**且两个入口**可计数**。见
-    [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md)。
-  公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10200），破坏性变更需要 MINOR/MAJOR 版本号。
+- **当前状态**：**v1.3.0 是最新已发布版本**（稳定版）。它收尾了 `v1.3` 计划 —— **Track Q**
+  （Q1–Q7）全部完成，引擎现在声称了 `v1.2.0` 明确不声称的那条轴：**在恶劣网络下优雅降级**。
+  码流中途的参数集变更可自行解码（Q1 / Q1b，H.264 软件与 H.265 NVDEC），音频抖动缓冲的内存
+  **有界**且上界**可上报**（Q2），重传走独立的 RFC 4588 流（Q3），接收侧 RTCP feedback
+  **有界**且两个入口**可计数**（Q4），soak 可**扰动网络**并驱动引擎、跨模拟 NAT 且 24 小时
+  窗口已归档（Q5），画面与声音**对齐**（Q6），硬件编解码链路由可复跑的任务端到端验证（Q7）。
+  `main` 主干在 v1.3.0 之后、尚未发版，上面挂着 **v1.4** 轨道 —— 真实 TURN + TLS 传输、
+  macOS 下游验证与原生 `coturn` CI 任务。见
+  [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md)。
+  公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10300），破坏性变更需要 MINOR/MAJOR 版本号。
   **In-process SFU relay（`nimrtc_sfu`）、DC 转发策略（DC-3）、`sfu-relay` 基准（BENCH-1）
   已于 2026-10-19 关闭为 NO，仍不在关键路径上**（见 `docs/plan/v1.0-plan.md` §7，SFU 不是项目核心目标）。
 
@@ -131,31 +137,31 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 
 ---
 
-## 下载预编译包（v1.2.0）
+## 下载预编译包（v1.3.0）
 
 每个平台的 bundle 都包含 **NimRTC 本体**——公共头文件、静态库与 CMake 包配置——以及该平台
 **vendored 第三方依赖栈**（wolfSSL / libsrtp3 / libjuice / msquic 的头文件与库），你可以直接
 检视并链接引擎所用的同一套 crypto、SRTP、ICE、QUIC 原语，不必自己先编译一遍。
 
-> **v1.2.0 的 bundle 里包含 NimRTC 自己的头文件、静态库和 `NimRTCConfig.cmake`。**
-> 因此从下载的 v1.2.0 bundle 里就能直接 `find_package(NimRTC)`：安装规则
+> **v1.3.0 的 bundle 里包含 NimRTC 自己的头文件、静态库和 `NimRTCConfig.cmake`。**
+> 因此从下载的 v1.3.0 bundle 里就能直接 `find_package(NimRTC)`：安装规则
 > （`NIMRTC_INSTALL=ON`）产出 `include/` + `lib/` + `lib/cmake/NimRTC/`，
 > Windows 下游已验证，Linux 下游验证在 `ci.yml` 每次推送时运行。
 > （这一点在 v1.0.2 的 bundle 上**不成立**——那四个包只有 vendored 第三方栈，
 > 见 `CHANGELOG.md` `[1.0.2]`。）
 
-> **v1.2.0 的 bundle 里带 WebRTC APM 归档**：四个 tarball 都有 `lib/webrtc_apm/` 目录，
+> **v1.3.0 的 bundle 里带 WebRTC APM 归档**：四个 tarball 都有 `lib/webrtc_apm/` 目录，
 > 外加 `apm_link_order.txt`，所以下载到的 bundle 提供的是真实的 AEC/ANS/AGC，而不是内置的
 > stub 3A 路径。发布说明里的逐平台 3A 状态因此写作"WebRTC APM (real 3A) bundled"。
 
-- Release 页面：[v1.2.0](https://github.com/NimRTC/nimrtc/releases/tag/v1.2.0)
-- 资产：`nimrtc-1.2.0-<platform>.tar.xz` + `.sha256` + `.asc`（含 `sbom.json` 与
+- Release 页面：[v1.3.0](https://github.com/NimRTC/nimrtc/releases/tag/v1.3.0)
+- 资产：`nimrtc-1.3.0-<platform>.tar.xz` + `.sha256` + `.asc`（含 `sbom.json` 与
   `nimrtc-signing-key.asc`）
 
 ```bash
-tar -xJf nimrtc-1.2.0-linux-x86_64-gcc.tar.xz
-sha256sum -c nimrtc-1.2.0-linux-x86_64-gcc.tar.xz.sha256
-gpg --verify nimrtc-1.2.0-linux-x86_64-gcc.tar.xz.asc
+tar -xJf nimrtc-1.3.0-linux-x86_64-gcc.tar.xz
+sha256sum -c nimrtc-1.3.0-linux-x86_64-gcc.tar.xz.sha256
+gpg --verify nimrtc-1.3.0-linux-x86_64-gcc.tar.xz.asc
 ```
 
 签名公钥指纹：`114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`。
@@ -514,7 +520,7 @@ Plugin 是 NimRTC **可演进性**的核心机制：P0–P1 用内置实现，P2
 | **AI Agent / 3A 旁路 hook** | ✅ `pre/post-3a` PCM tap（P2） | ❌ APM 黑盒 | ❌ | ❌ | ❌ |
 | **ref_frame / 帧对齐时间线** | 🚧 P3 | ❌ | ❌ | ❌ | ❌ |
 | **线缆级 Chrome 互通** | ✅ Case D 绿色（媒体）+ Case E 绿色（WebTransport DataChannel） | ✅ | ✅（仅 Go） | ✅ 通过浏览器 SDK | ✅ 通过浏览器 SDK |
-| **2026 生产成熟度** | Stable（v1.2.0 已发布） | Production-grade | Production-grade | Production-grade | Production-grade |
+| **2026 生产成熟度** | Stable（v1.3.0 已发布） | Production-grade | Production-grade | Production-grade | Production-grade |
 
 **NimRTC 全面领先的领域**：aarch64 嵌入式、GM/T 国密路径（DTLS 层）、AI Agent hook、单主干 P2P+relay（`relay` 是单策略网关 profile，编译期跳过 L2 编解码；from-scratch 的 SFU 模块不是交付内容 —— 见 `docs/plan/v1.0-plan.md` §7，BDFL 2026-10-19）。
 **NimRTC 落后的领域**：生态广度、编解码覆盖、浏览器引擎对等、年限沉淀。**按需选择。**
@@ -571,18 +577,19 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | **v1.0.x** | Stable | WebTransport / msquic 数据面（DC-1）、调度器内排序（DC-2）、Chrome e2e Case D + E | ✅ **v1.0.2 已发布** 2026-11-03 |
 | **v1.1** | 质量 + 打包 + 加固 + 质量线 | 可复现的传输层基线并产出 CI artifact；安装规则 + `NimRTCConfig.cmake`，让 `find_package(NimRTC)` 在安装树里可用；APM 预编译产物随包发布；发布加固（签名 tag、四平台 release 腿）；传输栈残留（`ISctpSocket` 生命周期、ICE `last_recv_packet()` 分流、统一 `make_transport_instance()`、ARQ tech-preview 标注）；媒体/RTP（SDP `a=rtpmap` 视频时钟率、p99 策略校验器）；DTLS P2（IPv6 `set_peer()`、NAT rebinding `rehandshake()`、pump 重入保护）；弱网质量链（简化版 Goog-CC 风格 BWE、统一自适应 JB、RTCP feedback 回环、netem 弱网基线）；`ref_frame` 与指令-帧 API 提升到引擎公开面；引擎级 video stats；GMSSL 以 submodule 形式 vendor + SRTP 后端 seam；引擎源码拆分 | ✅ **已在 v1.2.0 发布** 2026-11-18 |
 | **v1.2** | 收敛 + 可观测 | 八道收敛门（Track E）：冻结公共头文件基线、macOS 与 Linux 编译每个适配器叶子、vendored AEC 实测 30.35 dB ERLE、两条 Chrome Case E 平面进 CI 断言、DXGI 零拷贝交接、饱和链路上的 ABR 实测、删除 vendored `usrsctp` 树、发布说明本身；以及 `getStats()` 可观测接口面（Track S）：快照生命周期、按 SSRC 的入站 RTP 统计、按类型拆分的 RTCP feedback、传输 / 数据通道 / 远程桌面三个平面，以及由 CI 从头文件派生的 **145 字段稳定字段集** | ✅ **v1.2.0 已发布** 2026-11-18 |
-| **v1.3** | 接收路径有界 | 音频抖动缓冲的内存有界且上界可上报；接收侧 RTCP feedback 有界且两个入口可计数；视频同步 seam；引擎拆分的剩余部分 | 🟡 已落地在 `main`，尚未发版 —— 见 [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md) |
+| **v1.3** | 韧性与质量（Track Q） | 恶劣网络下优雅降级：码流中途的参数集变更可自行解码（Q1 / Q1b），音频抖动缓冲的内存有界且上界可上报（Q2），重传走独立 RFC 4588 流（Q3），接收侧 RTCP feedback 有界且两个入口可计数（Q4），soak 可扰动网络并驱动引擎、跨模拟 NAT 且 24 小时窗口已归档（Q5），画面与声音对齐（Q6），硬件编解码链路由可复跑任务端到端验证（Q7） | ✅ **v1.3.0 已发布** 2026-11-20 |
+| **v1.4** | 传输 + 触达 | 真实 TURN / TLS 传输（N1）、macOS 下游验证（N9）、原生 `coturn` CI 任务（N5-2）、引擎拆分剩余的四项行为 | 🟡 已启动 —— 见 [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md) |
 | **v1.2+** | — | SM4-GCM SRTP 实现、`cloudgame`（长线候选）、`takeover`（远程车辆接管，P4） | ⏸️ 规划中 |
 | — | 已关闭 | 进程内 SFU 模块（`nimrtc_sfu`）、DC 转发策略（DC-3）、`sfu-relay` 基准（BENCH-1） | ❌ **NO** —— 2026-10-19 关闭，BDFL：SFU 不是项目核心目标（`docs/plan/v1.0-plan.md` §7） |
 
 完整路线图：[`docs/zh/architecture.md`](docs/zh/architecture.md) §13 ·
-[`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md)。
+[`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md)。
 
 ---
 
-## 当前进度（v1.2.0 已发布 —— main 领先）
+## 当前进度（v1.3.0 已发布 —— main 领先）
 
-今天就能用的能力。下表覆盖**截至 v1.2.0（含）**已发布的内容；表后的段落列出
+今天就能用的能力。下表覆盖**截至 v1.3.0（含）**已发布的内容；表后的段落列出
 **已落地在 `main` 但尚未发版**的工作。
 
 | 能力 | 状态 | 落地版本 |
@@ -624,6 +631,21 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | AV1 视频编解码 —— 端到端 | ⚠️ **已实现，但编码只有硬件路径或 stub** —— `src/modules/av1/` 注册 id 为 `"av1"` 的 video-codec 插件。RTP 载荷格式遵循 **draft-ietf-payload-av1**（aggregation header、LEB128 长度、Annex-B 分帧、OBU 重组）；SDP 侧为 AV1 Unified Plan 的 `a=fmtp:` 字段。真实的 AV1 路径是 **NVENC / NVDEC** 硬件编解码与 vendored 的 **dav1d 软件解码器**（`NIMRTC_PLUGINS_DAV1D=ON`）；**没有捆绑 AV1 软件编码器** —— 软件编码路径是合成 stub。 | v1.2 |
 | Chrome ↔ NimRTC 媒体互通 e2e（Case D，四平台全绿） | ✅ | v0.11.0 |
 
+### 已在 v1.3.0 发布（先落地到主干，再切标签）
+
+这些随 **`v1.3.0`** 发布：`CHANGELOG.md` 有 `## [1.3.0] - 2026-11-20` 段落，标签已切并签名，
+四个平台的 bundle 已发布。这就是 **Track Q** 这条线 —— 引擎现在能在恶劣网络下优雅降级。
+
+| 能力 | 状态 | 轨道 |
+|---|---|---|
+| 码流中途的参数集变更可自行解码 —— **无需关键帧往返，也不在链路上发 PLI** —— H.264（软件）与 H.265（NVDEC）均已验证 | ✅ 已落地 | v1.3 Q1 / Q1b |
+| 音频抖动缓冲的内存**有界**，且上界**可上报** | ✅ 已落地 | v1.3 Q2 |
+| 重传走独立的 **RFC 4588** 流 | ✅ 已落地 | v1.3 Q3 |
+| 接收侧 RTCP feedback **有界**，且两个请求关键帧的原因**可区分** | ✅ 已落地 | v1.3 Q4 |
+| soak 可**扰动网络**并驱动引擎，跨模拟 NAT；24 小时窗口已归档并附 netem 参数 | ✅ 已落地 | v1.3 Q5 |
+| 画面与声音**对齐**（R3 的视频半边 —— 音频半边在 `v1.2.0` 已发布） | ✅ 已落地 | v1.3 Q6 |
+| 硬件编解码链路由**可复跑**的任务端到端验证（自托管 GPU runner），并归档 `PASS` 记录 | ✅ 已落地 | v1.3 Q7 |
+
 ### 已在 v1.2.0 发布（先落地到主干，再切标签）
 
 这些随 **`v1.2.0`** 发布：`CHANGELOG.md` 有 `## [1.2.0] - 2026-11-18` 段落，标签已切并签名，
@@ -653,16 +675,17 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 
 ### 已落地在 `main`，尚未发版
 
-这些在主干上，**不在**已发布的 v1.2.0 bundle 里 —— 即 `v1.3` 轨道。
-见 [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md)。
+这些在主干上，**不在**已发布的 v1.3.0 bundle 里 —— 即 `v1.4` 这条线。
+见 [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md)。
 
 | 能力 | 状态 | 轨道 |
 |---|---|---|
-| 音频抖动缓冲的内存**有界**，且上界**可上报** | ✅ 已落地 | v1.3 |
-| 接收侧 RTCP feedback **有界**，且两个入口**可计数** | ✅ 已落地 | v1.3 |
+| **真实 TURN / TLS** 传输（v1.3 推迟出来的那半边） | 🟡 进行中 | v1.4 N1 |
+| **macOS 下游验证** 与**原生 `coturn`** CI 任务 | 🟡 进行中 | v1.4 N5-2 / N9 |
+| **H.265 参数集断言的软件半边**（v1.3 推迟的 Q1 半边） | ⏳ 排在 `1.3.x` 线上作为 Q1b | v1.3 §9 |
 
-> v1.2.0 是**已发布的 Stable** 版本 —— 公共 API 按 ADR-015 冻结
-> （`NIMRTC_API_VERSION` = 10200，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）；
+> v1.3.0 是**已发布的 Stable** 版本 —— 公共 API 按 ADR-015 冻结
+> （`NIMRTC_API_VERSION` = 10300，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）；
 > WebTransport / msquic 数据面（DC-1）+ 调度器内排序（DC-2）；
 > Chrome e2e Case E（DataChannel over WebTransport / QUIC）**PASS E1–E6** ——
 > 对 `examples/demo-wtserver` 的 datagram + bidi-stream 回显，经

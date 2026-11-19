@@ -1676,6 +1676,80 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
   nimrtc_copy_wolfssl_certs(test_engine_video_e2e_loopback)
 endif()
 
+# ----------------------------------------------------------------------------
+# The engine-level *hardware* encode test (v1.3 plan Q7 / O-6).
+#
+# The software e2e test above proves the media path with OpenH264.  This
+# one proves the same chain with the engine pinned to `video_codec_backend
+# = "hardware"` — a pin the engine honours by *failing* rather than
+# falling back (plan B2) — and asserts from the stats that a hardware
+# backend answered (`video_codec_hardware_accelerated`, `video_codec_
+# backend` neither "software-stub" nor "openh264") and that the picture
+# still arrives pixel-correct.  It skips on a host with no hardware
+# encoder; the dedicated evidence run is `examples/hw-e2e` +
+# `tools/run_hardware_e2e.py` + `.github/workflows/hardware.yml`.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_FRAME AND NIMRTC_MODULE_H264)
+  add_executable(test_engine_video_hw_loopback test_engine_video_hw_loopback.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_hw_loopback PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::h264
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_hw_loopback PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_hw_loopback PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_hw_loopback PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_hw_loopback LENIENT)
+  add_test(NAME test_engine_video_hw_loopback
+      COMMAND $<TARGET_FILE:test_engine_video_hw_loopback>)
+  set_tests_properties(test_engine_video_hw_loopback PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_hw_loopback
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_video_hw_loopback)
+endif()
+
 # Phase 3 / C3 — the GPU zero-copy video send path.  The test needs the
 # video pipeline (receiver / sender "reference") so it reuses
 # `nimrtc_add_engine_codec_test`'s link set.

@@ -440,6 +440,51 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which accepts only a run of at least **24 h** under loss **and**
   jitter **and** reorder on a clean tree.
 
+- **The hardware codec path is now exercised end-to-end by something
+  that re-runs (v1.3 plan item `Q7`, video plan `O-6`).**
+  The standard CI matrix has no encoder-capable GPU, so the hardware
+  path was validated **by hand** — which is the shape that fails
+  silently: a procedure that nobody re-runs is a procedure that has
+  already failed once.
+
+  Two recorders land, and they cover the two halves of the claim:
+
+  - **`examples/hw-e2e`** — the codec-level harness.  It pins the
+    shipped H.264 backend table to `kHardware` (a pin the engine
+    honours by *failing* rather than falling back), encodes 1080p
+    frames through `IVideoEncoder`, carries the bitstream through the
+    shipped `VideoSender` / `VideoReceiver` (STAP-A / FU-A) and
+    `rtp::PacketBuilder` / `rtp::Parser`, decodes it back, and
+    compares the luma against the source.  It prints one JSON record.
+  - **`tests/test_engine_video_hw_loopback.cpp`** — the engine-level
+    test: two real `NimRTCEngine`s with `video_codec_backend =
+    "hardware"`, asserting from the **stats** that a hardware backend
+    answered (`video_codec_hardware_accelerated`, and the backend
+    neither `software-stub` nor `openh264`) *and* that the picture
+    still arrives pixel-correct.
+
+  `tools/run_hardware_e2e.py` is the recorder: it folds the harness
+  record together with the machine's **driver stamp** and the tree's
+  git provenance, re-derives the verdict from the archived numbers,
+  and appends one record to `build/hardware/<platform>-<date>.jsonl`.
+  `.github/workflows/hardware.yml` runs it on a **self-hosted,
+  GPU-capable** runner (`runs-on: [self-hosted, windows, gpu-nvenc]`) —
+  the label *is* the contract, so a hosted runner never picks the job
+  up and a green check that means "nothing ran" cannot happen.
+
+  **The honesty rules are the same ones the soak recorder applies**, and
+  they are the point: a host with no hardware encoder produces a
+  **SKIPPED** record, never a PASS, and `--require-hardware` turns that
+  skip into a failing exit code — so a runner that silently lost its
+  GPU is visible instead of quiet.  The verdict is re-derived from the
+  archived numbers rather than read from the harness's own `"status"`,
+  and a record on a dirty tree says so.  Each of those three rules is
+  pinned by `tools/run_hardware_e2e.py --self-test`, which runs in CI.
+
+  On a host with no hardware encoder the harness exits **77** and the
+  record is `SKIPPED` — which is the honest outcome, not a failure of
+  the tree.
+
 
 ## [1.2.0] - 2026-11-18
 

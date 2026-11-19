@@ -46,6 +46,26 @@ namespace demoai {
 // ---------------------------------------------------------------------------
 // Game model: a 3-hole whack-a-mole board (plan §11: M1 打地鼠).
 // ---------------------------------------------------------------------------
+//
+// ── The implicit contract with the game source ─────────────────────────
+//
+// `kHoles` below is a **single row** of three holes (left / center / right).
+// The rendered game source (`examples/remote-desktop/game_source.hpp`) draws
+// a **3x3 grid** of nine holes, parameterised by its own `kHoleColumns` /
+// `kHoleRows`.
+//
+// The two are **independent models** and the two modules do not link each
+// other — this decision engine is self-contained (pure C++20 arithmetic, no
+// NimRTC linkage), and the game source is a capture device that knows
+// nothing about AI decisions.  So:
+//
+//   * Changing `kHoles` here changes **only** the decision model.
+//   * Changing the grid in `game_source.hpp` changes **only** the rendering.
+//
+// They agree today by coincidence of both being "3", not by construction.
+// If the two boards ever need to be the *same* board, that is a contract
+// change: it needs a shared constant (or a shared header) and an ADR — not
+// a quiet edit to either number.
 
 constexpr int kHoles = 3;                    // left / center / right
 constexpr std::int64_t kFramePeriodUs = 16667;  // 1/60 s source cadence (plan §9)

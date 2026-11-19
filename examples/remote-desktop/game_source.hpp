@@ -219,6 +219,28 @@ namespace {
 
 // The game picture's geometry is relative to the frame, so it stays a
 // recognizable whack-a-mole scene at any advertised resolution.
+//
+// ── The implicit contract with the AI decision side ──────────────────
+//
+// This board (a `kHoleColumns` x `kHoleRows` grid — 3x3 = 9 holes) and the
+// decision model's board (`ai_decision.hpp`'s `kHoles = 3`, a single row of
+// left / center / right) are **two independent models of a whack-a-mole
+// game**.  The two modules do not link each other: the decision demo is
+// self-contained (pure C++20 arithmetic, no NimRTC linkage), and this file
+// is a capture device that knows nothing about AI decisions.
+//
+// The consequence is deliberate but worth stating plainly:
+//
+//   * Changing `kHoleColumns` / `kHoleRows` here changes **only** what is
+//     rendered.  It does not change the AI side's three-hole model, and
+//     nothing at compile time will tell you so.
+//   * Changing `kHoles` in `ai_decision.hpp` changes **only** the decision
+//     model.  It does not change what is rendered.
+//
+// They agree today by coincidence of both being "3", not by construction.
+// If a future change needs the two boards to be the *same* board, that is a
+// contract change: it needs a shared constant (or a shared header) and an
+// ADR — not a quiet edit to either number.
 constexpr std::uint32_t kHoleColumns = 3;
 constexpr std::uint32_t kHoleRows    = 3;
 

@@ -120,6 +120,14 @@ target_link_libraries(nimrtc_engine
     PRIVATE
         nimrtc::rtp            # RTP parser/builder (P1) — Impl in engine.cpp
         nimrtc::sdp            # SDP parser/munger (P1)
+        # v1.3 plan Q3 (video plan T1): the RFC 4588 retransmission
+        # *payload format*.  The engine needs it for two things: the
+        # `apt=` SDP parameter (which binds the retransmission payload
+        # type to the one it protects) and the `rtx/90000` encoding
+        # name.  It is the same kind of dependency as `rtp` and `sdp` —
+        # a wire contract that is not replaceable (ADR-025 / the L4
+        # exception in AGENTS.md), not a pluggable implementation.
+        nimrtc::rtx
         nimrtc::jb             # JitterBuffer (P1) — the *plugin* that the
                                # audio receive pipeline injects through the
                                # IJB seam (spec B-3); the engine itself no

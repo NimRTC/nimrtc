@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to NimRTC are documented in this file.
 
@@ -296,6 +296,68 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   key-frame requests may go out in 30 s, both for a 30 % loss profile and
   for the adversarial "every frame is lost" one (901 requests raised).
   `tests/test_engine_video_feedback.cpp` covers the engine-level half.
+- **Retransmissions now travel on their own RFC 4588 stream (v1.3 plan
+  item `Q3`, video plan `T1`).**
+  A NACK used to be answered by re-sending the *original* packet — same
+  sequence number, same payload type.  RFC 4588 §4.1 is explicit that
+  this is **not** RTX: a retransmission "SHALL be sent on a different
+  payload type" so the receiver can tell it apart and restore the
+  original's sequence number.  The consequence is that the receiver has
+  to *un-RTX* — unwrap the header, restore the number, and splice the
+  payload back into the frame it belongs to — because the receiver's
+  frame assembly is keyed on the sequence number.
+
+  The retransmission stream now exists end to end:
+
+  - **A new format module, `src/modules/rtx/`.**  It owns the two-octet
+    OSN header (RFC 4588 §4.1), the byte order, and the `apt=` /
+    `rtx-time=` SDP parameters (RFC 4588 §8.1).  It is a *format* module
+    — it builds no RTP headers and sends nothing — so both ends agree on
+    the bytes by construction rather than by convention.
+  - **The SDP advertises it.**  The offer carries
+    `a=rtpmap:<pt> rtx/90000`, `a=fmtp:<pt> apt=<vpt>`, and
+    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>` with the retransmission
+    SSRC's own `a=ssrc:` line (RFC 5576 §4.2).  The answer echoes the
+    offer's numbers (RFC 3264 §6.1).
+  - **The sender frames it.**  The retransmission ring builds the OSN
+    header, and the retransmission stream keeps its **own**
+    sequence-number space (RFC 4588 §4) — a retransmission does not
+    reuse the original's number on the wire.
+  - **The receiver unwraps it.**  The OSN is read out, the *original*
+    sequence number is restored, the payload is spliced into the frame it
+    belongs to, and the packet is erased from the pending-NACK list — or
+    the receiver would ask for it again, and again.
+  - **The scope boundary holds.**  A peer that offers no RTX payload
+    type gets no RTX stream, and the sender falls back to re-sending the
+    original packet.  Both shapes are pinned by the tests.
+
+  Three details the RFCs forced, each of which is a place a
+  plausible-looking implementation gets it wrong:
+
+  - **The header is two octets, not three.**  RFC 4588 §4.1 defines no
+    marker byte; the `0x90` some descriptions of RTX mention is not in
+    the RFC, and a peer that sent one would have its sequence number
+    restored `0x9000` too large.  (The v1.3 plan's own description was
+    corrected.)
+  - **The FID group lists the media SSRC first** —
+    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>`.  RFC 5576 §4.2's FID
+    semantics relate a *primary* source to its *dependent* ones, and the
+    primary comes first.  The reverse order is a real interop hazard: a
+    receiver that follows the convention would treat the media stream as
+    the repair flow and drop the picture.
+  - **One payload type serves both directions.**  RFC 8843 (Unified Plan)
+    gives an m-section a *single* payload-type list, so the RTX payload
+    type is a property of the m-section rather than of a direction —
+    which is also how Chrome negotiates it.  The `apt=` parameter then
+    says which payload type *within* the section the retransmission
+    protects.
+
+  The public surface grows additively: `EngineConfig::video_sender_tuning`
+  gains `rtx_payload_type` / `rtx_ssrc` / `rtx_time_ms`, `Stats` gains
+  `video_rtx_packets_sent` / `video_rtx_packets_received`, and the
+  plugin seams gain `set_rtx_enabled()` / `set_rtx_packet_callback()` /
+  `set_rtx_payload_type()` / `push_rtp_rtx()` — all with defaults that
+  leave a non-RTX plugin working exactly as before.
 
 - **The audio jitter buffer's memory is bounded, and the bound is
   reported (v1.3 plan item `Q2`, video plan `R4`).**

@@ -706,6 +706,26 @@ struct NIMRTC_API_STABLE EngineConfig {
         std::uint8_t  payload_type = 102;
         std::uint16_t mtu          = 1200;
         std::uint16_t initial_seq  = 0;
+
+        // ---- The RFC 4588 retransmission stream (v1.3 plan Q3) ----------
+        //
+        // A retransmission travels on its own payload type, with its own
+        // SSRC, and its own sequence-number space (RFC 4588 §4).  The
+        // three values below describe that stream; 0 means "the engine
+        // picks one that does not collide with the media stream".
+
+        /** The retransmission payload type.  0 = the engine picks a free
+         *  one (the first dynamic payload type above the media one). */
+        std::uint8_t  rtx_payload_type = 0;
+
+        /** The retransmission SSRC.  0 = the engine derives one from the
+         *  media SSRC (RFC 4588 §5.2 wants it *distinct*). */
+        std::uint32_t rtx_ssrc = 0;
+
+        /** How long (in milliseconds) the sender keeps a packet
+         *  available for retransmission — the `rtx-time` SDP parameter
+         *  (RFC 4588 §8.1).  0 = do not advertise the parameter. */
+        std::uint32_t rtx_time_ms = 0;
     } video_sender_tuning;
 
     // ---- Video geometry ---------------------------------------------------
@@ -4264,6 +4284,11 @@ public:
         std::uint64_t video_keyframes_q        = 0;  // keyframe reqs queued
         std::uint64_t video_feedback_applied   = 0;  // inbound RTCP actions
         std::uint64_t video_keyframes_applied  = 0;  // inbound keyframe reqs
+        // ---- The RFC 4588 retransmission stream (v1.3 plan Q3) -----------
+        /** Retransmission packets we put on the wire (RFC 4588). */
+        std::uint64_t video_rtx_packets_sent     = 0;
+        /** Retransmission packets we received and unwrapped (RFC 4588). */
+        std::uint64_t video_rtx_packets_received = 0;
         // ---- RTCP feedback, by type (plan Track S / S4, additive) --------
         //
         // `video_feedback_applied` above counts every feedback action as
@@ -5591,6 +5616,64 @@ private:
      *  the packetizer is codec-aware, so a family change means the
      *  sender has to be rebuilt and rewired. */
     void wire_default_sender() noexcept;
+
+    /** Build, protect and enqueue one outbound video RTP packet.
+     *
+     *  The shared half of every outbound video path: the default
+     *  stream's packet callback and the RFC 4588 retransmission
+     *  callback.  Both stamp an RTP header, protect it with SRTP and
+     *  hand it to the scheduler, and both must do it *identically* —
+     *  a retransmission that differs from the original in any way the
+     *  peer does not expect is a retransmission the peer drops.
+     *
+     *  @param payload      The RTP payload.
+     *  @param rtp_ts       The media-clock timestamp.
+     *  @param seq          The sequence number.
+     *  @param marker       The marker bit.
+     *  @param payload_type The payload type to stamp.
+     *  @param ssrc         The SSRC to stamp.
+     *  @param prio         The scheduler priority.
+     *  @param count_bytes  Whether the packet counts towards the
+     *                      outbound video byte / packet counters.  A
+     *                      retransmission is a *re-send* of a packet
+     *                      that was already counted, so it must not
+     *                      inflate the media bitrate. */
+    void send_video_rtp_packet(plugins::BufferView payload,
+                               std::uint32_t rtp_ts,
+                               std::uint16_t seq,
+                               bool marker,
+                               std::uint8_t payload_type,
+                               std::uint32_t ssrc,
+                               plugins::Priority prio,
+                               bool count_bytes) noexcept;
+
+    /** The RFC 4588 retransmission stream's outbound path.
+     *
+     *  The sender plugin builds the OSN-framed payload and hands it
+     *  here; this stamps the retransmission RTP header (the *media*
+     *  SSRC's own SSRC, the retransmission stream's own sequence
+     *  number, the original's timestamp and marker) and puts it on the
+     *  wire.
+     *
+     *  RFC 4588 §4.1: the RTP header of a retransmission carries the
+     *  original's **timestamp** and **marker bit**, and the
+     *  retransmission stream's own **sequence number** — the original's
+     *  sequence number is inside the OSN header, not in the RTP header.
+     */
+    void wire_rtx_sender() noexcept;
+
+    /** Apply the negotiated retransmission stream to the video plugins.
+     *
+     *  Called after every description exchange, because RTX is a
+     *  *negotiated* property: the sender may only take the RFC 4588
+     *  path once the peer agreed to the retransmission stream, and the
+     *  receiver may only unwrap packets once it knows which payload
+     *  type carries them.
+     *
+     *  It is also what makes a renegotiation *shrink* the feature: a
+     *  peer that stops offering RTX leaves `rtx_negotiated` false, and
+     *  the sender falls back to re-sending the original packet. */
+    void apply_negotiated_video_rtx() noexcept;
 
     /** Encode one frame and push it through the given stream's sender. */
     plugins::Status encode_and_send_video_frame_for(

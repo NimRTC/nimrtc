@@ -111,3 +111,41 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 30
         DISCOVERY_TIMEOUT 60)
 endif()
+
+# -----------------------------------------------------------------------------
+# The RFC 4588 retransmission path (v1.3 plan Q3 / video plan T1).
+#
+# The `rtx` module's own tests cover the *format* (the two-octet OSN
+# header, the `apt=` parameter).  These cover the part the format cannot
+# reach: that the receiver restores the original sequence number and that
+# the restored payload lands in the **right frame** — the v1.3 plan's
+# definition of done for Q3.
+# -----------------------------------------------------------------------------
+add_executable(test_video_pipeline_rtx test_video_pipeline_rtx.cpp)
+
+set_target_properties(test_video_pipeline_rtx PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_video_pipeline_rtx LENIENT)
+
+target_link_libraries(test_video_pipeline_rtx PRIVATE
+    nimrtc::video_pipeline
+    nimrtc::video_frame
+    nimrtc::video_payload
+    nimrtc::plugins
+    nimrtc::rtp
+    nimrtc::rtx
+    nimrtc::core
+    GTest::gtest_main
+    GTest::gtest)
+
+add_test(NAME modules_video_pipeline_tests_test_video_pipeline_rtx
+         COMMAND test_video_pipeline_rtx)
+set_tests_properties(modules_video_pipeline_tests_test_video_pipeline_rtx
+                     PROPERTIES TIMEOUT 30)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_video_pipeline_rtx
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+endif()

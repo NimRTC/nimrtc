@@ -1095,6 +1095,22 @@ nimrtc_add_engine_video_feedback_test(test_engine_video_feedback
 endif()
 
 # ----------------------------------------------------------------------------
+# v1.3 Q3 — engine-level RFC 4588 (RTX) retransmission stream.
+#
+# The `rtx` module's tests cover the *format* (the two-octet OSN header,
+# the `apt=` parameter); the video pipeline's tests cover the *mechanism*
+# (the sender frames a retransmission, the receiver unwraps it).  This
+# target covers the two halves only the engine can do: the **negotiation**
+# (the `a=rtpmap:` / `a=fmtp:` / `a=ssrc-group:FID` lines) and the
+# **wire** (a NACK answered on the RTX payload type, an inbound
+# retransmission unwrapped rather than decoded).
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
+nimrtc_add_engine_video_feedback_test(test_engine_video_rtx
+                                       test_engine_video_rtx.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
 # Phase 4.2 / D2 — the engine ↔ `video_stats` module wiring.
 #
 # The module owns the per-stream video quality counters (freeze detection,

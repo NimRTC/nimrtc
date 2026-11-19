@@ -949,7 +949,7 @@ rides along with work that is already in the release.
 **What this does not change.** The `v1.1.x` line stays fixes-only, and
 the video plan's own release map (`docs/plan/video-pipeline-v2-plan.md`
 §B.1) is untouched — the video side's own render clock (its item R3)
-stays on `v1.4.0` and consumes the same skew later. The total public
+now lands in **`v1.3.0`** as Track Q's Q6 and consumes the same skew. The total public
 API of the release grows from 21 to 27 symbols and from 109 to 110
 public headers (spec E-8, amendment A-1).
 
@@ -988,7 +988,7 @@ question. The shared points, and the decision for each:
 | Pack / payload framing | RFC 7587 framing for audio (B-5) sits next to the video RTP path; both use the engine's per-engine SSRC / sequence / timestamp state from A-6 |
 | Error codes | The audio range `0x1A40`–`0x1A48` extends the existing block; the video side keeps its own ranges — one numbering scheme, no overlap |
 | Logging | One logger (`core::log::Logger` — the only global L6 allows) and one prefix convention (Part L). The video side follows the same rules when its own log points are specified; no second logger, no second convention |
-| A/V synchronisation | The engine corrects the **audio playout** against the capture timeline (C-4, WP-14). The video side's own render clock is the video plan's item R3 (`v1.4.0`) and consumes the same skew later. Neither side re-times the other |
+| A/V synchronisation | The engine corrects the **audio playout** against the capture timeline (C-4, WP-14). The video side's own render clock is the video plan's item R3, scheduled as **Q6 of `v1.3.0`**, and consumes the same skew. Neither side re-times the other |
 
 ---
 

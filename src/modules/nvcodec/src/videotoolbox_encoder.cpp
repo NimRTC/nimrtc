@@ -875,7 +875,8 @@ public:
 
         const plugins::Status st = encode_pixel_buffer(pixel_buffer, output,
                                                        output_capacity,
-                                                       encoded_out);
+                                                       encoded_out,
+                                                       /*zero_copy=*/false);
         CVPixelBufferRelease(pixel_buffer);
         return st;
     }
@@ -926,7 +927,8 @@ public:
         }
 
         return encode_pixel_buffer(pixel_buffer, scratch_.data(),
-                                    scratch_.size(), encoded_out);
+                                    scratch_.size(), encoded_out,
+                                    /*zero_copy=*/true);
     }
 
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
@@ -973,11 +975,20 @@ public:
     }
 
 private:
-    /** Encode one `CVPixelBuffer` and publish the bitstream. */
+    /** Encode one `CVPixelBuffer` and publish the bitstream.
+     *
+     *  `zero_copy` says how the picture reached the session: `true` when
+     *  the caller handed over a `CVPixelBuffer` it already owned (the
+     *  surface never crossed the CPU), `false` when this backend staged
+     *  the planes into a fresh surface itself.  The distinction is what
+     *  the `frames_encoded_staged` / `frames_encoded_zero_copy` counters
+     *  report — a session that reports neither reads as "the encoder
+     *  never ran". */
     plugins::Status encode_pixel_buffer(CVPixelBufferRef pixel_buffer,
                                         std::uint8_t* output,
                                         std::size_t output_capacity,
-                                        plugins::EncodedVideoFrame& encoded_out) noexcept {
+                                        plugins::EncodedVideoFrame& encoded_out,
+                                        bool zero_copy) noexcept {
         std::vector<std::uint8_t> raw_bs;
         bool is_keyframe = false;
         if (!session_.encode(pixel_buffer, force_keyframe_next_, raw_bs,
@@ -1059,6 +1070,23 @@ private:
 
         stats_.frames_encoded++;
         stats_.bytes_encoded += n_copy;
+        // The staged / zero-copy split is what tells a host *how* the
+        // picture reached the encoder.  A session that reports neither
+        // reads as "the encoder never ran" — which is exactly what the
+        // engine's telemetry and the hardware-loopback test read.
+        if (zero_copy) {
+            // The surface was handed over as it was: the picture never
+            // crossed the CPU, so `bytes_copied` stays at zero.
+            stats_.frames_encoded_zero_copy++;
+            stats_.zero_copy = true;
+            stats_.zero_copy_frames++;
+        } else {
+            // The planes were copied into a fresh surface: that is a
+            // CPU staging copy.
+            stats_.frames_encoded_staged++;
+            stats_.zero_copy = false;
+            stats_.staged_frames++;
+        }
         stats_.encode_latency_us_total += session_.last_latency_us();
         if (session_.last_latency_us() > stats_.encode_latency_us_max) {
             stats_.encode_latency_us_max = session_.last_latency_us();

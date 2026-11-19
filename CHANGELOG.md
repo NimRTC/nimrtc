@@ -7,7 +7,455 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> Work that lands after `v1.3.0`.
+
+## [1.3.0] - 2026-11-20
+
+### Status: Stable
+
+> The source version is `1.3.0` (`project(VERSION)` in `CMakeLists.txt`,
+> `NIMRTC_API_VERSION` = 10300, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
+> `v1.3.0` is the release that closes the v1.3 plan
+> (`docs/plan/v1.3-plan.md`): **Track Q** (Q1, Q2, Q3, Q4, Q5, Q6, Q7) is
+> complete.
+
+> The release's headline is that the engine now **degrades gracefully under
+> a hostile network** — the axis `v1.2.0` explicitly did not claim.  The
+> seven Track Q items are:
+
+> - **Q1 / Q1b** — a mid-stream parameter-set change is now *proven* to
+>   decode on its own, on H.264 (software) and on H.265 (NVDEC), with no
+>   key-frame round trip and no PLI on the wire.
+> - **Q2** — the audio jitter buffer's memory is bounded, and the bound is
+>   reported.
+> - **Q3** — retransmissions travel on their own RFC 4588 stream.
+> - **Q4** — the receiver's feedback to the peer is bounded, and the two
+>   reasons for a key-frame request are distinguishable.
+> - **Q5** — the soak can now impair the network *and* drive the engine,
+>   across a simulated NAT; the 24 h window is archived with its netem
+>   parameters.
+> - **Q6** — the picture is now aligned to the sound (the video half of
+>   R3; the audio half shipped in `v1.2.0`).
+> - **Q7** — the hardware codec path is exercised end-to-end by something
+>   that re-runs, on a self-hosted GPU runner.
+
+> **The release gates are read, not assumed.**  The `release` workflow's
+> preflight now verifies the seven-day soak window at the tag, checks that
+> the tag is an ancestor of `main`, and confirms the README already
+> describes the release being published.  The release lines and the
+> release tags are protected by rulesets.
+
+> **Q1b (the H.265 half of the parameter-set switch) is a `1.3.x` item.**
+> The codec-level assertion and the engine-level hardware case both ship
+> in `v1.3.0`; the plan's §9 records the remainder — the software-decoder
+> half, which stays deferred because there is still no software H.265
+> decoder to assert on.
+
+
 > Work that lands after `v1.2.0`.
+
+### Added
+
+- **The soak window, the tag ancestry and the README's release claims
+  are now read at cut time (post-v1.2.0 review).**
+  Three gates that were written down but never consulted:
+
+  - **The soak window was never read by `release.yml`.**  The v1.1
+    plan's "7-day soak before the tag" box was still empty two
+    releases later.  The preflight now requires a green window whose
+    every day was measured on a commit the tagged commit descends
+    from, and whose last day is within 30 days of the cut
+    (`run_soak.py --expect-ancestor-of` / `--max-window-age-days`,
+    `fetch_soak_evidence.py --require`).
+  - **A tag could be cut from a branch unreachable from `main`.**
+    `v1.2.0` had that shape: `compare/v1.2.0...main` reported
+    "diverged" with byte-identical trees, and `git describe` on `main`
+    could not find the tag.  It was repaired afterwards by merging the
+    release branch back.  The preflight now runs
+    `git merge-base --is-ancestor "$tag" origin/main` before releasing.
+  - **The README's badge went stale for eleven days** after `v1.0.2` →
+    `v1.2.0`: the badge still read `v1.0.2` while the body of the same
+    file described `v1.2.0` as shipped.
+    `tools/check_readme_release.py` compares the badge, the
+    "Latest release" paragraph and the "Current `main`" paragraph in
+    both languages against the newest changelog section, runs in the
+    `docs / markdown links` job, and gains `--expect-tag` for the
+    preflight's reverse question: does the README already describe the
+    tag being published?
+
+- **The release lines and the release tags are protected by rulesets
+  (post-v1.2.0 review).**
+  `release/1.2` carried the published `v1.2.0` tag as its head, was
+  `protected: false`, and the repository's only ruleset covered
+  `refs/heads/main` — one force-push would have severed the artifact
+  from the commit it was built from.  Two rulesets
+  (`protect-release-branches`, `protect-release-tags`) apply `deletion`
+  and `non_fast_forward` to `refs/heads/release/*` and `refs/tags/v*`.
+  They carry no `pull_request` rule and no required checks on purpose:
+  hot-fixes reach a release line by cherry-pick, and the PR-triggered
+  workflows do not run for a PR into `release/X.Y`, so a required
+  check there would be unsatisfiable.  `protect-main.json` also records
+  why `required_approving_review_count` stays 0 in a
+  single-collaborator repository.
+
+- **The receiver's feedback to the peer is bounded, and the two reasons
+  for a key-frame request are now distinguishable (v1.3 plan item `Q4`,
+  video plan `T2`).**
+  The receiver used to *merge* its feedback into one pending report
+  without a bound, and the two doors into that report were
+  indistinguishable.  Three things could go wrong, and all three are
+  feedback amplification:
+
+  - **The key-frame request had no rate limit of its own.**  The engine's
+    decode-failure path had a 250 ms throttle, but the jitter buffer's own
+    loss report did not — and both went into the *same* pending report, so
+    a stream that both lost packets and failed to decode asked for key
+    frames at twice the rate.
+  - **The NACK list was uncapped.**  Every detected gap added its sequence
+    numbers to a list that was merged into the pending report without a
+    limit, so a peer that dropped 30 % of a 30 fps stream produced a report
+    that grew with the loss.
+  - **The pending report had no age.**  A report that sat in the queue while
+    the link was down was stale by the time it went out: the losses it
+    named had either been retransmitted already or were long gone.
+
+  The bound now lives in one private collaborator,
+  `src/engine/src/engine_feedback_guard.{hpp,cpp}`
+  (`nimrtc::engine::detail::FeedbackGuard`), so the receive-side feedback
+  has a single visible owner:
+
+  - **The key-frame rate limit is global, not per-door** — one request per
+    interval (default 250 ms, i.e. 4 Hz per RFC 5104 §4.3.1.1), whichever
+    door raised it.  The peer's encoder is the shared resource the limit
+    protects, so a per-door limit would let the two doors add up to twice
+    the rate.  The engine's own decode-failure throttle stays as the
+    *door's* throttle (it keeps the log quiet).
+  - **The NACK cap keeps the *most recent* losses** (default 64 per
+    report).  RFC 4585 §6.2.1 shapes the request around the recent
+    losses, and the sender's retransmission cache only holds the recent
+    packets — a request for an old loss is a request the peer cannot
+    answer.  When the list overflows, the *oldest* entries are dropped.
+  - **A stale report is dropped, not sent** (default age 1 s).
+
+  The two doors are counted separately, because they call for completely
+  different fixes: `video_feedback_pli_from_loss` says "the network dropped
+  a picture", `video_feedback_pli_from_decode_failure` says "the decoder
+  cannot decode what it is being sent".
+
+  The bound is reachable from a host and visible to one:
+
+  - `EngineConfig::video_feedback_min_pli_interval_us` (default 250000;
+    `0` disables the limit), `EngineConfig::video_feedback_max_nack_seqs`
+    (default 64; a negative value means unbounded) and
+    `EngineConfig::video_feedback_max_report_age_us` (default 1000000;
+    `0` means "never expire") are new.
+  - `Engine::Stats` gains seven counters:
+    `video_feedback_pli_requests` (the demand),
+    `video_feedback_pli_allowed` (what went on the wire),
+    `video_feedback_pli_suppressed` (what the limit dropped),
+    `video_feedback_pli_from_loss`, `video_feedback_pli_from_decode_failure`,
+    `video_feedback_nack_seqs_dropped` and `video_feedback_reports_expired`.
+
+  The guard's clock is **injected**, which is what makes the acceptance
+  deterministic: the engine passes the monotonic clock, the test passes a
+  virtual one it advances by hand.  `tests/test_engine_feedback_guard.cpp`
+  therefore runs the 30 s synthetic-loss profile in microseconds of real
+  time and asserts the same numbers on every machine — at most **121**
+  key-frame requests may go out in 30 s, both for a 30 % loss profile and
+  for the adversarial "every frame is lost" one (901 requests raised).
+  `tests/test_engine_video_feedback.cpp` covers the engine-level half.
+
+- **An H.265 mid-stream parameter-set change is asserted on the hardware
+  decoder (v1.3 plan item `Q1b`).**
+  Q1 proved the H.264 mechanism on the software decoder.  Q1b is the
+  H.265 counterpart, and it is asserted where H.265 actually runs here 鈥?  on **NVDEC**, against a stream produced by **NVENC**:
+
+  - `src/modules/nvcodec/src/hevc_pts.{hpp,cpp}` is a new private helper
+    that parses `profile_tier_level` and the SPS geometry fields
+    (ITU-T H.265 搂7.3.3, 搂7.3.2.2.1) **independently of the driver**, and
+    summarises an Annex-B access unit into `plugins::HevcPtsSummary`:
+    the visible size, FNV-1a hashes of the **VPS / SPS / PPS** RBSPs, and the
+    profile idc with its compatibility flags.  The summary is what lets a
+    test tell "the parameter sets changed" from "the stream never
+    changed".
+  - `IVideoEncoder::last_hevc_pts()` / `IVideoDecoder::last_hevc_pts()`
+    expose the summary of the last keyframe each seam handled.
+  - `HwPtsSwitch.GeometryChangeDecodesOnTheSameNvdecSession` holds one
+    NVDEC instance created for 320脳240, switches the sender to 640脳480
+    (NVENC re-initialises and emits an IRAP with inline VPS / SPS / PPS),
+    and asserts the **first** decode call after the switch returns `kOk`
+    with a 640脳480 picture, the decoder's SPS hash equal to the
+    encoder's, and the receiver's key-frame-request counter still at
+    zero 鈥?i.e. no PLI on the wire.
+  -   `HwPtsSwitch.ParameterSetChangeAtTheSameGeometryIsNoticed` covers
+  MAIN 鈫?MAIN10 at the same size, the case a width/height comparison
+  cannot see.
+
+  The private parser reads `general_reserved_zero_44bits` (a 44-bit
+  field, longer than any machine word) without truncation, skips the
+  sub-layer ordering-info block with the 搂7.3.3 rule that
+  `maxNumSubLayersMinus1 > 0` is followed by `8 - maxNumSubLayersMinus1`
+  `reserved_zero_2bits` words, and decodes `ue(v)` as
+  `(1 << leading) - 1 + suffix`.  Each of those is a place a hand-rolled
+  bit reader silently desynchronises and reports a plausible-but-wrong
+  geometry; the summary's SPS hash is what makes such a desync visible.
+
+  Both cases run against the real driver and skip cleanly on a host
+  without the hardware; the software-decoder half stays deferred (there
+  is still no software H.265 decoder to assert on, and the skip says so).
+
+- **A mid-stream parameter-set change is now *proven* to decode on its own
+  (v1.3 plan item `Q1`, video plan `R2`).**
+  The survey behind the v1.3 plan found that the *sender* already did the
+  right thing — `openh264_encoder.cpp`'s `set_params()` re-creates the
+  encoder when the geometry changes and the new SPS / PPS travel in-band
+  with the next IDR — and that the *receiver* needed no mechanism at all:
+  OpenH264's decoder handles a mid-stream SPS update on its own, because
+  the decoder is the sole owner of "do my parameter sets still match?".
+
+  What was missing was therefore not a mechanism; it was an **assertion**.
+  Q1 is the test that would have caught a regression, and it is now in the
+  standard CI matrix:
+
+  - **The codec-level half**
+    (`src/modules/h264/tests/test_openh264_software.cpp`) exercises the
+    *warm* decoder: it decodes a 320×240 picture first (so the decoder is
+    holding that parameter set), the encoder's geometry then changes to
+    640×480, and the new picture is decoded **with the same decoder** — no
+    flush, no re-initialisation, no key-frame request.  The bar is `kOk`
+    on the *first* decode call: a `kErrNotReady` would mean the decoder
+    needed another round trip.  The two parameter sets are compared
+    byte-for-byte, so the test cannot pass by decoding the *old* frame
+    twice, and a second case asserts the decoded picture carries real
+    signal (a correctly-sized but blank frame would pass a
+    geometry-only assertion).
+  - **The engine-level half**
+    (`tests/test_engine_video_e2e_loopback.cpp`) drives the *whole*
+    pipeline with no stub in the middle: two engines, a real OpenH264
+    encoder, real RTP on the wire (STAP-A for the parameter sets, FU-A
+    for the slice), and the real receive path (depacketize → jitter
+    buffer → decode → render).  The host pushes a 320×240 frame and then a
+    640×480 one; the receiver must decode both and render the *new*
+    geometry.  The acceptance is the plan's own wording — the
+    decode-failure door stayed shut
+    (`video_feedback_pli_from_decode_failure == 0`) **and** no PLI
+    datagram went on the wire, which is the "no key-frame round-trip"
+    half checked on the wire rather than only in a counter.
+  - **The negative control.**  A counter that is *always* zero would
+    satisfy `== 0` vacuously, so the harness also has to show the counter
+    *does* move when the decoder really does refuse a frame.
+    `TheDecodeFailureDoorIsLiveInThisHarness` feeds the receiver a
+    synthetic single-NAL H.264 picture whose body is nonsense: the
+    depacketizer accepts it, the jitter buffer assembles it, and the
+    decoder refuses it — which opens the decode-failure door and moves
+    the counter.  Without that control, the Q1 assertion would prove
+    nothing.
+
+  The H.265 half of Q1 is **still open** — the H.265 decoder in the tree
+  is a stub, so there is nothing to assert on yet.  It is recorded as an
+  explicit follow-up in the v1.3 plan's §6, not silently skipped.
+
+- **Retransmissions now travel on their own RFC 4588 stream (v1.3 plan
+  item `Q3`, video plan `T1`).**
+  A NACK used to be answered by re-sending the *original* packet — same
+  sequence number, same payload type.  RFC 4588 §4.1 is explicit that
+  this is **not** RTX: a retransmission "SHALL be sent on a different
+  payload type" so the receiver can tell it apart and restore the
+  original's sequence number.  The consequence is that the receiver has
+  to *un-RTX* — unwrap the header, restore the number, and splice the
+  payload back into the frame it belongs to — because the receiver's
+  frame assembly is keyed on the sequence number.
+
+  The retransmission stream now exists end to end:
+
+  - **A new format module, `src/modules/rtx/`.**  It owns the two-octet
+    OSN header (RFC 4588 §4.1), the byte order, and the `apt=` /
+    `rtx-time=` SDP parameters (RFC 4588 §8.1).  It is a *format* module
+    — it builds no RTP headers and sends nothing — so both ends agree on
+    the bytes by construction rather than by convention.
+  - **The SDP advertises it.**  The offer carries
+    `a=rtpmap:<pt> rtx/90000`, `a=fmtp:<pt> apt=<vpt>`, and
+    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>` with the retransmission
+    SSRC's own `a=ssrc:` line (RFC 5576 §4.2).  The answer echoes the
+    offer's numbers (RFC 3264 §6.1).
+  - **The sender frames it.**  The retransmission ring builds the OSN
+    header, and the retransmission stream keeps its **own**
+    sequence-number space (RFC 4588 §4) — a retransmission does not
+    reuse the original's number on the wire.
+  - **The receiver unwraps it.**  The OSN is read out, the *original*
+    sequence number is restored, the payload is spliced into the frame it
+    belongs to, and the packet is erased from the pending-NACK list — or
+    the receiver would ask for it again, and again.
+  - **The scope boundary holds.**  A peer that offers no RTX payload
+    type gets no RTX stream, and the sender falls back to re-sending the
+    original packet.  Both shapes are pinned by the tests.
+
+  Three details the RFCs forced, each of which is a place a
+  plausible-looking implementation gets it wrong:
+
+  - **The header is two octets, not three.**  RFC 4588 §4.1 defines no
+    marker byte; the `0x90` some descriptions of RTX mention is not in
+    the RFC, and a peer that sent one would have its sequence number
+    restored `0x9000` too large.  (The v1.3 plan's own description was
+    corrected.)
+  - **The FID group lists the media SSRC first** —
+    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>`.  RFC 5576 §4.2's FID
+    semantics relate a *primary* source to its *dependent* ones, and the
+    primary comes first.  The reverse order is a real interop hazard: a
+    receiver that follows the convention would treat the media stream as
+    the repair flow and drop the picture.
+  - **One payload type serves both directions.**  RFC 8843 (Unified Plan)
+    gives an m-section a *single* payload-type list, so the RTX payload
+    type is a property of the m-section rather than of a direction —
+    which is also how Chrome negotiates it.  The `apt=` parameter then
+    says which payload type *within* the section the retransmission
+    protects.
+
+  The public surface grows additively: `EngineConfig::video_sender_tuning`
+  gains `rtx_payload_type` / `rtx_ssrc` / `rtx_time_ms`, `Stats` gains
+  `video_rtx_packets_sent` / `video_rtx_packets_received`, and the
+  plugin seams gain `set_rtx_enabled()` / `set_rtx_packet_callback()` /
+  `set_rtx_payload_type()` / `push_rtp_rtx()` — all with defaults that
+  leave a non-RTX plugin working exactly as before.
+
+- **The soak can now impair the network and drive the engine (v1.3 plan
+  item `Q5`).**
+  The v1.2 release gate's soak window measured a **clean** network, and
+  the impairment tooling that existed measured the **transport floor** —
+  raw datagrams in, raw datagrams out.  Neither drove the engine, and
+  neither used netem's `reorder` knob at all, even though the plan names
+  *reordering* as one of the three impairments the soak must survive.
+
+  Three pieces land together, and the point of the combination is that
+  the impairments now hit the **real RTP path**:
+
+  - **`src/modules/net_sim/`** — the impairment model
+    (`net_sim::ImpairmentConfig`: loss / delay / jitter / reorder / rate,
+    seeded and therefore deterministic) and the **simulated NAT**
+    (`net_sim::NatRelay`, an address-translating UDP relay with two
+    sockets).  Neither peer ever sees the other's real address, so the
+    pair looks like two peers behind a NAT exactly as the SDP presents
+    it.  This is the plan's Q5-1 default: the **real TURN/TLS leg is
+    deferred to v1.4.0** and is recorded as a known gap, not papered
+    over.
+  - **`examples/soak-p2p`** — the engine-level harness: **two real
+    `NimRTCEngine`s** (ICE + DTLS + SRTP + RTP) streaming audio across
+    the relay, with the impairment profile applied to every packet the
+    relay forwards.  It prints one JSON object with the parameters it
+    was given and the counters it measured.
+  - **`tools/run_soak_impaired.py`** — the recorder.  It runs the
+    harness, folds its JSON together with the **git provenance** of the
+    tree (`git_ref`, `git_commit`, `git_dirty`), **re-derives** the green
+    criteria from the archived numbers, and appends one record to
+    `build/soak-impaired/<platform>.jsonl`.  The netem parameters travel
+    with the result, which is what the v1.2 plan's DoD asks for:
+    *"soak runs are archived with their netem parameters."*
+
+  **The recorder does not trust the harness**, and that is the part
+  worth naming.  The green criteria are re-derived from the archived
+  numbers rather than read from the harness's own `"green"` field, so a
+  harness bug that faked a pass is still caught by the archive; a run
+  that could not be measured is `INCONCLUSIVE` and **never** `PASS`
+  (a broken runner must not be able to look like a green day); and a
+  green run on a dirty tree is marked, because a dirty tree is not the
+  commit it claims.  Each of those three rules is pinned by
+  `tools/run_soak_impaired.py --self-test`, which runs in CI.
+
+  The verdict is a **property of the run**, not of a reference number:
+  the media path carried media, memory stayed inside Q2's bound (at most
+  4 s of PCM), the feedback rate stayed inside Q4's bound, the loss was
+  recovered, and a 100 %-loss profile actually dropped something — a
+  profile that never drops would make the soak a lie.
+
+  `reorder` is now a tier in the kernel-side tooling too
+  (`tools/benchmark_weaknet_netem.sh`: netem `reorder 10% 50%`) and in
+  its portable counterpart (`tools/benchmark_weaknet.py`: the
+  `reorder-10pct` tier), so the two implementations of the same profile
+  list stay in step.
+
+  The operating procedure is `docs/plan/soak-impaired-runbook.md`; the
+  gate is `python tools/run_soak_impaired.py --summary --expect-q5`,
+  which accepts only a run of at least **24 h** under loss **and**
+  jitter **and** reorder on a clean tree.
+
+- **The picture is now aligned to the sound (v1.3 plan item `Q6`, video
+  plan `R3` -- the video half).**
+  The audio half of R3 shipped in `v1.2.0`: the engine aligns audio
+  playout against the capture timeline, and the correction is
+  switchable.  The **video** half did not exist -- the renderer had a
+  display path but no clock to render against, and the skew the
+  sender-report tracker produced was *visible* but nothing acted on it.
+
+  A new `video_sync` module holds the render clock and the correction
+  policy, and the engine drives it through a new
+  `plugins::IVideoSyncController` seam -- so the engine orchestrates the
+  plugin and never names a concrete module (Layout Invariant 4 /
+  ADR-025).  The renderer is now **told** the presentation instant; it
+  does not derive one.
+
+  A video frame cannot be stretched, so the clock's actions are
+  *present at the clock's instant*, *drop*, or *delay* -- chosen from
+  the measured skew and the jitter buffer's current occupancy.  The
+  jitter buffer keeps the playout deadline; the render clock owns the
+  presentation instant *within* it, which is what keeps the buffer's
+  memory bound stable.
+
+  **There is still only one skew model.**  The clock has no capture-time
+  accumulator of its own: it reads the ADR-017 mapping the audio half
+  already reads.  That constraint was the one most likely to be
+  violated by accident, so it is stated where a future change would
+  look at it.
+
+  The synthetic-skew test feeds the mapping a known offset and asserts
+  a deterministic correction, so it fails on the pre-change code rather
+  than passing vacuously.
+
+- **The hardware codec path is now exercised end-to-end by something
+  that re-runs (v1.3 plan item `Q7`, video plan `O-6`).**
+  The standard CI matrix has no encoder-capable GPU, so the hardware
+  path was validated **by hand** — which is the shape that fails
+  silently: a procedure that nobody re-runs is a procedure that has
+  already failed once.
+
+  Two recorders land, and they cover the two halves of the claim:
+
+  - **`examples/hw-e2e`** — the codec-level harness.  It pins the
+    shipped H.264 backend table to `kHardware` (a pin the engine
+    honours by *failing* rather than falling back), encodes 1080p
+    frames through `IVideoEncoder`, carries the bitstream through the
+    shipped `VideoSender` / `VideoReceiver` (STAP-A / FU-A) and
+    `rtp::PacketBuilder` / `rtp::Parser`, decodes it back, and
+    compares the luma against the source.  It prints one JSON record.
+  - **`tests/test_engine_video_hw_loopback.cpp`** — the engine-level
+    test: two real `NimRTCEngine`s with `video_codec_backend =
+    "hardware"`, asserting from the **stats** that a hardware backend
+    answered (`video_codec_hardware_accelerated`, and the backend
+    neither `software-stub` nor `openh264`) *and* that the picture
+    still arrives pixel-correct.
+
+  `tools/run_hardware_e2e.py` is the recorder: it folds the harness
+  record together with the machine's **driver stamp** and the tree's
+  git provenance, re-derives the verdict from the archived numbers,
+  and appends one record to `build/hardware/<platform>-<date>.jsonl`.
+  `.github/workflows/hardware.yml` runs it on a **self-hosted,
+  GPU-capable** runner (`runs-on: [self-hosted, windows, gpu-nvenc]`) —
+  the label *is* the contract, so a hosted runner never picks the job
+  up and a green check that means "nothing ran" cannot happen.
+
+  **The honesty rules are the same ones the soak recorder applies**, and
+  they are the point: a host with no hardware encoder produces a
+  **SKIPPED** record, never a PASS, and `--require-hardware` turns that
+  skip into a failing exit code — so a runner that silently lost its
+  GPU is visible instead of quiet.  The verdict is re-derived from the
+  archived numbers rather than read from the harness's own `"status"`,
+  and a record on a dirty tree says so.  Each of those three rules is
+  pinned by `tools/run_hardware_e2e.py --self-test`, which runs in CI.
+
+  On a host with no hardware encoder the harness exits **77** and the
+  record is `SKIPPED` — which is the honest outcome, not a failure of
+  the tree.
+
+### Fixed
 
 - **A shell expansion inside `${{ }}` can stop an entire workflow from
   running, and nothing local says a word (2026-11-19).**
@@ -51,48 +499,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not.  Its engine is Node's `RegExp`, not Python's `re` — `re` rejects
   `[0-9]+*` outright ("multiple repeat"), so a Python check could not
   evaluate the shape it exists to catch.
-
-- **The soak window, the tag ancestry and the README's release claims
-  are now read at cut time (post-v1.2.0 review).**
-  Three gates that were written down but never consulted:
-
-  - **The soak window was never read by `release.yml`.**  The v1.1
-    plan's "7-day soak before the tag" box was still empty two
-    releases later.  The preflight now requires a green window whose
-    every day was measured on a commit the tagged commit descends
-    from, and whose last day is within 30 days of the cut
-    (`run_soak.py --expect-ancestor-of` / `--max-window-age-days`,
-    `fetch_soak_evidence.py --require`).
-  - **A tag could be cut from a branch unreachable from `main`.**
-    `v1.2.0` had that shape: `compare/v1.2.0...main` reported
-    "diverged" with byte-identical trees, and `git describe` on `main`
-    could not find the tag.  It was repaired afterwards by merging the
-    release branch back.  The preflight now runs
-    `git merge-base --is-ancestor "$tag" origin/main` before releasing.
-  - **The README's badge went stale for eleven days** after `v1.0.2` →
-    `v1.2.0`: the badge still read `v1.0.2` while the body of the same
-    file described `v1.2.0` as shipped.
-    `tools/check_readme_release.py` compares the badge, the
-    "Latest release" paragraph and the "Current `main`" paragraph in
-    both languages against the newest changelog section, runs in the
-    `docs / markdown links` job, and gains `--expect-tag` for the
-    preflight's reverse question: does the README already describe the
-    tag being published?
-
-- **The release lines and the release tags are protected by rulesets
-  (post-v1.2.0 review).**
-  `release/1.2` carried the published `v1.2.0` tag as its head, was
-  `protected: false`, and the repository's only ruleset covered
-  `refs/heads/main` — one force-push would have severed the artifact
-  from the commit it was built from.  Two rulesets
-  (`protect-release-branches`, `protect-release-tags`) apply `deletion`
-  and `non_fast_forward` to `refs/heads/release/*` and `refs/tags/v*`.
-  They carry no `pull_request` rule and no required checks on purpose:
-  hot-fixes reach a release line by cherry-pick, and the PR-triggered
-  workflows do not run for a PR into `release/X.Y`, so a required
-  check there would be unsatisfiable.  `protect-main.json` also records
-  why `required_approving_review_count` stays 0 in a
-  single-collaborator repository.
 
 - **The release bundle now ships the third-party licence texts, and the
   bundle-size limit is no longer a hidden release blocker.**
@@ -178,73 +584,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ci-fast` is dropped from the watched workflows: it triggered 1 of
   the 498 measured `ci-retry` runs over the last 1200, and
   `windows / fast` is not a required check.
-
-- **The receiver's feedback to the peer is bounded, and the two reasons
-  for a key-frame request are now distinguishable (v1.3 plan item `Q4`,
-  video plan `T2`).**
-  The receiver used to *merge* its feedback into one pending report
-  without a bound, and the two doors into that report were
-  indistinguishable.  Three things could go wrong, and all three are
-  feedback amplification:
-
-  - **The key-frame request had no rate limit of its own.**  The engine's
-    decode-failure path had a 250 ms throttle, but the jitter buffer's own
-    loss report did not — and both went into the *same* pending report, so
-    a stream that both lost packets and failed to decode asked for key
-    frames at twice the rate.
-  - **The NACK list was uncapped.**  Every detected gap added its sequence
-    numbers to a list that was merged into the pending report without a
-    limit, so a peer that dropped 30 % of a 30 fps stream produced a report
-    that grew with the loss.
-  - **The pending report had no age.**  A report that sat in the queue while
-    the link was down was stale by the time it went out: the losses it
-    named had either been retransmitted already or were long gone.
-
-  The bound now lives in one private collaborator,
-  `src/engine/src/engine_feedback_guard.{hpp,cpp}`
-  (`nimrtc::engine::detail::FeedbackGuard`), so the receive-side feedback
-  has a single visible owner:
-
-  - **The key-frame rate limit is global, not per-door** — one request per
-    interval (default 250 ms, i.e. 4 Hz per RFC 5104 §4.3.1.1), whichever
-    door raised it.  The peer's encoder is the shared resource the limit
-    protects, so a per-door limit would let the two doors add up to twice
-    the rate.  The engine's own decode-failure throttle stays as the
-    *door's* throttle (it keeps the log quiet).
-  - **The NACK cap keeps the *most recent* losses** (default 64 per
-    report).  RFC 4585 §6.2.1 shapes the request around the recent
-    losses, and the sender's retransmission cache only holds the recent
-    packets — a request for an old loss is a request the peer cannot
-    answer.  When the list overflows, the *oldest* entries are dropped.
-  - **A stale report is dropped, not sent** (default age 1 s).
-
-  The two doors are counted separately, because they call for completely
-  different fixes: `video_feedback_pli_from_loss` says "the network dropped
-  a picture", `video_feedback_pli_from_decode_failure` says "the decoder
-  cannot decode what it is being sent".
-
-  The bound is reachable from a host and visible to one:
-
-  - `EngineConfig::video_feedback_min_pli_interval_us` (default 250000;
-    `0` disables the limit), `EngineConfig::video_feedback_max_nack_seqs`
-    (default 64; a negative value means unbounded) and
-    `EngineConfig::video_feedback_max_report_age_us` (default 1000000;
-    `0` means "never expire") are new.
-  - `Engine::Stats` gains seven counters:
-    `video_feedback_pli_requests` (the demand),
-    `video_feedback_pli_allowed` (what went on the wire),
-    `video_feedback_pli_suppressed` (what the limit dropped),
-    `video_feedback_pli_from_loss`, `video_feedback_pli_from_decode_failure`,
-    `video_feedback_nack_seqs_dropped` and `video_feedback_reports_expired`.
-
-  The guard's clock is **injected**, which is what makes the acceptance
-  deterministic: the engine passes the monotonic clock, the test passes a
-  virtual one it advances by hand.  `tests/test_engine_feedback_guard.cpp`
-  therefore runs the 30 s synthetic-loss profile in microseconds of real
-  time and asserts the same numbers on every machine — at most **121**
-  key-frame requests may go out in 30 s, both for a 30 % loss profile and
-  for the adversarial "every frame is lost" one (901 requests raised).
-  `tests/test_engine_video_feedback.cpp` covers the engine-level half.
 
 - **The audio jitter buffer's memory is bounded, and the bound is
   reported (v1.3 plan item `Q2`, video plan `R4`).**
@@ -436,44 +775,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A `Benchmark G2 control plane (plan E6)` step now runs in both the Windows
   and the Linux CI legs, and the artifact is uploaded with them, because a
   benchmark that only runs on one developer's machine is not a gate.
-- **An H.265 mid-stream parameter-set change is asserted on the hardware
-  decoder (v1.3 plan item `Q1b`).**
-  Q1 proved the H.264 mechanism on the software decoder.  Q1b is the
-  H.265 counterpart, and it is asserted where H.265 actually runs here 鈥?  on **NVDEC**, against a stream produced by **NVENC**:
-
-  - `src/modules/nvcodec/src/hevc_pts.{hpp,cpp}` is a new private helper
-    that parses `profile_tier_level` and the SPS geometry fields
-    (ITU-T H.265 搂7.3.3, 搂7.3.2.2.1) **independently of the driver**, and
-    summarises an Annex-B access unit into `plugins::HevcPtsSummary`:
-    the visible size, FNV-1a hashes of the **VPS / SPS / PPS** RBSPs, and the
-    profile idc with its compatibility flags.  The summary is what lets a
-    test tell "the parameter sets changed" from "the stream never
-    changed".
-  - `IVideoEncoder::last_hevc_pts()` / `IVideoDecoder::last_hevc_pts()`
-    expose the summary of the last keyframe each seam handled.
-  - `HwPtsSwitch.GeometryChangeDecodesOnTheSameNvdecSession` holds one
-    NVDEC instance created for 320脳240, switches the sender to 640脳480
-    (NVENC re-initialises and emits an IRAP with inline VPS / SPS / PPS),
-    and asserts the **first** decode call after the switch returns `kOk`
-    with a 640脳480 picture, the decoder's SPS hash equal to the
-    encoder's, and the receiver's key-frame-request counter still at
-    zero 鈥?i.e. no PLI on the wire.
-  -   `HwPtsSwitch.ParameterSetChangeAtTheSameGeometryIsNoticed` covers
-  MAIN 鈫?MAIN10 at the same size, the case a width/height comparison
-  cannot see.
-
-  The private parser reads `general_reserved_zero_44bits` (a 44-bit
-  field, longer than any machine word) without truncation, skips the
-  sub-layer ordering-info block with the 搂7.3.3 rule that
-  `maxNumSubLayersMinus1 > 0` is followed by `8 - maxNumSubLayersMinus1`
-  `reserved_zero_2bits` words, and decodes `ue(v)` as
-  `(1 << leading) - 1 + suffix`.  Each of those is a place a hand-rolled
-  bit reader silently desynchronises and reports a plausible-but-wrong
-  geometry; the summary's SPS hash is what makes such a desync visible.
-
-  Both cases run against the real driver and skip cleanly on a host
-  without the hardware; the software-decoder half stays deferred (there
-  is still no software H.265 decoder to assert on, and the skip says so).
 
 - **A single H.264 NAL unit packet is forwarded according to the
   receiver's declared framing, not re-framed unconditionally.**
@@ -487,225 +788,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unconditionally, which silently changed the default contract.  The
   flag's semantics are now documented in the header rather than only in
   the plan.
-
-- **A mid-stream parameter-set change is now *proven* to decode on its own
-  (v1.3 plan item `Q1`, video plan `R2`).**
-  The survey behind the v1.3 plan found that the *sender* already did the
-  right thing — `openh264_encoder.cpp`'s `set_params()` re-creates the
-  encoder when the geometry changes and the new SPS / PPS travel in-band
-  with the next IDR — and that the *receiver* needed no mechanism at all:
-  OpenH264's decoder handles a mid-stream SPS update on its own, because
-  the decoder is the sole owner of "do my parameter sets still match?".
-
-  What was missing was therefore not a mechanism; it was an **assertion**.
-  Q1 is the test that would have caught a regression, and it is now in the
-  standard CI matrix:
-
-  - **The codec-level half**
-    (`src/modules/h264/tests/test_openh264_software.cpp`) exercises the
-    *warm* decoder: it decodes a 320×240 picture first (so the decoder is
-    holding that parameter set), the encoder's geometry then changes to
-    640×480, and the new picture is decoded **with the same decoder** — no
-    flush, no re-initialisation, no key-frame request.  The bar is `kOk`
-    on the *first* decode call: a `kErrNotReady` would mean the decoder
-    needed another round trip.  The two parameter sets are compared
-    byte-for-byte, so the test cannot pass by decoding the *old* frame
-    twice, and a second case asserts the decoded picture carries real
-    signal (a correctly-sized but blank frame would pass a
-    geometry-only assertion).
-  - **The engine-level half**
-    (`tests/test_engine_video_e2e_loopback.cpp`) drives the *whole*
-    pipeline with no stub in the middle: two engines, a real OpenH264
-    encoder, real RTP on the wire (STAP-A for the parameter sets, FU-A
-    for the slice), and the real receive path (depacketize → jitter
-    buffer → decode → render).  The host pushes a 320×240 frame and then a
-    640×480 one; the receiver must decode both and render the *new*
-    geometry.  The acceptance is the plan's own wording — the
-    decode-failure door stayed shut
-    (`video_feedback_pli_from_decode_failure == 0`) **and** no PLI
-    datagram went on the wire, which is the "no key-frame round-trip"
-    half checked on the wire rather than only in a counter.
-  - **The negative control.**  A counter that is *always* zero would
-    satisfy `== 0` vacuously, so the harness also has to show the counter
-    *does* move when the decoder really does refuse a frame.
-    `TheDecodeFailureDoorIsLiveInThisHarness` feeds the receiver a
-    synthetic single-NAL H.264 picture whose body is nonsense: the
-    depacketizer accepts it, the jitter buffer assembles it, and the
-    decoder refuses it — which opens the decode-failure door and moves
-    the counter.  Without that control, the Q1 assertion would prove
-    nothing.
-
-  The H.265 half of Q1 is **still open** — the H.265 decoder in the tree
-  is a stub, so there is nothing to assert on yet.  It is recorded as an
-  explicit follow-up in the v1.3 plan's §6, not silently skipped.
-
-- **Retransmissions now travel on their own RFC 4588 stream (v1.3 plan
-  item `Q3`, video plan `T1`).**
-  A NACK used to be answered by re-sending the *original* packet — same
-  sequence number, same payload type.  RFC 4588 §4.1 is explicit that
-  this is **not** RTX: a retransmission "SHALL be sent on a different
-  payload type" so the receiver can tell it apart and restore the
-  original's sequence number.  The consequence is that the receiver has
-  to *un-RTX* — unwrap the header, restore the number, and splice the
-  payload back into the frame it belongs to — because the receiver's
-  frame assembly is keyed on the sequence number.
-
-  The retransmission stream now exists end to end:
-
-  - **A new format module, `src/modules/rtx/`.**  It owns the two-octet
-    OSN header (RFC 4588 §4.1), the byte order, and the `apt=` /
-    `rtx-time=` SDP parameters (RFC 4588 §8.1).  It is a *format* module
-    — it builds no RTP headers and sends nothing — so both ends agree on
-    the bytes by construction rather than by convention.
-  - **The SDP advertises it.**  The offer carries
-    `a=rtpmap:<pt> rtx/90000`, `a=fmtp:<pt> apt=<vpt>`, and
-    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>` with the retransmission
-    SSRC's own `a=ssrc:` line (RFC 5576 §4.2).  The answer echoes the
-    offer's numbers (RFC 3264 §6.1).
-  - **The sender frames it.**  The retransmission ring builds the OSN
-    header, and the retransmission stream keeps its **own**
-    sequence-number space (RFC 4588 §4) — a retransmission does not
-    reuse the original's number on the wire.
-  - **The receiver unwraps it.**  The OSN is read out, the *original*
-    sequence number is restored, the payload is spliced into the frame it
-    belongs to, and the packet is erased from the pending-NACK list — or
-    the receiver would ask for it again, and again.
-  - **The scope boundary holds.**  A peer that offers no RTX payload
-    type gets no RTX stream, and the sender falls back to re-sending the
-    original packet.  Both shapes are pinned by the tests.
-
-  Three details the RFCs forced, each of which is a place a
-  plausible-looking implementation gets it wrong:
-
-  - **The header is two octets, not three.**  RFC 4588 §4.1 defines no
-    marker byte; the `0x90` some descriptions of RTX mention is not in
-    the RFC, and a peer that sent one would have its sequence number
-    restored `0x9000` too large.  (The v1.3 plan's own description was
-    corrected.)
-  - **The FID group lists the media SSRC first** —
-    `a=ssrc-group:FID <media_ssrc> <rtx_ssrc>`.  RFC 5576 §4.2's FID
-    semantics relate a *primary* source to its *dependent* ones, and the
-    primary comes first.  The reverse order is a real interop hazard: a
-    receiver that follows the convention would treat the media stream as
-    the repair flow and drop the picture.
-  - **One payload type serves both directions.**  RFC 8843 (Unified Plan)
-    gives an m-section a *single* payload-type list, so the RTX payload
-    type is a property of the m-section rather than of a direction —
-    which is also how Chrome negotiates it.  The `apt=` parameter then
-    says which payload type *within* the section the retransmission
-    protects.
-
-  The public surface grows additively: `EngineConfig::video_sender_tuning`
-  gains `rtx_payload_type` / `rtx_ssrc` / `rtx_time_ms`, `Stats` gains
-  `video_rtx_packets_sent` / `video_rtx_packets_received`, and the
-  plugin seams gain `set_rtx_enabled()` / `set_rtx_packet_callback()` /
-  `set_rtx_payload_type()` / `push_rtp_rtx()` — all with defaults that
-  leave a non-RTX plugin working exactly as before.
-
-- **The soak can now impair the network and drive the engine (v1.3 plan
-  item `Q5`).**
-  The v1.2 release gate's soak window measured a **clean** network, and
-  the impairment tooling that existed measured the **transport floor** —
-  raw datagrams in, raw datagrams out.  Neither drove the engine, and
-  neither used netem's `reorder` knob at all, even though the plan names
-  *reordering* as one of the three impairments the soak must survive.
-
-  Three pieces land together, and the point of the combination is that
-  the impairments now hit the **real RTP path**:
-
-  - **`src/modules/net_sim/`** — the impairment model
-    (`net_sim::ImpairmentConfig`: loss / delay / jitter / reorder / rate,
-    seeded and therefore deterministic) and the **simulated NAT**
-    (`net_sim::NatRelay`, an address-translating UDP relay with two
-    sockets).  Neither peer ever sees the other's real address, so the
-    pair looks like two peers behind a NAT exactly as the SDP presents
-    it.  This is the plan's Q5-1 default: the **real TURN/TLS leg is
-    deferred to v1.4.0** and is recorded as a known gap, not papered
-    over.
-  - **`examples/soak-p2p`** — the engine-level harness: **two real
-    `NimRTCEngine`s** (ICE + DTLS + SRTP + RTP) streaming audio across
-    the relay, with the impairment profile applied to every packet the
-    relay forwards.  It prints one JSON object with the parameters it
-    was given and the counters it measured.
-  - **`tools/run_soak_impaired.py`** — the recorder.  It runs the
-    harness, folds its JSON together with the **git provenance** of the
-    tree (`git_ref`, `git_commit`, `git_dirty`), **re-derives** the green
-    criteria from the archived numbers, and appends one record to
-    `build/soak-impaired/<platform>.jsonl`.  The netem parameters travel
-    with the result, which is what the v1.2 plan's DoD asks for:
-    *"soak runs are archived with their netem parameters."*
-
-  **The recorder does not trust the harness**, and that is the part
-  worth naming.  The green criteria are re-derived from the archived
-  numbers rather than read from the harness's own `"green"` field, so a
-  harness bug that faked a pass is still caught by the archive; a run
-  that could not be measured is `INCONCLUSIVE` and **never** `PASS`
-  (a broken runner must not be able to look like a green day); and a
-  green run on a dirty tree is marked, because a dirty tree is not the
-  commit it claims.  Each of those three rules is pinned by
-  `tools/run_soak_impaired.py --self-test`, which runs in CI.
-
-  The verdict is a **property of the run**, not of a reference number:
-  the media path carried media, memory stayed inside Q2's bound (at most
-  4 s of PCM), the feedback rate stayed inside Q4's bound, the loss was
-  recovered, and a 100 %-loss profile actually dropped something — a
-  profile that never drops would make the soak a lie.
-
-  `reorder` is now a tier in the kernel-side tooling too
-  (`tools/benchmark_weaknet_netem.sh`: netem `reorder 10% 50%`) and in
-  its portable counterpart (`tools/benchmark_weaknet.py`: the
-  `reorder-10pct` tier), so the two implementations of the same profile
-  list stay in step.
-
-  The operating procedure is `docs/plan/soak-impaired-runbook.md`; the
-  gate is `python tools/run_soak_impaired.py --summary --expect-q5`,
-  which accepts only a run of at least **24 h** under loss **and**
-  jitter **and** reorder on a clean tree.
-
-- **The hardware codec path is now exercised end-to-end by something
-  that re-runs (v1.3 plan item `Q7`, video plan `O-6`).**
-  The standard CI matrix has no encoder-capable GPU, so the hardware
-  path was validated **by hand** — which is the shape that fails
-  silently: a procedure that nobody re-runs is a procedure that has
-  already failed once.
-
-  Two recorders land, and they cover the two halves of the claim:
-
-  - **`examples/hw-e2e`** — the codec-level harness.  It pins the
-    shipped H.264 backend table to `kHardware` (a pin the engine
-    honours by *failing* rather than falling back), encodes 1080p
-    frames through `IVideoEncoder`, carries the bitstream through the
-    shipped `VideoSender` / `VideoReceiver` (STAP-A / FU-A) and
-    `rtp::PacketBuilder` / `rtp::Parser`, decodes it back, and
-    compares the luma against the source.  It prints one JSON record.
-  - **`tests/test_engine_video_hw_loopback.cpp`** — the engine-level
-    test: two real `NimRTCEngine`s with `video_codec_backend =
-    "hardware"`, asserting from the **stats** that a hardware backend
-    answered (`video_codec_hardware_accelerated`, and the backend
-    neither `software-stub` nor `openh264`) *and* that the picture
-    still arrives pixel-correct.
-
-  `tools/run_hardware_e2e.py` is the recorder: it folds the harness
-  record together with the machine's **driver stamp** and the tree's
-  git provenance, re-derives the verdict from the archived numbers,
-  and appends one record to `build/hardware/<platform>-<date>.jsonl`.
-  `.github/workflows/hardware.yml` runs it on a **self-hosted,
-  GPU-capable** runner (`runs-on: [self-hosted, windows, gpu-nvenc]`) —
-  the label *is* the contract, so a hosted runner never picks the job
-  up and a green check that means "nothing ran" cannot happen.
-
-  **The honesty rules are the same ones the soak recorder applies**, and
-  they are the point: a host with no hardware encoder produces a
-  **SKIPPED** record, never a PASS, and `--require-hardware` turns that
-  skip into a failing exit code — so a runner that silently lost its
-  GPU is visible instead of quiet.  The verdict is re-derived from the
-  archived numbers rather than read from the harness's own `"status"`,
-  and a record on a dirty tree says so.  Each of those three rules is
-  pinned by `tools/run_hardware_e2e.py --self-test`, which runs in CI.
-
-  On a host with no hardware encoder the harness exits **77** and the
-  record is `SKIPPED` — which is the honest outcome, not a failure of
-  the tree.
 
 - **The CI auto-retry workflow no longer re-runs a superseded run — and a
   pull request can now reach a green state.**
@@ -730,7 +812,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The concurrency groups are deliberately left SHA-free: a SHA-bearing group
   would stop a new push from cancelling the run it supersedes, and a rapid
   sequence of pushes would then burn a full four-platform matrix each.
-
 
 ## [1.2.0] - 2026-11-18
 

@@ -121,6 +121,23 @@ struct NIMRTC_API_STABLE ReceiverConfig {
 
     /** If true, the receiver runs FU-A reassembly itself (recommended). */
     bool                   expect_fu_a   = true;
+
+    /** Declare that the H.264 frame contract is Annex-B (a start code
+     *  ahead of every NAL unit — the shape NVENC, x264 and OpenH264 all
+     *  produce).  The receiver then emits every single NAL unit packet
+     *  in Annex-B framing, synthesising the start code when the sender
+     *  left it out, and (with `h264_validate_nalus`) refuses a stitched
+     *  frame whose bytes could never be a NAL unit instead of silently
+     *  handing it to the decoder.  Default off: a single NAL unit packet
+     *  is forwarded byte for byte (RFC 6184 §5.1 — the bare NAL unit
+     *  reaches the decoder as `NaluFormat::kRaw`). */
+    bool                   h264_annex_b        = false;
+
+    /** Drop an H.264 NAL unit whose header byte is not a valid type
+     *  (0, 24..31 are reserved / unspecified) before it reaches the
+     *  bitstream.  This catches corruption that a lost packet or a
+     *  misplaced start code leaves behind.  Default off. */
+    bool                   h264_validate_nalus = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -133,6 +150,15 @@ struct NIMRTC_API_STABLE ReceiverStats {
     std::uint64_t frames_incomplete    = 0;
     std::uint64_t fua_fragments_seen   = 0;
     std::uint64_t stap_a_packets_seen  = 0;
+    /** H.264 packets refused because a NAL unit header carried a
+     *  reserved type (see `ReceiverConfig::h264_validate_nalus`).  A
+     *  nonzero count means corruption was caught before the decoder. */
+    std::uint64_t nalus_dropped_invalid = 0;
+    /** H.264 packets whose Annex-B framing was rebuilt from the
+     *  accumulated frame bytes (see the STAP-A concatenation note in
+     *  `video_pipeline.cpp`).  Zero for streams whose every packet
+     *  re-frames independently. */
+    std::uint64_t annex_b_reframed_packets = 0;
     std::uint64_t nack_entries_emitted = 0;
     std::uint64_t sequence_gaps_seen   = 0;
     /** Number of key-frame requests the receiver raised because picture

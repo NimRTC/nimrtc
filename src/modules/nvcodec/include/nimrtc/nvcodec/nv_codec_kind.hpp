@@ -54,6 +54,18 @@ enum class NIMRTC_API_STABLE NvCodec : std::uint8_t {
     kAv1         = 3,
 };
 
+/** The H.265 profile an NVENC session asks for (see
+ *  `src/hevc_profile.hpp`).  Declared here so the test can name it. */
+enum class H265Profile : std::uint8_t;
+
+/** True iff this host can *encode* @p codec with NVENC at @p profile.
+ *
+ *  The same honest probe as `nvenc_codec_available()`, narrowed by the
+ *  profile: a GPU whose silicon has no MAIN10 encoder answers false for
+ *  `kMain10` rather than opening a MAIN session in its place. */
+NIMRTC_API_STABLE bool nvenc_codec_available_at_profile(NvCodec codec,
+                                                        H265Profile profile) noexcept;
+
 /** Everything the NVENC / NVDEC backends need to know about a codec. */
 struct NIMRTC_API_STABLE NvCodecDesc {
     /** The codec itself. */

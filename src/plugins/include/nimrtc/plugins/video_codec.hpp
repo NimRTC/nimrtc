@@ -873,6 +873,57 @@ struct NIMRTC_API_STABLE VideoCodecCapabilities {
 };
 
 // ---------------------------------------------------------------------------
+// HevcPtsSummary — the H.265 parameter sets of one keyframe (plan Q1b)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief What an H.265 keyframe's parameter sets said, in the terms a
+ *        parameter-set *switch* is asserted in.
+ *
+ * Q1b (`docs/plan/v1.3-plan.md` §9, Track R) asks for one thing: a
+ * mid-stream VPS / SPS / PPS change must be decoded by the *same* NVDEC
+ * session, with the new picture's geometry, and without the receiver
+ * asking for a key frame.  Three of those four facts live in the
+ * bitstream, not in a status code:
+ *
+ *   - *the geometry* — `sps_width` x `sps_height`, read from the SPS the
+ *     encoder wrote (an independent parse of ITU-T H.265 §7.3.2.2.1, not
+ *     the driver's report of what it decoded);
+ *   - *the parameter sets themselves* — `sps_hash` / `pps_hash`, so
+ *     "they changed" is observable even when the geometry did not;
+ *   - *which profile the sequence is in* — `ptl`, which is what a
+ *     decoder session is created for and what a profile switch changes.
+ *
+ * The struct is deliberately *plain data* with no pointers: it crosses
+ * the plugin boundary by value, in `IVideoEncoder::last_hevc_pts()`
+ * / `IVideoDecoder::last_hevc_pts()`.
+ */
+struct NIMRTC_API_STABLE HevcPtsSummary {
+    /** True iff the summarised access unit carried an SPS / PPS at all. */
+    bool has_sps = false;
+    bool has_pps = false;
+
+    /** The *visible* picture size (conformance window applied). */
+    std::uint32_t sps_width  = 0;
+    std::uint32_t sps_height = 0;
+
+    /** FNV-1a over the SPS / PPS RBSP (the NAL unit minus its header,
+     *  emulation-prevention bytes removed).  Two access units whose
+     *  parameter sets are byte-identical hash identically; anything a
+     *  decoder could notice changing the picture's interpretation
+     *  changes the hash. */
+    std::uint64_t sps_hash = 0;
+    std::uint64_t pps_hash = 0;
+
+    /** `general_profile_idc` of the SPS's profile_tier_level. */
+    std::uint8_t profile_idc = 0;
+    /** True iff the SPS advertises a profile other than
+     *  `general_profile_idc` through the compatibility flags or a
+     *  sub-layer's profile_idc (ITU-T H.265 §A.3.2). */
+    bool has_compatible_profiles = false;
+};
+
+// ---------------------------------------------------------------------------
 // IVideoEncoder
 // ---------------------------------------------------------------------------
 
@@ -1018,6 +1069,21 @@ public:
 
     /** True iff this encoder runs on a hardware accelerator. */
     virtual bool is_hardware_accelerated() const noexcept { return false; }
+
+    /** Q1b (`1.3.x` line) — the H.265 parameter sets this encoder last
+     *  *wrote* with a keyframe, if it tracks them.
+     *
+     *  An encoder fills it after it writes a keyframe's VPS / SPS / PPS;
+     *  a receiver compares it with the decoder's own answer to assert
+     *  that a mid-stream parameter-set change was noticed on both sides
+     *  of the wire without a key-frame round trip.
+     *
+     *  Default = nullopt: an encoder that does not track parameter sets
+     *  (every encoder but the NVIDIA H.265 one today) says so honestly.
+     *  The summary type is defined above, before the two seams */
+    virtual std::optional<HevcPtsSummary> last_hevc_pts() const noexcept {
+        return std::nullopt;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -1085,6 +1151,20 @@ public:
 
     /** True iff this decoder runs on a hardware accelerator. */
     virtual bool is_hardware_accelerated() const noexcept { return false; }
+
+    /** Q1b (`1.3.x` line) — the H.265 parameter sets the decoder last
+     *  created or refreshed its session for, if it tracks them.
+     *
+     *  A receiver compares it with the encoder's answer to assert that a
+     *  mid-stream parameter-set change was noticed on both sides of the
+     *  wire without a key-frame round trip.
+     *
+     *  Default = nullopt: a decoder that does not track parameter sets
+     *  (every decoder but the NVIDIA H.265 one today) says so honestly.
+     *  The summary type is defined above, before the two seams */
+    virtual std::optional<HevcPtsSummary> last_hevc_pts() const noexcept {
+        return std::nullopt;
+    }
 };
 
 // ---------------------------------------------------------------------------

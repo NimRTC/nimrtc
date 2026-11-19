@@ -484,6 +484,21 @@ jobs:
       - name: Check the release workflow's tag filter
         run: python tools/check_release_tag_filter.py --self-test
 
+      # A `${{ }}` block is evaluated by GitHub's expression language, not
+      # by bash and not by YAML.  A shell expansion inside one -- writing an
+      # expression block whose body is `tag` followed by a shell
+      # dot-suffix-strip -- is invisible locally: the YAML parses and the
+      # string is legal bash.  It shows up only after a push, as a workflow
+      # that starts and produces zero jobs because the file did not parse.
+      # That happened on 2026-11-19: commit `d6c3e38c` put such a block in
+      # release.yml's ancestry step, and every subsequent push ran the
+      # release workflow for 0 s with no jobs.  (This comment deliberately
+      # does not quote the broken block -- quoting it here would break this
+      # file in exactly the same way, which is also why the guard scans
+      # comments.)
+      - name: Check that every workflow expression is an expression
+        run: python tools/check_workflow_expressions.py --self-test
+
       # The plugin catalogue in docs/plugin_author_guide.md section 4 is
       # a promise about the code: every knob it names must exist in
       # EngineConfig, every macro it names must exist in the registry,

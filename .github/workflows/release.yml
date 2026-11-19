@@ -190,7 +190,7 @@ jobs:
           if ! git merge-base --is-ancestor "$tag" origin/main; then
             echo "::error::tag '$tag' is NOT an ancestor of main."
             echo "       A release tag must be reachable from main, or"
-            echo "       'git describe' cannot find it, a '${{ tag%.* }}.x'"
+            echo "       'git describe' cannot find it, a '${tag%.*}.x'"
             echo "       maintenance branch cannot be based on it, and the"
             echo "       provenance of the published artefact has to be"
             echo "       reconstructed by hand."

@@ -3544,3 +3544,32 @@ if(NIMRTC_BUILD_TESTS)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# The workflow-expression guard.
+#
+# `${{ ... }}` is GitHub's expression language, not bash and not YAML.  A
+# shell expansion inside one -- `${{ tag%.* }}`, added by `d6c3e38c` to the
+# ancestry step -- parses as YAML, reads as legal bash to every editor, and
+# makes the *whole workflow* refuse to run: it started and produced zero
+# jobs on every push after it landed (runs 44478642313, 44481029254).
+# Nothing local said a word.  The guard scans every workflow's expression
+# blocks for characters and expansions the language does not have.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_workflow_expressions
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_workflow_expressions.py"
+                         --self-test)
+        set_tests_properties(test_workflow_expressions PROPERTIES
+            TIMEOUT 60
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the workflow-expression "
+            "guard (tools/check_workflow_expressions.py).  CI runs it as a "
+            "dedicated step.")
+    endif()
+endif()
+

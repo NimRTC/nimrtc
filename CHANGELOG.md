@@ -9,30 +9,48 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.2.0`.
 
-- **A push to a branch can no longer start the release workflow, and a
-  guard keeps it that way (2026-11-19).**
-  Pushing `chore/release-1.2-followup` started the full `release`
-  workflow; its preflight has no tag to work with and failed in 0 s
-  (run `44478642313`).  The cause was in `on.push.tags`:
-  `v[0-9]+.[0-9]+.[0-9]+*`.  GitHub evaluates those patterns as
-  ECMAScript regexes anchored at the *start* of the ref, where `*` and
-  `+` quantify the preceding *character* — not the class before them —
-  so the pattern meant "v, a run of digits, any character, a run of
-  digits, …" and matched branch names as well as tags.
+- **A shell expansion inside `${{ }}` can stop an entire workflow from
+  running, and nothing local says a word (2026-11-19).**
+  The v1.2.0 follow-up added to `release.yml`'s tag-ancestry step:
 
-  Anchoring with `$` was not enough: "one run of digits, then
-  anything" cannot distinguish `v1.2.0-rc.1` from `v1.2.0-post1`, and
-  a four-segment pattern matched `integrate/q3-q6-recover`.  The
-  filter is now two whole-ref patterns (`v[0-9]*.[0-9]*.[0-9]` and
-  `v[0-9]*.[0-9]*.[0-9]-*`), checked against the repository's real
-  tags (11 release / pre-release / dev forms, all must fire) and its
-  real branches (26 refs, none may).
+  ```bash
+  echo "       'git describe' cannot find it, a '${{ tag%.* }}.x'"
+  ```
 
-  `tools/check_release_tag_filter.py` is that check, wired into the
-  `docs / markdown links` job and registered as `test_release_tag_filter`.
-  Its engine is Node's `RegExp`, not Python's `re`: `re` rejects the
-  old pattern outright ("multiple repeat"), so a Python check could
-  never have evaluated the shape it exists to catch.
+  `tag%.*` is bash "strip the shortest dot-suffix".  Inside `${{ }}` it is
+  not an expression, so the file did not parse, and the `release` workflow
+  started on every push and produced **zero jobs** (runs `44478642313`,
+  `44481029254`) — 0 s, no failing step to read, no check-run to annotate.
+  The YAML was valid, the string was legal bash, and `bash -n` was happy;
+  the only signal was the absence of everything.
+
+  `tools/check_workflow_expressions.py` now scans every workflow's
+  expression blocks and rejects the characters and expansions the
+  expression language does not have.  Against the pre-fix file it fails on
+  exactly that line (193); against the fixed tree it passes.  Wired into
+  `docs / markdown links` and registered as `test_workflow_expressions`.
+
+- **The `release` workflow's tag filter also matched branch names
+  (2026-11-19).**
+  The trigger was `on.push.tags: v[0-9]+.[0-9]+.[0-9]+*`.  GitHub
+  evaluates those patterns as ECMAScript regexes with `RegExp.test()`,
+  anchored at the *start* of the ref only, in which `+` and `*` quantify
+  the preceding *character* — not the class before them.  The filter
+  therefore read as "v, a run of digits, any character, a run of digits,
+  any character, …", and as a prefix test it matched ordinary branch
+  names, `chore/release-1.2-followup` among them.
+
+  Anchoring with `$` is not enough: "a run of digits" is still
+  indistinguishable from "a run of digits, then anything", and a
+  four-segment pattern matched `integrate/q3-q6-recover`.  The filter is
+  now two whole-ref patterns — `v[0-9]*.[0-9]*.[0-9]` and
+  `v[0-9]*.[0-9]*.[0-9]-*` — covering the tag forms the repository has
+  actually cut.  `tools/check_release_tag_filter.py` pins that: the 11
+  release forms in the repository's tag list must fire the workflow, and
+  the 23 branch names plus the `v1`-style aliases and `archive/*` tags must
+  not.  Its engine is Node's `RegExp`, not Python's `re` — `re` rejects
+  `[0-9]+*` outright ("multiple repeat"), so a Python check could not
+  evaluate the shape it exists to catch.
 
 - **The soak window, the tag ancestry and the README's release claims
   are now read at cut time (post-v1.2.0 review).**

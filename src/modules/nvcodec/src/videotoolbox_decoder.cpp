@@ -574,7 +574,22 @@ private:
         }
     }
 
-    /** The output callback VideoToolbox delivers the decoded picture to. */
+    /** The output callback VideoToolbox delivers the decoded picture to.
+     *
+     *  The `image_buffer` the callback receives is a **borrowed**
+     *  reference: VideoToolbox owns it, and the decompressor may still
+     *  be referring to it after the callback returns (unless
+     *  `kVTDecodeInfo_ImageBufferModifiable` is set).  The decoder has
+     *  to *retain* it to keep it alive past the callback — the CPU
+     *  path copies the pixels out of it afterwards, and the zero-copy
+     *  path hands it to the sink.
+     *
+     *  Releasing a reference the decoder does not own would be an
+     *  over-release: the buffer would be freed while VideoToolbox
+     *  still believes it is alive, and the next frame's use of it
+     *  would read freed memory.  The heap corruption that follows
+     *  shows up as a SIGTRAP or a segmentation fault in the middle of
+     *  the decode — far away from the release that caused it. */
     static void output_callback(void* refcon,
                                 void* /*sourceFrameRefCon*/,
                                 OSStatus status,
@@ -590,8 +605,10 @@ private:
         if (self->decoded_) {
             CVPixelBufferRelease(self->decoded_);
         }
-        // The session hands over a +1 reference; the decoder keeps it
-        // until the next frame replaces it.
+        // The callback's reference is borrowed, so the decoder takes one
+        // of its own.  The buffer is released when the next frame
+        // replaces it, or when the session is closed.
+        CVPixelBufferRetain(static_cast<CVPixelBufferRef>(image_buffer));
         self->decoded_ = static_cast<CVPixelBufferRef>(image_buffer);
     }
 

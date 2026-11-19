@@ -5,7 +5,7 @@
  * ## Receiver
  *
  *   push_rtp(packet, now_us):
- *     1. Track seq number (wrap-aware) 鈫?detect gaps 鈫?fill NACK list.
+ *     1. Track seq number (wrap-aware) →detect gaps →fill NACK list.
  *     2. If H.264:
  *        - peek_nalu_type(payload)
  *        - FU-A start : clear/initialise reassembly buffer (NRI, type).
@@ -14,7 +14,7 @@
  *        - STAP-A     : extract all NAL units, concatenate, push to JB.
  *        - Single     : push payload directly to JB.
  *     3. If VP8/VP9: push the raw payload to JB (JB concatenates).
- *     4. Drain pop_frame() 鈫?invoke user frame_callback.
+ *     4. Drain pop_frame() →invoke user frame_callback.
  *
  *   Sequence-number tracking is wrap-aware (signed distance), and we
  *   only report a gap when the new seq is strictly newer than the
@@ -30,7 +30,7 @@
  *        - Else: try STAP-A aggregation with neighbouring small NALs.
  *          Flush STAP-A when adding another NAL would exceed mtu.
  *        - Else: emit as a single-NAL packet.
- *     3. If VP8/VP9: emit as a single packet (no descriptor 鈥?minimal
+ *     3. If VP8/VP9: emit as a single packet (no descriptor —minimal
  *        reference impl; the descriptor would be added by an interop-
  *        aware variant).
  *     4. For each emitted packet: assign seq, fire packet_callback.
@@ -80,10 +80,10 @@ constexpr std::uint8_t kNriMask      = 0x60;
 constexpr std::uint8_t kFuAType      = 28;
 constexpr std::uint8_t kStapAType    = 24;
 
-// The Annex-B start code (ITU-T H.264 Annex B / ISO-IEC 14496-10 搂7.4.1.2.4):
+// The Annex-B start code (ITU-T H.264 Annex B / ISO-IEC 14496-10 §7.4.1.2.4):
 // four zero bytes followed by a one.
 //
-// RFC 6184 搂5.1 carries *bare* NAL units in the RTP payload 鈥?the start
+// RFC 6184 §5.1 carries *bare* NAL units in the RTP payload —the start
 // code is not on the wire.  The receiver therefore has to put it back,
 // because the decoder consumes the Annex-B framing that
 // `video_frame::NaluFormat::kAnnexBStartCode` promises:
@@ -96,7 +96,7 @@ constexpr std::uint8_t kStapAType    = 24;
 // receiver reassembles.  The jitter buffer below it only concatenates.
 //
 // So the start code is inserted *here*, at the point where the NAL
-// boundary is still known, and never in `video_jb` 鈥?that module is
+// boundary is still known, and never in `video_jb` —that module is
 // codec-agnostic (VP8 / VP9 carry no NAL units at all).
 constexpr std::uint8_t kAnnexBStartCode[4] = {0x00, 0x00, 0x00, 0x01};
 
@@ -124,7 +124,7 @@ inline std::int32_t seq_delta(std::uint16_t newer, std::uint16_t older) noexcept
 // The NAL units are returned as **spans into the input buffer**, not as
 // copies.  The caller owns the bitstream for the duration of the
 // packetization (the engine's `video_enc_buf` lives across the whole
-// `push_frame()` call), so a copy is pure waste 鈥?and on the hot path
+// `push_frame()` call), so a copy is pure waste —and on the hot path
 // it is the dominant cost: a 1080p key frame is tens of kilobytes
 // copied once per frame, on top of the per-NAL heap allocations the
 // copy itself needed.
@@ -215,7 +215,7 @@ struct VideoReceiver::Impl {
 
     std::unique_ptr<video_jb::IVideoJitterBuffer> jb;
 
-    // Sequence tracking 鈥?wrap-aware.
+    // Sequence tracking —wrap-aware.
     bool        seq_initialised = false;
     std::uint16_t highest_seq     = 0;
     std::uint16_t expected_next   = 0;
@@ -243,7 +243,7 @@ struct VideoReceiver::Impl {
     // one-byte FU header; the original NAL unit type travels in the FU
     // header's FuType field.  The reassembled NAL unit therefore starts
     // with the original two-byte NAL header, which the FU payload header
-    // does *not* carry (RFC 7798 搂4.3.3: the FU header replaces the
+    // does *not* carry (RFC 7798 §4.3.3: the FU header replaces the
     // original NAL header, and the type is carried in FuType).
     bool                   fu_h265_in_progress = false;
     H265NaluType           fu_h265_nalu_type   = H265NaluType::kUnspecified;
@@ -328,7 +328,7 @@ struct VideoReceiver::Impl {
     // missing.  Erase it from the pending-NACK list.
     //
     // Without this the receiver would keep NACKing a packet it already
-    // has 鈥?the peer would keep retransmitting it, and the loop would
+    // has —the peer would keep retransmitting it, and the loop would
     // run until the packet fell out of the retransmission cache.  This
     // is the "the restored number must be used *everywhere* the
     // original would have been" requirement of the plan.
@@ -463,7 +463,7 @@ struct VideoReceiver::Impl {
         fua_in_progress = false;
         if (body.empty()) {
             // Empty reassembly; nothing to emit.  This can happen if a
-            // middle/end fragment arrived without a start 鈥?drop silently.
+            // middle/end fragment arrived without a start —drop silently.
             return;
         }
         rx_annex_b_scratch.clear();
@@ -482,7 +482,7 @@ struct VideoReceiver::Impl {
     // ---------------------------------------------------------------------
     // Flush the current H.265 FU buffer as a single NALU into the JB.
     //
-    // RFC 7798 搂4.3.3: the FU payload header carries the *wrapper* type
+    // RFC 7798 §4.3.3: the FU payload header carries the *wrapper* type
     // (49) in place of the original NAL unit's type, and the original
     // type travels in the FU header's FuType field.  The reassembled NAL
     // unit therefore needs its two-byte header synthesised from the
@@ -499,7 +499,7 @@ struct VideoReceiver::Impl {
         nalu.insert(nalu.end(), kAnnexBStartCode,
                     kAnnexBStartCode + sizeof(kAnnexBStartCode));
 
-        // The two-byte NAL unit header (RFC 7798 搂1.1.4):
+        // The two-byte NAL unit header (RFC 7798 §1.1.4):
         //   byte 0: F(1) | Type(6) | LayerId MSB(1)
         //   byte 1: LayerId low 5 bits(5) | TID(3)
         const std::uint8_t t   = static_cast<std::uint8_t>(fu_h265_nalu_type) & kH265TypeMask;
@@ -524,7 +524,7 @@ struct VideoReceiver::Impl {
     // ---------------------------------------------------------------------
     // Handle a single RTP packet (after seq tracking).
     //
-    // `seq` is the *effective* sequence number 鈥?the one the packet is
+    // `seq` is the *effective* sequence number —the one the packet is
     // accounted under.  For an ordinary packet that is its own sequence
     // number; for a retransmission (RFC 4588) it is the **restored
     // original** number, because everything downstream (the jitter
@@ -748,7 +748,7 @@ struct VideoReceiver::Impl {
                 jb->insert(pkt);
                 return;
             }
-            // Single NAL unit packet (types 0..47) 鈥?pass through.
+            // Single NAL unit packet (types 0..47) —pass through.
         }
 
         // ---- AV1 (draft-ietf-payload-av1) ---------------------------------
@@ -877,7 +877,7 @@ struct VideoReceiver::Impl {
             stats.frames_emitted++;
             if (!f->complete) {
                 stats.frames_incomplete++;
-                // v1.1 Q3: picture data was lost 鈥?ask the sender for a
+                // v1.1 Q3: picture data was lost —ask the sender for a
                 // fresh key frame so the decoder can resync (PLI / FIR).
                 request_keyframe();
             }
@@ -925,7 +925,7 @@ bool VideoReceiver::push_rtp(const rtp::PacketView& packet,
 
     // For H.264 FU-A, we may insert a synthesised NALU before draining
     // (so the frame can fire on this same push).  arrival_us is filled
-    // with now_us; for fragments it stays at now_us 鈥?close enough for
+    // with now_us; for fragments it stays at now_us —close enough for
     // the JB's purpose.
     s.handle_payload(packet.payload, packet.marker,
                      packet.timestamp, packet.seq, now_us);
@@ -947,9 +947,9 @@ bool VideoReceiver::push_rtp_rtx(const rtp::PacketView& packet,
     // type is not ours to unwrap.
     if (s.cfg.rtx_payload_type == 0) return false;
 
-    // RFC 4588 搂4.1: the retransmission payload is the two-octet OSN
+    // RFC 4588 §4.1: the retransmission payload is the two-octet OSN
     // header followed by the original packet's payload.  The header is
-    // exactly two octets 鈥?there is no marker byte in front of it (see
+    // exactly two octets —there is no marker byte in front of it (see
     // the module's header comment), so a peer that sent a marker would
     // have its sequence number restored 0x9000 too large.
     const auto parsed = rtx::parse_payload(packet.payload);
@@ -967,14 +967,14 @@ bool VideoReceiver::push_rtp_rtx(const rtp::PacketView& packet,
     // ---- The restored sequence number is what everything else sees ----
     //
     // The retransmission stream has its own sequence space (RFC 4588
-    // 搂4), so `packet.seq` is *not* the number the payload belongs
+    // §4), so `packet.seq` is *not* the number the payload belongs
     // under.  The OSN is.  Everything downstream is keyed on the
     // original's sequence space:
     //
     //   * the jitter buffer's frame assembly (a frame's packets are
     //     grouped by RTP timestamp, and the *sequence* decides which
     //     packet of the frame this is);
-    //   * the NACK bookkeeping 鈥?the retransmitted packet must be
+    //   * the NACK bookkeeping —the retransmitted packet must be
     //     *erased* from the pending-NACK list, or the receiver will ask
     //     for it again, and again, and again.
     //
@@ -988,7 +988,7 @@ bool VideoReceiver::push_rtp_rtx(const rtp::PacketView& packet,
     s.erase_pending_nack(osn);
 
     // The frame's RTP timestamp and marker are the *original's*
-    // (RFC 4588 搂4.1), so the payload lands in the frame it belongs to.
+    // (RFC 4588 §4.1), so the payload lands in the frame it belongs to.
     s.handle_payload(original, packet.marker, packet.timestamp, osn, now_us);
 
     s.drain_frames(now_us);
@@ -1055,13 +1055,13 @@ struct VideoSender::Impl {
     //
     // The limiter sits between "a key frame was asked for" and "the
     // encoder is armed".  A burst of PLIs therefore produces ONE key
-    // frame, not N 鈥?and the counters say how many were granted, held
+    // frame, not N —and the counters say how many were granted, held
     // back and dropped.
     //
     // The limiter is built around the `FirCoalescer`, which is the
     // mechanism plan B14 says was "finally wired into the engine": the
     // coalescer owns the per-media-SSRC interval gate (RFC 5104
-    // 搂4.3.1.1) and the limiter consults it.
+    // §4.3.1.1) and the limiter consults it.
     video_rtcp_feedback::FirCoalescer coalescer{0};
     KeyframeLimiter limiter{coalescer, KeyframeLimiterConfig{}};
 
@@ -1100,10 +1100,10 @@ struct VideoSender::Impl {
     //
     // With RTX negotiated, a NACK is answered by sending the original
     // packet's payload on the *retransmission* payload type, behind the
-    // two-octet OSN header (RFC 4588 搂4.1).  Without it, the sender
-    // re-sends the original packet as-is 鈥?the pre-RTX behaviour.
+    // two-octet OSN header (RFC 4588 §4.1).  Without it, the sender
+    // re-sends the original packet as-is —the pre-RTX behaviour.
     //
-    // The RTX stream has its own sequence space (RFC 4588 搂4): a
+    // The RTX stream has its own sequence space (RFC 4588 §4): a
     // retransmission does NOT reuse the original's sequence number, so
     // the sender keeps a separate counter for it.
     SenderRtxCallback         rtx_cb;
@@ -1123,7 +1123,7 @@ struct VideoSender::Impl {
     // the NAL unit list, the "does this NAL need FU-A" flags, the FU-A
     // fragment groups, the STAP-A group, the STAP-A span list and the
     // STAP-A output buffer.  On a 30 fps video path that is a steady
-    // stream of short-lived heap allocations 鈥?the last thing a real-time
+    // stream of short-lived heap allocations —the last thing a real-time
     // path should have.
     //
     // All of them are now members whose capacity is kept across frames.
@@ -1157,7 +1157,7 @@ struct VideoSender::Impl {
 
     explicit Impl(SenderConfig c) : cfg(std::move(c)) {
         next_seq = cfg.initial_seq;
-        // The coalescer is per-media-SSRC (RFC 5104 搂4.3.1.1), so it
+        // The coalescer is per-media-SSRC (RFC 5104 §4.3.1.1), so it
         // must know which stream it is guarding.
         coalescer = video_rtcp_feedback::FirCoalescer(cfg.ssrc);
         KeyframeLimiterConfig lim_cfg{};
@@ -1167,14 +1167,14 @@ struct VideoSender::Impl {
         // Pre-size every retransmission slot to the MTU so caching a packet
         // is a memcpy into an existing buffer, not a fresh allocation.
         // Without this the RTX ring allocated one buffer per outgoing
-        // packet 鈥?a per-frame allocation on the hot path.
+        // packet —a per-frame allocation on the hot path.
         for (CachedPacket& slot : rtx_cache) {
             slot.payload.reserve(cfg.mtu);
         }
         // Reserve the packetization scratch vectors up-front.  Their
         // sizes depend on the *content* of the frame (how many NAL units
         // it has), so without a reservation the first frame that carries
-        // more NAL units than any before it grows the vector 鈥?a
+        // more NAL units than any before it grows the vector —a
         // one-off allocation that shows up as a per-frame allocation in
         // the benchmark whenever the payload happens to contain a
         // start-code-like byte sequence.
@@ -1307,9 +1307,9 @@ struct VideoSender::Impl {
         for (std::size_t i = 0; i < nalus.size(); ++i) {
             use_fua[i] = nalus[i].size() > cfg.mtu;
         }
-        // ---- The marker bit (RFC 6184 搂5.1) --------------------------------
+        // ---- The marker bit (RFC 6184 §5.1) --------------------------------
         //
-        // The marker marks the LAST packet of a *frame* 鈥?that is, the
+        // The marker marks the LAST packet of a *frame* —that is, the
         // packet that carries the frame's LAST NAL unit.  It does **not**
         // mark the last packet of every NAL group.
         //
@@ -1323,7 +1323,7 @@ struct VideoSender::Impl {
         // that carries `SPS | PPS | <oversized IDR slice>`.  The SPS and
         // the PPS are small, so they are aggregated into one STAP-A
         // packet, while the slice is fragmented into FU-A packets.  The
-        // STAP-A is *not* the last packet of the frame 鈥?but a marker
+        // STAP-A is *not* the last packet of the frame —but a marker
         // there made the receiver emit "SPS + PPS" as if it were the
         // whole picture, and the IDR slice that followed was dropped
         // because its frame had already been played out.
@@ -1475,7 +1475,7 @@ struct VideoSender::Impl {
             if (use_fua[i]) {
                 const core::ByteSpan n = nalus[i];
                 // The layer id / temporal id come from the original NAL
-                // unit header (RFC 7798 搂1.1.4).
+                // unit header (RFC 7798 §1.1.4).
                 const auto hdr = video_payload::h265::parse_nalu_header(n);
                 const std::uint8_t layer_id = hdr ? hdr->layer_id : 0;
                 const std::uint8_t tid      = hdr ? hdr->tid : 1;
@@ -1624,7 +1624,7 @@ core::Result<void> VideoSender::push_frame(video_frame::EncodedVideoFrame frame,
     if (s.keyframe_pending) {
         s.keyframe_pending = false;
         s.stats.frames_marked_as_keyframe++;
-        // We don't override frame.is_keyframe 鈥?the caller is responsible
+        // We don't override frame.is_keyframe —the caller is responsible
         // for emitting a real keyframe (IDR for H.264).  This is just a
         // bookkeeping marker for the receiver feedback roundtrip.
     }
@@ -1658,7 +1658,7 @@ core::Result<void> VideoSender::push_frame(video_frame::EncodedVideoFrame frame,
         }
         case video_frame::CodecKind::kH265: {
             // H.265 uses the same Annex-B / length-prefixed framing as
-            // H.264 鈥?only the NAL unit header differs (two bytes).
+            // H.264 —only the NAL unit header differs (two bytes).
             switch (frame.nalu_format) {
                 case video_frame::NaluFormat::kAnnexBStartCode:
                     parse_annex_b(frame.payload, s.nalus);
@@ -1749,7 +1749,7 @@ std::uint32_t VideoSender::retry_pending_keyframe(std::int64_t now_us) noexcept 
 
     // Re-offer the held request.  The limiter arbitrates again: if the
     // minimum interval still has not elapsed, the request stays held
-    // and the next tick tries again 鈥?which is the whole point of
+    // and the next tick tries again —which is the whole point of
     // *holding* rather than dropping it.
     const KeyframeDecision decision =
         s.limiter.request(KeyframeReason::kPli, now_us);
@@ -1833,11 +1833,11 @@ bool VideoSender::retransmit(std::uint16_t seq) noexcept {
     //
     // With RTX negotiated the retransmission travels on the
     // *retransmission* payload type, wrapped in the two-octet OSN
-    // header (RFC 4588 搂4.1), so the receiver can tell it apart from
+    // header (RFC 4588 §4.1), so the receiver can tell it apart from
     // the original and restore the original's sequence number.
     //
     // The RTP header of the retransmission is the original's except for
-    // the sequence number (RFC 4588 搂4.1) 鈥?so the *timestamp* and the
+    // the sequence number (RFC 4588 §4.1) —so the *timestamp* and the
     // *marker bit* are the original's, and the payload is the OSN
     // header followed by the original's payload.
     if (s.rtx_enabled && s.rtx_cb) {
@@ -1859,7 +1859,7 @@ bool VideoSender::retransmit(std::uint16_t seq) noexcept {
         out.rtp_timestamp = p->rtp_ts;
         out.marker        = p->marker;
         out.original_seq  = p->seq;
-        // RFC 4588 搂4: the retransmission stream has its own sequence
+        // RFC 4588 §4: the retransmission stream has its own sequence
         // number space, so the packet does not reuse the original's
         // number on the wire.
         out.rtx_seq       = s.rtx_next_seq;
@@ -1875,7 +1875,7 @@ bool VideoSender::retransmit(std::uint16_t seq) noexcept {
     //
     // Re-emit with the ORIGINAL sequence number / timestamp / marker so
     // the receiver can splice the packet back into the frame it belongs
-    // to.  RFC 4588 搂4.1 says this is *not* RTX 鈥?the packet keeps its
+    // to.  RFC 4588 §4.1 says this is *not* RTX —the packet keeps its
     // own payload type, so a receiver that multiplexes by payload type
     // cannot tell it from the original.
     if (s.packet_cb) {
@@ -2059,7 +2059,7 @@ core::Result<int> apply_feedback_rtcp(VideoSender& sender,
             // The video pipeline's sender has nothing to do with it 鈥?            // but it must not be mistaken for a protocol error.
         }
         // Other feedback kinds (REMB, transport-cc, 鈥? are ignored on
-        // purpose 鈥?the video pipeline has no use for them.  The same
+        // purpose —the video pipeline has no use for them.  The same
         // holds for the non-feedback RTCP packets (SR / RR / SDES) that
         // share a compound datagram with a NACK: they are skipped, not
         // treated as a protocol error.

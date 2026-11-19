@@ -81,9 +81,14 @@ std::vector<std::uint8_t> nalu_to_rbsp(core::ByteSpan nalu) {
 /** Skip the per-sub-layer PTL blocks and record each sub-layer's
  *  profile_idc (ITU-T H.265 §7.3.3: the `for (i = 0; i < maxSubLayersMinus1;
  *  i++)` loop over profile_present_flag / level_present_flag /
- *  sub_layer_profile_idc[i] ... sub_layer_level_idc[i]). */
-template <typename Buf>
-void skip_sub_layer_blocks(BasicBitReader<Buf>& r,
+ *  sub_layer_profile_idc[i] ... sub_layer_level_idc[i]).
+ *
+ *  Concrete `BitReader`, for the reason spelled out on
+ *  `parse_profile_tier_level` below: a function template defined only
+ *  in the .cpp cannot be explicitly instantiated from another
+ *  translation unit, and the resulting compile failure is
+ *  platform-dependent. */
+void skip_sub_layer_blocks(BitReader& r,
                            std::uint8_t max_num_sub_layers_minus1,
                            ProfileTierLevel& out) noexcept {
     auto& ids = out.sub_layer_profile_idc;
@@ -121,8 +126,7 @@ void skip_sub_layer_blocks(BasicBitReader<Buf>& r,
     }
 }
 
-template <typename Buf>
-bool parse_profile_tier_level(BasicBitReader<Buf>& r,
+bool parse_profile_tier_level(BitReader& r,
                               std::uint8_t max_num_sub_layers_minus1,
                               ProfileTierLevel& out) noexcept {
     out.max_sub_layers_minus1 = max_num_sub_layers_minus1;
@@ -212,8 +216,10 @@ bool parse_sps(core::ByteSpan sps_nalu, SpsInfo& out) noexcept {
 bool parse_sps_body(core::ByteSpan rbsp_in, SpsInfo& out) noexcept {
     if (rbsp_in.data() == nullptr || rbsp_in.size() < 2) return false;
 
-    // Copy through a vector so `BasicBitReader`'s buffer type is the one
-    // the explicit instantiation in the test covers.
+    // Copy through a vector so the reader's buffer type is the one the
+    // library uses (`BitReader`).  `core::ByteSpan` is not itself a
+    // buffer type the reader can hold -- it would need a copy anyway,
+    // because a span does not own the bytes.
     const std::vector<std::uint8_t> rbsp(rbsp_in.data(),
                                          rbsp_in.data() + rbsp_in.size());
     BitReader r{rbsp};

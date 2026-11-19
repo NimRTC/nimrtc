@@ -174,9 +174,20 @@ std::uint8_t highest_profile(const ProfileTierLevel& ptl) noexcept;
  *  Returns false when the RBSP is too short; the partial result is then
  *  meaningless.  The reserved bits are skipped exactly as
  *  ITU-T H.265 §7.3.3 specifies, which is what makes the reader land on
- *  the right bit after each of the two blocks. */
-template <typename Buf>
-bool parse_profile_tier_level(BasicBitReader<Buf>& r,
+ *  the right bit after each of the two blocks.
+ *
+ *  Not a template, and not a `BasicBitReader` template parameter: the
+ *  definition lives in the .cpp, and a function *template* whose
+ *  definition is not visible to its caller cannot be explicitly
+ *  instantiated from another translation unit -- GCC rejects the
+ *  instantiation outright ("explicit instantiation of ... but no
+ *  definition available"), while MSVC accepts it.  That is a
+ *  platform-dependent compile failure in a test, which is the worst
+ *  shape a defect can have.  `BasicBitReader` stays a template (the
+ *  reader itself is header-only and fully visible), but the two
+ *  functions that *consume* a reader take the concrete `BitReader`
+ *  alias, so no explicit instantiation is needed anywhere. */
+bool parse_profile_tier_level(BitReader& r,
                               std::uint8_t max_num_sub_layers_minus1,
                               ProfileTierLevel& out) noexcept;
 

@@ -63,15 +63,6 @@ namespace core = nimrtc::core;
 namespace nvcodec = nimrtc::nvcodec;
 namespace hevc = nimrtc::nvcodec::hevc_detail;
 
-// The parser's only caller inside the library is `parse_sps()`, which
-// reads a `std::vector<uint8_t>` RBSP.  The type is a template so the
-// tests can drive it with their own hand-written buffers; without this
-// explicit instantiation the definition would be private to the .cpp.
-template bool hevc::parse_profile_tier_level(
-    hevc::BasicBitReader<std::vector<std::uint8_t>>& r,
-    std::uint8_t max_num_sub_layers_minus1,
-    hevc::ProfileTierLevel& out) noexcept;
-
 namespace {
 
 // ===========================================================================

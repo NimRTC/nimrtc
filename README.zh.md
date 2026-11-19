@@ -638,8 +638,8 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | 从 SDP `a=rtpmap` 协商非标视频时钟率；`max_p99_ms` 策略校验器（opt-in 强制） | ✅ 已落地 | v1.1 Track M |
 | DTLS IPv6 `set_peer()` 走 `getaddrinfo`；NAT rebinding `rehandshake()`；pump 重入保护测试 | ✅ 已落地 | v1.1 Track Dtls |
 | 共享自适应抖动策略（`src/modules/jb_strategy`）：RFC 3550 抖动估计器 + "base + 4·J" 目标延迟，音频与视频抖动缓冲共用；视频侧自适应播放为 opt-in | ✅ 已落地 | v1.1 Track Q2 |
-| 3A 与自身契约对齐（输入域电平表、遵循 VAD / 电平开关、真实 APM 参考信号、引擎不再改动调用方的 PCM） | ✅ 已落地 | v1.0.2 之后的修复 |
-| libsrtp 转为真正的 git submodule；vendor 清单区分已验证 submodule 与签入树 | ✅ 已落地 | v1.0.2 之后的杂项 |
+| 3A 与自身契约对齐（输入域电平表、遵循 VAD / 电平开关、真实 APM 参考信号、引擎不再改动调用方的 PCM） | ✅ 已落地 | v1.2.0（v1.0.2 之后的修复） |
+| libsrtp 转为真正的 git submodule；vendor 清单区分已验证 submodule 与签入树 | ✅ 已落地 | v1.2.0（v1.0.2 之后的杂项） |
 | 简化版 Goog-CC 风格 BWE（opt-in，默认仍走 AIMD；RTT + 丢包混合估计，不是完整 trendline 移植）、RTCP feedback 回环、netem 弱网基线、引擎级 `ref_frame` / video stats、GMSSL vendor + SRTP seam、引擎源码拆分 | ✅ 已落地 | v1.1 Tracks Q1 / Q3 / Q4 / T / V / X / R |
 | **远程桌面轨** —— 采集设备 seam（`IVideoCapture`），带 **synthetic** 设备与 Windows 的 **DXGI Desktop Duplication** / **Windows Graphics Capture** 后端，以及 macOS **ScreenCaptureKit**、Linux **PipeWire** / **X11** 适配器；采集 id 为 `windows-dxgi` / `windows-wgc` / `macos-screencapturekit` / `linux-pipewire` / `linux-x11` / `synthetic` | ✅ 已落地 | remote-desktop plan A1–A8 |
 | **视频 sink seam + 渲染器** —— `IVideoSink` 增加 **GPU surface 交付路径**（`GpuBuffer`）；已交付的渲染器是 `headless`、`pinned`、**`d3d11`**（Windows）、**`metal`**（macOS）、**`egl`**（Linux）。`d3d11` / `metal` / `egl` 三个工厂在全平台注册，配置里点名能解析上，但在不匹配的平台 `open()` 返回 `kErrUnsupported` | ✅ 已落地 | remote-desktop plan E1–E8 |

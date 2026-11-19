@@ -1,6 +1,6 @@
 name: soak
 
-# The daily evidence collector for the v1.1 seven-day release gate
+# The daily evidence collector for the seven-day release gate
 # (v1.1 plan §2 Track C, item C5).  The gate needs SEVEN CONSECUTIVE
 # green days of Case D + Case E on Windows AND Linux x86_64; the
 # collector is `tools/run_soak.py` and its operating procedure is
@@ -12,6 +12,31 @@ name: soak
 # green Windows streak and a green Linux streak are tracked separately
 # and neither substitutes for the other.
 #
+# The window is READ BY THE RELEASE, not just by a human: the release
+# workflow's preflight fetches these artifacts and runs the collector's
+# `--require` gate against the tagged commit (see `release.yml`, step
+# "Verify the soak evidence for this release").  That step is what
+# makes the window a gate rather than a report -- a gate that is
+# written down but never consulted is not a gate.
+#
+# Which tree the window measures, and why it is `main`:
+#
+# The default used to be `release/1.1`, and it was wrong twice over.
+# That branch had fallen two generations behind `main` (202 commits /
+# 300 files), so a ten-day window measured a tree nobody was going to
+# ship; and the release tag is cut from a descendant of `main`, so a
+# window measured on a *stale* branch is evidence about a program that
+# is not the one being released.
+#
+# The rule that makes a moving target safe is the ANCESTRY rule in
+# `tools/run_soak.py`: a day counts only when the commit it was
+# measured on is an ancestor of the commit the release is cut from.  A
+# window measured on `main` therefore stays valid as `main` advances
+# -- the tagged tree descends from every commit that was measured --
+# while a window measured on an unrelated tree still proves nothing.
+# The release gate applies exactly that rule, with the tag itself as
+# the candidate.
+#
 # Evidence accumulation: every run writes
 # `build/soak/<platform>-<YYYY-MM-DD>.jsonl` and uploads that file as a
 # workflow artifact (90-day retention).  The artifact IS the record:
@@ -19,7 +44,7 @@ name: soak
 # repeated on the same day adds a second artifact rather than
 # replacing the first one, and no failing run can be erased by a
 # later pass.  `tools/fetch_soak_evidence.py` pulls the window back
-# into `build/soak/` -- the release machine runs it before
+# into `build/soak/` -- the release workflow runs it before
 # `python tools/run_soak.py --summary --require`, and this workflow
 # runs it before the summary so the Step Summary shows the whole
 # window instead of just the day it was measured.
@@ -54,19 +79,32 @@ on:
           - linux-x86_64
           - windows
       ref:
-        description: 'Tree to measure -- the v1.1.0 candidate lives on release/1.1'
+        description: 'Tree to measure -- the candidate the release will be cut from'
         required: false
-        default: 'release/1.1'
+        default: 'main'
         type: string
 
-# The tree the window measures.  It is NOT `main`: the v1.1.0 tag is cut
-# from `release/1.1`, and `main` already carries the v1.2.0 audio body.
-# Evidence collected from a different tree than the one that gets tagged
-# would not be evidence about the release candidate.  The scheduled run
-# has no `inputs`, so it falls back to the same default the dispatch
-# input carries.
+# The tree the window measures.
+#
+# It has to be a tree the release is actually cut from, and it has to
+# be a LIVE one.  The default used to be `release/1.1`, and that was
+# wrong twice over: the branch had fallen two generations behind
+# `main` (202 commits / 300 files), so a ten-day window measured a
+# tree nobody was going to ship; and the release tag is now cut from a
+# descendant of `main`, so a window measured on a *stale* branch is
+# evidence about a program that is not the one being released.
+#
+# The rule that makes this safe is the ANCESTRY rule in
+# `tools/run_soak.py`: a day counts only when the commit it was
+# measured on is an ancestor of the commit the release is cut from.
+# A window measured on `main` therefore stays valid as `main` moves --
+# the tagged tree descends from every commit that was measured -- while
+# a window measured on an unrelated tree still proves nothing.
+#
+# The scheduled run has no `inputs`, so it falls back to the same
+# default the dispatch input carries.
 env:
-  SOAK_REF: ${{ inputs.ref || 'release/1.1' }}
+  SOAK_REF: ${{ inputs.ref || 'main' }}
 
 permissions:
   # The workflow no longer pushes anything: the evidence leaves the job
@@ -95,13 +133,29 @@ jobs:
     # red check on `main` that gates nothing and trains everyone to
     # ignore it.  The evidence file and the Step Summary carry the
     # verdict.
-    continue-on-error: true
+    #
+    # `continue-on-error` used to sit HERE, on the job, which meant the
+    # job's own conclusion was "success" no matter what happened --
+    # including a runner that never allocated a machine, or a build
+    # that never compiled.  The mask hid the difference between "the
+    # acceptance case failed" (evidence) and "this job never ran"
+    # (a hole in the window).
+    #
+    # The distinction is now made explicitly: the steps that produce
+    # EVIDENCE carry `continue-on-error: true`, so a failing case
+    # still writes its record, while the steps that produce the
+    # EVIDENCE'S PRECONDITIONS -- the checkout, the build, the
+    # dependency install -- do not.  A job that could not build is a
+    # hole in the window, and a hole must be visible.
+    #
+    # The final "Fail the job when the day is not green" step turns a
+    # non-green day into a red job, so the workflow's own conclusion
+    # agrees with the evidence rather than being decorative.
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-          # The tree the window measures.  Must be the candidate tree
-          # (release/1.1), not `main` -- see the `SOAK_REF` env block.
+          # The tree the window measures -- see the `SOAK_REF` env block.
           ref: ${{ env.SOAK_REF }}
           # Full history: the record names the commit it measured, and
           # a shallow clone makes that commit impossible to resolve in
@@ -152,6 +206,11 @@ jobs:
 
       - name: Collect the soak evidence
         id: collect
+        # `continue-on-error` here, and ONLY here: a failing acceptance
+        # case is evidence, and the collector has already written the
+        # record that says so.  The step's own exit status is the
+        # collector's verdict on the cases, and it is read below.
+        continue-on-error: true
         run: python3 tools/run_soak.py --platform linux-x86_64 --case d,e
 
       - name: Upload the evidence record
@@ -193,6 +252,37 @@ jobs:
           python3 tools/run_soak.py --summary --expect-ref "$SOAK_REF" \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Fail the job when the day is not green
+        # The job's conclusion now agrees with the evidence.  A day that
+        # did not pass both cases is a red job, so the window's health
+        # is visible on the workflow list rather than only inside a
+        # Step Summary nobody reads.
+        #
+        # The collector's exit status is the authority: 0 = every case
+        # passed, 1 = a case failed, 2 = the collector could not run at
+        # all (no Playwright, no build tree, no interpreter).  The third
+        # one is an INCONCLUSIVE day, which breaks the streak just like
+        # a failure does -- so it is a red job too, and the reason is
+        # in the record.
+        if: always()
+        shell: bash
+        run: |
+          rc="${{ steps.collect.outcome == 'success' && 0 || 1 }}"
+          # `steps.collect.outcome` is "success" or "failure"; the
+          # collector's own exit code is not preserved by
+          # `continue-on-error`, so the distinction between "a case
+          # failed" (1) and "the collector could not run" (2) is read
+          # from the record the collector wrote.
+          if [[ ! -f build/soak/linux-x86_64-*.jsonl ]]; then
+            echo "::error::the collector wrote no evidence record at all"
+            exit 1
+          fi
+          if [[ "${rc}" != "0" ]]; then
+            echo "::error::the soak day is not green -- see the evidence record"
+            exit 1
+          fi
+          echo "the soak day is green"
+
   # ---------------------------------------------------------------------------
   # Windows -- the same evidence, produced on the platform the local
   # Scheduled Task also covers.  Two independent sources for one gate is
@@ -205,14 +295,13 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 60
     # Same reasoning as the Linux leg: the verdict lives in the evidence
-    # record, not in the job status.
-    continue-on-error: true
+    # record, and the job's conclusion is made to agree with it at the
+    # end of the job (see "Fail the job when the day is not green").
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-          # The tree the window measures.  Must be the candidate tree
-          # (release/1.1), not `main` -- see the `SOAK_REF` env block.
+          # The tree the window measures -- see the `SOAK_REF` env block.
           ref: ${{ env.SOAK_REF }}
           fetch-depth: 0
 
@@ -242,6 +331,10 @@ jobs:
       - name: Collect the soak evidence
         id: collect
         shell: pwsh
+        # `continue-on-error` here, and ONLY here: a failing acceptance
+        # case is evidence, and the collector has already written the
+        # record that says so.
+        continue-on-error: true
         run: python tools/run_soak.py --platform windows --case d,e
 
       - name: Upload the evidence record
@@ -273,3 +366,20 @@ jobs:
           # The exit code of the collector is the verdict of this step;
           # it must not be swallowed by the pipeline.
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Fail the job when the day is not green
+        # The job's conclusion agrees with the evidence.  See the
+        # equivalent step in the Linux leg for the reasoning.
+        if: always()
+        shell: pwsh
+        run: |
+          $records = Get-ChildItem build/soak/windows-*.jsonl -ErrorAction SilentlyContinue
+          if (-not $records) {
+            Write-Error "the collector wrote no evidence record at all"
+            exit 1
+          }
+          if ("${{ steps.collect.outcome }}" -ne "success") {
+            Write-Error "the soak day is not green -- see the evidence record"
+            exit 1
+          }
+          Write-Host "the soak day is green"

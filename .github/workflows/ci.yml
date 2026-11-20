@@ -844,7 +844,14 @@ jobs:
       # generator is exercised here and not only on a developer's
       # machine.
       - name: Generate the TLS material
-        run: ./examples/turn-server/gen-certs.sh
+        # `bash <script>`, not `./<script>`.  The exec bit is recorded in
+        # the index (100755), but a script *invoked* by path depends on
+        # the checkout's mode surviving, and a Windows contributor with
+        # core.fileMode=false cannot set it in their working tree at
+        # all.  Calling bash explicitly removes that dependency.  The
+        # repository's other shell entry points are invoked the same way
+        # (`sh scripts/check-release-freeze.sh`).
+        run: bash ./examples/turn-server/gen-certs.sh
 
       # The leg itself.  It starts and stops coturn twice (the TLS
       # server, then the plain control on the same port) and asserts
@@ -857,7 +864,7 @@ jobs:
         env:
           NIMRTC_TURN_TLS_PORT: '5349'
           NIMRTC_TURN_PLAIN_PORT: '3478'
-        run: ./examples/turn-server/ci-acceptance.sh
+        run: bash ./examples/turn-server/ci-acceptance.sh
 
       # The logs are the evidence N1 cites ("the TLS handshake is
       # visible in the server log"), so they are uploaded rather than

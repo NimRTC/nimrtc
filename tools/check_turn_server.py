@@ -63,6 +63,14 @@ thing the deployment exists to prove is not true:
     therefore write to the *same* log file, and the control's run
     would destroy the positive server's evidence.
 
+9.  CI invokes a shell script by path.  The scripts are recorded in
+    the index as ``100644``, and a checkout on a machine with
+    ``core.fileMode=false`` cannot change that -- so ``./gen-certs.sh``
+    exits 126 ("permission denied") before the script starts.  The
+    invocation has to be ``bash <script>``: bash reads the file, the
+    kernel does not need the mode.  This one was found by CI, not by
+    review.
+
 Usage:
     python tools/check_turn_server.py [--verbose]
 """
@@ -593,6 +601,64 @@ def check_control_config_exists(report: Report) -> None:
         )
 
 
+def check_scripts_are_invoked_through_bash(report: Report) -> None:
+    """The CI leg must invoke the scripts through ``bash``.
+
+    This is rule 9, and it was found by CI rather than by review: the
+    first run of the leg exited 126 on ``./gen-certs.sh`` -- "permission
+    denied" -- because the scripts are recorded in the index as
+    ``100644``, and a *checkout* on a Windows contributor's machine
+    (``core.fileMode=false``) cannot change that.  A deployment whose
+    acceptance run cannot start is not a deployment that was tested.
+
+    Invoking ``bash <script>`` instead of ``./<script>`` takes the exec
+    bit out of the picture entirely: the script is read by bash, not by
+    the kernel.  The repository's other shell entry points are invoked
+    the same way (``sh scripts/check-release-freeze.sh``), so this is
+    the house style and not a one-off.
+
+    The rule covers the *workflow*, which is where the invocation
+    lives.  It does not check the index's mode bits: a local clone's
+    index is not the clone CI checks out, and on Windows the mode is
+    not settable at all.
+    """
+    workflow = os.path.join(ROOT, ".github", "workflows", "ci.yml")
+    if not os.path.isfile(workflow):
+        report.fail(
+            "ci.yml",
+            "it is missing -- the reference TURN server's acceptance run "
+            "lives there",
+        )
+        return
+
+    for lineno, line in enumerate(read(workflow), start=1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if "turn-server/" not in stripped:
+            continue
+        if ".sh" not in stripped:
+            continue
+        # A `run:` line that mentions a script.  It must name bash (or
+        # sh) explicitly, or it must be a line that is *not* the
+        # invocation -- a comment, a path filter, an artifact path.
+        if stripped.startswith(("run:", "- run:")):
+            invocation = stripped.split(":", 1)[1].strip()
+            if invocation.startswith(("bash ", "sh ")):
+                continue
+            if invocation.startswith("./"):
+                report.fail(
+                    f"ci.yml:{lineno}",
+                    f"'{invocation}' invokes the script by path -- the exec "
+                    "bit is recorded in the index, but a checkout on a "
+                    "machine with core.fileMode=false cannot have it, and "
+                    "the run then fails with exit 126 (permission denied) "
+                    "before the script ever starts.  Invoke it as "
+                    "'bash <script>' instead: bash reads the file, the "
+                    "kernel does not need the mode",
+                )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verbose", action="store_true")
@@ -604,6 +670,7 @@ def main() -> int:
             return 2
 
     report = Report(args.verbose)
+    check_scripts_are_invoked_through_bash(report)
     check_config_options(report, CONF, "turnserver.conf")
     check_config_options(report, PLAIN_CONF, "turnserver.plain.conf")
     check_config_options(report, WSL_CONF, "turnserver.wsl.conf")

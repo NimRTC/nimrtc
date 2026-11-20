@@ -20,19 +20,30 @@ def run_check(root):
     return proc.returncode, proc.stdout + proc.stderr
 
 
+def resolve(rel):
+    """Where a mutation target lives.
+
+    Most targets are in examples/turn-server/.  The CI workflow is
+    not -- it is two directories up and one sideways.
+    """
+    if rel == 'ci.yml':
+        return os.path.join(ROOT, '.github', 'workflows', 'ci.yml')
+    return os.path.join(DIR, rel)
+
+
 def with_mutated(files, mutate):
     """Copy the tree, apply `mutate`, run the check, restore."""
     backup = {}
     try:
         for rel in files:
-            path = os.path.join(DIR, rel)
+            path = resolve(rel)
             backup[rel] = io.open(path, 'r', encoding='utf-8').read()
             io.open(path, 'w', encoding='utf-8', newline='\n').write(mutate(rel, backup[rel]))
         code, out = run_check(ROOT)
         return code, out
     finally:
         for rel, text in backup.items():
-            path = os.path.join(DIR, rel)
+            path = resolve(rel)
             io.open(path, 'w', encoding='utf-8', newline='\n').write(text)
 
 
@@ -170,6 +181,21 @@ def case_control_on_the_wrong_port(files):
     return mutate
 
 
+def case_script_invoked_by_path(files):
+    # The defect: CI invokes the script by path.  The exec bit is
+    # recorded in the index, but a checkout on a machine with
+    # core.fileMode=false cannot have it -- and the run then exits 126
+    # ("permission denied") before the script ever starts.  This is
+    # what actually happened on the first run of the leg.
+    def mutate(rel, text):
+        if rel == 'ci.yml':
+            return text.replace(
+                'run: bash ./examples/turn-server/gen-certs.sh',
+                'run: ./examples/turn-server/gen-certs.sh')
+        return text
+    return mutate
+
+
 case('the TLS listener is moved off 5349',
      ['docker-compose.yml'], case_tls_port_moved, 'tls-listening-port')
 
@@ -205,6 +231,9 @@ case('the negative control does not disable the TLS listeners',
 
 case('the negative control listens on the wrong port',
      ['turnserver.plain.conf'], case_control_on_the_wrong_port, 'listening-port')
+
+case('CI invokes the script by path instead of through bash',
+     ['ci.yml'], case_script_invoked_by_path, 'exit 126')
 
 
 def main():

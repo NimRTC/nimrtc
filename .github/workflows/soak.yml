@@ -273,7 +273,22 @@ jobs:
           # `continue-on-error`, so the distinction between "a case
           # failed" (1) and "the collector could not run" (2) is read
           # from the record the collector wrote.
-          if [[ ! -f build/soak/linux-x86_64-*.jsonl ]]; then
+          #
+          # A glob is NOT expanded on the right-hand side of `-f` inside
+          # `[[ ... ]]`: the pattern is handed to the test as a literal
+          # string, and a literal string with a `*` in it is never a
+          # file.  The negation therefore ALWAYS held, and this step
+          # reported "the collector wrote no evidence record at all" on
+          # every single run -- including the ones whose evidence file
+          # was sitting right there.  The Linux leg was red every day
+          # for a reason that had nothing to do with the soak.
+          #
+          # The fix is to let the shell expand the glob in a context
+          # that does expand it: a plain `compgen`/`for` over the
+          # pattern, or `ls` with the pattern.  `compgen -G` is the
+          # cheapest of the two -- it prints the matching paths and
+          # returns non-zero when there are none.
+          if ! compgen -G "build/soak/linux-x86_64-*.jsonl" > /dev/null; then
             echo "::error::the collector wrote no evidence record at all"
             exit 1
           fi

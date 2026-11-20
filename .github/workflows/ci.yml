@@ -843,6 +843,35 @@ jobs:
       # an inline openssl invocation, so that a change to the
       # generator is exercised here and not only on a developer's
       # machine.
+      - name: Stop the distro's coturn service
+        # Ubuntu's coturn package starts a system service on 3478 the
+        # moment it is installed.  That service would collide with the
+        # deployment's own plain listener, and the collision is a *host*
+        # problem, not a deployment defect -- the acceptance run would
+        # report "port 3478 is already in use" and the reader would be
+        # left looking for a defect in the deployment that is not
+        # there.  So the host is put back into a clean state first.
+        #
+        # The service is *masked*, not just stopped: a masked unit
+        # cannot be restarted by anything else on the runner, so the
+        # port cannot come back between the two phases of the run.
+        run: |
+          sudo systemctl stop coturn.service  || true
+          sudo systemctl disable coturn.service || true
+          sudo systemctl mask coturn.service   || true
+          # Belt and braces: an already-running instance is not always
+          # owned by systemd (a runner image may have started one by
+          # hand), so any leftover turnserver is stopped too.
+          sudo pkill -x turnserver || true
+          sleep 1
+          for port in 3478 5349; do
+            if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+              exec 3<&- 3>&-
+              echo "port $port is still held after stopping coturn" >&2
+              exit 1
+            fi
+          done
+
       - name: Generate the TLS material
         # `bash <script>`, not `./<script>`.  The exec bit is recorded in
         # the index (100755), but a script *invoked* by path depends on

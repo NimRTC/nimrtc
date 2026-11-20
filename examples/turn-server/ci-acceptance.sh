@@ -135,7 +135,14 @@ port_in_use() {
 
 for port in "$TLS_PORT" "$PLAIN_PORT"; do
     if port_in_use "$port"; then
-        fail "port $port is already in use -- something else on this host holds it"
+        cat >&2 <<EOF
+ci-acceptance: FAIL: port $port is already in use -- something else on this host holds it.
+ci-acceptance:   The usual culprit is the distro's coturn service, which starts
+ci-acceptance:   itself when the package is installed:
+ci-acceptance:       sudo systemctl stop coturn.service && sudo systemctl mask coturn.service
+ci-acceptance:   The deployment is not at fault here; the host is not clean.
+EOF
+        exit 1
     fi
 done
 

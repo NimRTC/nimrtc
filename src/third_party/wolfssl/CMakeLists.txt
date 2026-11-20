@@ -166,6 +166,30 @@ unset(_nimrtc_werror_backup)
 # 就会找不到 wolfSSL_get_peer_certificate/wolfSSL_X509_free/wolfSSL_X509_get_der。
 target_compile_definitions(wolfssl PUBLIC KEEP_PEER_CERT)
 
+# The NSS keylog must not land in the repository root.
+#
+# wolfSSL's `WOLFSSL_SSLKEYLOGFILE_OUTPUT` defaults to the RELATIVE path
+# "sslkeylog.log" (see wolfssl/internal.h), and it is resolved against the
+# PROCESS's working directory.  Every tool that runs from the top of the
+# tree -- tools/run_soak_impaired.py, scripts/run-soak-daily.ps1, the e2e
+# harnesses -- has the repository root as its CWD, so the keylog lands
+# there.  The release freeze checklist treats a keylog at the root as a
+# forbidden artifact (scripts/check-release-freeze.sh, the `root` check), so
+# the file has to be directed at the build tree instead.
+#
+# The path is ABSOLUTE (CMAKE_BINARY_DIR) rather than relative on purpose:
+# a relative "build/sslkeylog.log" would still resolve against whatever
+# CWD the binary happens to inherit, which is exactly the fragility that
+# put the file at the root in the first place.
+#
+# This is a PRIVATE definition on purpose.  The macro is consumed by
+# wolfSSL's own translation units (src/ssl.c, src/tls13.c) and must not
+# leak into NimRTC's consumers, which have their own keylog writer
+# (NIMRTC_DTLS_KEYLOG -> diag::write_keylog_line in
+# src/modules/dtls/backends/wolfssl/src/dtls_wolfssl_session.cpp).
+target_compile_definitions(wolfssl PRIVATE
+    "WOLFSSL_SSLKEYLOGFILE_OUTPUT=\"${CMAKE_BINARY_DIR}/sslkeylog.log\"")
+
 # Public re-export of HAVE_SECRET_CALLBACK so NimRTC's dtls TU sees the
 # same macro as wolfSSL itself and can gate its keylog-callback
 # registration block on `#ifdef HAVE_SECRET_CALLBACK`.  This is only

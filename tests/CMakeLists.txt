@@ -1756,6 +1756,87 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
   nimrtc_copy_wolfssl_certs(test_engine_video_hw_loopback)
 endif()
 
+# ----------------------------------------------------------------------------
+# The engine-level *H.265 parameter-set switch* test (v1.3 plan Q1b).
+#
+# The codec-level half of Q1b lives in
+# `src/modules/nvcodec/tests/test_hevc_pts.cpp` — one NVDEC instance
+# decodes the picture that follows an NVENC re-init at a new geometry.
+# This is the *engine-level* half: two `NimRTCEngine`s drive a full
+# H.265 hardware loopback (NVENC → RTP → jitter buffer → NVDEC → sink)
+# across a mid-stream resolution change, and the test asserts that the
+# switch decoded on its own — no PLI round-trip.
+#
+# The test is gated on the hardware leg (the Q7 `gpu-nvenc` runner): it
+# skips with an honest reason on a host with no NVENC / NVDEC pair for
+# HEVC, because there is no software H.265 decoder in the tree to fall
+# back to.  The dedicated evidence run is `.github/workflows/hardware.yml`.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_FRAME AND NIMRTC_MODULE_H265 AND NIMRTC_MODULE_NVCODEC)
+  add_executable(test_engine_video_hw_h265 test_engine_video_hw_h265.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_hw_h265 PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_hw_h265 PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_hw_h265 PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_hw_h265 PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_frame
+      nimrtc::h265
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_hw_h265 PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h265/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_hw_h265 PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_hw_h265 PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_hw_h265 LENIENT)
+  add_test(NAME test_engine_video_hw_h265
+      COMMAND $<TARGET_FILE:test_engine_video_hw_h265>)
+  set_tests_properties(test_engine_video_hw_h265 PROPERTIES TIMEOUT 90)
+  # The target links `nimrtc::web_transport` (the engine's registrar table
+  # references its factory), so it needs msquic.dll beside it on Windows.
+  # PRE_TEST discovery keeps the gtest probe from running before the
+  # POST_BUILD copy — otherwise it dies with STATUS_DLL_NOT_FOUND.
+  nimrtc_copy_msquic_dll(test_engine_video_hw_h265)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_hw_h265
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 60
+        DISCOVERY_MODE PRE_TEST)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_video_hw_h265)
+endif()
+
 # Phase 3 / C3 — the GPU zero-copy video send path.  The test needs the
 # video pipeline (receiver / sender "reference") so it reuses
 # `nimrtc_add_engine_codec_test`'s link set.

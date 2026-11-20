@@ -23,7 +23,11 @@ name: hardware
 #      stamp and the tree's git provenance;
 #   2. `ctest -R test_engine_video_hw_loopback` — the *engine-level*
 #      test that drives two `NimRTCEngine`s with `video_codec_backend =
-#      "hardware"` and asserts `Stats::video_codec_hardware_accelerated`.
+#      "hardware"` and asserts `Stats::video_codec_hardware_accelerated`;
+#   3. `ctest -R test_engine_video_hw_h265` — the *engine-level*
+#      H.265 parameter-set-switch test (v1.3 plan Q1b), which asserts
+#      that a mid-stream resolution change decodes on a warm NVDEC
+#      session with no key-frame round-trip.
 #
 # The record is the evidence.  A run on a runner that has lost its GPU
 # is a **SKIPPED** record, and `--require-hardware` makes that a red
@@ -106,7 +110,7 @@ jobs:
       - name: Build hw-e2e + the engine-level hardware test
         shell: pwsh
         run: |
-          cmake --build build --config Release -j --target hw-e2e test_engine_video_hw_loopback
+          cmake --build build --config Release -j --target hw-e2e test_engine_video_hw_loopback test_engine_video_hw_h265
 
       - name: The codec-level end-to-end run (recorded evidence)
         id: hw_e2e
@@ -130,7 +134,7 @@ jobs:
         # the engine ran the pinned hardware path end to end.
         shell: pwsh
         run: |
-          ctest --test-dir build -C Release -R test_engine_video_hw_loopback `
+          ctest --test-dir build -C Release -R "test_engine_video_hw_loopback|test_engine_video_hw_h265" `
             --output-on-failure
 
       - name: Surface the evidence summary

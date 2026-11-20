@@ -257,7 +257,9 @@ test('验收测试文件是真实断言，无 todo 用例残留；验证方式�
 // ---------------------------------------------------------------------------
 test('不破坏既有行为；验证方式：ctest 无回归（opus 编解码 / audio_rx 流水线 / 引擎音频媒体路径）', () => {
     const regression = [
-        { re: '^test_opus\\.',            note: 'opus 编解码（既有 DTX 编码与往返）' },
+        // 二进制级 test 名嵌入绝对路径（fix-ctest-testfile 重写），
+        // 所以 opus 编解码二进制用「发现式用例名」（Opus<suite>.<case>）锚定。
+        { re: '^Opus(Encoder|Decoder|Codec)\\.', note: 'opus 编解码（既有 DTX 编码与往返）' },
         { re: 'test_opus_packetise$',     note: 'RFC 7587 RTP 打包' },
         { re: 'test_opus_codec_plugin$',  note: 'opus codec 接缝' },
         { re: '^test_audio_seams$',       note: '音频插件接缝契约' },

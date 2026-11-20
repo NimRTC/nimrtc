@@ -86,7 +86,20 @@ NIMRTC_API_STABLE bool vt_encoder_available(VtCodec codec) noexcept;
 NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoCodec>
 make_vt_encoder(VtCodec codec, plugins::VideoCodecConfig cfg);
 
-/** True iff this host can decode @p codec with VideoToolbox. */
+/** True iff this host can decode @p codec with VideoToolbox.
+ *
+ *  The answer is the host's **capability**, not a probe session: a
+ *  hardware VideoToolbox decoder refuses a format description that
+ *  carries no codec extension atom (`avcC` / `hvcC`), and only the
+ *  *stream's own* parameter sets can produce one.  A probe that tried
+ *  to create a session would therefore report "no hardware decoder" on
+ *  every Mac that in fact has one — and the hardware path would be
+ *  dead everywhere.
+ *
+ *  So the probe asks `VTIsHardwareDecodeSupported()` instead, and the
+ *  session itself is created later, from the stream's parameter sets.
+ *
+ *  Returns false on every non-Apple build. */
 NIMRTC_API_STABLE bool vt_decoder_available(VtCodec codec) noexcept;
 
 /** Create a VideoToolbox decoder for @p codec.

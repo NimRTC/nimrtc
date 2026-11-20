@@ -457,6 +457,120 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The VideoToolbox path walked the luma plane diagonally, so the
+  decoded picture was garbage in the left columns (2026-11-19).**
+  Both the encoder's staging copy and the decoder's `copy_surface_to_i420()`
+  used `CVPixelBufferGetBytesPerRow(pb)` as the luma row stride.  For a
+  buffer with more than one plane that value is **not** the luma plane's
+  stride: Apple documents it as the stride whose product with the height
+  covers *the whole buffer, all planes together* — for a 1920x1080 NV12
+  buffer it is 2904, which is
+  `(1920*1080 + 1920*540) / 1080` rounded up, while the luma plane's own
+  stride is 1920.
+
+  So row N was read from an offset of `N*2904` instead of `N*1920`: the
+  picture was walked diagonally, each row shifted sideways relative to the
+  one above it, and the rows near the bottom read from the chroma plane
+  or past the end of the surface.  The symptom was a *partly* correct
+  picture — the left 576 columns of the 1080p frame came out black, the
+  rest of the row matched the reference, and the hardware loopback test
+  failed with mae 15.68 and Pearson 0.759.
+
+  The same call also returned the wrong *base address* (the whole
+  buffer's, not the luma plane's), which on an IOSurface-backed buffer
+  points into the middle of the luma allocation.
+
+  Both sites now use `CVPixelBufferGetBytesPerRowOfPlane(pb, 0)` and
+  `CVPixelBufferGetBaseAddressOfPlane(pb, 0)` — the same way the chroma
+  plane and the planar path already did.
+
+- **The macOS hardware video decoder existed, but could never open a
+  session (2026-11-19).**
+  `vt_decoder_available()` probed the host by creating a real
+  `VTDecompressionSession` and tearing it down — the honest question for
+  the *encoder*, whose compression session needs no stream context.  The
+  *decoder* cannot be probed that way: a hardware VideoToolbox decoder
+  rejects a format description that carries no **codec extension atom**
+  (`avcC` for H.264, `hvcC` for HEVC) with `-8971`
+  (`codecExtensionNotFoundErr`), and only the *stream's own* parameter
+  sets can produce one.  So the probe reported "this host has no
+  hardware decoder" on every Mac that in fact had one — and the
+  hardware decode path was dead everywhere, silently, while the
+  capability table claimed the row existed.
+
+  Two changes fix it:
+
+  - **The capability query is now a capability query.**
+    `VTIsHardwareDecodeSupported()` answers "does this host have a
+    hardware decoder for the codec?" without a format description, which
+    is the only way to ask it.  `vt_decoder_available()` asks that, and
+    `vt_detail::hardware_decode_supported()` exposes it to the rest of
+    the module.
+  - **The session creation is deferred to the first access unit.**
+    `VtDecoderSession::open()` succeeds when the host has a hardware
+    decoder but the stream has not yet delivered its parameter sets; the
+    session is then created from the first access unit that carries
+    them (`CMVideoFormatDescriptionCreateFromH264ParameterSets` /
+    `...FromHEVCParameterSets`).  Access units that arrive before the
+    parameter sets are dropped rather than failing the decoder, and a
+    mid-stream parameter-set change re-creates the session — the format
+    description the session holds describes the *old* sequence.
+
+  AV1 is unaffected and stays eager: it carries its sequence header
+  inside the OBU stream, has no codec extension atom, and is created
+  from the codec-type description.
+
+  The rule that decides what a format description needs — the SPS and
+  the PPS for H.264, the VPS as well for HEVC, nothing for AV1 — is a
+  *pure* predicate (`vt_detail::parameter_sets_complete()`), so it is
+  unit-tested on every host rather than only on a Mac.
+
+- **The VideoToolbox decoder released a pixel buffer it did not own
+  (2026-11-19).**
+  The decompression callback hands over a **borrowed** `CVPixelBufferRef`:
+  VideoToolbox owns the buffer, and the decoder has to take a reference
+  of its own to keep it alive past the callback.  The decoder stored the
+  borrowed pointer and then released it when the next frame replaced it
+  — an over-release on a buffer VideoToolbox still believed it owned.
+  The heap corruption that follows shows up far away from the release
+  that caused it: the hardware loopback decode died with a `SIGTRAP` or
+  a segmentation fault in the middle of the frame copy.
+
+  The callback now retains the buffer it stores and releases the
+  previous one, so the decoder holds exactly one reference for exactly
+  as long as it needs the picture.
+
+  The AV1 availability probe is now a **session** probe too.  For H.264
+  and HEVC the capability query is the only honest question — their
+  format descriptions need the stream's own parameter sets, so there is
+  nothing to probe with — but AV1 carries no codec extension atom and
+  *can* be probed with a real session.  `VTIsHardwareDecodeSupported()`
+  answers for the *silicon*; the session creation answers for *this
+  host*, and the two can disagree: a host that reports AV1 support but
+  refuses a hardware session would answer the factory's decoder
+  selection with a row that then fails to open, leaving the codec with
+  no decoder at all — on a host that does have the software AV1 decoder
+  (`dav1d`) to fall back to.
+
+- **The hardware loopback test measured the quantiser, not the path
+  (2026-11-19).**
+  The synthetic picture was a horizontal stripe pattern — every other
+  band of 32 rows carried a different value — so the picture had a hard
+  edge in every block *row*, which the quantiser renders inexactly at
+  the horizontal block boundaries.  At 1080p that pattern artefact
+  alone pushed the luma MAE past the threshold on a healthy pipeline.
+
+  The pattern is now a horizontal ramp plus one hard **vertical** edge
+  at a quarter of the width, which is what `examples/hw-e2e` paints and
+  what the pattern is actually for: a broken codec smooths the edge
+  away, and a vertical edge costs only the columns of blocks that cross
+  it.
+
+  This is the picture the test never really measured before: on macOS
+  the VideoToolbox *decoder* was unavailable, so the test skipped there
+  and the artefact stayed invisible.
+
+
 - **A shell expansion inside `${{ }}` can stop an entire workflow from
   running, and nothing local says a word (2026-11-19).**
   The v1.2.0 follow-up added to `release.yml`'s tag-ancestry step:

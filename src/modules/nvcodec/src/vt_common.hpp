@@ -124,6 +124,41 @@ inline CMVideoCodecType cm_codec_type(Codec codec) noexcept {
 }
 #endif
 
+/** True iff this host has a **hardware** decoder for @p codec.
+ *
+ *  ## Why this is a capability query and not a session probe
+ *
+ *  The obvious way to ask "does this machine decode @p codec in
+ *  hardware?" is to create a decompression session and see whether it
+ *  works.  That is what the *encoder* half of this module does, and it
+ *  is the honest answer there: the compression session is created from
+ *  a format description that needs no stream context.
+ *
+ *  The decoder half cannot do that.  A hardware VideoToolbox decoder
+ *  rejects a format description that carries no **codec extension
+ *  atom** (`avcC` for H.264, `hvcC` for HEVC) with
+ *  `-8971` (`codecExtensionNotFoundErr`) — and those atoms can only be
+ *  built from the *stream's own* parameter sets, which a probe has no
+ *  way to know.  Probing by session creation therefore reports "this
+ *  host has no hardware decoder" on every Mac that in fact has one.
+ *
+ *  `VTIsHardwareDecodeSupported()` answers the same question without a
+ *  format description, which is exactly what the probe needs.
+ *
+ *  Off-Apple the answer is `false`: there is no VideoToolbox there.
+ *
+ *  @see the session's deferred-open path in `videotoolbox_decoder.cpp`,
+ *       which uses this to decide whether to wait for the stream's
+ *       parameter sets or to give up. */
+inline bool hardware_decode_supported(Codec codec) noexcept {
+#if defined(__APPLE__)
+    return VTIsHardwareDecodeSupported(cm_codec_type(codec)) != 0;
+#else
+    (void)codec;
+    return false;
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // OS version
 // ---------------------------------------------------------------------------
@@ -252,9 +287,27 @@ inline std::string decoder_unavailable_reason(Codec codec) noexcept {
                "this host runs macOS " +
                std::to_string(running.major) + "." + std::to_string(running.minor);
     }
+    if (!hardware_decode_supported(codec)) {
+        return std::string("videotoolbox: this host's VideoToolbox hardware "
+                           "does not provide a ") +
+               codec_name(codec) +
+               " decoder (VTIsHardwareDecodeSupported reports no hardware "
+               "support for the codec)";
+    }
+    // AV1 carries no codec extension atom, so its description is built
+    // from the codec type alone and the session is not waiting for
+    // anything the stream has yet to deliver; the failure here is the
+    // host refusing a *hardware* session, not a missing parameter set.
+    if (codec == Codec::kAv1) {
+        return std::string("videotoolbox: VTDecompressionSessionCreate failed for ") +
+               codec_name(codec) +
+               " — the host reports a hardware decoder for the codec, but it "
+               "would not create a hardware-accelerated session for it";
+    }
     return std::string("videotoolbox: VTDecompressionSessionCreate failed for ") +
            codec_name(codec) +
-           " — this host's VideoToolbox hardware does not provide that decoder";
+           " — the host has a hardware decoder for the codec, but the "
+           "session could not be created from the stream's parameter sets";
 #else
     return std::string("videotoolbox: the Apple VideoToolbox framework does "
                        "not exist on this platform, so the ") +
@@ -568,6 +621,41 @@ struct ParameterSets {
     [[nodiscard]] bool has_sps() const noexcept { return !sps.empty(); }
     [[nodiscard]] bool has_pps() const noexcept { return !pps.empty(); }
 };
+
+/** True iff @p sets carry everything the format description for @p codec
+ *  needs.
+ *
+ *  H.264 needs the SPS and the PPS; HEVC needs the VPS as well (without
+ *  it the `hvcC` atom is incomplete, and VideoToolbox refuses the
+ *  session).  AV1 carries its sequence header inside the OBU stream
+ *  itself, so it has no out-of-band parameter sets at all — the answer
+ *  for AV1 is therefore `false`, and the AV1 path never asks.
+ *
+ *  This is a *pure* predicate over the extracted sets, so the rule is
+ *  unit-tested on every host — the macOS-only session code is not the
+ *  only place that knows what a format description needs. */
+inline bool parameter_sets_complete(Codec codec,
+                                     const ParameterSets& sets) noexcept {
+    if (codec == Codec::kAv1) return false;   // AV1 has no out-of-band sets
+    if (!sets.has_sps() || !sets.has_pps()) return false;
+    if (codec == Codec::kH265 && sets.vps.empty()) return false;
+    return true;
+}
+
+/** True iff @p a and @p b carry the same parameter sets, byte for byte.
+ *
+ *  The comparison is what tells "the stream still speaks the sequence
+ *  the session was created for" from "the stream switched sequence".
+ *  A mid-stream switch (a new geometry, a new profile) has to re-create
+ *  the session, because the format description the session holds
+ *  describes the *old* sequence.
+ *
+ *  The vectors hold the raw NAL units (header byte included), so the
+ *  comparison is exact. */
+inline bool parameter_sets_equal(const ParameterSets& a,
+                                 const ParameterSets& b) noexcept {
+    return a.sps == b.sps && a.pps == b.pps && a.vps == b.vps;
+}
 
 /** Extract the parameter sets from an Annex-B bitstream.
  *

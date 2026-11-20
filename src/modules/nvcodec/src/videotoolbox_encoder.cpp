@@ -747,21 +747,13 @@ public:
         // reads past the end of the surface.  That is a heap overrun,
         // and it is what used to crash the macOS CI leg.
         const CVReturn lock_st = CVPixelBufferLockBaseAddress(pixel_buffer, 0);
-        void* base = (lock_st == kCVReturnSuccess)
-                         ? CVPixelBufferGetBaseAddress(pixel_buffer) : nullptr;
-        const std::size_t pitch = (lock_st == kCVReturnSuccess)
-                                      ? CVPixelBufferGetBytesPerRow(pixel_buffer) : 0;
-        if (!base || pitch == 0) {
-            if (lock_st == kCVReturnSuccess) {
-                CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
-            }
+        if (lock_st != kCVReturnSuccess) {
             CVPixelBufferRelease(pixel_buffer);
             stats_.encode_errors++;
             return plugins::kErrInternal;
         }
 
         {
-            auto* dst = static_cast<std::uint8_t*>(base);
             const auto& layout = cpu->layout();
             const std::uint32_t stride_y =
                 static_cast<std::uint32_t>(layout.strides[0]);
@@ -776,9 +768,36 @@ public:
                 format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
                 // ---- The bi-planar (NV12) layout -------------------------
                 //
-                // The luma plane: one row at a time, at the buffer's pitch.
+                // The luma plane: one row at a time, at the *plane's own*
+                // stride.
+                //
+                // The stride is `CVPixelBufferGetBytesPerRowOfPlane(pb, 0)`,
+                // NOT `CVPixelBufferGetBytesPerRow(pb)`: for a buffer with
+                // more than one plane the latter returns a value whose
+                // product with the height covers *the whole buffer, all
+                // planes together* (for 1920x1080 NV12: 2904, which is
+                // (1920*1080 + 1920*540) / 1080 rounded up).  Using it
+                // as the luma row stride walks the luma plane diagonally:
+                // row N is read from an offset of N*2904 instead of
+                // N*luma_stride, so the encoder codes a picture whose
+                // rows are shifted sideways — and whose bottom rows come
+                // from the chroma plane or past the end of the surface.
+                //
+                // The same applies to the plane's *address*: the luma
+                // plane's base address comes from the buffer, not from
+                // `base + something`.
+                const std::size_t y_pitch =
+                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+                void* y_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0);
+                if (y_pitch == 0 || !y_plane) {
+                    CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+                    CVPixelBufferRelease(pixel_buffer);
+                    stats_.encode_errors++;
+                    return plugins::kErrInternal;
+                }
+                auto* y_dst = static_cast<std::uint8_t*>(y_plane);
                 for (std::uint32_t row = 0; row < h; ++row) {
-                    std::memcpy(dst + static_cast<std::size_t>(row) * pitch,
+                    std::memcpy(y_dst + static_cast<std::size_t>(row) * y_pitch,
                                 y_in + static_cast<std::size_t>(row) * stride_y, w);
                 }
                 // The chroma plane: U and V interleaved, at the buffer's
@@ -875,7 +894,8 @@ public:
 
         const plugins::Status st = encode_pixel_buffer(pixel_buffer, output,
                                                        output_capacity,
-                                                       encoded_out);
+                                                       encoded_out,
+                                                       /*zero_copy=*/false);
         CVPixelBufferRelease(pixel_buffer);
         return st;
     }
@@ -926,7 +946,8 @@ public:
         }
 
         return encode_pixel_buffer(pixel_buffer, scratch_.data(),
-                                    scratch_.size(), encoded_out);
+                                    scratch_.size(), encoded_out,
+                                    /*zero_copy=*/true);
     }
 
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
@@ -973,11 +994,20 @@ public:
     }
 
 private:
-    /** Encode one `CVPixelBuffer` and publish the bitstream. */
+    /** Encode one `CVPixelBuffer` and publish the bitstream.
+     *
+     *  `zero_copy` says how the picture reached the session: `true` when
+     *  the caller handed over a `CVPixelBuffer` it already owned (the
+     *  surface never crossed the CPU), `false` when this backend staged
+     *  the planes into a fresh surface itself.  The distinction is what
+     *  the `frames_encoded_staged` / `frames_encoded_zero_copy` counters
+     *  report — a session that reports neither reads as "the encoder
+     *  never ran". */
     plugins::Status encode_pixel_buffer(CVPixelBufferRef pixel_buffer,
                                         std::uint8_t* output,
                                         std::size_t output_capacity,
-                                        plugins::EncodedVideoFrame& encoded_out) noexcept {
+                                        plugins::EncodedVideoFrame& encoded_out,
+                                        bool zero_copy) noexcept {
         std::vector<std::uint8_t> raw_bs;
         bool is_keyframe = false;
         if (!session_.encode(pixel_buffer, force_keyframe_next_, raw_bs,
@@ -1059,6 +1089,23 @@ private:
 
         stats_.frames_encoded++;
         stats_.bytes_encoded += n_copy;
+        // The staged / zero-copy split is what tells a host *how* the
+        // picture reached the encoder.  A session that reports neither
+        // reads as "the encoder never ran" — which is exactly what the
+        // engine's telemetry and the hardware-loopback test read.
+        if (zero_copy) {
+            // The surface was handed over as it was: the picture never
+            // crossed the CPU, so `bytes_copied` stays at zero.
+            stats_.frames_encoded_zero_copy++;
+            stats_.zero_copy = true;
+            stats_.zero_copy_frames++;
+        } else {
+            // The planes were copied into a fresh surface: that is a
+            // CPU staging copy.
+            stats_.frames_encoded_staged++;
+            stats_.zero_copy = false;
+            stats_.staged_frames++;
+        }
         stats_.encode_latency_us_total += session_.last_latency_us();
         if (session_.last_latency_us() > stats_.encode_latency_us_max) {
             stats_.encode_latency_us_max = session_.last_latency_us();

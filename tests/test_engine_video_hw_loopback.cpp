@@ -42,12 +42,16 @@
  * decoder's own reason, rather than failing a test that is really
  * asserting "this machine has no hardware H.264 decoder".
  *
- * (On macOS / Apple Silicon the hardware *decoder* is genuinely
- * unavailable today: `VTDecompressionSessionCreate` rejects a format
+ * (On macOS / Apple Silicon the hardware *decoder* used to be
+ * unavailable: `VTDecompressionSessionCreate` rejects a format
  * description built from a bare codec type with `os=-8971`
  * (`codecExtensionNotFoundErr`), because such a description carries no
- * `avcC` atom.  The encoder is fine; the decoder row is not.  The
- * dedicated hardware job is where the end-to-end claim is gated.)
+ * `avcC` atom.  The decoder now asks
+ * `VTIsHardwareDecodeSupported()` whether the host has a hardware
+ * decoder at all, and creates the session from the *stream's own*
+ * parameter sets when they arrive — so the row is live there too.  The
+ * encoder is unaffected either way.  The dedicated hardware job is
+ * where the end-to-end claim is gated.)
  *
  * ## Why a hardware *encode* and any decode is enough
  *
@@ -65,6 +69,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -636,6 +641,14 @@ struct LoopbackResult {
     std::uint64_t rx_frames_rendered = 0;
     std::uint64_t rx_tx_frames_encoded = 0;
 
+    // The receiver's *loss* counters.  A frame that was dropped at the
+    // jitter buffer (or by the decoder) is a different failure from a
+    // frame that decoded into a partly black picture — and the two have
+    // to be told apart before the picture can be blamed on the codec.
+    std::uint64_t rx_frames_dropped_jb      = 0;
+    std::uint64_t rx_frames_dropped_decoder = 0;
+    std::uint64_t rx_bytes_received         = 0;
+
     // The TX engine's telemetry, copied before the engines are destroyed.
     std::string codec_backend;
     std::string codec_backend_preference;
@@ -712,6 +725,9 @@ LoopbackResult run_loopback() {
     const auto rx_stats = rx_engine.stats();
     result.rx_frames_decoded  = rx_stats.video_frames_decoded;
     result.rx_frames_rendered = rx_stats.video_frames_rendered;
+    result.rx_frames_dropped_jb      = rx_stats.video_frames_dropped_jb;
+    result.rx_frames_dropped_decoder = rx_stats.video_frames_dropped_decoder;
+    result.rx_bytes_received         = rx_stats.video_bytes_received;
     EXPECT_GE(rx_stats.video_frames_decoded, 1u)
         << "the decoder must have decoded the hardware bitstream";
 

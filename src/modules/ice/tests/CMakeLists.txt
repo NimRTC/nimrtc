@@ -33,6 +33,7 @@ add_executable(test_ice_test test_ice.cpp)
 add_executable(test_consent_freshness_test test_consent_freshness.cpp)
 add_executable(test_ice_restart_test test_ice_restart.cpp)
 add_executable(test_turn_relay_test test_turn_relay.cpp)
+add_executable(test_turn_tls_test test_turn_tls.cpp)
 
 # The VS multi-config generator sets LinkLibraryDependencies=false on
 # Application targets, which strips transitive PUBLIC deps from the vcxproj.
@@ -46,6 +47,8 @@ set_target_properties(test_ice_restart_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 set_target_properties(test_turn_relay_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_turn_tls_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
 nimrtc_apply_options(test_ice_test LENIENT)
 nimrtc_link_libjuice(test_ice_test)
@@ -58,6 +61,9 @@ nimrtc_link_libjuice(test_ice_restart_test)
 
 nimrtc_apply_options(test_turn_relay_test LENIENT)
 nimrtc_link_libjuice(test_turn_relay_test)
+
+nimrtc_apply_options(test_turn_tls_test LENIENT)
+nimrtc_link_libjuice(test_turn_tls_test)
 
 target_link_libraries(test_ice_test PRIVATE
     nimrtc::ice
@@ -90,6 +96,15 @@ target_link_libraries(test_turn_relay_test PRIVATE
     GTest::gtest_main
     GTest::gtest)
 
+# The TURN/TLS test needs libjuice's *server* half to stand up the
+# plain-TCP negative control, and the ICE module's TLS client.
+target_link_libraries(test_turn_tls_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
 # NOTE: No top-level add_test() —see modules/audio3a/tests/CMakeLists.txt
 # for the rationale (CMake 4.0 multi-config conditional bug).
 if(COMMAND gtest_discover_tests)
@@ -104,5 +119,8 @@ if(COMMAND gtest_discover_tests)
         DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_turn_relay_test
         PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 60)
+    gtest_discover_tests(test_turn_tls_test
+        PROPERTIES TIMEOUT 120
         DISCOVERY_TIMEOUT 60)
 endif()

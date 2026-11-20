@@ -110,6 +110,11 @@ typedef struct agent_turn_state {
 	juice_turn_transport_t transport;
 	turn_tcp_stream_t *stream;
 
+	// Set when the transport could not be opened at all (for example
+	// TURN over TLS without a TLS client).  The entry then fails
+	// instead of retrying.
+	bool failed;
+
 	// Reader thread for the TURN-over-TCP control connection.  The
 	// Allocate response and the relayed data both arrive on the stream,
 	// so the stream has to be pumped independently of the UDP socket.

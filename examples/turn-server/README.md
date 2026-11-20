@@ -1,0 +1,301 @@
+# The reference TURN server
+
+A one-command TURN deployment that **refuses plain TCP**, so a TURN/TLS
+test cannot pass by silently falling back.  It is the deployment side of
+`v1.4` plan item **N5** (`docs/plan/v1.4-plan.md` §3), and it is the
+target N1's positive test and N1's negative control both point at.
+
+This directory is a *deployment*, not a library.  coturn is **not**
+vendored into `src/third_party/`, nothing here is compiled into the
+library, and the only thing the SDK and this server share is a TURN URI
+and a credential.
+
+---
+
+## 1. Why this exists
+
+The v1.4 survey found that `IceTransport::add_turn_server()` accepts a
+`TurnTransport::Tls` server, warns, and then connects over **plain TCP**
+(`src/modules/ice/src/ice.cpp`; `turn_transport_supported(Tls)` returns
+`false`).  Every TURN claim in the tree so far has been asserted against
+the ICE agent's own test fixture, so nothing in CI could have caught the
+fallback: there was no server that *enforced* TLS.
+
+N5 is that server.  It exists so that N1 has a test whose failure mode is
+observable — a client pointed at this server that nevertheless connects
+over plain TCP is caught, because this server has no plain TCP to
+connect to on 5349.
+
+---
+
+## 2. Bring it up
+
+Requirements: Docker (with Compose v2) for the container path, and
+`openssl` for the certificate generator.
+
+```bash
+# Once: generate the CA, the server certificate and the credential file.
+./gen-certs.sh
+
+# The positive server: TLS-only on 5349.
+docker compose up -d
+
+# The negative control: plain TURN on the SAME port 5349, TLS off.
+# This *replaces* the positive server — they cannot both hold 5349.
+docker compose --profile plain up -d
+
+# Stop everything.
+docker compose down
+```
+
+The two services read two configuration files: `turnserver.conf` (the
+positive server) and `turnserver.plain.conf` (the negative control).
+They are separate files because coturn **ignores a command-line
+`--log-file`** — the config file's `log-file=` wins — so the control
+cannot be given its own log from the command line, and the two runs
+would otherwise write over each other's evidence.
+
+What lands on disk (all under `secrets/`, which `.gitignore` keeps out of
+the tree):
+
+| Path | What it is |
+|---|---|
+| `secrets/ca/ca.pem` | The local CA.  **This is what a verifying client trusts.** |
+| `secrets/ca/ca.key` | The CA's private key.  Test-only; regenerate with `./gen-certs.sh --force`. |
+| `secrets/tls/turn.pem` | The server chain coturn presents (leaf, then CA). |
+| `secrets/tls/turn.key` | The server's private key. |
+| `secrets/creds.txt` | The realm and the static long-term credential. |
+| `secrets/logs/turnserver.log` | The server log — N1's "TLS handshake visible in the log" evidence. |
+| `secrets/logs/turnserver-plain.log` | The negative control's log, kept separate so the two runs do not overwrite each other's evidence. |
+
+Regenerating the certificate rotates the trust anchor and breaks every
+client pinned to the old one, so it is an explicit act (`--force`), not
+a side effect.
+
+### The native path (what CI uses)
+
+The same configuration runs without Docker, through `run-native.sh`:
+
+```bash
+./run-native.sh                      # this directory
+./run-native.sh /path/to/turn-server # or an explicit root
+```
+
+The script substitutes the machine-specific paths into a temporary copy
+of the configuration and starts `turnserver` with it.  It exists because
+**coturn does not expand environment variables in its config file** —
+there is no `getenv` in its config reader — so the paths have to be
+written down, and they cannot be written down for *one* machine.  The
+WSL variant (`turnserver.wsl.conf`) therefore carries a placeholder and
+`run-native.sh` fills it in.
+
+This is what CI's Linux leg does (v1.4 plan §5 **N5-2**), because
+GitHub's hosted runners have no Docker daemon.
+
+---
+
+## 3. What the server is configured to be
+
+`turnserver.conf` is short and every non-obvious line is commented.  The
+load-bearing decisions:
+
+* **TLS 1.2 is the floor** (`no-tlsv1=1`, `no-tlsv1_1=1`).  RFC 8656
+  § 7.2 requires TLS 1.2 or better, and the client's DTLS stack
+  (ADR-013) is configured to the same floor.  A test that passes at
+  TLS 1.0 is testing a protocol the client cannot negotiate in the field.
+* **No TURN-over-DTLS** (`no-dtls=1`).  N1's scope is RFC 5766
+  long-term credentials over a TCP control stream wrapped in TLS
+  (RFC 6062 § 3.2) — no alternate auth, no DTLS.  There is **no
+  `no-dtlsv1` option**: coturn has one DTLS switch, not a version
+  ladder, and a config line it does not recognise is discarded with a
+  "Bad configuration format" warning.  The file therefore states the
+  floor it can actually enforce.
+* **Loopback peers are allowed** (`allow-loopback-peers=1`).  The sample
+  and the tests run on one host, so the relay peer *is* loopback; without
+  this the allocation is refused and the failure looks like a credential
+  problem.
+* **The relay range is small and published on loopback only** (41 ports,
+  `x-relay-ports` in `docker-compose.yml`, mirrored by `min-port` /
+  `max-port`).  A relayed allocation forwards datagrams from an
+  unauthenticated peer, so a range bound to `0.0.0.0` is an open relay.
+  Widen the binding only if peers on other hosts must be served, and
+  firewall it when you do.
+* **Static credentials, published on purpose** — `nimrtc` /
+  `nimrtc-test-secret` in realm `nimrtc.local`.  A test credential that
+  has to be fetched is a test that cannot run from a clean checkout.
+  The *real* credential lifecycle is N7's job (a provider consulted at
+  gathering time and re-consulted on expiry); this file is exactly the
+  static server list that N7 keeps working (§5 N7-1).
+* **`lt-cred-mech` is explicit.**  coturn's default is the *short-term*
+  mechanism, where the "password" is a credential the server hands out
+  — there is nothing for a test to configure up front.  The long-term
+  mechanism is the one RFC 5766 §4 describes, and it is what makes the
+  `user=` line mean anything.
+* **`cli-password` is required, and not optional politeness.**  coturn
+  refuses to start with *"allow_loopback_peers and empty cli password
+  cannot be used together"*.  The CLI password guards coturn's
+  administrative console, not the TURN protocol — but without it the
+  server will not run with the loopback peers the tests need.
+
+---
+
+## 3a. How to tell that the server is *actually* serving TLS
+
+This is the question the whole directory exists to answer, so it is
+worth stating exactly — because a TURN server that has quietly lost its
+TLS listener looks completely healthy from the outside.
+
+**A container that is up is not a container that is serving TLS.**
+coturn's response to an unreadable certificate or key is *not* to fail:
+it logs a warning, sets `no_tls = true`, and **starts anyway with the
+TLS listener disabled**.  The port stays published, the health check
+passes, and the client fails to connect — to a server that looks like a
+TLS server.  Three things cause that, and all three are handled here:
+
+| What goes wrong | How it is prevented |
+|---|---|
+| The certificate path does not exist (a config copied to another machine) | `gen-certs.sh` writes the paths the compose file mounts, and `run-native.sh` refuses to start without a certificate |
+| The private key is unreadable by the server's user (OpenSSL writes keys 0600; the container runs as `nobody`) | `gen-certs.sh` widens the key's mode and the directories' |
+| The log directory is not writable, so the evidence never lands | `gen-certs.sh` makes `secrets/logs` writable |
+
+**The check itself.**  coturn prints the negotiated cipher and the TLS
+version on the session line, and it prints them **only for a TLS
+socket**:
+
+```
+session 003000000000000001: new, realm=<nimrtc.local>, username=<nimrtc>,
+  lifetime=600, cipher=ECDHE-RSA-AES256-GCM-SHA384, method=TLSv1.2
+```
+
+A **plain** session has no `cipher=` and no `method=` at all — the
+format string is a different one.  So the log line is the evidence,
+and its *absence* is the failure signal:
+
+```bash
+# Positive: the handshake happened.
+grep -q 'cipher=.*method=TLSv1' secrets/logs/turnserver.log && echo TLS-OK
+
+# Negative control: no TLS session was ever created.
+grep -q 'cipher=' secrets/logs/turnserver-plain.log && echo LEAKED || echo NO-TLS
+```
+
+(`fingerprint=1` in the config is a **different** thing — it is
+RFC 5766's FINGERPRINT attribute, a TURN-protocol integrity check.  It
+does not print the TLS cipher, and it is not what proves the handshake
+happened.)
+
+---
+
+## 4. How the client uses it
+
+The library side already has the vocabulary; N1 is what makes
+`TurnTransport::Tls` true.
+
+```cpp
+nimrtc::ice::TurnServer turn;
+turn.host     = "127.0.0.1";
+turn.port     = 5349;
+turn.username = "nimrtc";
+turn.password = "nimrtc-test-secret";
+turn.transport      = nimrtc::ice::TurnTransport::Tls;
+turn.tls_server_name = "turn.nimrtc.local";   // SNI + the name verified
+
+// Existing lifecycle: pre_open(), then add_turn_server(), then open().
+```
+
+Verification pins `secrets/ca/ca.pem`.  The certificate is valid for
+`turn.nimrtc.local`, `localhost`, `127.0.0.1` and `::1`, so a client that
+connects by address verifies too.
+
+Until N1 lands, `turn_transport_supported(TurnTransport::Tls)` is
+`false`, `add_turn_server()` warns, and the connection is plain TCP to
+port 5349 — **which this server does not accept**, so the observable is
+"the session does not establish", not "the session established over a
+transport nobody checked".
+
+---
+
+## 5. The positive and negative controls
+
+| N1's case | Server | Expected |
+|---|---|---|
+| Positive | `coturn` (TLS-only, 5349) | The session establishes; `Stats::transport.turn_transport_used == "tls"`; the server log names the TLS handshake |
+| Negative | `coturn-plain` (TLS off, **also 5349**) | The session **fails to establish** — a client that connects here was told to use 5349 and fell back |
+
+The negative control is the one that matters, and **the port matters**.
+A control on a *different* port cannot catch the defect: the client
+would fail to reach the wrong port, which is a connection error, not a
+protocol downgrade.  The control has to be a plain server **on the port
+the client was told to use**, so the only thing between the client and a
+working session is whether it actually negotiated TLS.
+
+That is also why the two services are mutually exclusive — one host
+port, two listeners — and why the control is brought up *instead of* the
+positive server rather than beside it.
+
+---
+
+## 6. CI
+
+CI does **not** use this compose file.  GitHub's hosted runners have no
+Docker daemon, so the Linux leg installs `coturn` natively and runs
+`ci-acceptance.sh` against it (v1.4 plan §5 **N5-2**).  The compose
+file is the *developer* path and the *archived-evidence* path: the
+two-machine run that N6 files records the server configuration it
+used, and this is that configuration.
+
+Both paths present the same thing to the test — a TURN URI and a
+credential — which is what keeps the claim honest regardless of which
+path brought the server up.
+
+### What the CI leg asserts
+
+The leg is `linux-turn / reference TURN server` in `.github/workflows/ci.yml`.
+It builds nothing; it exercises the deployment.  It asserts:
+
+| Assertion | What it rules out |
+|---|---|
+| The TLS port completes a handshake that verifies against the generated CA | A server that came up with the TLS listener disabled (coturn does this when the certificate or key is missing or unreadable, and says only a warning) |
+| A **real TURN allocation** succeeds over that TLS session, with coturn's own `turnutils_uclient` | A port that speaks TLS but not TURN — and, more importantly, a deployment whose credential is not accepted |
+| The server log records the session's `cipher=… method=TLSv1.2` | The evidence N1 cites ("the TLS handshake is visible in the server log") going missing |
+| The **same client**, on the **same port**, against a plain TURN server, gets **no** allocation | A client that silently downgraded to plain TCP — the defect N1 exists to remove |
+
+The last one is the negative control, and the *same port* is the point:
+a control on a different port would produce a connection error, not a
+protocol downgrade, and would not catch the defect.
+
+Two things the native path has to do that the compose file does not:
+
+* **Write the two logs to two different files.**  coturn's
+  `set_option()` lists `'l'` (log-file) among the options "already
+  taken care of before", and the pass that applies the config file's
+  `log-file=` runs *after* the command line — so a command-line
+  `--log-file=` is **silently ignored**.  The control therefore has its
+  own configuration file (`turnserver.plain.conf`), not a command-line
+  override.
+* **Check that the TLS listener is up**, with the `cipher=` grep from
+  §3a, before believing a green result.  On a runner the certificate is
+  generated fresh, and a permission problem there is indistinguishable
+  from a protocol failure unless the log is looked at.
+
+### Running it by hand
+
+```bash
+./gen-certs.sh
+./ci-acceptance.sh
+```
+
+It needs `coturn` and `openssl` on `PATH`; `turnutils_uclient` (which
+ships with coturn) enables the allocation assertions.
+
+---
+
+## 7. Tearing it down
+
+```bash
+docker compose --profile plain down
+rm -rf secrets/          # also drops the generated trust anchor
+```
+
+Removing `secrets/` is safe: nothing in the repository depends on a
+particular certificate, and `gen-certs.sh` recreates all of it.

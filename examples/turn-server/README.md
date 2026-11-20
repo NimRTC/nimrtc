@@ -48,6 +48,13 @@ docker compose --profile plain up -d
 docker compose down
 ```
 
+The two services read two configuration files: `turnserver.conf` (the
+positive server) and `turnserver.plain.conf` (the negative control).
+They are separate files because coturn **ignores a command-line
+`--log-file`** — the config file's `log-file=` wins — so the control
+cannot be given its own log from the command line, and the two runs
+would otherwise write over each other's evidence.
+
 What lands on disk (all under `secrets/`, which `.gitignore` keeps out of
 the tree):
 
@@ -231,29 +238,55 @@ positive server rather than beside it.
 ## 6. CI
 
 CI does **not** use this compose file.  GitHub's hosted runners have no
-Docker daemon, so the Linux leg installs `coturn` natively and runs it
-with `--tls-only` against a certificate from this directory's
-`gen-certs.sh` (v1.4 plan §5 **N5-2**).  The compose file is the
-*developer* path and the *archived-evidence* path: the two-machine run
-that N6 files records the server configuration it used, and this is that
-configuration.
+Docker daemon, so the Linux leg installs `coturn` natively and runs
+`ci-acceptance.sh` against it (v1.4 plan §5 **N5-2**).  The compose
+file is the *developer* path and the *archived-evidence* path: the
+two-machine run that N6 files records the server configuration it
+used, and this is that configuration.
 
 Both paths present the same thing to the test — a TURN URI and a
 credential — which is what keeps the claim honest regardless of which
 path brought the server up.
 
+### What the CI leg asserts
+
+The leg is `linux-turn / reference TURN server` in `.github/workflows/ci.yml`.
+It builds nothing; it exercises the deployment.  It asserts:
+
+| Assertion | What it rules out |
+|---|---|
+| The TLS port completes a handshake that verifies against the generated CA | A server that came up with the TLS listener disabled (coturn does this when the certificate or key is missing or unreadable, and says only a warning) |
+| A **real TURN allocation** succeeds over that TLS session, with coturn's own `turnutils_uclient` | A port that speaks TLS but not TURN — and, more importantly, a deployment whose credential is not accepted |
+| The server log records the session's `cipher=… method=TLSv1.2` | The evidence N1 cites ("the TLS handshake is visible in the server log") going missing |
+| The **same client**, on the **same port**, against a plain TURN server, gets **no** allocation | A client that silently downgraded to plain TCP — the defect N1 exists to remove |
+
+The last one is the negative control, and the *same port* is the point:
+a control on a different port would produce a connection error, not a
+protocol downgrade, and would not catch the defect.
+
 Two things the native path has to do that the compose file does not:
 
-* **Set the external IP explicitly.**  The compose file passes
-  `--external-ip=$(detect-external-ip)`, which resolves the machine's
-  public address over DNS.  A CI runner has no public address, so the
-  native path sets `--external-ip` to the runner's own address, or
-  leaves it alone and lets the relay advertise the runner's address
-  directly.  What it must *not* do is advertise a container address.
+* **Write the two logs to two different files.**  coturn's
+  `set_option()` lists `'l'` (log-file) among the options "already
+  taken care of before", and the pass that applies the config file's
+  `log-file=` runs *after* the command line — so a command-line
+  `--log-file=` is **silently ignored**.  The control therefore has its
+  own configuration file (`turnserver.plain.conf`), not a command-line
+  override.
 * **Check that the TLS listener is up**, with the `cipher=` grep from
   §3a, before believing a green result.  On a runner the certificate is
   generated fresh, and a permission problem there is indistinguishable
   from a protocol failure unless the log is looked at.
+
+### Running it by hand
+
+```bash
+./gen-certs.sh
+./ci-acceptance.sh
+```
+
+It needs `coturn` and `openssl` on `PATH`; `turnutils_uclient` (which
+ships with coturn) enables the allocation assertions.
 
 ---
 

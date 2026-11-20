@@ -68,7 +68,14 @@ services:
     container_name: nimrtc-turn-tls
     restart: unless-stopped
     command:
-      - --config=/etc/coturn/turnserver.conf
+      # **The config file is `-c`, not `--config`.**  coturn's
+      # long-option table has no `config` entry at all: `--config` makes
+      # the server print "unrecognized option '--config=...'" and
+      # **exit**, so the container never starts and the deployment
+      # looks like a Docker problem rather than a spelling problem.
+      # The short form takes the path as its argument.
+      - -c
+      - /etc/coturn/turnserver.conf
       # The external IP, so that a relay allocation hands the peer an
       # address the peer can actually reach.
       #
@@ -95,7 +102,17 @@ services:
       - --external-ip=$(detect-external-ip)
     volumes:
       # The configuration, the credential list and the certificate.
-      # gen-certs.sh writes them; .gitignore keeps them out of the tree.
+      #
+      # **The configuration file is mounted separately**, because it
+      # lives in this directory and `secrets/` is gitignored (it holds
+      # the generated key material).  Mounting only `./secrets` would
+      # leave `/etc/coturn/turnserver.conf` *absent*, and coturn's
+      # response to a missing config file is a warning plus
+      # "Default and command-line settings will be used" -- so the
+      # server would start with **coturn's built-in defaults**: no
+      # realm, no user, no certificate, and therefore no TLS listener.
+      # The container would be healthy and the port would be published.
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
       - ./secrets:/etc/coturn
     ports:
       # TLS on the conventional port (RFC 8656 § 7.2).  **This is the
@@ -122,26 +139,33 @@ services:
     profiles: ["plain"]
     restart: "no"
     command:
-      - --config=/etc/coturn/turnserver.conf
+      # `-c`, not `--config` -- see the note on the TLS service above.
+      - -c
+      # The control's **own** configuration file, not the positive
+      # server's.  It is a separate file because coturn **ignores a
+      # command-line `--log-file`**: `set_option()` lists `'l'` among
+      # the options "already taken care of before", and the pass that
+      # applies the config file's `log-file=` runs *after* the command
+      # line.  So the control could not be given its own log by
+      # `--log-file=...` -- it would have kept writing to the positive
+      # server's log file, and whichever run happened last would have
+      # destroyed the other's evidence.
+      - /etc/coturn/turnserver.plain.conf
       # Everything identical to the TLS service except the transport:
       # a client that connects here when told to use 5349 has fallen
       # back, not succeeded.
       - --no-tls
       - --no-dtls
-      # The control listens on the port the client was told to use, so
-      # the failure it produces is "the TLS handshake did not happen",
-      # not "the wrong port was unreachable".
-      - --listening-port=5349
       # The same external IP as the positive server, for the same
       # reason: the control must fail *only* because TLS is off, so
       # everything else has to be identical.
       - --external-ip=$(detect-external-ip)
-      # Its own log file, so the control's run does not overwrite the
-      # positive server's evidence.  (`--log-file` on the command line
-      # overrides the config file's `log-file`.)
-      - --log-file=/etc/coturn/logs/turnserver-plain.log
     volumes:
-      # The configuration and the credential list, read-only: the
+      # The configuration file, mounted separately from `secrets/` for
+      # the same reason as on the TLS service: it is not in `secrets/`.
+      - ./turnserver.plain.conf:/etc/coturn/turnserver.plain.conf:ro
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      # The credential list and the certificate, read-only: the
       # control has no business rewriting them.
       - ./secrets:/etc/coturn:ro
       # ... but the log directory has to be writable, and the `:ro`

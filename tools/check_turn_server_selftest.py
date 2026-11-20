@@ -112,6 +112,64 @@ def case_placeholder_not_substituted(files):
     return mutate
 
 
+def case_config_spelling(files):
+    # The defect: `--config` instead of `-c`.  coturn has no `config`
+    # long option, so the server exits with "unrecognized option" and
+    # the container never starts.
+    def mutate(rel, text):
+        if rel == 'docker-compose.yml':
+            return text.replace('      - -c\n', '      - --config=/etc/coturn/turnserver.conf\n')
+        return text
+    return mutate
+
+
+def case_config_not_mounted(files):
+    # The defect: the config file is not mounted, so coturn falls back
+    # to its built-in defaults -- no realm, no user, no certificate,
+    # and therefore no TLS listener.
+    def mutate(rel, text):
+        if rel == 'docker-compose.yml':
+            return text.replace(
+                '      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro\n', '')
+        return text
+    return mutate
+
+
+def case_log_file_on_the_command_line(files):
+    # The defect: the two runs are separated by a command-line
+    # `--log-file`, which coturn silently ignores -- so both write to
+    # the same file and the control destroys the positive server's
+    # evidence.
+    def mutate(rel, text):
+        if rel == 'docker-compose.yml':
+            return text.replace(
+                '      - --external-ip=$(detect-external-ip)\n',
+                '      - --external-ip=$(detect-external-ip)\n'
+                '      - --log-file=/etc/coturn/logs/turnserver-plain.log\n')
+        return text
+    return mutate
+
+
+def case_control_has_no_own_config(files):
+    # The defect: the control has no configuration file of its own, so
+    # it has no way to keep its log separate.
+    def mutate(rel, text):
+        if rel == 'turnserver.plain.conf':
+            return text.replace('no-tls=1', '# no-tls=1')
+        return text
+    return mutate
+
+
+def case_control_on_the_wrong_port(files):
+    # The defect: the control listens on a different port, which makes
+    # it a connection error rather than a protocol downgrade.
+    def mutate(rel, text):
+        if rel == 'turnserver.plain.conf':
+            return text.replace('listening-port=5349', 'listening-port=9999')
+        return text
+    return mutate
+
+
 case('the TLS listener is moved off 5349',
      ['docker-compose.yml'], case_tls_port_moved, 'tls-listening-port')
 
@@ -132,6 +190,21 @@ case('the README does not say how to tell TLS from plain',
 
 case('the WSL placeholder is never substituted',
      ['run-native.sh'], case_placeholder_not_substituted, '@TURN_ROOT@')
+
+case('the config file is named with an option coturn does not have',
+     ['docker-compose.yml'], case_config_spelling, '--config')
+
+case('the config file is not mounted into the container',
+     ['docker-compose.yml'], case_config_not_mounted, 'not mounted')
+
+case('the two runs are separated by an ignored --log-file',
+     ['docker-compose.yml'], case_log_file_on_the_command_line, '--log-file')
+
+case('the negative control does not disable the TLS listeners',
+     ['turnserver.plain.conf'], case_control_has_no_own_config, 'no-tls')
+
+case('the negative control listens on the wrong port',
+     ['turnserver.plain.conf'], case_control_on_the_wrong_port, 'listening-port')
 
 
 def main():

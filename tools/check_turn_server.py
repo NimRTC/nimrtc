@@ -39,6 +39,30 @@ thing the deployment exists to prove is not true:
 5.  The log directory is not writable by the server's user, so the log
     line that is N1's *evidence* never lands.
 
+6.  The compose file passes ``--config=``.  coturn's long-option table
+    has no ``config`` entry at all -- the option is ``-c`` -- so the
+    server prints "unrecognized option" and **exits**.  The container
+    never starts, and the failure reads like a Docker problem rather
+    than a spelling problem.
+
+7.  The compose file does not mount the configuration file.  It lives
+    in the directory, not in ``secrets/`` (which is gitignored, because
+    it holds the generated key material), so mounting ``./secrets``
+    alone leaves ``/etc/coturn/turnserver.conf`` **absent**.  coturn's
+    response to a missing config file is a warning and "Default and
+    command-line settings will be used" -- so the server starts with
+    coturn's built-in defaults: no realm, no user, no certificate, and
+    therefore no TLS listener.  The container is healthy and the port
+    is published.
+
+8.  The compose file separates the two runs' logs with a command-line
+    ``--log-file=``.  That option is **silently ignored**: coturn's
+    ``set_option()`` lists ``'l'`` among the options "already taken
+    care of before", and the pass that applies the config file's
+    ``log-file=`` runs *after* the command line.  Both runs would
+    therefore write to the *same* log file, and the control's run
+    would destroy the positive server's evidence.
+
 Usage:
     python tools/check_turn_server.py [--verbose]
 """
@@ -54,10 +78,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIR = os.path.join(ROOT, "examples", "turn-server")
 
 CONF = os.path.join(DIR, "turnserver.conf")
+PLAIN_CONF = os.path.join(DIR, "turnserver.plain.conf")
 WSL_CONF = os.path.join(DIR, "turnserver.wsl.conf")
 COMPOSE = os.path.join(DIR, "docker-compose.yml")
 GEN_CERTS = os.path.join(DIR, "gen-certs.sh")
 RUN_NATIVE = os.path.join(DIR, "run-native.sh")
+ACCEPTANCE = os.path.join(DIR, "ci-acceptance.sh")
 README = os.path.join(DIR, "README.md")
 
 
@@ -450,6 +476,123 @@ def check_wsl_placeholder_is_substituted(report: Report) -> None:
         )
 
 
+def check_compose_uses_coturn_spelling(report: Report) -> None:
+    """The compose file must use coturn's real option spellings."""
+    compose = read(COMPOSE)
+    for lineno, line in enumerate(compose, start=1):
+        stripped = line.strip()
+        if stripped.startswith("#") or "--" not in stripped:
+            continue
+        if "--config" in stripped:
+            report.fail(
+                f"docker-compose.yml:{lineno}",
+                "'--config' -- coturn's long-option table has no 'config' "
+                "entry; the option is '-c'.  The server prints "
+                "'unrecognized option' and EXITS, so the container never "
+                "starts and the failure reads like a Docker problem rather "
+                "than a spelling problem",
+            )
+        if "--log-file" in stripped:
+            report.fail(
+                f"docker-compose.yml:{lineno}",
+                "'--log-file' is silently ignored: coturn's set_option() "
+                "lists 'l' among the options 'already taken care of "
+                "before', and the pass that applies the config file's "
+                "'log-file=' runs AFTER the command line.  Both runs would "
+                "write to the same log file, and the control's run would "
+                "destroy the positive server's evidence",
+            )
+
+
+def check_compose_mounts_the_config(report: Report) -> None:
+    """The configuration file must be mounted into the container.
+
+    It lives in the directory, not in ``secrets/`` (which is gitignored,
+    because it holds the generated key material), so mounting
+    ``./secrets`` alone leaves the config file absent -- and coturn's
+    response to a missing config file is to start with its *built-in
+    defaults*: no realm, no user, no certificate, and therefore no TLS
+    listener.
+    """
+    compose = read(COMPOSE)
+    for lineno, line in enumerate(compose, start=1):
+        stripped = line.strip()
+        if stripped.startswith("#") or not stripped.startswith("- "):
+            continue
+        if "turnserver.conf" in stripped and ":" in stripped:
+            # A volume line: "./turnserver.conf:/etc/coturn/turnserver.conf:ro"
+            report.note(f"docker-compose.yml:{lineno} mounts the config file")
+            return
+    report.fail(
+        "docker-compose.yml",
+        "the configuration file is not mounted -- it lives in this "
+        "directory, not in 'secrets/' (which is gitignored), so mounting "
+        "'./secrets' alone leaves '/etc/coturn/turnserver.conf' absent.  "
+        "coturn then starts with its built-in defaults: no realm, no user, "
+        "no certificate, and therefore no TLS listener",
+    )
+
+
+def check_control_config_exists(report: Report) -> None:
+    """The negative control needs its own configuration file.
+
+    It cannot get a separate log from the command line (rule 8), so the
+    separation has to live in a config file.
+    """
+    if not os.path.isfile(PLAIN_CONF):
+        report.fail(
+            "turnserver.plain.conf",
+            "it is missing -- the negative control needs its own "
+            "configuration file, because coturn ignores a command-line "
+            "'--log-file' and would therefore write the control's log over "
+            "the positive server's evidence",
+        )
+        return
+
+    # The control must actually disable TLS, or it is not a control.
+    options = {}
+    for line in strip_comments(read(PLAIN_CONF)):
+        name = option_name(line)
+        if name is None:
+            continue
+        value = line.split("=", 1)[1].strip() if "=" in line else ""
+        options[name] = value
+
+    for name in ("no-tls", "no-dtls"):
+        if name not in options:
+            report.fail(
+                "turnserver.plain.conf",
+                f"it does not set '{name}' -- the control must not start "
+                "the TLS/DTLS listeners, or it is not a control",
+            )
+        elif options[name] not in ("1", "on", "yes", "true"):
+            report.fail(
+                "turnserver.plain.conf",
+                f"'{name}={options[name]}' -- the control must disable the "
+                "TLS/DTLS listeners",
+            )
+
+    # And it must listen on the port the client is told to use, which is
+    # what makes it a control rather than a server on the wrong port.
+    if options.get("listening-port") != "5349":
+        report.fail(
+            "turnserver.plain.conf",
+            f"its listening-port is {options.get('listening-port')!r}, not "
+            "'5349' -- a control on a different port cannot catch the "
+            "defect (the client would fail to reach the wrong port, "
+            "which is a connection error, not a protocol downgrade)",
+        )
+
+    # And it must write to its own log, or the two runs share one file.
+    log_file = options.get("log-file", "")
+    if "plain" not in log_file:
+        report.fail(
+            "turnserver.plain.conf",
+            f"its log-file is {log_file!r} -- the control must write to its "
+            "own log, or it overwrites the positive server's evidence",
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verbose", action="store_true")
@@ -462,11 +605,15 @@ def main() -> int:
 
     report = Report(args.verbose)
     check_config_options(report, CONF, "turnserver.conf")
+    check_config_options(report, PLAIN_CONF, "turnserver.plain.conf")
     check_config_options(report, WSL_CONF, "turnserver.wsl.conf")
     check_tls_port_is_single(report)
     check_no_machine_paths(report)
     check_key_permissions(report)
     check_compose_external_ip(report)
+    check_compose_uses_coturn_spelling(report)
+    check_compose_mounts_the_config(report)
+    check_control_config_exists(report)
     check_evidence_is_documented(report)
     check_wsl_placeholder_is_substituted(report)
 

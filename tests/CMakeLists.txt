@@ -1723,6 +1723,13 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
       nimrtc::video_frame
       nimrtc::h264
       GTest::gtest_main)
+  # The H.265 half of Q1b (v1.3 plan item Q1b) runs in the same binary:
+  # the engine-level parameter-set switch is asserted on NVENC / NVDEC.
+  if(TARGET nimrtc::h265)
+    target_link_libraries(test_engine_video_hw_loopback PRIVATE nimrtc::h265)
+    target_include_directories(test_engine_video_hw_loopback PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/modules/h265/include")
+  endif()
   target_include_directories(test_engine_video_hw_loopback PRIVATE
       "${CMAKE_SOURCE_DIR}/src/core/include"
       "${CMAKE_SOURCE_DIR}/src/plugins/include"

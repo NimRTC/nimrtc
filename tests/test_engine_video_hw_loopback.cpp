@@ -80,6 +80,7 @@
 #include <nimrtc/dtls/dtls_session_factory.hpp>
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/h264/hw_backends.hpp>
+#include <nimrtc/h265/hw_backends.hpp>
 #include <nimrtc/plugins/hw_video_backend.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
 #include <nimrtc/plugins/video_capture.hpp>
@@ -108,6 +109,11 @@ constexpr std::uint32_t kWidth  = 1920;
 constexpr std::uint32_t kHeight = 1080;
 
 constexpr std::uint8_t kVideoPt = 102;
+
+// The H.265 payload type: RFC 7798 §4.1 recommends 116 for H.265 and
+// Chrome's WebRTC stack uses it too — it is also the engine's own
+// default for the H.265 family (see `video_codec_config.hpp`).
+constexpr std::uint8_t kH265VideoPt = 116;
 
 // ---------------------------------------------------------------------------
 // The hardware probe
@@ -201,6 +207,100 @@ std::string HardwareDecoderUnavailableReason() {
 }
 
 // ---------------------------------------------------------------------------
+// The H.265 hardware probe (v1.3 plan item Q1b)
+// ---------------------------------------------------------------------------
+//
+// The H.265 backend table is a *separate* table from the H.264 one (the
+// two codec families have their own rows, their own priorities and their
+// own availability probes), so the probe has to ask the H.265 table the
+// same question the H.264 probe above asks its table.  The answer is
+// still the driver's: a GPU with an H.264 encoder but no H.265 encoder
+// reports "not available" here, and the skip message says so.
+
+// The geometry the Q1b switch runs at: small enough for a hardware
+// encoder to re-initialise quickly, large enough to be a real picture.
+constexpr std::uint32_t kSwitchWidth      = 320;
+constexpr std::uint32_t kSwitchHeight     = 240;
+constexpr std::uint32_t kSwitchedWidth    = 640;
+constexpr std::uint32_t kSwitchedHeight   = 480;
+
+/** True iff the H.265 backend table offers a usable hardware encoder. */
+bool H265HardwareEncoderAvailable() {
+    nimrtc::h265::register_default_video_backends();
+    np::VideoCodecConfig probe{};
+    probe.width  = kSwitchWidth;
+    probe.height = kSwitchHeight;
+    probe.fps    = 30;
+    probe.codec  = np::VideoCodecKind::kH265;
+    for (const auto* be : np::HwVideoBackendRegistry::instance()
+                             .list_encoders(np::VideoCodecKind::kH265)) {
+        if (be != nullptr && be->is_hw && be->available && be->available(probe)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** The reason the table gives for the first *unavailable* hardware H.265
+ *  encoder — used to make the skip message honest. */
+std::string H265HardwareEncoderUnavailableReason() {
+    nimrtc::h265::register_default_video_backends();
+    np::VideoCodecConfig probe{};
+    probe.width  = kSwitchWidth;
+    probe.height = kSwitchHeight;
+    probe.fps    = 30;
+    probe.codec  = np::VideoCodecKind::kH265;
+    for (const auto* be : np::HwVideoBackendRegistry::instance()
+                             .list_encoders(np::VideoCodecKind::kH265)) {
+        if (be == nullptr || !be->is_hw) continue;
+        if (be->available && be->available(probe)) return {};
+        if (be->unavailable_reason) {
+            const std::string why = be->unavailable_reason(probe);
+            if (!why.empty()) return why;
+        }
+    }
+    return "no hardware H.265 encoder row is available on this host";
+}
+
+/** True iff the H.265 backend table offers a usable hardware *decoder*. */
+bool H265HardwareDecoderAvailable() {
+    nimrtc::h265::register_default_video_backends();
+    np::VideoCodecConfig probe{};
+    probe.width  = kSwitchWidth;
+    probe.height = kSwitchHeight;
+    probe.fps    = 30;
+    probe.codec  = np::VideoCodecKind::kH265;
+    for (const auto* be : np::HwVideoBackendRegistry::instance()
+                             .list_decoders(np::VideoCodecKind::kH265)) {
+        if (be != nullptr && be->is_hw && be->available && be->available(probe)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** The reason the table gives for the first *unavailable* hardware H.265
+ *  decoder — used to make the skip message honest. */
+std::string H265HardwareDecoderUnavailableReason() {
+    nimrtc::h265::register_default_video_backends();
+    np::VideoCodecConfig probe{};
+    probe.width  = kSwitchWidth;
+    probe.height = kSwitchHeight;
+    probe.fps    = 30;
+    probe.codec  = np::VideoCodecKind::kH265;
+    for (const auto* be : np::HwVideoBackendRegistry::instance()
+                             .list_decoders(np::VideoCodecKind::kH265)) {
+        if (be == nullptr || !be->is_hw) continue;
+        if (be->available && be->available(probe)) return {};
+        if (be->unavailable_reason) {
+            const std::string why = be->unavailable_reason(probe);
+            if (!why.empty()) return why;
+        }
+    }
+    return "no hardware H.265 decoder row is available on this host";
+}
+
+// ---------------------------------------------------------------------------
 // The synthetic picture (the same pattern `examples/hw-e2e` paints)
 // ---------------------------------------------------------------------------
 //
@@ -278,6 +378,79 @@ double pearson_correlation(const std::vector<std::uint8_t>& a,
     }
     if (var_a <= 0.0 || var_b <= 0.0) return 0.0;
     return cov / (std::sqrt(var_a) * std::sqrt(var_b));
+}
+
+// ---------------------------------------------------------------------------
+// The source picture (the Q1b switch's input)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief An I420 frame with a horizontal luma ramp and neutral chroma.
+ *
+ * The picture is *grey* (the chroma planes carry no signal), so a chroma
+ * error cannot mask a luma error, and the luma of column `col` is
+ * `32 + (col * 160) / width` — a ramp the decoder's output can be
+ * compared against directly.
+ *
+ * The frame is a *view* into @p storage, which the caller keeps alive
+ * for as long as the frame is in use.
+ */
+np::VideoSourceFrame make_i420_frame(std::uint32_t width,
+                                     std::uint32_t height,
+                                     std::vector<std::uint8_t>& storage,
+                                     std::int64_t capture_ts_us,
+                                     std::uint32_t rtp_timestamp,
+                                     std::uint32_t frame_seq) {
+    const std::size_t luma_size = static_cast<std::size_t>(width) * height;
+    const std::size_t chroma_size =
+        static_cast<std::size_t>((width + 1u) / 2u) * ((height + 1u) / 2u);
+    storage.assign(luma_size + 2u * chroma_size, 0);
+
+    for (std::uint32_t row = 0; row < height; ++row) {
+        std::uint8_t* p = storage.data() + static_cast<std::size_t>(row) * width;
+        for (std::uint32_t col = 0; col < width; ++col) {
+            p[col] = static_cast<std::uint8_t>(
+                32 + ((col * 160) / (width == 0 ? 1u : width)));
+        }
+    }
+    std::memset(storage.data() + luma_size, 128, 2u * chroma_size);
+
+    np::VideoSourceFrame frame{};
+    frame.width    = width;
+    frame.height   = height;
+    frame.format   = np::VideoPixelFormat::kI420;
+    frame.stride_y = static_cast<std::int32_t>(width);
+    frame.stride_u = static_cast<std::int32_t>((width + 1u) / 2u);
+    frame.stride_v = static_cast<std::int32_t>((width + 1u) / 2u);
+    frame.plane_y  = storage.data();
+    frame.plane_u  = storage.data() + luma_size;
+    frame.plane_v  = storage.data() + luma_size + chroma_size;
+    frame.buffer_size = storage.size();
+    frame.capture_ts_us = capture_ts_us;
+    frame.rtp_timestamp = rtp_timestamp;
+    frame.frame_seq     = frame_seq;
+    return frame;
+}
+
+/** The luma plane the source picture *should* decode to. */
+std::vector<std::uint8_t> ramp_reference(std::uint32_t width,
+                                          std::uint32_t height) {
+    std::vector<std::uint8_t> y(static_cast<std::size_t>(width) * height);
+    for (std::uint32_t row = 0; row < height; ++row) {
+        for (std::uint32_t col = 0; col < width; ++col) {
+            y[static_cast<std::size_t>(row) * width + col] =
+                static_cast<std::uint8_t>(32 + ((col * 160) / width));
+        }
+    }
+    return y;
+}
+
+/** True iff the datagram looks like an RTCP PLI (RFC 4585 §6.3.1). */
+bool is_pli_datagram(const std::vector<std::uint8_t>& d) {
+    if (d.size() < 2) return false;
+    const std::uint8_t pt2 = d[1];
+    if (pt2 < 192 || pt2 > 223) return false;   // not RTCP at all
+    return pt2 == 206 && (d[0] & 0x1Fu) == 1;   // PSFB, FMT = 1 = PLI
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +796,30 @@ EngineConfig make_config() {
     return cfg;
 }
 
+/**
+ * @brief The engine configuration of the Q1b (H.265) case.
+ *
+ * The same wiring as `make_config()`, with two differences:
+ *
+ *   - the codec is the shipped **H.265** plug-in (`"h265"`), whose
+ *     factory pairs NVENC and NVDEC into one composite codec — the
+ *     engine holds a single codec per session and drives both
+ *     directions through it;
+ *   - the capture device is *not* used: the host pushes the frames
+ *     itself through `send_video()`, because the switch is about the
+ *     geometry of the frame the host hands over.
+ */
+EngineConfig make_h265_config() {
+    EngineConfig cfg = make_config();
+    cfg.video_codec_name    = "h265";
+    cfg.video_codec_backend = "hardware";
+    cfg.video_capture_name.clear();
+    cfg.video_capture_pump = false;
+    cfg.video_width         = kSwitchWidth;
+    cfg.video_height        = kSwitchHeight;
+    return cfg;
+}
+
 // ---------------------------------------------------------------------------
 // The loopback driver
 // ---------------------------------------------------------------------------
@@ -863,4 +1060,258 @@ TEST_F(EngineVideoHwLoopback, HardwareEncodeReachesTheReceiverAsRealPixels) {
     RecordProperty("pearson_r_x1000", static_cast<int>(corr * 1000.0));
     RecordProperty("tx_rtp_packets", static_cast<int>(result.tx_rtp_packets));
     RecordProperty("rx_frames", static_cast<int>(result.rx_frames));
+}
+
+// ===========================================================================
+// Q1b: the H.265 half of Q1 — a mid-stream parameter-set switch on the
+//       hardware path (v1.3 plan item Q1b)
+// ===========================================================================
+//
+// Q1 proved the H.264 mechanism on the *software* decoder: a mid-stream
+// SPS / PPS change decodes on the warm decoder, with no key-frame round
+// trip.  Q1b is the H.265 counterpart, and it is asserted where H.265
+// actually runs in this tree — on **NVENC / NVDEC**.
+//
+// The chain under test is the *whole* engine path, with no stub in the
+// middle:
+//
+//   send_video(320x240)  -> NVENC -> RFC 7798 packetization (AP for the
+//   parameter sets, FU for the slices) -> RTP on the wire -> the
+//   receiving engine's depacketizer -> jitter buffer -> NVDEC -> the
+//   recording sink
+//
+// and then the same thing again at 640x480.  The switch is a *parameter
+// set* switch (a new VPS / SPS / PPS travels in-band with the next
+// IRAP), so the receiver's decoder must follow it on its own.
+//
+// The acceptance is Q1b's own wording:
+//
+//   - the first decode after the change succeeds (no `kErrNotReady`);
+//   - the decoded geometry is the *new* one;
+//   - **no PLI goes on the wire** — neither as the engine's internal
+//     decode-failure counter nor as an RTCP datagram on the receiver's
+//     transport.
+//
+// The last point needs two independent checks: the counter is an
+// internal fact, and the datagram is what actually left the machine.  A
+// PLI that went out and came back would show up in the second check
+// even if the first one were blind.
+
+TEST_F(EngineVideoHwLoopback, AnH265MidStreamParameterSetSwitchDecodesWithoutAKeyFrameRoundTrip) {
+    // ---- The hardware has to be there ------------------------------------
+    //
+    // The skip is the honest result on a host without an H.265 encoder
+    // (or decoder): the dedicated hardware job
+    // (`.github/workflows/hardware.yml`, the `gpu-nvenc` leg) is where
+    // the claim is gated.
+    if (!H265HardwareEncoderAvailable()) {
+        GTEST_SKIP() << "no hardware H.265 encoder on this host — "
+                     << H265HardwareEncoderUnavailableReason();
+    }
+    if (!H265HardwareDecoderAvailable()) {
+        GTEST_SKIP() << "no hardware H.265 decoder on this host — "
+                     << H265HardwareDecoderUnavailableReason();
+    }
+
+    // ---- The receiving engine -------------------------------------------
+    //
+    // It never captures: it only receives.  Its decode path is the real
+    // one (depacketizer -> jitter buffer -> NVDEC -> sink), so the
+    // assertions below are about the production path.
+    EngineConfig rx_cfg = make_h265_config();
+    rx_cfg.transport_name  = "hw-ice-rx";
+    rx_cfg.video_sink_name = "hw-recording-rx";
+
+    NimRTCEngine rx_engine(rx_cfg);
+    ASSERT_EQ(rx_engine.open(), 0u) << "the receiving engine must open";
+
+    // ---- The transmitting engine ----------------------------------------
+    EngineConfig tx_cfg = make_h265_config();
+
+    NimRTCEngine tx_engine(tx_cfg);
+    ASSERT_EQ(tx_engine.open(), 0u) << "the transmitting engine must open";
+
+    FakeIceTransport* tx_ice = g_tx_ice.instance();
+    ASSERT_NE(tx_ice, nullptr);
+    FakeIceTransport* rx_ice = g_rx_ice.instance();
+    ASSERT_NE(rx_ice, nullptr);
+
+    // ---- The first geometry ----------------------------------------------
+    //
+    // The host pushes the frames itself (`send_video()`), so the RTP
+    // timestamp is the host's own media clock: two distinct timestamps
+    // per geometry, so the jitter buffer sees two *separate* frames
+    // rather than two packets of one picture.
+    std::vector<std::uint8_t> storage;
+    {
+        const auto frame = make_i420_frame(kSwitchWidth, kSwitchHeight,
+                                           storage, /*capture_ts_us=*/1000,
+                                           /*rtp_timestamp=*/9000,
+                                           /*frame_seq=*/1);
+        ASSERT_EQ(tx_engine.send_video(frame), np::kOk)
+            << "the first frame must be accepted";
+    }
+    for (int i = 0; i < 5; ++i) tx_engine.tick();
+
+    const auto tx_stats_after_first = tx_engine.stats();
+    EXPECT_GE(tx_stats_after_first.video_frames_sent, 1u)
+        << "the first picture must have reached the sender";
+
+    // The wire state before the switch: the second picture has to add
+    // packets of its own (a new picture, with a new parameter set).
+    const std::size_t datagrams_before_switch = tx_ice->sent().size();
+
+    // ---- The geometry changes mid-stream --------------------------------
+    //
+    // This is the whole point of the test: the *frame* is the authority
+    // on what is being sent (remote-desktop plan B13), so pushing a
+    // frame at a new geometry must make the engine restart the encoder
+    // and put the new VPS / SPS / PPS on the wire with the next frame.
+    {
+        const auto frame = make_i420_frame(kSwitchedWidth, kSwitchedHeight,
+                                           storage, /*capture_ts_us=*/40000,
+                                           /*rtp_timestamp=*/18000,
+                                           /*frame_seq=*/2);
+        ASSERT_EQ(tx_engine.send_video(frame), np::kOk)
+            << "the frame at the new geometry must be accepted";
+    }
+    for (int i = 0; i < 5; ++i) tx_engine.tick();
+
+    // The engine restarts the encoder for the new geometry (plan B13):
+    // that is what puts the new parameter sets on the wire with the next
+    // frame, and it is what the "no PLI" assertion below depends on.
+    EXPECT_GT(tx_ice->sent().size(), datagrams_before_switch)
+        << "the frame at the new geometry produced no packets — the "
+           "encoder did not restart and the new parameter sets never "
+           "reached the peer";
+
+    // ---- Hand the wire bytes to the receiving engine --------------------
+    //
+    // The *whole* datagram list is handed over, RTCP included: the
+    // receiver's own feedback has to be able to come back to the sender
+    // (that is what makes the "no key-frame round-trip" assertion
+    // meaningful — a PLI that went out and came back would show up).
+    const auto& datagrams = tx_ice->sent();
+    std::size_t rtp_packets = 0;
+    for (const auto& d : datagrams) {
+        if (d.size() >= 2) {
+            const std::uint8_t pt = d[1] & 0x7Fu;
+            if (pt == kH265VideoPt) ++rtp_packets;
+        }
+        rx_engine.feed_media_inbound(d.data(), d.size());
+    }
+    ASSERT_GT(rtp_packets, 0u)
+        << "the encoder's pictures must have reached the wire as RTP";
+
+    // ---- Give the RX engine a few ticks to drain its jitter buffer ------
+    for (int i = 0; i < 20; ++i) rx_engine.tick();
+
+    const auto rx_stats = rx_engine.stats();
+
+    // ---- The assertion ---------------------------------------------------
+    //
+    // (a) The decode-failure door never opened.  This is the "no
+    //     key-frame request round-trip" half: the receiver's decoder
+    //     accepted the new picture, so it never asked for a key frame.
+    EXPECT_EQ(rx_stats.video_feedback_pli_from_decode_failure, 0u)
+        << "the receiver asked for a key frame after the parameter-set "
+           "switch — the switch must decode on its own, with no PLI "
+           "round-trip";
+
+    // (b) Nothing went out on the wire as a PLI either.  This is the
+    //     independent check: the counter above is an *internal* fact,
+    //     and this one is what actually went on the wire.
+    {
+        std::size_t plis = 0;
+        for (const auto& d : rx_ice->sent()) {
+            if (is_pli_datagram(d)) ++plis;
+        }
+        EXPECT_EQ(plis, 0u)
+            << "a PLI went out on the wire after the parameter-set switch";
+    }
+
+    // (c) The decoder dropped nothing.
+    EXPECT_EQ(rx_stats.video_frames_dropped_decoder, 0u)
+        << "the decoder refused a frame during the parameter-set switch";
+
+    // (d) The picture really decoded — at the *new* geometry.
+    ASSERT_GE(rx_stats.video_frames_decoded, 1u)
+        << "the receiver must have decoded the switched picture";
+    EXPECT_GE(rx_stats.video_frames_rendered, 1u)
+        << "the decoded picture must have reached the sink";
+
+    HwRecordingSink* rx_sink = g_rx_sink.instance();
+    ASSERT_NE(rx_sink, nullptr);
+    const auto& frames = rx_sink->frames();
+    ASSERT_FALSE(frames.empty())
+        << "the sink must have received the decoded picture";
+
+    // The last decoded frame carries the *new* geometry: a decoder that
+    // kept the old parameter sets would report the old size.
+    const RecordedFrame& last = frames.back();
+    EXPECT_EQ(last.width, kSwitchedWidth)
+        << "the decoded picture does not carry the new geometry — the "
+           "decoder did not follow the new parameter sets";
+    EXPECT_EQ(last.height, kSwitchedHeight)
+        << "the decoded picture does not carry the new geometry — the "
+           "decoder did not follow the new parameter sets";
+
+    // (e) The new picture carries real signal — a correctly-sized but
+    //     blank frame would pass a geometry-only assertion.
+    {
+        const auto [min_it, max_it] =
+            std::minmax_element(last.luma.begin(), last.luma.end());
+        EXPECT_GT(static_cast<unsigned>(*max_it - *min_it), 30u)
+            << "the decoded picture after the switch is a constant — it "
+               "carries no signal";
+    }
+
+    // (f) The *old* geometry was decoded too — the switch did not break
+    //     the stream that came before it.  The first frame was pushed
+    //     before the switch, so the receiver decoded it with the *old*
+    //     parameter sets and the second one with the *new* ones: both
+    //     pictures went through the same warm decoder.
+    ASSERT_GE(frames.size(), 2u)
+        << "both pictures must have been decoded — the switch test is "
+           "only meaningful on a decoder that was already working";
+    EXPECT_EQ(frames.front().width, kSwitchWidth);
+    EXPECT_EQ(frames.front().height, kSwitchHeight);
+
+    // (g) The picture is the *right* picture — a decoder that kept the
+    //     old parameter sets would render the *old* picture at the new
+    //     size, and only a pixel comparison catches that.
+    {
+        const std::vector<std::uint8_t> reference =
+            ramp_reference(kSwitchedWidth, kSwitchedHeight);
+        ASSERT_EQ(last.luma.size(), reference.size())
+            << "the decoded luma plane does not have the expected size";
+
+        const double mae = mean_abs_error(reference, last.luma);
+        EXPECT_LT(mae, 12.0)
+            << "the decoded picture after the switch is not the captured "
+               "picture (mean absolute luma error " << mae << ")";
+
+        const double corr = pearson_correlation(reference, last.luma);
+        EXPECT_GT(corr, 0.95)
+            << "the decoded picture after the switch does not correlate "
+               "with the captured picture (Pearson r = " << corr << ")";
+
+        // The negative control for *those* thresholds: a flat grey frame
+        // must fail both, or they prove nothing.
+        const std::vector<std::uint8_t> blank(reference.size(), 128);
+        EXPECT_GE(mean_abs_error(reference, blank), 12.0)
+            << "the MAE threshold is too loose: a flat grey frame passes it";
+        EXPECT_LE(pearson_correlation(reference, blank), 0.95)
+            << "the Pearson threshold is too loose: a flat grey frame "
+               "passes it";
+
+        RecordProperty("mae_x100", static_cast<int>(mae * 100.0));
+        RecordProperty("pearson_r_x1000", static_cast<int>(corr * 1000.0));
+    }
+
+    RecordProperty("rtp_packets", static_cast<int>(rtp_packets));
+    RecordProperty("rx_frames", static_cast<int>(frames.size()));
+
+    tx_engine.close();
+    rx_engine.close();
 }

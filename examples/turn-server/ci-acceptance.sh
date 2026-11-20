@@ -27,6 +27,14 @@
 #    between the client and a working session is whether TLS was
 #    actually negotiated.
 #
+#    The control is judged by *behaviour*, not by the text of a
+#    failure: a **plain** client must get an allocation from it (so it
+#    is a working server, not a dead port), and the **same TLS client**
+#    that allocated in phase 1 must not.  The first version of this
+#    script judged the control by `openssl s_client`'s output, and on
+#    the CI runner the probe hung, `timeout` killed it, and the
+#    buffered output -- the very evidence -- was discarded.
+#
 # 3. **The server log says which listener it opened.**  "the TLS
 #    handshake is visible in the server log" is N1's evidence, so the
 #    log has to name the TLS listener on the TLS port -- and the
@@ -303,6 +311,39 @@ sleep 1
 # where the TLS one was.  This is the control: everything is identical
 # except the transport, so a client that connects here when it was told
 # to use TLS has fallen back, not succeeded.
+#
+# **The control is judged by what it does, not by what it prints.**
+#
+# The first version of this phase ran `openssl s_client` against the
+# control and looked for "no peer certificate available" or
+# "Cipher is (NONE)" in its output.  That was wrong in two ways, and
+# the second one only showed up on the CI runner:
+#
+#   * The verdict was read from the *text* of a failure.  A failure is
+#     not a contract: OpenSSL's wording changes between versions, and
+#     the wording differs between the "connection reset" case and the
+#     "hung" case.
+#   * When the probe hung, `timeout` killed it and **the buffered
+#     output was discarded** -- so the evidence vanished and the
+#     assertion could only report "the control is not a control", which
+#     is the opposite of what was true.
+#
+# So the control is now judged by *behaviour*, and the behaviour is
+# checked from both sides:
+#
+#   * A **plain** client (no `-S`) MUST get an allocation.  This proves
+#     the control is a *working* TURN server and not a dead port or a
+#     crashed process -- without it, "the TLS client got nothing" would
+#     be satisfied by a server that is simply broken, and the control
+#     would prove nothing.
+#   * The **same TLS client** that allocated in phase 1 MUST NOT get
+#     an allocation.  That is the claim N1 makes: the port speaks
+#     plain TCP, and a client that was told to use TLS cannot fall back
+#     to it.
+#
+# Together the two are a real control: the difference between the two
+# clients is exactly the TLS flag, and it is exactly what decides
+# whether the allocation happens.
 
 echo "ci-acceptance: phase 2 -- the plain control on $TLS_PORT"
 
@@ -328,23 +369,9 @@ done
     fail "the plain control never came up on $TLS_PORT"
 }
 
-control="$(echo | timeout 20 openssl s_client \
-    -connect "127.0.0.1:$TLS_PORT" 2>&1 || true)"
-
-# The verdict is read from the *negotiated cipher*, not from the
-# verification result.  `openssl s_client` without a `-CAfile` reports
-# "Verify return code: 0 (ok)" even when no certificate was offered at
-# all, because there was nothing to verify -- so the verification line
-# is meaningless here and would make the control look like a success.
-# What says "this was not TLS" is that no cipher was negotiated.
-if grep -qE "Cipher is \(NONE\)" <<<"$control" || grep -q "no peer certificate available" <<<"$control"; then
-    echo "ci-acceptance:   the plain control refused TLS, as it must"
-else
-    echo "$control" >&2
-    fail "the plain control on $TLS_PORT completed a TLS handshake -- the control is not a control"
-fi
-
-# The control's log must not claim a TLS listener on the port.
+# The control's log must not claim a TLS listener on the port.  This is
+# the *server's* own account of itself, and it is independent of what
+# any client makes of the port.
 for _ in $(seq 1 25); do
     [[ -s "$PLAIN_LOG" ]] && grep -q "listener opened on .*:$TLS_PORT" "$PLAIN_LOG" && break
     sleep 0.2
@@ -354,12 +381,35 @@ if grep -q "TLS/TCP listener opened on .*:$TLS_PORT" "$PLAIN_LOG"; then
 fi
 echo "ci-acceptance:   the control's log claims no TLS listener on $TLS_PORT"
 
-# And the *same client* that allocated over TLS must not allocate here.
-# This is the negative control's real point: the client was told the
-# TLS port, and the port is there -- it just does not speak TLS any
-# more.  A client that fell back to plain TCP would succeed, and the
-# whole "the credentials stay encrypted" claim would be void.
 if command -v turnutils_uclient >/dev/null 2>&1; then
+    # ---- Side one: the control is alive -----------------------------------
+    #
+    # A plain client -- no `-S`, so no TLS -- must get an allocation.
+    # If it does not, the control is not a control but a broken server,
+    # and the rest of this phase would prove nothing.
+    echo "ci-acceptance:   the plain client must allocate against the control"
+
+    plain_allocation="$(timeout 60 turnutils_uclient \
+        -u nimrtc \
+        -w nimrtc-test-secret \
+        -p "$TLS_PORT" \
+        -t -v -y -c \
+        127.0.0.1 2>&1 || true)"
+
+    if ! grep -qE "Received relay addr" <<<"$plain_allocation"; then
+        echo "$plain_allocation" >&2
+        fail "the plain client could not allocate against the control on "\
+"$TLS_PORT -- the control is not a working TURN server, so it controls "\
+"nothing"
+    fi
+    echo "ci-acceptance:   the control is a working plain TURN server"
+
+    # ---- Side two: the TLS client must not -------------------------------
+    #
+    # The *same* client that allocated over TLS in phase 1, pointed at
+    # the same port, with the same credential.  If it allocates here,
+    # the TLS request was silently downgraded to plain TCP -- and the
+    # whole "the credentials stay encrypted" claim is void.
     echo "ci-acceptance:   the same client must NOT allocate against the control"
 
     control_allocation="$(timeout 60 turnutils_uclient \
@@ -378,6 +428,10 @@ if command -v turnutils_uclient >/dev/null 2>&1; then
 "$TLS_PORT -- the TLS request was silently downgraded to plain TCP"
     fi
     echo "ci-acceptance:   the client did not allocate against the control, as it must"
+else
+    echo "ci-acceptance:   turnutils_uclient is not installed -- the control's"
+    echo "ci-acceptance:   behaviour cannot be checked (the TLS handshake in"
+    echo "ci-acceptance:   phase 1 still ran)"
 fi
 
 cleanup

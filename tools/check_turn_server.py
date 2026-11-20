@@ -71,6 +71,15 @@ thing the deployment exists to prove is not true:
     kernel does not need the mode.  This one was found by CI, not by
     review.
 
+10. The acceptance script judges the negative control by the *text* of
+    an OpenSSL failure.  On the CI runner the probe hung, ``timeout``
+    killed it, and the buffered output -- the evidence -- was
+    discarded, so the script could only report that the control was not
+    a control, which was the opposite of the truth.  A failure's
+    wording is not a contract.  The control has to be judged by
+    *behaviour*: a plain client must get an allocation from it, and
+    the same TLS client must not.
+
 Usage:
     python tools/check_turn_server.py [--verbose]
 """
@@ -659,6 +668,102 @@ def check_scripts_are_invoked_through_bash(report: Report) -> None:
                 )
 
 
+def check_control_is_judged_by_behaviour(report: Report) -> None:
+    """The acceptance script must judge the control by what it *does*.
+
+    Rule 10, and the second one CI found rather than review.  The
+    first version of the control phase ran ``openssl s_client`` against
+    the control and looked for "no peer certificate available" or
+    "Cipher is (NONE)" in the output.  On the CI runner the probe
+    *hung*: ``timeout`` killed it, and the buffered output -- the very
+    evidence -- was discarded, so the script could only report that the
+    control was not a control, which was the opposite of the truth.
+
+    A failure's wording is not a contract, and a timeout erases it
+    entirely.  So the control is judged by behaviour: a plain client
+    must get an allocation from it (the control is a *working* server,
+    not a dead port), and the same TLS client must not.
+
+    The rule checks that the script makes both moves.  It does not
+    check the exact wording of the assertions -- that would be the
+    same mistake one level down.
+    """
+    if not os.path.isfile(ACCEPTANCE):
+        report.fail(
+            "ci-acceptance.sh",
+            "it is missing -- the deployment's acceptance run lives there",
+        )
+        return
+
+    text = "\n".join(read(ACCEPTANCE))
+    lines = text.split("\n")
+
+    # The check below looks for the *wording* of an OpenSSL failure.
+    # The header of the script explains why that wording must not be
+    # used, and it quotes it -- so the wording has to be looked for in
+    # the executable part only.  A comment is not a verdict.
+    code_lines = [
+        line for line in lines
+        if not line.strip().startswith("#")
+    ]
+    code_text = "\n".join(code_lines)
+
+    # Find every `turnutils_uclient` invocation and, for each, the block
+    # of option lines that follows it (up to the address argument).
+    # Whether the invocation asks for TLS is decided by whether '-S'
+    # appears in *that* block -- an '-S' belonging to a different
+    # invocation must not be mistaken for this one's.
+    tls_invocations = 0
+    plain_invocations = 0
+    for index, line in enumerate(code_lines):
+        # Only a real invocation counts.  A line that merely *mentions*
+        # the tool -- `command -v turnutils_uclient`, an echo about it --
+        # is not an invocation, and treating it as one would let the
+        # tool's absence from a nearby block decide the verdict.
+        if "turnutils_uclient" not in line:
+            continue
+        if not re.search(r"[\w\"']*turnutils_uclient\s*\\?\s*$", line.strip()):
+            continue
+        block = []
+        for candidate in code_lines[index + 1:index + 20]:
+            block.append(candidate)
+            if "127.0.0.1" in candidate:
+                break
+        joined = "\n".join(block)
+        if re.search(r"(?<![\w-])-S(?![\w-])", joined):
+            tls_invocations += 1
+        else:
+            plain_invocations += 1
+
+    if plain_invocations == 0:
+        report.fail(
+            "ci-acceptance.sh",
+            "it never runs a *plain* turnutils_uclient (one without '-S') "
+            "against the control -- without that, 'the TLS client got "
+            "nothing' would also be satisfied by a control that is simply "
+            "broken, and the control would prove nothing",
+        )
+
+    if tls_invocations == 0:
+        report.fail(
+            "ci-acceptance.sh",
+            "it never runs a *TLS* turnutils_uclient ('-S') against the "
+            "control -- that client getting no allocation is the actual "
+            "claim N1 makes",
+        )
+
+    # And the verdict must not be read out of a probe's failure text.
+    if "Cipher is (NONE)" in code_text or "no peer certificate available" in code_text:
+        report.fail(
+            "ci-acceptance.sh",
+            "it still judges the control by the *text* of an OpenSSL "
+            "failure -- a failure's wording is not a contract, and a "
+            "timeout erases it entirely (the CI runner's probe hung, and "
+            "the buffered evidence was discarded with it).  Judge the "
+            "control by whether a client gets an allocation",
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verbose", action="store_true")
@@ -671,6 +776,7 @@ def main() -> int:
 
     report = Report(args.verbose)
     check_scripts_are_invoked_through_bash(report)
+    check_control_is_judged_by_behaviour(report)
     check_config_options(report, CONF, "turnserver.conf")
     check_config_options(report, PLAIN_CONF, "turnserver.plain.conf")
     check_config_options(report, WSL_CONF, "turnserver.wsl.conf")

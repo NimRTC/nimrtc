@@ -196,6 +196,46 @@ def case_script_invoked_by_path(files):
     return mutate
 
 
+def case_control_judged_by_failure_text(files):
+    # The defect: the control is judged by the *text* of an OpenSSL
+    # failure.  A failure's wording is not a contract, and a timeout
+    # erases it entirely -- which is what happened on the CI runner.
+    # The mutation relaxes the verdict so that the OpenSSL wording
+    # counts as proof.
+    def mutate(rel, text):
+        if rel == 'ci-acceptance.sh':
+            return text.replace(
+                '    if ! grep -qE "Received relay addr" <<<"$plain_allocation"; then',
+                '    if ! grep -qE "Received relay addr" <<<"$plain_allocation" '
+                '&& ! grep -q "Cipher is (NONE)" <<<"$control"; then')
+        return text
+    return mutate
+
+
+def case_no_plain_client_against_the_control(files):
+    # The defect: only a TLS client is tried against the control.  Then
+    # "the TLS client got nothing" would also be satisfied by a control
+    # that is simply broken, and the control would prove nothing.
+    # The mutation gives the plain client the '-S' flag, so both
+    # clients ask for TLS and the plain side no longer proves the
+    # control is alive.
+    def mutate(rel, text):
+        if rel != 'ci-acceptance.sh':
+            return text
+        lines = text.split('\n')
+        for index, line in enumerate(lines):
+            if 'plain_allocation=' not in line or 'turnutils_uclient' not in line:
+                continue
+            for offset in range(1, 8):
+                if '-t -v -y -c' in lines[index + offset]:
+                    lines[index + offset] = lines[index + offset].replace(
+                        '-t -v -y -c', '-S -t -v -y -c')
+                    return '\n'.join(lines)
+            raise AssertionError('the plain client invocation moved')
+        raise AssertionError('the plain client invocation moved')
+    return mutate
+
+
 case('the TLS listener is moved off 5349',
      ['docker-compose.yml'], case_tls_port_moved, 'tls-listening-port')
 
@@ -234,6 +274,13 @@ case('the negative control listens on the wrong port',
 
 case('CI invokes the script by path instead of through bash',
      ['ci.yml'], case_script_invoked_by_path, 'exit 126')
+
+case('the control is judged by the text of an OpenSSL failure',
+     ['ci-acceptance.sh'], case_control_judged_by_failure_text, 'timeout erases it')
+
+case('no plain client is tried against the control',
+     ['ci-acceptance.sh'], case_no_plain_client_against_the_control,
+     'plain* turnutils_uclient')
 
 
 def main():

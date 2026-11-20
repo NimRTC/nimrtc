@@ -267,12 +267,29 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rc="${{ steps.collect.outcome == 'success' && 0 || 1 }}"
-          # `steps.collect.outcome` is "success" or "failure"; the
-          # collector's own exit code is not preserved by
+          # `steps.collect.outcome` is "success" or "failure".  It is
+          # compared as a STRING and never routed through an arithmetic
+          # ternary, because GitHub's expression language has no
+          # `?:` -- the idiom `cond && 0 || 1` looks like one and is
+          # not: `0` is falsy in that language, so `true && 0` yields
+          # `0`, which falsy-falls-through to the `|| 1` branch and the
+          # whole expression evaluates to `1` no matter what the
+          # condition was.  That is precisely what happened here: the
+          # step read `rc="1"` on a run whose every recorded case was
+          # PASS, and the Linux leg was red for a reason that had
+          # nothing to do with the soak -- a second bug, in the very
+          # step that reports the verdict, hiding behind the glob bug
+          # above.  The Windows leg never had it: it compares the
+          # outcome as a string (`-ne "success"`), which is the shape
+          # to copy.
+          if [[ "${{ steps.collect.outcome }}" != "success" ]]; then
+            echo "::error::the soak day is not green -- see the evidence record"
+            exit 1
+          fi
+          # The collector's own exit code is not preserved by
           # `continue-on-error`, so the distinction between "a case
           # failed" (1) and "the collector could not run" (2) is read
-          # from the record the collector wrote.
+          # from the record the collector wrote, not from this step.
           #
           # A glob is NOT expanded on the right-hand side of `-f` inside
           # `[[ ... ]]`: the pattern is handed to the test as a literal
@@ -290,10 +307,6 @@ jobs:
           # returns non-zero when there are none.
           if ! compgen -G "build/soak/linux-x86_64-*.jsonl" > /dev/null; then
             echo "::error::the collector wrote no evidence record at all"
-            exit 1
-          fi
-          if [[ "${rc}" != "0" ]]; then
-            echo "::error::the soak day is not green -- see the evidence record"
             exit 1
           fi
           echo "the soak day is green"

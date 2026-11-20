@@ -1469,6 +1469,31 @@ struct VideoSender::Impl {
             use_fua[i] = nalus[i].size() > cfg.mtu;
         }
 
+        // ---- The marker bit (RFC 7798 §4.4) -------------------------------
+        //
+        // The marker marks the LAST packet of a *frame* — the packet that
+        // carries the frame's LAST NAL unit — not the last packet of every
+        // NAL group.  RFC 6184 §5.1 says the same for H.264, and the H.264
+        // path above already follows it.
+        //
+        // Getting this wrong is not cosmetic.  The jitter buffer groups the
+        // packets of a frame by RTP timestamp and uses the marker bit to
+        // decide that a frame is complete, so a marker on an intermediate
+        // packet makes the receiver emit a *truncated* frame and discard
+        // everything that arrives after it.
+        //
+        // The case that bites is the NVENC HEVC output: an IDR frame that
+        // carries `VPS | SPS | PPS | <oversized IDR slice>`.  The three
+        // parameter sets are small, so they are aggregated into one AP
+        // packet, while the slice is fragmented into FU packets.  A marker
+        // on the AP packet made the receiver emit "VPS + SPS + PPS" as if it
+        // were the whole picture, and the IDR slice that followed was
+        // dropped because its frame had already been played out.
+        //
+        // `last_nalu` is therefore the index of the frame's last NAL unit:
+        // the marker goes on the packet that carries it.
+        const std::size_t last_nalu = nalus.size() - 1;
+
         // ---- Walk the NAL units ----
         std::size_t i = 0;
         while (i < nalus.size()) {
@@ -1510,7 +1535,7 @@ struct VideoSender::Impl {
                             "video_pipeline: build_fu failed");
                     }
                     emit(core::ByteSpan{fua_buf.data(), wrote},
-                         rtp_ts, /*marker=*/end);
+                         rtp_ts, /*marker=*/end && (i == last_nalu));
                     offset += this_len;
                 }
                 stats.fua_frames_packetized++;
@@ -1541,14 +1566,20 @@ struct VideoSender::Impl {
                 const std::size_t wrote = build_ap(
                     ap_group, /*layer_id=*/0, /*tid=*/1,
                     core::MutableByteSpan{group_out.data(), group_out.size()});
+                // The group spans the NAL units [i, j) — the marker goes on
+                // the packet only when the group carries the frame's LAST
+                // NAL unit (see the marker note above).
+                const bool group_is_last = (j - 1 == last_nalu);
                 if (wrote == 0) {
-                    for (const auto& g : ap_group) {
-                        emit(g.data, rtp_ts, /*marker=*/false);
+                    for (std::size_t k = 0; k < ap_group.size(); ++k) {
+                        const std::size_t idx = i + k;
+                        emit(ap_group[k].data, rtp_ts,
+                             /*marker=*/(idx == last_nalu));
                         stats.single_nal_frames_packetized++;
                     }
                 } else {
                     emit(core::ByteSpan{group_out.data(), wrote},
-                         rtp_ts, /*marker=*/true);
+                         rtp_ts, /*marker=*/group_is_last);
                     stats.stapa_frames_packetized++;
                 }
                 i = j;
@@ -1556,9 +1587,28 @@ struct VideoSender::Impl {
             }
 
             if (ap_group.size() == 1) {
-                emit(ap_group[0].data, rtp_ts, /*marker=*/true);
+                emit(ap_group[0].data, rtp_ts, /*marker=*/(i == last_nalu));
                 stats.single_nal_frames_packetized++;
                 i = j;
+                continue;
+            }
+
+            // The group is EMPTY: the NAL unit at `i` is too large to be
+            // aggregated (it does not fit the AP budget — an aggregated
+            // NAL unit costs a two-byte length prefix on top of its own
+            // bytes) but not large enough to be fragmented either, because
+            // `use_fua` only fires above the MTU.
+            //
+            // Such a unit is dropped by the aggregation walk unless it is
+            // handled here.  It still fits a *Single NAL unit* packet,
+            // whose payload is the NAL unit verbatim — the two-byte header
+            // IS the payload header, so no length prefix is needed — and
+            // `use_fua[i] == false` guarantees it is no larger than the
+            // MTU.
+            if (ap_group.empty()) {
+                emit(nalus[i], rtp_ts, /*marker=*/(i == last_nalu));
+                stats.single_nal_frames_packetized++;
+                ++i;
                 continue;
             }
 

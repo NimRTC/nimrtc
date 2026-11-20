@@ -100,6 +100,22 @@ jobs:
         with:
           submodules: recursive
           ref: ${{ inputs.tag || github.ref }}
+          # Full history, and the point of it is stated where it is
+          # needed rather than here: the soak gate reads the window
+          # with `--expect-ancestor-of "$tag"`, which asks git
+          # `merge-base --is-ancestor <measured commit> <tag>` for
+          # every day of the window.  A shallow checkout holds ONE
+          # commit, so that question cannot be answered for any day
+          # but the last, and the collector answers "unknown" -- which
+          # the gate counts as NOT green.  The window therefore scored
+          # 0/7 on both platforms, and the v1.3.0 release failed in
+          # preflight on a window that was green on every one of its
+          # days (release run 44687753371, 2026-11-20).
+          #
+          # `soak.yml` already checks out with `fetch-depth: 0` for
+          # exactly this reason; the release workflow did not, and the
+          # two disagreed about the same evidence.
+          fetch-depth: 0
 
       - name: Resolve release tag (push vs workflow_dispatch)
         id: resolve-tag

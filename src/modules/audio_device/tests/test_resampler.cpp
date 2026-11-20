@@ -4,21 +4,21 @@
 //
 // What they cover, and why:
 //
-//   1. the round-trip fidelity �?a 48 kHz sine down to 44.1 kHz and
+//   1. the round-trip fidelity — a 48 kHz sine down to 44.1 kHz and
 //      back must track the input: the fundamental frequency (measured
 //      by a zero-crossing count) and the peak amplitude;
-//   2. the rate-ratio accuracy �?over N frames the output frame count
+//   2. the rate-ratio accuracy — over N frames the output frame count
 //      must match `input_frames * ratio` (the *cumulative* count is
 //      what matters, because a converter buffers internally);
-//   3. the channel interleaving �?a 2-channel input stays 2-channel and
+//   3. the channel interleaving — a 2-channel input stays 2-channel and
 //      the channels are not mixed;
-//   4. the invalid-configuration rejection �?a zero rate, a zero
+//   4. the invalid-configuration rejection — a zero rate, a zero
 //      channel count: a clean error, not an exception and not a crash;
-//   5. the fallback path �?when the vendored library is not compiled
+//   5. the fallback path — when the vendored library is not compiled
 //      in, `backend()` reports "linear" and the same tests still pass
 //      with a looser tolerance.  The tolerance is picked from
 //      `resampler_backend()`, so the file works with either backend;
-//   6. the continuity across calls �?resampling in 10 small blocks must
+//   6. the continuity across calls — resampling in 10 small blocks must
 //      produce the same output as resampling in one large block, which
 //      proves the internal state is kept.
 //
@@ -385,7 +385,7 @@ TEST(resampler_channels, a_two_channel_input_stays_two_channel) {
     constexpr std::uint32_t kOut = 44100;
     constexpr std::size_t kFrames = 4800;
 
-    // Left is a 1 kHz tone, right is a 3 kHz tone �?clearly different
+    // Left is a 1 kHz tone, right is a 3 kHz tone — clearly different
     // signals, so a mix-up is unmistakable.
     const std::vector<std::int16_t> in = make_sine(kIn, 2, kFrames, 1000.0);
     std::vector<std::int16_t> two = in;
@@ -469,7 +469,7 @@ TEST(resampler_continuity, splitting_the_stream_does_not_change_the_output) {
 }
 
 // ---------------------------------------------------------------------------
-// 7. The statistics �?the DEC-3 "make the conversion visible" surface
+// 7. The statistics — the DEC-3 "make the conversion visible" surface
 // ---------------------------------------------------------------------------
 
 TEST(resampler_stats, the_conversion_is_reported) {

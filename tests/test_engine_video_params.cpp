@@ -306,7 +306,7 @@ TEST_F(EngineVideoParams, TheColourDescriptionReachesTheEncoder) {
 // ---------------------------------------------------------------------------
 
 TEST_F(EngineVideoParams, TheContentHintReachesTheSdp) {
-    // RFC 8692 ง3 defines three values; both the media-level
+    // RFC 8692 ยง3 defines three values; both the media-level
     // `a=content-hint:` attribute and the `x-google-content-hint` fmtp
     // parameter carry them, and they must agree.
     EngineConfig cfg{};

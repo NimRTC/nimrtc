@@ -13,7 +13,7 @@
 
 /**
  * @file tests/test_engine_capture_pump.cpp
- * @brief Remote-desktop plan A10 / A11 鈥?the capture -> engine pump.
+ * @brief Remote-desktop plan A10 / A11 — the capture -> engine pump.
  *
  * The remote-desktop plan's A10 row asks for exactly this:
  *
@@ -30,8 +30,8 @@
  * So this file has four jobs:
  *
  *   1. **The pump works.**  A capture device is registered, the engine
- *      is configured to use it, and the test drives `tick()` 鈥?never
- *      `send_video()` 鈥?and observes RTP packets going out.
+ *      is configured to use it, and the test drives `tick()` — never
+ *      `send_video()` — and observes RTP packets going out.
  *
  *   2. **The codec is only touched from the tick thread.**  The test
  *      registers its own codec plug-in, records the thread id at
@@ -45,8 +45,8 @@
  *      reported through `on_error` (not silently ignored), and a device
  *      that is lost is reopened.
  *
- * The capture device under test is a *fake* defined in this file 鈥?not
- * the synthetic one from the capture module 鈥?because the fake has to
+ * The capture device under test is a *fake* defined in this file — not
+ * the synthetic one from the capture module — because the fake has to
  * record the thread it produced its frames on, and it has to be able to
  * inject a "device lost" error.  The synthetic device's own behaviour
  * is covered by the module's tests; what matters here is the *engine's*
@@ -90,7 +90,7 @@ namespace np = nimrtc::plugins;
  *
  *   - it produces frames on *its own* thread (here: the thread that
  *     calls `produce()`), so the engine's tick thread is a different
- *     thread from the producer's 鈥?which is what makes the
+ *     thread from the producer's — which is what makes the
  *     "the codec is only touched from the tick thread" assertion
  *     meaningful;
  *   - it fills a bounded queue with an explicit drop policy;
@@ -173,7 +173,7 @@ public:
 
         // The capture seam's contract: the pixels stay valid until the
         // *next* call to `pop_frame()`.  So the popped frame's bytes are
-        // copied into a buffer that lives until then 鈥?not into a
+        // copied into a buffer that lives until then — not into a
         // per-slot buffer that dies with the queue entry.
         const Slot& slot = queue_.front();
         current_pixels_.assign(slot.pixels.begin(), slot.pixels.end());
@@ -218,7 +218,7 @@ public:
         queue_.push_back(std::move(slot));
 
         // The queue is bounded: the oldest frame goes (the screen-content
-        // policy 鈥?the newest frame is the truth).
+        // policy — the newest frame is the truth).
         while (queue_.size() > depth_) {
             queue_.pop_front();
             ++stats_.frames_dropped;
@@ -258,7 +258,7 @@ private:
     np::CaptureConfig cfg_;
     std::deque<Slot> queue_;
     /** The bytes of the most recently popped frame.  Valid until the
-     *  next `pop_frame()` 鈥?the seam's lifetime contract. */
+     *  next `pop_frame()` — the seam's lifetime contract. */
     std::vector<std::uint8_t> current_pixels_;
     np::CaptureFrameCallback cb_;
     np::CaptureStats stats_{};
@@ -297,7 +297,7 @@ std::mutex DeviceCaptureFactory::mu_;
 DeviceCapture* DeviceCaptureFactory::last_ = nullptr;
 
 // ---------------------------------------------------------------------------
-// The fake codec 鈥?it records the thread it was called on
+// The fake codec — it records the thread it was called on
 // ---------------------------------------------------------------------------
 
 /** A codec that records the thread id at every `encode()` call.
@@ -501,7 +501,7 @@ TEST_F(EngineCaptureDevice, NoCaptureConfiguredMeansNoDevice) {
     ASSERT_EQ(engine.open(), 0u);
 
     EXPECT_EQ(engine.video_capture(), nullptr);
-    // And the counters stay at zero 鈥?a host that never configured a
+    // And the counters stay at zero — a host that never configured a
     // capture device sees no change in its telemetry.
     EXPECT_EQ(engine.stats().video_capture_frames, 0u);
     EXPECT_EQ(engine.stats().video_capture_frames_pumped, 0u);
@@ -682,7 +682,7 @@ TEST_F(EngineCaptureDevice, TheManualPathStillWorksWithACaptureConfigured) {
     NimRTCEngine engine(cfg);
     ASSERT_EQ(engine.open(), 0u);
 
-    // The device is still opened 鈥?the host drives it.
+    // The device is still opened — the host drives it.
     ASSERT_NE(engine.video_capture(), nullptr);
     EXPECT_TRUE(engine.video_capture()->is_open());
 

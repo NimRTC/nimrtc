@@ -281,6 +281,16 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
                                     bool end, bool marker) noexcept {
     if (!dtmf_codec_) return false;
 
+    // Q5: the transport gate.  A telephone event rides the same 5-tuple
+    // as the audio, so a transport that refuses the audio refuses the
+    // event too.  Building and protecting a packet for a dead transport
+    // is the same waste the audio path avoids.
+    update_ice_send_gate();
+    if (impl_->session_state.ice_send_blocked.load(
+            std::memory_order_acquire)) {
+        return false;
+    }
+
     // --- Encode --------------------------------------------------------
     plugins::DtmfEvent event;
     event.code        = code;

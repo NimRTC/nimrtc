@@ -28,6 +28,8 @@
  */
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -118,6 +120,47 @@ struct SessionState {
     plugins::IceState last_ice_state = plugins::IceState::Disconnected;
     bool ice_connected_once = false;
     bool ice_rehandshake_armed = false;
+
+    // ---- ICE failure -> stop sending (Q5 finding, v1.3 plan) -----------
+    //
+    // When ICE gives up (`Failed`), libjuice clears its selected pair and
+    // every `ice_t_->send()` is refused with "Send while ICE is not
+    // connected".  The Q5 soak measured that refusal **26 627 times** at
+    // full media rate, for the remaining 21 minutes of a 24 h run: a
+    // failed call that still costs the host a full-rate send loop.
+    //
+    // The engine therefore stops *producing* media once the transport is
+    // gone, and says so **once** rather than once per packet.
+    //
+    // The condition is deliberately *not* "ICE is not connected": the
+    // window between `open()` and the first successful connectivity
+    // check is a normal phase in which the host may already be feeding
+    // PCM, and rejecting it there would be a behaviour change the host
+    // cannot see.  Only a transport that **was** connected and then
+    // stopped is treated as dead.
+    //
+    // The two flags below are **atomic** because the gate is read from
+    // the host's thread (`send_audio()`) as well as from the engine
+    // thread (`tick()`).  A `bool` written by one thread and read by
+    // another is a data race, and this is a flag whose whole job is to
+    // be read on the hot path.
+    //
+    // `ice_ever_connected` is the gate's own record, deliberately
+    // **separate** from `ice_connected_once` above: that field belongs
+    // to the rehandshake logic, which observes the ICE state
+    // *transitions* from `poll_ice_flap_for_rehandshake()`.  The gate
+    // needs a simpler question -- "has this transport ever been up?" --
+    // and it must be answerable at the moment the transport dies.
+    std::atomic<bool> ice_send_blocked{false};
+    // "The transport has been up at least once."
+    std::atomic<bool> ice_ever_connected{false};
+    // The latch above fires once per outage; this one counts the
+    // outages, so a host (and the soak) can tell "the link flapped
+    // twice" from "the link flapped once and stayed down".
+    //
+    // Also atomic: `stats()` may be called from the host's thread while
+    // the engine thread is updating it.
+    std::atomic<std::uint32_t> ice_send_blocked_events{0};
 
     // ---- DataChannel DTLS-transport cookie (v1.x follow-up) ------------
     //

@@ -1,0 +1,32 @@
+# Developer / archived-evidence path for the NimRTC reference TURN
+# deployment (slice v1-n5-turn-server / N5-1).
+#
+# CI does NOT use this file: N5-2 runs a native apt install of coturn on
+# the Linux leg instead.  This compose service exists so a developer can
+# bring up the same TLS-only TURN server locally with one command:
+#
+#   bash examples/turn-server/gen-certs.sh                # once, into ./certs/
+#   docker compose -f examples/turn-server/compose.yml up
+#
+# The acceptance test does not reference this file and does not start or
+# stop any container.  It only consumes NIMRTC_TURN_URI /
+# NIMRTC_TURN_USERNAME / NIMRTC_TURN_PASSWORD.  Default developer
+# credential (as baked into turnserver.conf): user "turnuser",
+# password "turnpass".
+services:
+  turn:
+    image: coturn/coturn:4.6
+    command:
+      - turnserver
+      - -c
+      - /etc/turn-server/turnserver.conf
+      # TLS-only: refuse UDP/TCP/DTLS, serve only TURN over TLS.
+      - --no-udp
+      - --no-tcp
+      - --no-dtls
+    volumes:
+      - ./certs:/etc/turn-server/certs:ro
+      - ./turnserver.conf:/etc/turn-server/turnserver.conf:ro
+    ports:
+      - "5349:5349/tcp"
+    restart: unless-stopped

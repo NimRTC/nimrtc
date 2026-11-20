@@ -4617,6 +4617,50 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     same, and     the `rtp_name` / `sdp_name` rows are gone from the
     catalogue.
 
+- **The impaired-soak recorder buffered a 24 h run in memory and lost
+  the evidence when it died (2026-11-20).**
+  `tools/run_soak_impaired.py` ran the harness with
+  `stdout=subprocess.PIPE`, `stderr=subprocess.STDOUT` — so the
+  recorder was the **only** reader of the harness's output, and
+  `subprocess.run` collected the whole thing in memory before it
+  returned.  The harness logs on every ICE / DTLS event, and a measured
+  15 s run produced **614 KB**; a 24 h run is four orders of magnitude
+  more.  Two things followed from that shape, and both bit in practice:
+
+  - **The recorder was the single point of failure.**  If it was killed
+    — a terminal task that times out, a shell that is closed, a laptop
+    that sleeps — the pipe's read end closed, and the harness's every
+    later write hit a broken pipe.  The measurements were already in
+    the harness; they just never reached the disk, because the fold
+    that writes them lives in the recorder.
+  - **The artifact path was resolved against the wrong directory.**
+    The harness resolves `--json` against *its own* working directory
+    (the repository root), while the recorder looked for the file
+    relative to wherever it was started from — so even a surviving
+    artifact could land where the recorder would not find it.
+
+  The harness's output now goes to a **file** (`run-<stamp>.log`), so
+  the recorder is no longer the reader, nothing is buffered in memory,
+  and the harness keeps writing to a descriptor it inherited whether the
+  recorder lives or dies.  The artifact path is **absolute**, so it
+  lands where the recorder will look for it.
+
+  And a run that outlives its recorder is now **recoverable**:
+  `python tools/run_soak_impaired.py --recover <artifact.json>` folds
+  an orphaned harness's artifact into the evidence file after the fact.
+  The recovered record is marked `"recovered": true` and carries a
+  `recovery_note` that says what it cannot know: the elapsed time is
+  the window the harness was **asked** to run (it runs its window to
+  completion before it writes the artifact, so the two agree), and the
+  provenance is the tree at **recovery** time, not at launch time.
+
+  The self-test grew six cases for this: an orphaned artifact folds
+  back in as a PASS, the recovered record says it was recovered, it
+  carries the harness's own run window, it carries the tree's
+  provenance, a recovered 24 h run satisfies the Q5 gate, and a
+  recovered run whose numbers fail the criteria is a FAIL.
+
+
 - **The `"sctp"` data-channel backend was retired from the public selectors
   (2026-11-10; DataChannel capability plan WP-A, DEC-4 = A1).**  The SCTP
   backend was a **test-only** backend: `SctpDataChannel` opens an in-process

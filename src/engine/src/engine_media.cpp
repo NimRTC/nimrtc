@@ -1697,6 +1697,32 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         return core::kEngineNotReady;
     }
 
+    // Q5: gate on the transport, not just the crypto session.
+    //
+    // The DTLS session stays in `Connected` after the ICE consent
+    // freshness expires — the DTLS layer has no idea the 5-tuple died —
+    // so the check above passes and the audio keeps being encoded,
+    // SRTP-protected and queued for a transport that refuses every one
+    // of them.  The 24 h soak measured that refusal 26 627 times.
+    //
+    // `ice_send_blocked` is set by `update_ice_send_gate()`, and is
+    // *only* set for a transport that was connected and then stopped, so
+    // this does not reject the audio a host feeds before the first
+    // connectivity check completes.
+    //
+    // The gate is refreshed *here* rather than only in `tick()`: the
+    // host's call thread is where the media is produced, and a gate
+    // that only the engine thread can update would leave a window in
+    // which the media path sees a stale "connected".  The refresh is
+    // one atomic load of the transport's state plus two atomic
+    // exchanges — cheap enough for the hot path, and it is the price of
+    // not sending into a dead transport.
+    update_ice_send_gate();
+    if (impl_->session_state.ice_send_blocked.load(
+            std::memory_order_acquire)) {
+        return core::kEngineNotReady;
+    }
+
     // Copy the capture PCM into an engine-owned buffer.  The 3A stage
     // processes audio in place, but the caller's buffer is declared const —
     // writing through a const_cast would be undefined behaviour and would
@@ -3442,6 +3468,12 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
                                        ? audio_bitrate_current_bps_
                                        : 0);
 
+    // The transport gate's outage count (Q5 finding).  See the field's
+    // declaration for why this counts outages and not packets.
+    out.ice_send_blocked_events =
+        impl_->session_state.ice_send_blocked_events.load(
+            std::memory_order_acquire);
+
     // ---- The per-stream audio entries (plan Track S / S4) -------------
     //
     // The audio plane's counterpart of the per-stream video list.  The
@@ -3856,6 +3888,25 @@ void NimRTCEngine::send_video_rtp_packet(plugins::BufferView payload,
                                           plugins::Priority prio,
                                           bool count_bytes) noexcept {
     if (impl_ == nullptr) return;
+
+    // Q5: the transport gate.
+    //
+    // Same reason as the audio path: the DTLS session stays `Connected`
+    // after the ICE consent expires, so without this the video keeps
+    // being encoded and SRTP-protected for a transport that refuses
+    // every packet.  The gate is only set for a transport that *was*
+    // connected and then stopped, so a stream that starts before the
+    // first connectivity check is unaffected.
+    //
+    // The gate is refreshed here as well as in `tick()`: this callback
+    // runs on the encoder's thread, and a gate only the engine thread
+    // could update would leave a window in which the video path sees a
+    // stale "connected".
+    update_ice_send_gate();
+    if (impl_->session_state.ice_send_blocked.load(
+            std::memory_order_acquire)) {
+        return;
+    }
 
     detail::RtpPacketSpec spec;
     spec.ssrc         = ssrc;

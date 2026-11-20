@@ -2755,6 +2755,24 @@ nimrtc_add_engine_test(test_engine_audio_loopback test_engine_audio_loopback.cpp
 nimrtc_add_engine_test(test_engine_audio_send test_engine_audio_send.cpp)
 
 # ---------------------------------------------------------------------------
+# The Q5 finding's second defect: the engine kept sending into a dead
+# transport.
+#
+# The 24 h impaired soak found that the ICE consent freshness expired,
+# libjuice moved the agent to `failed`, and the engine went on offering
+# media at full rate anyway -- 26 627 refused sends ("Send while ICE is
+# not connected") in the remaining 21 minutes of the run.  The engine
+# noticed the state change and had no path from "the call is dead" to
+# "stop the media source".
+#
+# The test drives the ICE state through a fake transport and asserts
+# that the media stops when the transport dies, resumes when it comes
+# back, and that the startup phase (before the first successful
+# connectivity check) is not mistaken for an outage.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_ice_send_gate test_engine_ice_send_gate.cpp)
+
+# ---------------------------------------------------------------------------
 # The audio send path's allocation budget (remediation Phase 3 §3.5).
 #
 # The plan asks for "音频路径 per-packet 堆分配次数 = 0".  The metric is

@@ -4666,6 +4666,21 @@ public:
         // It equals `Config::audio_bitrate_bps` until the BWE-linked
         // adaptation lowers it (or raises it back towards that ceiling).
         std::uint32_t audio_encoder_bitrate_bps  = 0;
+        // ---- Transport gate (Q5 finding, additive) ----------------------
+        // How many times the engine has stopped sending because the
+        // transport died.
+        //
+        // The Q5 soak found the failure mode this counts: the ICE
+        // consent freshness expired, libjuice moved the agent to
+        // `failed`, and the engine kept offering media at full rate
+        // anyway — 26 627 refused sends in the remaining 21 minutes of
+        // a 24 h run.
+        //
+        // The value is a count of **outages**, not of packets: one
+        // outage that lasts an hour is one, and a link that flaps is
+        // several.  The engine reports each one once, rather than once
+        // per packet.
+        std::uint32_t ice_send_blocked_events  = 0;
         // ---- Network feedback / BWE loop (v1.2.0 M1, additive) ---------
         // The counters that make the feedback loop observable: how many
         // inbound RTCP blocks were routed to the collector, how many
@@ -5547,6 +5562,20 @@ private:
      *  feedback messages all come from the same reporter. */
     std::uint32_t rtcp_reporter_ssrc() noexcept;
     void poll_ice_flap_for_rehandshake() noexcept;
+    /** Q5: close the media-send gate when the transport is dead.
+     *
+     *  Called from `tick()` before anything produces media.  When the ICE
+     *  agent has given up — consent freshness expired (RFC 7675 §5.1) or
+     *  the link dropped after having been up — the gate closes, so the
+     *  media paths stop producing packets for a transport that cannot
+     *  carry them, and the outage is reported **once** rather than once
+     *  per packet.
+     *
+     *  The gate is narrower than "ICE is not connected" on purpose: the
+     *  window between `open()` and the first successful connectivity
+     *  check is a normal startup phase, and only a transport that *was*
+     *  connected and then stopped counts as dead. */
+    void update_ice_send_gate() noexcept;
     void init_bwe_scheduler() noexcept;
     void shutdown_bwe_scheduler() noexcept;
     /** Hand the aggregated network-feedback snapshot to the bandwidth

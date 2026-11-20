@@ -206,6 +206,13 @@ void NimRTCEngine::wire_stream_sender(detail::VideoStream* s) noexcept {
                   std::uint32_t rtp_ts,
                   std::uint16_t seq,
                   bool marker) {
+            // Q5: the transport gate.  A per-stream video sender rides
+            // the same 5-tuple as the audio and the default stream, so a
+            // transport that refuses them refuses this too.
+            update_ice_send_gate();
+            if (impl_->session_state.ice_send_blocked.load(
+                    std::memory_order_acquire)) return;
+
             detail::RtpPacketSpec spec;
             spec.ssrc         = s->ssrc;
             spec.seq          = seq;

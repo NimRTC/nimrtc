@@ -93,12 +93,83 @@ typedef enum juice_turn_transport {
 	JUICE_TURN_TRANSPORT_TLS      // TURN over TLS (RFC 8656 section 12)
 } juice_turn_transport_t;
 
+// The TLS transport seam (NimRTC extension, see
+// src/third_party/libjuice/patches/0002-turn-tls-transport.patch).
+//
+// libjuice owns the TURN protocol but not a TLS stack: it would have to
+// carry one in the vendored tree, and a vendored MPL-2.0 tree is the
+// wrong place for it.  The host instead supplies the TLS client, and
+// libjuice uses it for the *control connection* only.
+//
+// The contract is deliberately narrow:
+//
+//   - `connect` wraps an already-connected socket in a TLS session and
+//     returns a session handle, or NULL on failure.  It must not block
+//     indefinitely: the caller polls it.
+//
+//   - `handshake` advances the handshake.  It returns 1 when the
+//     session is established, 0 when it still needs to make progress
+//     (the caller should wait for readability and retry), and -1 on
+//     failure.
+//
+//   - `read` / `write` transfer bytes.  They return the number of bytes
+//     transferred, 0 when the operation would block, and -1 on failure.
+//
+// The implementation must be **stream oriented**: a `write` of N bytes
+// may transfer fewer, and a `read` may return fewer bytes than
+// requested.  libjuice's framing is self-delimiting (RFC 8656 sections
+// 12.4 / 12.5), so partial messages are handled by the caller.
+//
+// The ops are only consulted for JUICE_TURN_TRANSPORT_TLS.  A NULL ops
+// pointer, or a NULL `connect`, means "TLS is not available", and the
+// TURN entry then fails to allocate rather than silently falling back
+// to plain TCP -- a silent downgrade is the defect this seam exists to
+// prevent.
+typedef struct juice_turn_tls_ops {
+	void *ctx;
+
+	// Wrap an already-connected socket in a TLS session.
+	//
+	// `socket_fd` is a connected, non-blocking TCP socket.  The
+	// implementation takes ownership of it: on success the session
+	// owns the socket, and on failure the implementation must close it.
+	//
+	// `host` is the host name that was resolved (for diagnostics and
+	// as the default certificate name), `port` the server port, and
+	// `server_name` the name to present as SNI and to verify the
+	// certificate against.  `server_name` may be empty, in which case
+	// `host` is used.
+	void *(*connect)(void *ctx, int socket_fd, const char *host, uint16_t port,
+	                 const char *server_name);
+
+	// Advance the handshake.  1 = established, 0 = pending, -1 = failed.
+	int (*handshake)(void *session);
+
+	// Read up to `size` bytes.  Returns the count, 0 if it would block,
+	// or -1 on failure.
+	int (*read)(void *session, char *buf, size_t size);
+
+	// Write up to `size` bytes.  Returns the count, 0 if it would block,
+	// or -1 on failure.
+	int (*write)(void *session, const char *buf, size_t size);
+
+	// Close and release the session.
+	void (*close)(void *session);
+} juice_turn_tls_ops_t;
+
 typedef struct juice_turn_server {
 	const char *host;
 	const char *username;
 	const char *password;
 	uint16_t port;
 	juice_turn_transport_t transport;
+
+	// The name presented as SNI and verified against the server's
+	// certificate when `transport` is JUICE_TURN_TRANSPORT_TLS.
+	//
+	// NULL means "use `host`", which is the right default when the
+	// host name is also the name in the certificate.
+	const char *server_name;
 } juice_turn_server_t;
 
 typedef enum juice_concurrency_mode {
@@ -115,6 +186,12 @@ typedef struct juice_config {
 
 	juice_turn_server_t *turn_servers;
 	int turn_servers_count;
+
+	// The TLS client used for TURN-over-TLS control connections.
+	// NULL (the default) means TURN-over-TLS is unavailable: a TURN
+	// server configured with JUICE_TURN_TRANSPORT_TLS then fails to
+	// allocate instead of silently downgrading to plain TCP.
+	const juice_turn_tls_ops_t *turn_tls_ops;
 
 	const char *bind_address;
 

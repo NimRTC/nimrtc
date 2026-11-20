@@ -45,6 +45,7 @@ Write an ADR when a decision:
 | [ADR-024](ADR-024-engineconfig-string-ownership.md) | `EngineConfig` string ownership — the engine owns its strings | Phase 5 (v1.2.0) |
 | [ADR-025](ADR-025-sdp-rtp-not-pluggable.md) | SDP / RTP are not pluggable — and the engine's concrete includes are enumerated, not hidden | Phase 4 (v1.2.0) |
 | [ADR-026](ADR-026-scheduler-c-abi.md) | The scheduler's C ABI — a real `extern "C"` surface | Phase 4 (v1.2.0) |
+| [ADR-027](ADR-027-turn-over-tls-libjuice-seam.md) | TURN over TLS — a narrow TLS seam in the vendored libjuice, and no plaintext fallback | v1.4 (N1) |
 
 ### Reserved numbers
 

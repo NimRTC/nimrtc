@@ -1,0 +1,687 @@
+﻿From: NimRTC contributors <bot@nimrtc.local>
+Subject: [PATCH] libjuice: a TURN-over-TLS transport seam, without a plaintext
+ fallback
+
+Upstream base commit: 77daa8befd828046169adbb012d8de928bfdcdd4
+
+Applies on top of: the NimRTC libjuice tree after PR #34 (TURN over TCP,
+which added src/turn_tcp.c) and PR #50 (0001-so-reuseaddr).  It does not
+apply to a pristine upstream checkout.
+
+Upstream libjuice knows the TURN transport enum value
+JUICE_TURN_TRANSPORT_TLS but has no way to actually speak it: the
+allocation path logs "TURN over TLS is not supported, falling back to
+TCP" and opens a *plain* TCP control connection to the server.  That
+fallback is the defect this patch removes.  A TURN server reached over
+TLS expects the client to speak TURN inside a TLS session; a plain TCP
+connection to the same port either fails (a TLS-only listener) or, on a
+server that also listens in the clear, silently sends the TURN
+credentials in the clear.
+
+libjuice owns the TURN protocol and its self-delimiting stream framing
+(RFC 8656 sections 12.4 / 12.5), but it does not own a TLS stack, and a
+vendored MPL-2.0 tree is the wrong place to carry one.  So the host
+supplies the TLS client through a narrow ops seam, and libjuice uses it
+for the *control connection* only.  The relayed transport address
+allocated by the server stays UDP, as RFC 6062 requires.
+
+The seam is juice_turn_tls_ops_t in include/juice/juice.h:
+
+  - connect  wraps an already-connected socket in a TLS session
+  - handshake advances the handshake, one step at a time
+  - read     / write transfer bytes
+  - close    releases the session
+
+The implementation must be stream oriented: a write may transfer fewer
+bytes than asked for, and a read may return fewer bytes than requested.
+libjuice's framing is self-delimiting, so partial messages are handled
+by the caller.
+
+The ops are consulted for JUICE_TURN_TRANSPORT_TLS only.  A NULL ops
+pointer, or a NULL connect, means "TLS is not available", and the TURN
+entry then fails immediately: it does NOT fall back to plain TCP.  The
+agent_turn_state_t::failed flag records that, so the entry fails at
+once instead of waiting for the retransmission timeout.
+
+The connection itself becomes three-phase, because a TLS session can
+only be created once the TCP connection has completed, and the
+handshake may need several round trips:
+
+  1. the non-blocking TCP connect, as before
+  2. the TLS session, created lazily from the connected socket
+  3. the TLS handshake, advanced incrementally
+
+Once the session exists, turn_tcp_stream_recv() and flush_locked() go
+through the TLS ops rather than recv()/send() on the raw socket.  The
+session owns the socket from that point on, and closes it.
+
+The public juice_turn_server_t gains a server_name field: the name
+presented as SNI and verified against the server's certificate.  NULL
+means "use the host name", which is the right default when the host
+name is also the name in the certificate.
+
+NimRTC's host side of the seam is src/modules/ice/src/turn_tls.cpp,
+which implements the ops on top of wolfSSL (TLS 1.2, CA verification,
+SAN dNSName check, SNI).
+diff --git a/include/juice/juice.h b/include/juice/juice.h
+index 34a0807c..f95aa55e 100644
+--- a/include/juice/juice.h
++++ b/include/juice/juice.h
+@@ -93,12 +93,83 @@ typedef enum juice_turn_transport {
+ 	JUICE_TURN_TRANSPORT_TLS      // TURN over TLS (RFC 8656 section 12)
+ } juice_turn_transport_t;
+ 
++// The TLS transport seam (NimRTC extension, see
++// src/third_party/libjuice/patches/0002-turn-tls-transport.patch).
++//
++// libjuice owns the TURN protocol but not a TLS stack: it would have to
++// carry one in the vendored tree, and a vendored MPL-2.0 tree is the
++// wrong place for it.  The host instead supplies the TLS client, and
++// libjuice uses it for the *control connection* only.
++//
++// The contract is deliberately narrow:
++//
++//   - `connect` wraps an already-connected socket in a TLS session and
++//     returns a session handle, or NULL on failure.  It must not block
++//     indefinitely: the caller polls it.
++//
++//   - `handshake` advances the handshake.  It returns 1 when the
++//     session is established, 0 when it still needs to make progress
++//     (the caller should wait for readability and retry), and -1 on
++//     failure.
++//
++//   - `read` / `write` transfer bytes.  They return the number of bytes
++//     transferred, 0 when the operation would block, and -1 on failure.
++//
++// The implementation must be **stream oriented**: a `write` of N bytes
++// may transfer fewer, and a `read` may return fewer bytes than
++// requested.  libjuice's framing is self-delimiting (RFC 8656 sections
++// 12.4 / 12.5), so partial messages are handled by the caller.
++//
++// The ops are only consulted for JUICE_TURN_TRANSPORT_TLS.  A NULL ops
++// pointer, or a NULL `connect`, means "TLS is not available", and the
++// TURN entry then fails to allocate rather than silently falling back
++// to plain TCP -- a silent downgrade is the defect this seam exists to
++// prevent.
++typedef struct juice_turn_tls_ops {
++	void *ctx;
++
++	// Wrap an already-connected socket in a TLS session.
++	//
++	// `socket_fd` is a connected, non-blocking TCP socket.  The
++	// implementation takes ownership of it: on success the session
++	// owns the socket, and on failure the implementation must close it.
++	//
++	// `host` is the host name that was resolved (for diagnostics and
++	// as the default certificate name), `port` the server port, and
++	// `server_name` the name to present as SNI and to verify the
++	// certificate against.  `server_name` may be empty, in which case
++	// `host` is used.
++	void *(*connect)(void *ctx, int socket_fd, const char *host, uint16_t port,
++	                 const char *server_name);
++
++	// Advance the handshake.  1 = established, 0 = pending, -1 = failed.
++	int (*handshake)(void *session);
++
++	// Read up to `size` bytes.  Returns the count, 0 if it would block,
++	// or -1 on failure.
++	int (*read)(void *session, char *buf, size_t size);
++
++	// Write up to `size` bytes.  Returns the count, 0 if it would block,
++	// or -1 on failure.
++	int (*write)(void *session, const char *buf, size_t size);
++
++	// Close and release the session.
++	void (*close)(void *session);
++} juice_turn_tls_ops_t;
++
+ typedef struct juice_turn_server {
+ 	const char *host;
+ 	const char *username;
+ 	const char *password;
+ 	uint16_t port;
+ 	juice_turn_transport_t transport;
++
++	// The name presented as SNI and verified against the server's
++	// certificate when `transport` is JUICE_TURN_TRANSPORT_TLS.
++	//
++	// NULL means "use `host`", which is the right default when the
++	// host name is also the name in the certificate.
++	const char *server_name;
+ } juice_turn_server_t;
+ 
+ typedef enum juice_concurrency_mode {
+@@ -116,6 +187,12 @@ typedef struct juice_config {
+ 	juice_turn_server_t *turn_servers;
+ 	int turn_servers_count;
+ 
++	// The TLS client used for TURN-over-TLS control connections.
++	// NULL (the default) means TURN-over-TLS is unavailable: a TURN
++	// server configured with JUICE_TURN_TRANSPORT_TLS then fails to
++	// allocate instead of silently downgrading to plain TCP.
++	const juice_turn_tls_ops_t *turn_tls_ops;
++
+ 	const char *bind_address;
+ 
+ 	uint16_t local_port_range_begin;
+diff --git a/src/agent.c b/src/agent.c
+index 5d170531..47060827 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -84,15 +84,18 @@ static int copy_turn_server(juice_turn_server_t *dst, const juice_turn_server_t
+ 	dst->password = alloc_string_copy(src->password, &alloc_failed);
+ 	dst->port = src->port;
+ 	dst->transport = src->transport;
++	dst->server_name = alloc_string_copy(src->server_name, &alloc_failed);
+ 
+ 	if (alloc_failed) {
+ 		JLOG_FATAL("Memory allocation for TURN server configuration copy failed");
+ 		free((void *)dst->host);
+ 		free((void *)dst->username);
+ 		free((void *)dst->password);
++		free((void *)dst->server_name);
+ 		dst->host = NULL;
+ 		dst->username = NULL;
+ 		dst->password = NULL;
++		dst->server_name = NULL;
+ 		return -1;
+ 	}
+ 
+@@ -128,6 +131,10 @@ juice_agent_t *agent_create(const juice_config_t *config) {
+ 	agent->config.cb_gathering_done = config->cb_gathering_done;
+ 	agent->config.cb_recv = config->cb_recv;
+ 	agent->config.user_ptr = config->user_ptr;
++	// The TLS client for TURN-over-TLS (RFC 6062).  The ops are copied
++	// by value; their `ctx` pointer keeps pointing at the host's client,
++	// which has to outlive the agent.
++	agent->config.turn_tls_ops = config->turn_tls_ops;
+ 	if (alloc_failed) {
+ 		JLOG_FATAL("Memory allocation for configuration copy failed");
+ 		goto error;
+@@ -216,6 +223,7 @@ void agent_destroy(juice_agent_t *agent) {
+ 		free((void *)turn_server->host);
+ 		free((void *)turn_server->username);
+ 		free((void *)turn_server->password);
++		free((void *)turn_server->server_name);
+ 	}
+ 	free(agent->config.turn_servers);
+ 	free((void *)agent->config.bind_address);
+@@ -569,16 +577,33 @@ int agent_resolve_servers(juice_agent_t *agent) {
+ 					entry->transaction_id_expired = false;
+ 					++agent->entries_count;
+ 
+-					// For TURN over TCP, the control connection to the
+-					// server is opened here and pumped by a dedicated
++					// For TURN over TCP or TLS, the control connection to
++					// the server is opened here and pumped by a dedicated
+ 					// reader thread.
+ 					if (turn_server->transport != JUICE_TURN_TRANSPORT_UDP) {
+ 						if (turn_server->transport == JUICE_TURN_TRANSPORT_TLS) {
+-							JLOG_WARN("TURN over TLS is not supported, falling back to TCP");
+-							entry->turn->transport = JUICE_TURN_TRANSPORT_TCP;
++							// TURN over TLS needs a host-provided TLS client.
++							// Without one the allocation fails: silently
++							// downgrading to plain TCP would send the
++							// credentials in the clear.
++							if (!agent->config.turn_tls_ops ||
++							    !agent->config.turn_tls_ops->connect) {
++								JLOG_ERROR("TURN over TLS is configured but no TLS client is "
++								          "available");
++								entry->turn->stream = NULL;
++								entry->turn->failed = true;
++								agent_arm_transmission(agent, entry, STUN_PACING_TIME * i);
++								++count;
++								continue;
++							}
++
++							entry->turn->stream = turn_tcp_stream_create_tls(record,
++							                                          agent->config.turn_tls_ops, hostname,
++							                                          turn_server->server_name);
++						} else {
++							entry->turn->stream = turn_tcp_stream_create(record);
+ 						}
+ 
+-						entry->turn->stream = turn_tcp_stream_create(record);
+ 						if (!entry->turn->stream) {
+ 							JLOG_WARN("Failed to open the TURN-over-TCP connection to %s:%s",
+ 							          hostname, service);
+@@ -1078,6 +1103,18 @@ int agent_bookkeeping(juice_agent_t *agent, timestamp_t *next_timestamp) {
+ 
+ 		// STUN requests transmission or retransmission
+ 		if (entry->state == AGENT_STUN_ENTRY_STATE_PENDING) {
++			// The transport could not be opened at all (for example
++			// TURN over TLS without a TLS client).  There is nothing to
++			// retransmit: the entry fails right away instead of waiting
++			// for the retransmission timeout.
++			if (entry->turn && entry->turn->failed) {
++				JLOG_INFO("TURN allocation failed");
++				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
++				entry->next_transmission = 0;
++				agent_update_gathering_done(agent);
++				continue;
++			}
++
+ 			if (entry->next_transmission > now)
+ 				continue;
+ 
+diff --git a/src/agent.h b/src/agent.h
+index 6dd9de19..8b7dd6dc 100644
+--- a/src/agent.h
++++ b/src/agent.h
+@@ -110,6 +110,11 @@ typedef struct agent_turn_state {
+ 	juice_turn_transport_t transport;
+ 	turn_tcp_stream_t *stream;
+ 
++	// Set when the transport could not be opened at all (for example
++	// TURN over TLS without a TLS client).  The entry then fails
++	// instead of retrying.
++	bool failed;
++
+ 	// Reader thread for the TURN-over-TCP control connection.  The
+ 	// Allocate response and the relayed data both arrive on the stream,
+ 	// so the stream has to be pumped independently of the UDP socket.
+diff --git a/src/turn_tcp.c b/src/turn_tcp.c
+index 93dbffc6..80538ca9 100644
+--- a/src/turn_tcp.c
++++ b/src/turn_tcp.c
+@@ -10,6 +10,8 @@
+ #include "log.h"
+ #include "turn.h"
+ 
++#include <juice/juice.h>
++
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -154,16 +156,70 @@ turn_tcp_stream_t *turn_tcp_stream_create_accepted(socket_t sock) {
+ 	return stream;
+ }
+ 
++turn_tcp_stream_t *turn_tcp_stream_create_tls(const addr_record_t *dst,
++                                               const struct juice_turn_tls_ops *ops,
++                                               const char *host, const char *server_name) {
++	if (!dst || !ops || !ops->connect)
++		return NULL;
++
++	socket_t sock = socket(dst->addr.ss_family, SOCK_STREAM, IPPROTO_TCP);
++	if (sock == INVALID_SOCKET) {
++		JLOG_WARN("TCP socket creation failed, errno=%d", sockerrno);
++		return NULL;
++	}
++
++	if (turn_tcp_set_nonblocking(sock) < 0) {
++		closesocket(sock);
++		return NULL;
++	}
++
++	int ret = connect(sock, (const struct sockaddr *)&dst->addr, dst->len);
++	if (ret != 0 && sockerrno != SEINPROGRESS && sockerrno != SEWOULDBLOCK) {
++		JLOG_WARN("TCP connection failed, errno=%d", sockerrno);
++		closesocket(sock);
++		return NULL;
++	}
++
++	turn_tcp_stream_t *stream = calloc(1, sizeof(turn_tcp_stream_t));
++	if (!stream) {
++		JLOG_FATAL("Memory allocation for TURN stream failed");
++		closesocket(sock);
++		return NULL;
++	}
++
++	stream->sock = sock;
++	stream->connected = false;
++	stream->failed = false;
++	stream->tls_ops = ops;
++	stream->tls_host = host ? strdup(host) : NULL;
++	stream->tls_server_name = server_name ? strdup(server_name) : NULL;
++	stream->tls_port = dst ? addr_get_port(&dst->addr) : 0;
++	if (host && !stream->tls_host) {
++		JLOG_FATAL("Memory allocation for the TURN stream host name failed");
++		closesocket(sock);
++		free(stream);
++		return NULL;
++	}
++	mutex_init(&stream->mutex, MUTEX_RECURSIVE);
++	return stream;
++}
++
+ void turn_tcp_stream_destroy(turn_tcp_stream_t *stream) {
+ 	if (!stream)
+ 		return;
+ 
+-	if (stream->sock != INVALID_SOCKET)
++	if (stream->tls_session && stream->tls_ops && stream->tls_ops->close)
++		stream->tls_ops->close(stream->tls_session);
++
++	// The TLS session owns the socket once it has been created.
++	if (stream->sock != INVALID_SOCKET && !stream->socket_owned_by_tls)
+ 		closesocket(stream->sock);
+ 
+ 	mutex_destroy(&stream->mutex);
+ 	free(stream->wbuf);
+ 	free(stream->rbuf);
++	free(stream->tls_host);
++	free(stream->tls_server_name);
+ 	free(stream);
+ }
+ 
+@@ -207,49 +263,96 @@ int turn_tcp_stream_check_connected(turn_tcp_stream_t *stream) {
+ 		return 1;
+ 	}
+ 
+-	// The socket is non-blocking, so the connection is either still in
+-	// progress or has completed.  A socket that is not writable yet means
+-	// the connection attempt is still running; a socket that became
+-	// writable either succeeded or failed, and SO_ERROR tells which.
+-	fd_set wset;
+-	FD_ZERO(&wset);
+-	FD_SET(stream->sock, &wset);
+-	struct timeval tv;
+-	tv.tv_sec = 0;
+-	tv.tv_usec = 0;
++	// Phase 1: the TCP connection.  The socket is non-blocking, so the
++	// connection is either still in progress or has completed.  A socket
++	// that is not writable yet means the connection attempt is still
++	// running; a socket that became writable either succeeded or failed,
++	// and SO_ERROR tells which.
++	if (!stream->socket_connected) {
++		fd_set wset;
++		FD_ZERO(&wset);
++		FD_SET(stream->sock, &wset);
++		struct timeval tv;
++		tv.tv_sec = 0;
++		tv.tv_usec = 0;
++
++		int ret = select(stream->sock + 1, NULL, &wset, NULL, &tv);
++		if (ret < 0) {
++			if (sockerrno == SEINTR) {
++				mutex_unlock(&stream->mutex);
++				return 0;
++			}
++			JLOG_WARN("select failed, errno=%d", sockerrno);
++			stream->failed = true;
++			mutex_unlock(&stream->mutex);
++			return -1;
++		}
+ 
+-	int ret = select(stream->sock + 1, NULL, &wset, NULL, &tv);
+-	if (ret < 0) {
+-		if (sockerrno == SEINTR) {
++		if (ret == 0) {
++			// Still connecting.
+ 			mutex_unlock(&stream->mutex);
+ 			return 0;
+ 		}
+-		JLOG_WARN("select failed, errno=%d", sockerrno);
+-		stream->failed = true;
+-		mutex_unlock(&stream->mutex);
+-		return -1;
++
++		int err = 0;
++		socklen_t err_len = sizeof(err);
++		if (getsockopt(stream->sock, SOL_SOCKET, SO_ERROR, (char *)&err, &err_len) != 0) {
++			JLOG_WARN("getsockopt failed, errno=%d", sockerrno);
++			stream->failed = true;
++			mutex_unlock(&stream->mutex);
++			return -1;
++		}
++
++		if (err != 0) {
++			JLOG_WARN("TCP connection failed, errno=%d", err);
++			stream->failed = true;
++			mutex_unlock(&stream->mutex);
++			return -1;
++		}
++
++		stream->socket_connected = true;
+ 	}
+ 
+-	if (ret == 0) {
+-		// Still connecting.
++	// Phase 2: the TLS session.  A plain TCP stream is connected as soon
++	// as the socket is.
++	if (!stream->tls_ops) {
++		stream->connected = true;
+ 		mutex_unlock(&stream->mutex);
+-		return 0;
++		return 1;
+ 	}
+ 
+-	int err = 0;
+-	socklen_t err_len = sizeof(err);
+-	if (getsockopt(stream->sock, SOL_SOCKET, SO_ERROR, (char *)&err, &err_len) != 0) {
+-		JLOG_WARN("getsockopt failed, errno=%d", sockerrno);
++	// The TLS ops take ownership of the socket, so it must not be closed
++	// by turn_tcp_stream_destroy() any more.
++	if (!stream->tls_session) {
++		stream->tls_session = stream->tls_ops->connect(stream->tls_ops->ctx, (int)stream->sock,
++		                                               stream->tls_host, stream->tls_port,
++		                                               stream->tls_server_name);
++		if (!stream->tls_session) {
++			JLOG_WARN("Failed to create the TLS session for the TURN-over-TLS connection");
++			// The ops closed the socket on failure.
++			stream->sock = INVALID_SOCKET;
++			stream->socket_owned_by_tls = true;
++			stream->failed = true;
++			mutex_unlock(&stream->mutex);
++			return -1;
++		}
++		stream->socket_owned_by_tls = true;
++	}
++
++	// Phase 3: the TLS handshake.  It may need several round trips, so it
++	// is advanced one step at a time.
++	int ret = stream->tls_ops->handshake(stream->tls_session);
++	if (ret < 0) {
++		JLOG_WARN("The TLS handshake with the TURN server failed");
+ 		stream->failed = true;
+ 		mutex_unlock(&stream->mutex);
+ 		return -1;
+ 	}
+ 
+-	if (err != 0) {
+-		JLOG_WARN("TCP connection failed, errno=%d", err);
+-		stream->failed = true;
++	if (ret == 0) {
++		// Still handshaking: the caller retries after a wait.
+ 		mutex_unlock(&stream->mutex);
+-		return -1;
++		return 0;
+ 	}
+ 
+ 	stream->connected = true;
+@@ -299,26 +402,44 @@ static int flush_locked(turn_tcp_stream_t *stream) {
+ 		return 0;
+ 
+ 	while (stream->wpos < stream->wlen) {
++		int len;
++		if (stream->tls_session) {
++			// The TLS client writes to the socket itself.  It returns the
++			// byte count, 0 when it would block, or -1 on failure.
++			len = stream->tls_ops->write(stream->tls_session, stream->wbuf + stream->wpos,
++			                             stream->wlen - stream->wpos);
++			if (len < 0) {
++				JLOG_WARN("TURN-over-TLS stream write failed");
++				stream->failed = true;
++				return -1;
++			}
++
++			if (len == 0) {
++				JLOG_VERBOSE("TURN-over-TLS stream write would block");
++				return 0;
++			}
++		} else {
+ #if defined(__APPLE__) || defined(_WIN32)
+-		int flags = 0;
++			int flags = 0;
+ #else
+-		int flags = MSG_NOSIGNAL;
++			int flags = MSG_NOSIGNAL;
+ #endif
+-		int len = send(stream->sock, stream->wbuf + stream->wpos,
+-		               (socklen_t)(stream->wlen - stream->wpos), flags);
+-		if (len < 0) {
+-			if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK) {
+-				JLOG_VERBOSE("TURN stream write would block");
+-				return 0;
++			len = send(stream->sock, stream->wbuf + stream->wpos,
++			           (socklen_t)(stream->wlen - stream->wpos), flags);
++			if (len < 0) {
++				if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK) {
++					JLOG_VERBOSE("TURN stream write would block");
++					return 0;
++				}
++				JLOG_WARN("TURN stream write failed, errno=%d", sockerrno);
++				stream->failed = true;
++				return -1;
+ 			}
+-			JLOG_WARN("TURN stream write failed, errno=%d", sockerrno);
+-			stream->failed = true;
+-			return -1;
+-		}
+ 
+-		if (len == 0) {
+-			stream->failed = true;
+-			return -1;
++			if (len == 0) {
++				stream->failed = true;
++				return -1;
++			}
+ 		}
+ 
+ 		stream->wpos += (size_t)len;
+@@ -482,25 +603,45 @@ int turn_tcp_stream_recv(turn_tcp_stream_t *stream, char *buffer, size_t size, s
+ 			return -1;
+ 		}
+ 
+-		int len = recv(stream->sock, stream->rbuf + stream->rlen,
+-		               (socklen_t)(stream->rcap - stream->rlen), 0);
+-		if (len < 0) {
+-			if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK) {
+-				JLOG_VERBOSE("No more data on the TURN stream");
++		int len;
++		if (stream->tls_session) {
++			// The TLS client reads from the socket itself.  It returns
++			// the byte count, 0 when it would block, or -1 on failure.
++			len = stream->tls_ops->read(stream->tls_session, stream->rbuf + stream->rlen,
++			                            stream->rcap - stream->rlen);
++			if (len < 0) {
++				JLOG_WARN("TURN-over-TLS stream read failed");
++				stream->failed = true;
++				mutex_unlock(&stream->mutex);
++				return -1;
++			}
++
++			if (len == 0) {
++				JLOG_VERBOSE("No more data on the TURN-over-TLS stream");
+ 				mutex_unlock(&stream->mutex);
+ 				return 0;
+ 			}
+-			JLOG_WARN("TURN stream read failed, errno=%d", sockerrno);
+-			stream->failed = true;
+-			mutex_unlock(&stream->mutex);
+-			return -1;
+-		}
++		} else {
++			len = recv(stream->sock, stream->rbuf + stream->rlen,
++			           (socklen_t)(stream->rcap - stream->rlen), 0);
++			if (len < 0) {
++				if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK) {
++					JLOG_VERBOSE("No more data on the TURN stream");
++					mutex_unlock(&stream->mutex);
++					return 0;
++				}
++				JLOG_WARN("TURN stream read failed, errno=%d", sockerrno);
++				stream->failed = true;
++				mutex_unlock(&stream->mutex);
++				return -1;
++			}
+ 
+-		if (len == 0) {
+-			JLOG_INFO("TURN stream closed by the peer");
+-			stream->failed = true;
+-			mutex_unlock(&stream->mutex);
+-			return -1;
++			if (len == 0) {
++				JLOG_INFO("TURN stream closed by the peer");
++				stream->failed = true;
++				mutex_unlock(&stream->mutex);
++				return -1;
++			}
+ 		}
+ 
+ 		stream->rlen += (size_t)len;
+diff --git a/src/turn_tcp.h b/src/turn_tcp.h
+index db3d4d21..e07bed6f 100644
+--- a/src/turn_tcp.h
++++ b/src/turn_tcp.h
+@@ -13,6 +13,8 @@
+ #include "socket.h"
+ #include "thread.h"
+ 
++#include <juice/juice.h>
++
+ #include <stdbool.h>
+ #include <stddef.h>
+ #include <stdint.h>
+@@ -60,7 +62,7 @@ int turn_tcp_decode(const char *buf, size_t len, turn_tcp_frame_t *frame);
+ // Put a socket in non-blocking mode.
+ int turn_tcp_set_nonblocking(socket_t sock);
+ 
+-// A TURN connection carried over a stream transport (TCP).
++// A TURN connection carried over a stream transport (TCP or TLS).
+ typedef struct turn_tcp_stream {
+ 	socket_t sock;
+ 	mutex_t mutex;
+@@ -77,6 +79,28 @@ typedef struct turn_tcp_stream {
+ 
+ 	bool connected;
+ 	bool failed;
++
++	// Whether the TCP connection has completed.  A TLS stream needs
++	// this before the TLS session can be created.
++	bool socket_connected;
++
++	// Whether the socket has been handed over to the TLS session.  The
++	// session then owns it and closes it.
++	bool socket_owned_by_tls;
++
++	// TLS session, or NULL for a plain TCP stream.  Owned by the
++	// stream: it is closed by turn_tcp_stream_destroy().
++	void *tls_session;
++
++	// The host-provided TLS ops, or NULL for a plain TCP stream.
++	const struct juice_turn_tls_ops *tls_ops;
++
++	// The parameters of the TLS session, kept until the socket is
++	// connected and the session can be created.  The host name is
++	// copied because the caller's buffer may not outlive the call.
++	char *tls_host;
++	char *tls_server_name;
++	uint16_t tls_port;
+ } turn_tcp_stream_t;
+ 
+ // Create a stream and start connecting to the given address.
+@@ -86,6 +110,22 @@ turn_tcp_stream_t *turn_tcp_stream_create(const addr_record_t *dst);
+ // Wrap an already-connected socket (e.g. one returned by accept()).
+ turn_tcp_stream_t *turn_tcp_stream_create_accepted(socket_t sock);
+ 
++// Create a stream that starts connecting to the given address over TCP,
++// and wraps the connected socket in a TLS session created by the
++// host-provided TLS ops.
++//
++// `ops` must not be NULL and must provide a `connect` callback.  The
++// TLS session is created against `host` / `port`, with `server_name`
++// presented as SNI.
++//
++// The TLS session is only created once the TCP connection has completed,
++// which is signalled by turn_tcp_stream_check_connected().
++//
++// Returns NULL on failure.
++turn_tcp_stream_t *turn_tcp_stream_create_tls(const addr_record_t *dst,
++                                               const struct juice_turn_tls_ops *ops,
++                                               const char *host, const char *server_name);
++
+ void turn_tcp_stream_destroy(turn_tcp_stream_t *stream);
+ 
+ socket_t turn_tcp_stream_socket(const turn_tcp_stream_t *stream);

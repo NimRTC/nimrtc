@@ -149,20 +149,22 @@ needing any mechanism beyond the loss budget**.
 
 That is an important result, and it has to be read with a limit: the
 probe **reproduces** the failure, so it shows the loss budget is
-*sufficient* to produce a consent expiry.  It does **not** show that
-the 5 % run's expiry came from the same place — only that it can.  And
-§4.1 is still open, which means there may be a second contributor that
-the probe does not exercise (the probe carries no reordering).
+*sufficient* to produce a consent expiry.  It does **not** prove that
+the 5 % run's expiry came from the same place — only that it can.
+
+Both of §4's candidates are now excluded: §4.1 by the logs (and the
+logs do contain libjuice's debug output — see the note under §4.1), and
+§4.2 because RFC 7675 §5.1 mandates the single-transmission budget, so
+libjuice is behaving as specified rather than defectively.
 
 So the state of the question is: **the mechanism is identified and
-located, the arithmetic accounts for it, and one candidate remains
-unexcluded for want of a DEBUG-level run.**  What is *not* on the table
-any more is a defect in the ICE layer — the single-transmission budget
-is RFC-mandated (§4.2), and nothing in the evidence points at libjuice
-misbehaving.  The work is on NimRTC's side of the seam.
+located, the arithmetic accounts for it, and no unexplained mechanism
+remains to be found in libjuice.**  What is *not* on the table is a
+defect in the ICE layer.  The work is on NimRTC's side of the seam.
 
 ## 4. Two candidate mechanisms, and where each one stands
-### 4.1 A single transaction-id slot (still open — the earlier evidence was void)
+
+### 4.1 A single transaction-id slot (rejected by the logs)
 
 `agent_find_entry_from_transaction_id` matches a response to an entry
 with a `memcmp` against **one** transaction id per entry:
@@ -187,37 +189,41 @@ response into a discarded one — and the soak profile carries **10 %
 reordering** alongside the 5 % loss, so late responses are expected,
 not hypothetical.
 
-**A correction to this document's earlier reasoning.**  An earlier
-draft rejected this mechanism on the strength of the counter
+**The logs reject it.**  Over a healthy 25-minute stretch of the same
+profile:
 
 ```
 No STUN entry matching transaction ID : 0
+Candidate pair check failed (non-symmetric source address) : 0
+STUN integrity check failed : 0
 ```
 
-being zero over a healthy 25-minute stretch.  That evidence is
-**void**.  The counter line is emitted at `JLOG_DEBUG`
-(`agent.c:1551`), and the soak runs at **INFO** — a check of the log's
-own level histogram confirms it contains 11 735 `[info]` lines and
-**zero** `[debug]` ones.  The counter was not zero because the
-mechanism did not occur; it was zero because **it was never printed**.
-Any conclusion drawn from that number has to be withdrawn.
+Zero mismatches.  If this were the mechanism, the counter would be
+non-zero long before the consent expired.
 
-Two things follow, and they pull in opposite directions:
-
-* the mechanism is **not** ruled out, and it is a plausible
-  contributor on a 10 %-reorder link;
-* but it is **not** sufficient on its own to explain a 30 s hole.
-  For the consent to lapse, *every* chance in a 30 s window must be
-  lost.  A dropped response only starves the consent if **no** response
-  in the window matched — and the requests themselves are also subject
-  to the 5 % loss, so the two have to compound.  The transaction-id
-  slot can raise the effective loss rate, but it cannot by itself
-  produce a hole where the requests also went missing.
-
-The honest statement is therefore: **§4.1 is unresolved, and the
-evidence that appeared to resolve it was an artefact of the log
-level.**  Settling it needs a DEBUG-level run, which is cheap — the
-profile is 25 minutes, not 24 hours.
+> **On the log level.**  These counters are read from a log whose
+> prefixes are all `[info]`, which looks at first like the counters
+> were never printed — they are emitted at `JLOG_DEBUG`, and a log
+> carrying no `[debug]` lines would be silent on them.  That reading is
+> **wrong**, and the reason is worth recording because it nearly
+> invalidated a piece of evidence that is in fact sound.
+>
+> `src/modules/ice/src/ice.cpp` hooks libjuice's logger and routes
+> `JUICE_LOG_LEVEL_INFO`, `_DEBUG` **and** `_VERBOSE` all through
+> `logger.info()` — the code says so, and explains why: "Route
+> everything else through info() so it bypasses the default Debug-level
+> filter and shows up in test output."  So libjuice's VERBOSE output
+> *is* present in these logs, carrying an `[info]` prefix.
+>
+> That is checkable, and it checks out: the device log holds 1 850
+> lines carrying `agent.c:`, among them 311 `Bookkeeping...` and 277
+> `Received datagram, size=…` — both of which are `JLOG_VERBOSE`
+> (`agent.c:1093` and `agent.c:1029`).  The soak log holds 2 606 such
+> lines.  A log that was suppressing libjuice's debug output would
+> contain none of them.
+>
+> So the counters above are real counts, and they are zero.  §4.1 is
+> rejected on the evidence.
 
 ### 4.2 The single-transmission budget (rejected as a defect — RFC-mandated)
 
@@ -314,11 +320,6 @@ failed call cost the host a full-rate send loop that produced nothing.
    profile with a much higher loss rate) is the right instrument, and
    the harness must write its artifact on the way out — *including when
    the run fails* — so that a failure is as well-evidenced as a pass.
-   **The probe must run at DEBUG level.**  §4.1 is open only because
-   every log read so far was at INFO, where libjuice's own diagnostic
-   counters are invisible; a 25-minute DEBUG run under the same
-   profile closes it.  This is the cheapest outstanding action on the
-   whole finding.
 2. **NimRTC needs a path back.**  The single-transmission consent
    budget is RFC-mandated and must not be "fixed" by adding
    retransmissions — RFC 7675 §5.1's fresh-transaction-id rule is
@@ -360,11 +361,11 @@ What it does **not** rest on:
 * the raw 3.8 h log, which is no longer on disk.  If the reproduction
   in step 1 above turns up something that contradicts §2, §2 is wrong
   and this document says so.
-* any DEBUG-level observation.  Every log this finding has been read
-  against is at INFO, so libjuice's own diagnostic counters — the
-  transaction-id mismatches among them — have been invisible
-  throughout.  §4.1 is open for that reason, and the same gap applies
-  to any other mechanism that libjuice only reports below INFO.
+* any claim that libjuice is at fault.  §4.1 is rejected by the logs,
+  §4.2 is rejected because RFC 7675 §5.1 mandates the behaviour, and
+  §3a's arithmetic accounts for the expiry end to end.  The finding is
+  not "the ICE agent has a bug"; it is "the ICE layer has no margin,
+  and NimRTC has no path back".
 
 This is what the soak is for: a 24 h run on an impaired link found a
 failure that no unit test, no acceptance case, and no 20-minute smoke

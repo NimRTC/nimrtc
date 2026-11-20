@@ -20,6 +20,8 @@
 
 #include <nimrtc/ice/ice.hpp>
 
+#include "turn_tls.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -28,6 +30,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -414,6 +417,15 @@ struct IceTransport::Impl {
     plugins::IBwe*         bwe_         = nullptr;
     plugins::IScheduler*    scheduler_   = nullptr;
 
+    // ---- TURN over TLS (RFC 6062) -----------------------------------------
+    //
+    // The TLS client is owned here and outlives the libjuice agent, which
+    // keeps a pointer to it through the transport seam.  It is only
+    // created when a TURN server actually asks for the TLS transport:
+    // creating a wolfSSL context for a session that never happens would
+    // cost memory and load the trust store for nothing.
+    std::unique_ptr<TurnTlsClient>  turn_tls_;
+
     // ---- libjuice static callbacks ---------------------------------------
 
     static void on_state(juice_agent_t*, juice_state_t st, void* user) {
@@ -535,6 +547,7 @@ struct IceTransport::Impl {
 
         std::vector<juice_turn_server_t> jt;
         jt.reserve(config.turn_servers.size());
+        bool needs_tls = false;
         for (const auto& t : config.turn_servers) {
             juice_turn_server_t s{};
             s.host = t.host.c_str();
@@ -542,11 +555,34 @@ struct IceTransport::Impl {
             s.username = t.username.empty() ? nullptr : t.username.c_str();
             s.password = t.password.empty() ? nullptr : t.password.c_str();
             s.transport = static_cast<juice_turn_transport_t>(t.transport);
+            s.server_name = t.tls_server_name.empty() ? nullptr : t.tls_server_name.c_str();
+            if (t.transport == TurnTransport::Tls) needs_tls = true;
             jt.push_back(s);
         }
         if (!jt.empty()) {
             jc.turn_servers      = jt.data();
             jc.turn_servers_count = static_cast<int>(jt.size());
+        }
+
+        // TURN over TLS (RFC 6062): the TLS client lives in this module
+        // and is handed to libjuice through the transport seam.  It is
+        // created only when a TURN server actually asks for it.
+        if (needs_tls) {
+            TurnTlsClient::Config tls_config;
+            tls_config.ca_file         = config.turn_tls_ca_file;
+            tls_config.client_cert_file = config.turn_tls_client_cert_file;
+            tls_config.client_key_file  = config.turn_tls_client_key_file;
+            tls_config.verify_peer      = config.turn_tls_verify_peer;
+            tls_config.check_hostname   = true;
+
+            turn_tls_ = std::make_unique<TurnTlsClient>(std::move(tls_config));
+            if (!turn_tls_->usable()) {
+                core::log::Logger::instance().error(
+                    "ice: the TURN/TLS client is unusable (" + turn_tls_->last_error() +
+                    "); the TURN allocation will fail");
+            } else {
+                jc.turn_tls_ops = turn_tls_->ops();
+            }
         }
 
         jc.cb_state_changed    = &Impl::on_state;
@@ -855,17 +891,17 @@ void IceTransport::add_turn_server(std::string_view host,
 void IceTransport::add_turn_server(const TurnServer& server) noexcept {
     impl_->config.turn_servers.push_back(server);
 
-    // Report the transport honestly.  The vendored libjuice build has no
-    // TLS code path for TURN (RFC 6062), so a TURN/TLS server would be
-    // configured and then silently spoken to over plain TCP.  Say so
-    // instead.  TURN over TCP (RFC 8656 section 12) *is* implemented.
+    // Report the transport honestly.  A transport the build cannot speak
+    // would be configured and then silently spoken to over something
+    // else, so say so instead.  Both TURN over TCP (RFC 8656 section 12)
+    // and TURN over TLS (RFC 6062) are implemented.
     if (!turn_transport_supported(server.transport)) {
         core::log::Logger::instance().warn(
             std::string("ice: TURN transport ") +
             (server.transport == TurnTransport::Tls ? "TLS" : "TCP") +
-            " is not supported by the vendored libjuice build; the "
-            "server at " + server.host + ":" + std::to_string(server.port) +
-            " will be reached over plain TURN/TCP");
+            " is not supported by this build; the allocation to the server at " +
+            server.host + ":" + std::to_string(server.port) +
+            " will fail rather than fall back to another transport");
     }
 
     core::log::Logger::instance().info(
@@ -897,10 +933,11 @@ bool IceTransport::turn_transport_supported(TurnTransport transport) noexcept {
             // address allocated by the server stays UDP).
             return true;
         case TurnTransport::Tls:
-            // RFC 6062: TURN over TLS.  There is no TLS code path in the
-            // vendored libjuice build, so a TURN/TLS server would be
-            // configured and then silently spoken to over plain TCP.
-            return false;
+            // RFC 6062: TURN over TLS.  The TLS client lives in this
+            // module (src/turn_tls.cpp) and is handed to libjuice through
+            // the transport seam, so the control connection really is
+            // TLS-protected.
+            return true;
     }
     return false;
 }

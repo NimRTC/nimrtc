@@ -84,15 +84,18 @@ static int copy_turn_server(juice_turn_server_t *dst, const juice_turn_server_t 
 	dst->password = alloc_string_copy(src->password, &alloc_failed);
 	dst->port = src->port;
 	dst->transport = src->transport;
+	dst->server_name = alloc_string_copy(src->server_name, &alloc_failed);
 
 	if (alloc_failed) {
 		JLOG_FATAL("Memory allocation for TURN server configuration copy failed");
 		free((void *)dst->host);
 		free((void *)dst->username);
 		free((void *)dst->password);
+		free((void *)dst->server_name);
 		dst->host = NULL;
 		dst->username = NULL;
 		dst->password = NULL;
+		dst->server_name = NULL;
 		return -1;
 	}
 
@@ -128,6 +131,10 @@ juice_agent_t *agent_create(const juice_config_t *config) {
 	agent->config.cb_gathering_done = config->cb_gathering_done;
 	agent->config.cb_recv = config->cb_recv;
 	agent->config.user_ptr = config->user_ptr;
+	// The TLS client for TURN-over-TLS (RFC 6062).  The ops are copied
+	// by value; their `ctx` pointer keeps pointing at the host's client,
+	// which has to outlive the agent.
+	agent->config.turn_tls_ops = config->turn_tls_ops;
 	if (alloc_failed) {
 		JLOG_FATAL("Memory allocation for configuration copy failed");
 		goto error;
@@ -216,6 +223,7 @@ void agent_destroy(juice_agent_t *agent) {
 		free((void *)turn_server->host);
 		free((void *)turn_server->username);
 		free((void *)turn_server->password);
+		free((void *)turn_server->server_name);
 	}
 	free(agent->config.turn_servers);
 	free((void *)agent->config.bind_address);
@@ -569,16 +577,33 @@ int agent_resolve_servers(juice_agent_t *agent) {
 					entry->transaction_id_expired = false;
 					++agent->entries_count;
 
-					// For TURN over TCP, the control connection to the
-					// server is opened here and pumped by a dedicated
+					// For TURN over TCP or TLS, the control connection to
+					// the server is opened here and pumped by a dedicated
 					// reader thread.
 					if (turn_server->transport != JUICE_TURN_TRANSPORT_UDP) {
 						if (turn_server->transport == JUICE_TURN_TRANSPORT_TLS) {
-							JLOG_WARN("TURN over TLS is not supported, falling back to TCP");
-							entry->turn->transport = JUICE_TURN_TRANSPORT_TCP;
+							// TURN over TLS needs a host-provided TLS client.
+							// Without one the allocation fails: silently
+							// downgrading to plain TCP would send the
+							// credentials in the clear.
+							if (!agent->config.turn_tls_ops ||
+							    !agent->config.turn_tls_ops->connect) {
+								JLOG_ERROR("TURN over TLS is configured but no TLS client is "
+								          "available");
+								entry->turn->stream = NULL;
+								entry->turn->failed = true;
+								agent_arm_transmission(agent, entry, STUN_PACING_TIME * i);
+								++count;
+								continue;
+							}
+
+							entry->turn->stream = turn_tcp_stream_create_tls(record,
+							                                          agent->config.turn_tls_ops, hostname,
+							                                          turn_server->server_name);
+						} else {
+							entry->turn->stream = turn_tcp_stream_create(record);
 						}
 
-						entry->turn->stream = turn_tcp_stream_create(record);
 						if (!entry->turn->stream) {
 							JLOG_WARN("Failed to open the TURN-over-TCP connection to %s:%s",
 							          hostname, service);
@@ -1078,6 +1103,18 @@ int agent_bookkeeping(juice_agent_t *agent, timestamp_t *next_timestamp) {
 
 		// STUN requests transmission or retransmission
 		if (entry->state == AGENT_STUN_ENTRY_STATE_PENDING) {
+			// The transport could not be opened at all (for example
+			// TURN over TLS without a TLS client).  There is nothing to
+			// retransmit: the entry fails right away instead of waiting
+			// for the retransmission timeout.
+			if (entry->turn && entry->turn->failed) {
+				JLOG_INFO("TURN allocation failed");
+				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
+				entry->next_transmission = 0;
+				agent_update_gathering_done(agent);
+				continue;
+			}
+
 			if (entry->next_transmission > now)
 				continue;
 

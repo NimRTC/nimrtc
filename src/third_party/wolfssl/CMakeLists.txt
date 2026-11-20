@@ -39,7 +39,19 @@ set(WOLFSSL_RNG "yes" CACHE BOOL "Enable RNG")
 set(WOLFSSL_SRTP "yes" CACHE BOOL "Enable SRTP")
 
 # 禁用不需要的功能
-set(WOLFSSL_RSA "no" CACHE BOOL "Disable RSA")
+#
+# RSA is ENABLED (it was disabled before v1.4 N1).  The reason: the
+# TURN-over-TLS client (RFC 6062) has to verify the certificate a real
+# TURN server presents, and RSA is by far the most common certificate
+# signature algorithm in the field — coturn's own default material, and
+# what `examples/turn-server/gen-certs.sh` produces.  With RSA off,
+# wolfSSL could not verify such a certificate at all, which would make
+# the TLS transport unusable against anything but an ECDSA server.
+#
+# The DTLS backend does not use RSA for the key exchange, so this does
+# not change the DTLS cipher suites; it only widens the set of
+# certificates the *verifier* accepts.
+set(WOLFSSL_RSA "yes" CACHE BOOL "Enable RSA")
 set(WOLFSSL_DSA "no" CACHE BOOL "Disable DSA")
 set(WOLFSSL_PSK "no" CACHE BOOL "Disable PSK")
 set(WOLFSSL_ANON "no" CACHE BOOL "Disable Anonymous DH")
@@ -74,6 +86,22 @@ set(WOLFSSL_OCSP_STAPLING "no" CACHE BOOL "Disable OCSP stapling")
 set(WOLFSSL_SESSION_CERTS "no" CACHE BOOL "Disable session certs")
 set(WOLFSSL_VERIFY_CALLBACK "no" CACHE BOOL "Disable verify callback")
 set(WOLFSSL_CHECK_PRIVATE_KEY "no" CACHE BOOL "Disable check private key")
+# Enable IP alternative names (RFC 6125 §6.4.4).
+#
+# The TURN-over-TLS client (RFC 6062) verifies the certificate the TURN
+# server presents.  A TURN server is very often reached *by address*
+# ("127.0.0.1", "::1"), and RFC 6125 §6.4.4 requires the reference
+# identity to be matched against the certificate's `iPAddress` SAN in
+# that case -- a `dNSName` match is not a substitute, and matching the
+# CN is forbidden.
+#
+# wolfSSL only parses `iPAddress` SAN entries into a comparable form when
+# WOLFSSL_IP_ALT_NAME is on; with it off the iPAddress entries are
+# skipped during the alt-name walk and an IP reference identity can
+# never match anything.  The TURN client therefore cannot verify a
+# server addressed by IP without this option.
+set(WOLFSSL_IP_ALT_NAME "yes" CACHE BOOL "Enable IP alternative names (RFC 6125)" FORCE)
+
 # Enable Extended Master Secret (RFC 7627).  Required for DTLS-SRTP per
 # RFC 5764 §5 ("the use of the Extended Master Secret extension is
 # REQUIRED").  Chrome has enforced EMS since M76 — without this option

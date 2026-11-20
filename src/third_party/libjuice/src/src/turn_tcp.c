@@ -10,6 +10,8 @@
 #include "log.h"
 #include "turn.h"
 
+#include <juice/juice.h>
+
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,16 +156,70 @@ turn_tcp_stream_t *turn_tcp_stream_create_accepted(socket_t sock) {
 	return stream;
 }
 
+turn_tcp_stream_t *turn_tcp_stream_create_tls(const addr_record_t *dst,
+                                               const struct juice_turn_tls_ops *ops,
+                                               const char *host, const char *server_name) {
+	if (!dst || !ops || !ops->connect)
+		return NULL;
+
+	socket_t sock = socket(dst->addr.ss_family, SOCK_STREAM, IPPROTO_TCP);
+	if (sock == INVALID_SOCKET) {
+		JLOG_WARN("TCP socket creation failed, errno=%d", sockerrno);
+		return NULL;
+	}
+
+	if (turn_tcp_set_nonblocking(sock) < 0) {
+		closesocket(sock);
+		return NULL;
+	}
+
+	int ret = connect(sock, (const struct sockaddr *)&dst->addr, dst->len);
+	if (ret != 0 && sockerrno != SEINPROGRESS && sockerrno != SEWOULDBLOCK) {
+		JLOG_WARN("TCP connection failed, errno=%d", sockerrno);
+		closesocket(sock);
+		return NULL;
+	}
+
+	turn_tcp_stream_t *stream = calloc(1, sizeof(turn_tcp_stream_t));
+	if (!stream) {
+		JLOG_FATAL("Memory allocation for TURN stream failed");
+		closesocket(sock);
+		return NULL;
+	}
+
+	stream->sock = sock;
+	stream->connected = false;
+	stream->failed = false;
+	stream->tls_ops = ops;
+	stream->tls_host = host ? strdup(host) : NULL;
+	stream->tls_server_name = server_name ? strdup(server_name) : NULL;
+	stream->tls_port = dst ? addr_get_port(&dst->addr) : 0;
+	if (host && !stream->tls_host) {
+		JLOG_FATAL("Memory allocation for the TURN stream host name failed");
+		closesocket(sock);
+		free(stream);
+		return NULL;
+	}
+	mutex_init(&stream->mutex, MUTEX_RECURSIVE);
+	return stream;
+}
+
 void turn_tcp_stream_destroy(turn_tcp_stream_t *stream) {
 	if (!stream)
 		return;
 
-	if (stream->sock != INVALID_SOCKET)
+	if (stream->tls_session && stream->tls_ops && stream->tls_ops->close)
+		stream->tls_ops->close(stream->tls_session);
+
+	// The TLS session owns the socket once it has been created.
+	if (stream->sock != INVALID_SOCKET && !stream->socket_owned_by_tls)
 		closesocket(stream->sock);
 
 	mutex_destroy(&stream->mutex);
 	free(stream->wbuf);
 	free(stream->rbuf);
+	free(stream->tls_host);
+	free(stream->tls_server_name);
 	free(stream);
 }
 
@@ -207,49 +263,96 @@ int turn_tcp_stream_check_connected(turn_tcp_stream_t *stream) {
 		return 1;
 	}
 
-	// The socket is non-blocking, so the connection is either still in
-	// progress or has completed.  A socket that is not writable yet means
-	// the connection attempt is still running; a socket that became
-	// writable either succeeded or failed, and SO_ERROR tells which.
-	fd_set wset;
-	FD_ZERO(&wset);
-	FD_SET(stream->sock, &wset);
-	struct timeval tv;
-	tv.tv_sec = 0;
-	tv.tv_usec = 0;
+	// Phase 1: the TCP connection.  The socket is non-blocking, so the
+	// connection is either still in progress or has completed.  A socket
+	// that is not writable yet means the connection attempt is still
+	// running; a socket that became writable either succeeded or failed,
+	// and SO_ERROR tells which.
+	if (!stream->socket_connected) {
+		fd_set wset;
+		FD_ZERO(&wset);
+		FD_SET(stream->sock, &wset);
+		struct timeval tv;
+		tv.tv_sec = 0;
+		tv.tv_usec = 0;
 
-	int ret = select(stream->sock + 1, NULL, &wset, NULL, &tv);
-	if (ret < 0) {
-		if (sockerrno == SEINTR) {
+		int ret = select(stream->sock + 1, NULL, &wset, NULL, &tv);
+		if (ret < 0) {
+			if (sockerrno == SEINTR) {
+				mutex_unlock(&stream->mutex);
+				return 0;
+			}
+			JLOG_WARN("select failed, errno=%d", sockerrno);
+			stream->failed = true;
+			mutex_unlock(&stream->mutex);
+			return -1;
+		}
+
+		if (ret == 0) {
+			// Still connecting.
 			mutex_unlock(&stream->mutex);
 			return 0;
 		}
-		JLOG_WARN("select failed, errno=%d", sockerrno);
+
+		int err = 0;
+		socklen_t err_len = sizeof(err);
+		if (getsockopt(stream->sock, SOL_SOCKET, SO_ERROR, (char *)&err, &err_len) != 0) {
+			JLOG_WARN("getsockopt failed, errno=%d", sockerrno);
+			stream->failed = true;
+			mutex_unlock(&stream->mutex);
+			return -1;
+		}
+
+		if (err != 0) {
+			JLOG_WARN("TCP connection failed, errno=%d", err);
+			stream->failed = true;
+			mutex_unlock(&stream->mutex);
+			return -1;
+		}
+
+		stream->socket_connected = true;
+	}
+
+	// Phase 2: the TLS session.  A plain TCP stream is connected as soon
+	// as the socket is.
+	if (!stream->tls_ops) {
+		stream->connected = true;
+		mutex_unlock(&stream->mutex);
+		return 1;
+	}
+
+	// The TLS ops take ownership of the socket, so it must not be closed
+	// by turn_tcp_stream_destroy() any more.
+	if (!stream->tls_session) {
+		stream->tls_session = stream->tls_ops->connect(stream->tls_ops->ctx, (int)stream->sock,
+		                                               stream->tls_host, stream->tls_port,
+		                                               stream->tls_server_name);
+		if (!stream->tls_session) {
+			JLOG_WARN("Failed to create the TLS session for the TURN-over-TLS connection");
+			// The ops closed the socket on failure.
+			stream->sock = INVALID_SOCKET;
+			stream->socket_owned_by_tls = true;
+			stream->failed = true;
+			mutex_unlock(&stream->mutex);
+			return -1;
+		}
+		stream->socket_owned_by_tls = true;
+	}
+
+	// Phase 3: the TLS handshake.  It may need several round trips, so it
+	// is advanced one step at a time.
+	int ret = stream->tls_ops->handshake(stream->tls_session);
+	if (ret < 0) {
+		JLOG_WARN("The TLS handshake with the TURN server failed");
 		stream->failed = true;
 		mutex_unlock(&stream->mutex);
 		return -1;
 	}
 
 	if (ret == 0) {
-		// Still connecting.
+		// Still handshaking: the caller retries after a wait.
 		mutex_unlock(&stream->mutex);
 		return 0;
-	}
-
-	int err = 0;
-	socklen_t err_len = sizeof(err);
-	if (getsockopt(stream->sock, SOL_SOCKET, SO_ERROR, (char *)&err, &err_len) != 0) {
-		JLOG_WARN("getsockopt failed, errno=%d", sockerrno);
-		stream->failed = true;
-		mutex_unlock(&stream->mutex);
-		return -1;
-	}
-
-	if (err != 0) {
-		JLOG_WARN("TCP connection failed, errno=%d", err);
-		stream->failed = true;
-		mutex_unlock(&stream->mutex);
-		return -1;
 	}
 
 	stream->connected = true;
@@ -299,26 +402,44 @@ static int flush_locked(turn_tcp_stream_t *stream) {
 		return 0;
 
 	while (stream->wpos < stream->wlen) {
-#if defined(__APPLE__) || defined(_WIN32)
-		int flags = 0;
-#else
-		int flags = MSG_NOSIGNAL;
-#endif
-		int len = send(stream->sock, stream->wbuf + stream->wpos,
-		               (socklen_t)(stream->wlen - stream->wpos), flags);
-		if (len < 0) {
-			if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK) {
-				JLOG_VERBOSE("TURN stream write would block");
+		int len;
+		if (stream->tls_session) {
+			// The TLS client writes to the socket itself.  It returns the
+			// byte count, 0 when it would block, or -1 on failure.
+			len = stream->tls_ops->write(stream->tls_session, stream->wbuf + stream->wpos,
+			                             stream->wlen - stream->wpos);
+			if (len < 0) {
+				JLOG_WARN("TURN-over-TLS stream write failed");
+				stream->failed = true;
+				return -1;
+			}
+
+			if (len == 0) {
+				JLOG_VERBOSE("TURN-over-TLS stream write would block");
 				return 0;
 			}
-			JLOG_WARN("TURN stream write failed, errno=%d", sockerrno);
-			stream->failed = true;
-			return -1;
-		}
+		} else {
+#if defined(__APPLE__) || defined(_WIN32)
+			int flags = 0;
+#else
+			int flags = MSG_NOSIGNAL;
+#endif
+			len = send(stream->sock, stream->wbuf + stream->wpos,
+			           (socklen_t)(stream->wlen - stream->wpos), flags);
+			if (len < 0) {
+				if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK) {
+					JLOG_VERBOSE("TURN stream write would block");
+					return 0;
+				}
+				JLOG_WARN("TURN stream write failed, errno=%d", sockerrno);
+				stream->failed = true;
+				return -1;
+			}
 
-		if (len == 0) {
-			stream->failed = true;
-			return -1;
+			if (len == 0) {
+				stream->failed = true;
+				return -1;
+			}
 		}
 
 		stream->wpos += (size_t)len;
@@ -482,25 +603,45 @@ int turn_tcp_stream_recv(turn_tcp_stream_t *stream, char *buffer, size_t size, s
 			return -1;
 		}
 
-		int len = recv(stream->sock, stream->rbuf + stream->rlen,
-		               (socklen_t)(stream->rcap - stream->rlen), 0);
-		if (len < 0) {
-			if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK) {
-				JLOG_VERBOSE("No more data on the TURN stream");
+		int len;
+		if (stream->tls_session) {
+			// The TLS client reads from the socket itself.  It returns
+			// the byte count, 0 when it would block, or -1 on failure.
+			len = stream->tls_ops->read(stream->tls_session, stream->rbuf + stream->rlen,
+			                            stream->rcap - stream->rlen);
+			if (len < 0) {
+				JLOG_WARN("TURN-over-TLS stream read failed");
+				stream->failed = true;
+				mutex_unlock(&stream->mutex);
+				return -1;
+			}
+
+			if (len == 0) {
+				JLOG_VERBOSE("No more data on the TURN-over-TLS stream");
 				mutex_unlock(&stream->mutex);
 				return 0;
 			}
-			JLOG_WARN("TURN stream read failed, errno=%d", sockerrno);
-			stream->failed = true;
-			mutex_unlock(&stream->mutex);
-			return -1;
-		}
+		} else {
+			len = recv(stream->sock, stream->rbuf + stream->rlen,
+			           (socklen_t)(stream->rcap - stream->rlen), 0);
+			if (len < 0) {
+				if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK) {
+					JLOG_VERBOSE("No more data on the TURN stream");
+					mutex_unlock(&stream->mutex);
+					return 0;
+				}
+				JLOG_WARN("TURN stream read failed, errno=%d", sockerrno);
+				stream->failed = true;
+				mutex_unlock(&stream->mutex);
+				return -1;
+			}
 
-		if (len == 0) {
-			JLOG_INFO("TURN stream closed by the peer");
-			stream->failed = true;
-			mutex_unlock(&stream->mutex);
-			return -1;
+			if (len == 0) {
+				JLOG_INFO("TURN stream closed by the peer");
+				stream->failed = true;
+				mutex_unlock(&stream->mutex);
+				return -1;
+			}
 		}
 
 		stream->rlen += (size_t)len;

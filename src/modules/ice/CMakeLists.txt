@@ -17,6 +17,7 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_ice STATIC
     src/ice.cpp
+    src/turn_tls.cpp
     )
 
 nimrtc_apply_options(nimrtc_ice)
@@ -26,6 +27,7 @@ target_link_libraries(nimrtc_ice
         nimrtc::plugins       # plugin interface (ITransport / IPlugin)
     PRIVATE
         nimrtc_vendor_libjuice
+        nimrtc_vendor_wolfssl  # TURN-over-TLS client (RFC 6062)
     )
 
 target_include_directories(nimrtc_ice
@@ -35,6 +37,18 @@ target_include_directories(nimrtc_ice
         ${CMAKE_BINARY_DIR}/include)
 
 target_compile_definitions(nimrtc_ice PUBLIC NIMRTC_HAS_ICE=1)
+
+# wolfSSL upstream headers use C-style casts in their public macros
+# (the WC_LAST_E comparisons in error-crypt.h / error-ssl.h, which
+# turn_tls.cpp includes for the error strings).  The tree builds with
+# -Wold-style-cast as an error, and we can't modify upstream vendored
+# code -- so suppress the warning for this module, exactly as the dtls
+# and opus modules do for the same reason.
+if(NOT MSVC)
+    target_compile_options(nimrtc_ice PRIVATE
+        -Wno-old-style-cast
+        -Wno-double-promotion)
+endif()
 
 add_library(nimrtc::ice ALIAS nimrtc_ice)
 

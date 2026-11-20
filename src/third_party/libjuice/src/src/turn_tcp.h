@@ -13,6 +13,8 @@
 #include "socket.h"
 #include "thread.h"
 
+#include <juice/juice.h>
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -60,7 +62,7 @@ int turn_tcp_decode(const char *buf, size_t len, turn_tcp_frame_t *frame);
 // Put a socket in non-blocking mode.
 int turn_tcp_set_nonblocking(socket_t sock);
 
-// A TURN connection carried over a stream transport (TCP).
+// A TURN connection carried over a stream transport (TCP or TLS).
 typedef struct turn_tcp_stream {
 	socket_t sock;
 	mutex_t mutex;
@@ -77,6 +79,28 @@ typedef struct turn_tcp_stream {
 
 	bool connected;
 	bool failed;
+
+	// Whether the TCP connection has completed.  A TLS stream needs
+	// this before the TLS session can be created.
+	bool socket_connected;
+
+	// Whether the socket has been handed over to the TLS session.  The
+	// session then owns it and closes it.
+	bool socket_owned_by_tls;
+
+	// TLS session, or NULL for a plain TCP stream.  Owned by the
+	// stream: it is closed by turn_tcp_stream_destroy().
+	void *tls_session;
+
+	// The host-provided TLS ops, or NULL for a plain TCP stream.
+	const struct juice_turn_tls_ops *tls_ops;
+
+	// The parameters of the TLS session, kept until the socket is
+	// connected and the session can be created.  The host name is
+	// copied because the caller's buffer may not outlive the call.
+	char *tls_host;
+	char *tls_server_name;
+	uint16_t tls_port;
 } turn_tcp_stream_t;
 
 // Create a stream and start connecting to the given address.
@@ -85,6 +109,22 @@ turn_tcp_stream_t *turn_tcp_stream_create(const addr_record_t *dst);
 
 // Wrap an already-connected socket (e.g. one returned by accept()).
 turn_tcp_stream_t *turn_tcp_stream_create_accepted(socket_t sock);
+
+// Create a stream that starts connecting to the given address over TCP,
+// and wraps the connected socket in a TLS session created by the
+// host-provided TLS ops.
+//
+// `ops` must not be NULL and must provide a `connect` callback.  The
+// TLS session is created against `host` / `port`, with `server_name`
+// presented as SNI.
+//
+// The TLS session is only created once the TCP connection has completed,
+// which is signalled by turn_tcp_stream_check_connected().
+//
+// Returns NULL on failure.
+turn_tcp_stream_t *turn_tcp_stream_create_tls(const addr_record_t *dst,
+                                               const struct juice_turn_tls_ops *ops,
+                                               const char *host, const char *server_name);
 
 void turn_tcp_stream_destroy(turn_tcp_stream_t *stream);
 

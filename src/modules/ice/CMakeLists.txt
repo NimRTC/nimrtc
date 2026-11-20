@@ -17,6 +17,7 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_ice STATIC
     src/ice.cpp
+    src/turn_tls.cpp
     )
 
 nimrtc_apply_options(nimrtc_ice)
@@ -26,6 +27,7 @@ target_link_libraries(nimrtc_ice
         nimrtc::plugins       # plugin interface (ITransport / IPlugin)
     PRIVATE
         nimrtc_vendor_libjuice
+        nimrtc_vendor_wolfssl  # TURN-over-TLS client (RFC 6062)
     )
 
 target_include_directories(nimrtc_ice

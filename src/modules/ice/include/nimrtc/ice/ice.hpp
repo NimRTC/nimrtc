@@ -121,8 +121,13 @@ NIMRTC_API_STABLE std::optional<Candidate> parse_candidate(std::string_view sdp)
  *  - `Tls`  — TURN over TLS (RFC 6062 § 3.2, the "TURN over TLS"
  *             profile).  The only option that survives a middlebox
  *             that terminates TLS for anything but the SNI it is
- *             configured with.  Not implemented by the vendored
- *             libjuice build yet — see `turn_transport_supported()`. */
+ *             configured with.
+ *
+ *  @note TURN over TLS needs a TLS client.  NimRTC supplies one
+ *        (wolfSSL, in `src/modules/ice/src/turn_tls.cpp`) and plugs it
+ *        into libjuice through a narrow transport seam.  The trust
+ *        anchors are configured on `IceConfig` (`turn_tls_ca_file` and
+ *        friends). */
 enum class NIMRTC_API_STABLE TurnTransport : std::uint8_t {
     Udp = 0,
     Tcp,
@@ -219,6 +224,36 @@ struct NIMRTC_API_STABLE IceConfig {
      *  Default: true (full ICE implementation). ICE-Lite peers should keep
      *  this true — they still track consent per RFC 7675 §5. */
     bool enable_consent_freshness = true;
+
+    // -------------------------------------------------------------------------
+    // TURN over TLS (RFC 6062)
+    // -------------------------------------------------------------------------
+
+    /** Path to a PEM file holding the CA certificates used to verify the
+     *  TURN server's certificate when a TURN server is configured with
+     *  `TurnTransport::Tls`.
+     *
+     *  Empty means the system trust store is used.  This is the way to
+     *  trust the local test CA that `examples/turn-server/gen-certs.sh`
+     *  produces. */
+    std::string turn_tls_ca_file;
+
+    /** Path to a PEM file holding a client certificate, for TURN servers
+     *  that require mutual TLS.  Empty means no client certificate. */
+    std::string turn_tls_client_cert_file;
+
+    /** Path to the PEM file holding the client private key that goes
+     *  with `turn_tls_client_cert_file`. */
+    std::string turn_tls_client_key_file;
+
+    /** Whether the TURN server's certificate is verified when the
+     *  transport is `TurnTransport::Tls`.
+     *
+     *  This defaults to true and must stay true in production: it is the
+     *  only thing standing between the client and a man-in-the-middle
+     *  that would harvest the TURN credentials.  Set it to false only
+     *  for local experiments with self-signed certificates. */
+    bool turn_tls_verify_peer = true;
 };
 
 // -----------------------------------------------------------------------------
@@ -415,8 +450,9 @@ public:
      *  @note TURN over TCP (RFC 8656 § 12) *is* implemented at the
      *        libjuice level: the control connection is a TCP stream and
      *        the messages are framed per RFC 8656 § 12.4/§ 12.5.
-     *        `TurnTransport::Tls` is accepted and reported, but the
-     *        underlying vendor build does not yet negotiate it.  See
+     *        `TurnTransport::Tls` (RFC 6062) is implemented too: the
+     *        TLS client lives in the ICE module and is plugged into
+     *        libjuice through a transport seam.  See
      *        `turn_transport_supported()`. */
     void add_turn_server(const TurnServer& server) noexcept;
 
@@ -433,8 +469,10 @@ public:
     bool turn_transport_supported(plugins::TurnTransport transport) const noexcept override;
 
     /** True when the vendored libjuice build can actually speak the
-     *  given TURN transport.  `Tls` is false today: the vendored
-     *  libjuice build has no TLS code path for TURN (RFC 6062). */
+     *  given TURN transport.
+     *
+     *  `Tls` is true: NimRTC supplies the TLS client and libjuice uses
+     *  it for the control connection (RFC 6062 § 3.2). */
     static bool turn_transport_supported(TurnTransport transport) noexcept;
 
     /** The concurrency mode the transport will actually run with.

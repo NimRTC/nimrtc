@@ -1,0 +1,122 @@
+# ---------------------------------------------------------------------------
+# examples/turn-server/docker-compose.yml
+# ---------------------------------------------------------------------------
+#
+# The developer / archived-evidence path for the reference TURN server
+# (v1.4 plan item **N5**, §5 N5-1).
+#
+#   ./gen-certs.sh                     # once; writes ./secrets/
+#   docker compose up -d              # TLS-only on 5349 (and 443)
+#   docker compose --profile plain up -d   # the NEGATIVE CONTROL (see below)
+#   docker compose down
+#
+# ---------------------------------------------------------------------------
+# The two services are MUTUALLY EXCLUSIVE, and that is the whole point.
+# ---------------------------------------------------------------------------
+#
+#   coturn        TLS listener on 5349 (and 443).  The target N1's
+#                 positive test points at.
+#
+#   coturn-plain  a plain TURN server on **the same port 5349**, with TLS
+#                 switched off.  It is N1's **negative control**.
+#
+# Why the same port, and why not both at once:
+#
+#   The defect N1 removes is a client that is told "use TLS" and quietly
+#   connects over **plain TCP** instead.  A negative control on a
+#   *different* port cannot catch that: the client would fail to reach
+#   the wrong port, which is a connection error, not a protocol
+#   downgrade.  The control has to be a plain server **on the port the
+#   client was told to use**, so that the only thing standing between
+#   the client and a working session is whether it actually negotiated
+#   TLS.
+#
+#   They therefore cannot run simultaneously (one host port, two
+#   listeners), and the control is brought up *instead of* the TLS
+#   server.  The `--profile plain` switch expresses exactly that: it
+#   starts the control and stops the positive.
+#
+# ---------------------------------------------------------------------------
+#
+# The relay ports are published on **loopback only**.  A TURN allocation
+# forwards datagrams from the peer, and the peer is unauthenticated by
+# construction, so a relay range bound to 0.0.0.0 turns the host into an
+# open relay.  CI and the sample both run on the same machine, so
+# loopback is enough.  Widen the binding only if the machine needs to
+# serve peers on other hosts — and then firewall it.
+#
+# The image is `coturn/coturn`, pinned.  coturn is **not** vendored under
+# `src/third_party/`: it is a deployment, not a library dependency (v1.4
+# plan §3 N5).
+# ---------------------------------------------------------------------------
+
+name: nimrtc-turn
+
+# The relay range.  coturn's default (49152-65535) is too wide to publish
+# port by port; this range is 41 ports, which covers a handful of
+# simultaneous clients — the sample, the N1 test and the N2 test — with
+# headroom.  `turnserver.conf` must carry the same range.
+x-relay-ports: &relay-ports
+  - "49160-49200:49160-49200/udp"
+
+services:
+  # -------------------------------------------------------------------------
+  # The positive server: TLS only.
+  # -------------------------------------------------------------------------
+  coturn:
+    image: coturn/coturn:4.6.3
+    container_name: nimrtc-turn-tls
+    restart: unless-stopped
+    command:
+      - --config=/etc/coturn/turnserver.conf
+      # A second TLS listener on 443: the port that survives a network
+      # which only lets "web" traffic out.  coturn takes the option once,
+      # so the config file carries 5349 and this adds 443.  Docker
+      # forwards host 443 to container 443, and coturn binds it as root
+      # before dropping privileges.
+      - --tls-listening-port=443
+    volumes:
+      # The configuration, the credential list and the certificate.
+      # gen-certs.sh writes them; .gitignore keeps them out of the tree.
+      - ./secrets:/etc/coturn
+    ports:
+      # TLS on the conventional port (RFC 8656 § 7.2).
+      - "5349:5349/tcp"
+      # TLS on 443 (see the extra `--tls-listening-port` above).
+      - "443:443/tcp"
+      # The plain port is published too, so the server is reachable the
+      # way a fallback client would try.  A server that cannot be
+      # reached proves nothing about a client that should not fall back.
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - *relay-ports
+
+  # -------------------------------------------------------------------------
+  # The negative control: plain TURN on the SAME port 5349.
+  # -------------------------------------------------------------------------
+  #
+  # `docker compose --profile plain up -d` starts this and stops the
+  # TLS service, because both would claim host port 5349.
+  coturn-plain:
+    image: coturn/coturn:4.6.3
+    container_name: nimrtc-turn-plain
+    profiles: ["plain"]
+    restart: "no"
+    command:
+      - --config=/etc/coturn/turnserver.conf
+      # Everything identical to the TLS service except the transport:
+      # a client that connects here when told to use 5349 has fallen
+      # back, not succeeded.
+      - --no-tls
+      - --no-dtls
+      # The control listens on the port the client was told to use, so
+      # the failure it produces is "the TLS handshake did not happen",
+      # not "the wrong port was unreachable".
+      - --listening-port=5349
+    volumes:
+      - ./secrets:/etc/coturn:ro
+    ports:
+      - "5349:5349/tcp"
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - *relay-ports

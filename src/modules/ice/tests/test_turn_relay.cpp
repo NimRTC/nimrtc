@@ -602,16 +602,19 @@ TEST(TurnRelay, UnreachableTurnServerProducesNoRelayCandidate) {
 // -----------------------------------------------------------------------------
 
 TEST(TurnRelay, TransportSurfaceReportsSupportedTransports) {
-    // TURN over UDP (RFC 5766) and TURN over TCP (RFC 8656 section 12)
-    // are both implemented by the vendored libjuice build: the latter
-    // through the dedicated `turn_tcp` module, which frames the messages
-    // on the TCP control connection per RFC 8656 section 12.4/12.5.
+    // TURN over UDP (RFC 5766), TURN over TCP (RFC 8656 section 12) and
+    // TURN over TLS (RFC 6062) are all implemented by this build:
     //
-    // TURN over TLS (RFC 6062) still has no code path at all, so the
-    // surface must say so rather than pretend.
+    //   - UDP: the plain TURN transport;
+    //   - TCP: the vendored libjuice build carries a dedicated `turn_tcp`
+    //     module that implements the self-delimiting framing of
+    //     RFC 8656 section 12.4/12.5;
+    //   - TLS: the TLS client lives in the ICE module
+    //     (src/turn_tls.cpp) and is handed to libjuice through a
+    //     transport seam, so the control connection really is protected.
     EXPECT_TRUE(IceTransport::turn_transport_supported(TurnTransport::Udp));
     EXPECT_TRUE(IceTransport::turn_transport_supported(TurnTransport::Tcp));
-    EXPECT_FALSE(IceTransport::turn_transport_supported(TurnTransport::Tls));
+    EXPECT_TRUE(IceTransport::turn_transport_supported(TurnTransport::Tls));
 }
 
 // The plugin seam (plugins::IICETransport) and the engine-facing API must
@@ -635,7 +638,7 @@ TEST(TurnTcp, PluginSeamCanSelectTcpTransport) {
     // The concrete transport must answer through the plugin seam too.
     IceTransport t{make_agent_config()};
     EXPECT_TRUE(t.turn_transport_supported(nimrtc::plugins::TurnTransport::Tcp));
-    EXPECT_FALSE(t.turn_transport_supported(nimrtc::plugins::TurnTransport::Tls));
+    EXPECT_TRUE(t.turn_transport_supported(nimrtc::plugins::TurnTransport::Tls));
 
     // And the plugin-seam overload must actually reach the TURN server
     // over TCP: the relay candidate it produces is the observable proof.

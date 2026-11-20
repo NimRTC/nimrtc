@@ -81,6 +81,11 @@ struct NIMRTC_API_STABLE AudioDecodedFrame {
     bool          concealed = false;
     /** The frame was reconstructed from in-band FEC. */
     bool          fec_recovered = false;
+    /** The frame is sender-side DTX silence (a TOC-only packet, RFC 6716
+     *  §3.4): the peer suppressed this media slot deliberately, so the
+     *  frame is silence, not a loss — the receive pipeline must not
+     *  conceal it (D5). */
+    bool          dtx_silence = false;
 };
 
 // ---------------------------------------------------------------------------

@@ -254,6 +254,15 @@ void NimRTCEngine::init_audio_modules() noexcept {
         // flight.
         rx_cfg.packet_loss_perc       = config_.audio_redundancy_percent;
         rx_cfg.enable_downmix         = config_.audio_downmix_to_pcm_channels;
+        // The peer's DTX state (D5): the negotiated `usedtx` reaches the
+        // receiver, which forwards it to the decoder as
+        // `AudioDecodeFormat::use_dtx`.  The receiver is created before
+        // the remote description is processed, so at open time the
+        // negotiated table is empty and this reads false — DTX is off by
+        // default (D5-1); the value only matters for a stream opened
+        // after the negotiation.
+        rx_cfg.peer_dtx_enabled =
+            impl_->audio_state.negotiated_opus_fmtp.usedtx.value_or(false);
         if (!config_.audio_downmix_to_pcm_channels) {
             // Without the downmix the pipeline keeps the decoder's own
             // channel count (spec B-9).

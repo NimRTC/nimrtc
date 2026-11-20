@@ -90,6 +90,14 @@ struct NIMRTC_API_STABLE AudioReceiverConfig {
     int           packet_loss_perc = 5;
     /** Downmix to `output_channels`. */
     bool          enable_downmix = true;
+    /** The peer negotiated `usedtx=1` (RFC 7587 §7.1 / RFC 6716 §8).
+     *
+     *  Such a peer suppresses silent frames on the wire and sends a
+     *  1-byte TOC-only packet in their place; the receiver has to treat
+     *  those as sender-side silence, not as packet loss (D5).  The value
+     *  is the negotiated `usedtx`, forwarded to the decoder as
+     *  `AudioDecodeFormat::use_dtx`. */
+    bool          peer_dtx_enabled = false;
 };
 
 // ---------------------------------------------------------------------------

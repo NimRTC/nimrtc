@@ -141,7 +141,8 @@ struct AudioState {
 
     /** The Opus format parameters the peer sent for the selected
      *  payload type, parsed (B-4).  WP-7 feeds them into the receive
-     *  pipeline's configuration. */
+     *  pipeline's configuration; `usedtx` (D5) reaches the receiver as
+     *  `AudioReceiverConfig::peer_dtx_enabled`. */
     OpusFmtpParams negotiated_opus_fmtp;
 
     /** The format parameters the answer echoed back — the negotiated

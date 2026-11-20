@@ -224,6 +224,23 @@ non-zero long before the consent expired.
 >
 > So the counters above are real counts, and they are zero.  §4.1 is
 > rejected on the evidence.
+>
+> **A note for anyone re-running this analysis.**  The ICE module now
+> asks libjuice for `JUICE_LOG_LEVEL_INFO` by default rather than
+> `JUICE_LOG_LEVEL_VERBOSE` — the per-datagram lines were 71 % of a
+> 24 h soak log's bytes, and the cut is what keeps a soak log
+> readable.  The counters this section reads are `JLOG_DEBUG`, so a
+> run made *after* that change does **not** carry them unless the run
+> was made with `NIMRTC_ICE_VERBOSE=1` in its environment.
+>
+> That does not affect the conclusion above, which rests on logs taken
+> *before* the change (the 3.8 h run and the 25-minute stretch).  It
+> does mean that a **new** run cannot reproduce these counters without
+> the env var, and — this is the part worth stating plainly — *the
+> absence of a DEBUG counter in a new log must not be read as the
+> counter being zero*.  The two are indistinguishable from the log
+> alone unless you know the level the run was made at.  This paragraph
+> exists so that the mistake is not repeated.
 
 ### 4.2 The single-transmission budget (rejected as a defect — RFC-mandated)
 
@@ -329,9 +346,30 @@ failed call cost the host a full-rate send loop that produced nothing.
    same ICE credentials MUST NOT be used on the affected 5-tuple
    again, and that obtaining consent to send again needs **a new
    session or an ICE restart**.  libjuice stops at `failed`; NimRTC
-   has no ICE-restart path, so the call cannot come back.  That is the
-   work item, and it belongs in the engine rather than in the vendored
-   ICE agent.
+   has no ICE-restart path, so the call cannot come back.
+   That is the work item, and it belongs in the engine rather than in
+   the vendored ICE agent.
+
+   > **This is v1.4 plan N3, not new work.**  The plan already
+   > specifies "a named private collaborator
+   > (`src/engine/src/engine_ice_recovery.{hpp,cpp}` …): a grace window
+   > on `Disconnected`, an exponential backoff with a cap, a **terminal**
+   > state when the cap is reached (reported, not looped), driven by the
+   > engine's own ICE state" — and its "done when" is exactly this
+   > finding's requirement: "a simulated network change recovers the
+   > session **without the host calling `restart_ice()`**, the restarts
+   > are bounded, and there is exactly **one** policy in the engine".
+   >
+   > The two halves the plan names are both present: `restart_ice()`
+   > (RFC 8445 §9.1.1.1) exists and counts against a budget, and
+   > `set_on_ice_restart` already fires when the **peer's** description
+   > carries new credentials.  What is missing is the engine driving
+   > the local half on its own.
+   >
+   > So this item is **already planned** — the finding's contribution is
+   > to say *why* it matters, and to point at the evidence: a consent
+   > expiry is a `Failed` transition, and §5's gate is what keeps the
+   > failed call cheap until N3's policy brings it back.
 3. **The engine must stop sending when ICE fails.**  26 627 pointless
    sends is a bug of its own, and it is independent of everything
    above — it is worth fixing on its own merits.

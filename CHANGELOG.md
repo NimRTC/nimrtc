@@ -37,7 +37,13 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > - **Q6** — the picture is now aligned to the sound (the video half of
 >   R3; the audio half shipped in `v1.2.0`).
 > - **Q7** — the hardware codec path is exercised end-to-end by something
->   that re-runs, on a self-hosted GPU runner.
+>   that re-runs, and the first `PASS` record was produced on a real
+>   NVENC encoder (an RTX 3060, driver 616.92) on a clean tree.  The
+>   record was made by the same recorder and the same harness the
+>   `hardware.yml` job runs, driven by hand: the repository has **no**
+>   self-hosted runner registered, so the job itself has never had a
+>   machine to run on.  The workflow and its `gpu-nvenc` contract are in
+>   the tree; the runner is what is missing.
 
 > **The release gates are read, not assumed.**  The `release` workflow's
 > preflight now verifies the seven-day soak window at the tag, checks that

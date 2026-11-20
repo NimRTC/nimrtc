@@ -2048,7 +2048,8 @@ int NimRTCEngine::drain_dtls() noexcept {
     // member (not a static local) so two engines in the same process
     // (e.g. the loopback test) log their transitions independently.
     const auto new_state = d->state();
-    if (new_state != impl_->security.last_dtls_state) {
+    const bool dtls_transitioned = (new_state != impl_->security.last_dtls_state);
+    if (dtls_transitioned) {
         core::log::Logger::instance().info(
             "engine[dtls]: state transition " +
             std::string(nimrtc::dtls::DtlsSession::state_name(impl_->security.last_dtls_state)) + " → " +
@@ -2059,9 +2060,30 @@ int NimRTCEngine::drain_dtls() noexcept {
     if (new_state == nimrtc::dtls::DtlsState::Connected) {
         // SRTP key installation happens here — this is the critical
         // handshake boundary the P1 interop tests verify.
-        core::log::Logger::instance().info(
-            "engine[dtls→srtp]: DTLS reached Connected, "
-            "calling maybe_install_srtp_keys()");
+        //
+        // The *call* stays on every tick: `maybe_install_srtp_keys()`
+        // is idempotent, but its idempotency is not the same as its
+        // readiness — the keying material (RFC 5764 §4.2) is only
+        // available once the Finished message has been processed, and
+        // the tick that observes `Connected` is not necessarily the
+        // tick that can read the material.  Retrying on the next tick
+        // is what makes the install eventual rather than lucky, so the
+        // call must not be narrowed to the transition.
+        //
+        // The *log line* is what was narrowed.  An earlier version
+        // logged on `state() == Connected`, which is true on every tick
+        // for the whole life of the connection: the 2026-11-20 Q5 soak
+        // printed "DTLS reached Connected" 169 983 times in 22½
+        // minutes — 15 % of every log line, and a projected 2.6 GB over
+        // a 24 h window.  A line that repeats once per tick is not a
+        // handshake trace; it is noise that buries the transitions it
+        // is meant to announce.  The message is now emitted once per
+        // handshake, at the transition.
+        if (dtls_transitioned) {
+            core::log::Logger::instance().info(
+                "engine[dtls→srtp]: DTLS reached Connected, "
+                "calling maybe_install_srtp_keys()");
+        }
         maybe_install_srtp_keys();
     }
 

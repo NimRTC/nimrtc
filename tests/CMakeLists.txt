@@ -2854,6 +2854,22 @@ nimrtc_add_engine_test(test_engine_audio_send test_engine_audio_send.cpp)
 nimrtc_add_engine_test(test_engine_ice_send_gate test_engine_ice_send_gate.cpp)
 
 # ---------------------------------------------------------------------------
+# The engine's DTLS handshake trace must be a *trace*, not a per-tick line.
+#
+# The 2026-11-20 Q5 impaired soak printed "DTLS reached Connected" 169 983
+# times in 22½ minutes — 15 % of every log line, projecting to ~2.6 GB for
+# one 24 h window.  The guard was on the DTLS *state* rather than on the
+# *transition*, and `state() == Connected` holds on every tick for the whole
+# life of the connection.
+#
+# The test pins both halves of the fix: the line is emitted once per
+# handshake, while the SRTP install is still retried on every tick (the
+# RFC 5764 §4.2 material is only readable once Finished has been
+# processed, so the install must be eventual, not lucky).
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_dtls_log_rate test_engine_dtls_log_rate.cpp)
+
+# ---------------------------------------------------------------------------
 # The audio send path's allocation budget (remediation Phase 3 §3.5).
 #
 # The plan asks for "音频路径 per-packet 堆分配次数 = 0".  The metric is

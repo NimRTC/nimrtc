@@ -6,7 +6,7 @@
 # (v1.4 plan item **N5**, §5 N5-1).
 #
 #   ./gen-certs.sh                     # once; writes ./secrets/
-#   docker compose up -d              # TLS-only on 5349 (and 443)
+#   docker compose up -d              # TLS-only on 5349
 #   docker compose --profile plain up -d   # the NEGATIVE CONTROL (see below)
 #   docker compose down
 #
@@ -14,7 +14,7 @@
 # The two services are MUTUALLY EXCLUSIVE, and that is the whole point.
 # ---------------------------------------------------------------------------
 #
-#   coturn        TLS listener on 5349 (and 443).  The target N1's
+#   coturn        TLS listener on 5349.  The target N1's
 #                 positive test points at.
 #
 #   coturn-plain  a plain TURN server on **the same port 5349**, with TLS
@@ -69,21 +69,40 @@ services:
     restart: unless-stopped
     command:
       - --config=/etc/coturn/turnserver.conf
-      # A second TLS listener on 443: the port that survives a network
-      # which only lets "web" traffic out.  coturn takes the option once,
-      # so the config file carries 5349 and this adds 443.  Docker
-      # forwards host 443 to container 443, and coturn binds it as root
-      # before dropping privileges.
-      - --tls-listening-port=443
+      # The external IP, so that a relay allocation hands the peer an
+      # address the peer can actually reach.
+      #
+      # The image's default CMD carries `--external-ip=$(detect-external-ip)`,
+      # and **overriding `command` replaces the CMD wholesale** -- so
+      # without this line the container would advertise its *container*
+      # address (172.x.x.x), which no peer on the host can route to, and
+      # every relayed session would be established but dead.
+      #
+      # `$(detect-external-ip)` is expanded by the image's entrypoint,
+      # which evaluates each argument separately (see
+      # docker/coturn/rootfs/usr/local/bin/docker-entrypoint.sh).  It
+      # resolves the host's public address over DNS, so it needs the
+      # container to have working DNS -- which the default bridge
+      # network provides.
+      #
+      # It is **not** the host's address as seen from the compose
+      # network, and it is not what `host.docker.internal` would give
+      # either: it is the address the *internet* sees.  That is the
+      # right one for a relayed allocation, and it is also the reason
+      # this server is a *developer* path rather than the CI path --
+      # CI's Linux leg has no public address and uses the native
+      # install instead (v1.4 plan §5 N5-2).
+      - --external-ip=$(detect-external-ip)
     volumes:
       # The configuration, the credential list and the certificate.
       # gen-certs.sh writes them; .gitignore keeps them out of the tree.
       - ./secrets:/etc/coturn
     ports:
-      # TLS on the conventional port (RFC 8656 § 7.2).
+      # TLS on the conventional port (RFC 8656 § 7.2).  **This is the
+      # port N1's client is told to use**, and it is the port the
+      # negative control also takes -- so it has to be the port the
+      # server actually binds.
       - "5349:5349/tcp"
-      # TLS on 443 (see the extra `--tls-listening-port` above).
-      - "443:443/tcp"
       # The plain port is published too, so the server is reachable the
       # way a fallback client would try.  A server that cannot be
       # reached proves nothing about a client that should not fall back.
@@ -113,8 +132,22 @@ services:
       # the failure it produces is "the TLS handshake did not happen",
       # not "the wrong port was unreachable".
       - --listening-port=5349
+      # The same external IP as the positive server, for the same
+      # reason: the control must fail *only* because TLS is off, so
+      # everything else has to be identical.
+      - --external-ip=$(detect-external-ip)
+      # Its own log file, so the control's run does not overwrite the
+      # positive server's evidence.  (`--log-file` on the command line
+      # overrides the config file's `log-file`.)
+      - --log-file=/etc/coturn/logs/turnserver-plain.log
     volumes:
+      # The configuration and the credential list, read-only: the
+      # control has no business rewriting them.
       - ./secrets:/etc/coturn:ro
+      # ... but the log directory has to be writable, and the `:ro`
+      # mount above covers it.  This more specific mount wins, so the
+      # control can write its own log.
+      - ./secrets/logs:/etc/coturn/logs
     ports:
       - "5349:5349/tcp"
       - "3478:3478/udp"

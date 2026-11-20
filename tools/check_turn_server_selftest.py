@@ -1,0 +1,166 @@
+"""Prove check_turn_server.py catches each defect it claims to catch.
+
+Every case here re-introduces a defect that was actually in
+examples/turn-server/ and asserts that the check fails, and names the
+failure.  A guard that cannot fail is not a guard.
+"""
+import io, os, shutil, subprocess, sys, tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CHECK = os.path.join(ROOT, 'tools', 'check_turn_server.py')
+DIR = os.path.join(ROOT, 'examples', 'turn-server')
+
+
+def run_check(root):
+    """Run the checker against a temporary copy of the tree."""
+    env = dict(os.environ)
+    proc = subprocess.run(
+        [sys.executable, CHECK],
+        cwd=root, capture_output=True, text=True, env=env)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def with_mutated(files, mutate):
+    """Copy the tree, apply `mutate`, run the check, restore."""
+    backup = {}
+    try:
+        for rel in files:
+            path = os.path.join(DIR, rel)
+            backup[rel] = io.open(path, 'r', encoding='utf-8').read()
+            io.open(path, 'w', encoding='utf-8', newline='\n').write(mutate(rel, backup[rel]))
+        code, out = run_check(ROOT)
+        return code, out
+    finally:
+        for rel, text in backup.items():
+            path = os.path.join(DIR, rel)
+            io.open(path, 'w', encoding='utf-8', newline='\n').write(text)
+
+
+CASES = []
+
+
+def case(name, files, mutate, needle):
+    CASES.append((name, files, mutate, needle))
+
+
+def case_tls_port_moved(files):
+    # The defect: a second --tls-listening-port in the compose file,
+    # which REPLACES the config's value and moves the TLS listener off
+    # the port the client was told to use.
+    def mutate(rel, text):
+        if rel == 'docker-compose.yml':
+            return text.replace(
+                '      - --external-ip=$(detect-external-ip)',
+                '      - --external-ip=$(detect-external-ip)\n'
+                '      - --tls-listening-port=443', 1)
+        return text
+    return mutate
+
+
+def case_unknown_option(files):
+    # The defect: a config line naming an option coturn does not have.
+    def mutate(rel, text):
+        if rel == 'turnserver.conf':
+            return text.replace('no-dtls=1', 'no-dtls=1\nno-dtlsv1=1', 1)
+        return text
+    return mutate
+
+
+def case_machine_path(files):
+    # The defect: one developer's absolute path, committed.
+    def mutate(rel, text):
+        if rel == 'turnserver.wsl.conf':
+            return text.replace('@TURN_ROOT@', '/mnt/d/MyOpen/NimRTC/examples/turn-server')
+        return text
+    return mutate
+
+
+def case_key_not_readable(files):
+    # The defect: OpenSSL's 0600 key, unreadable by the image's user.
+    def mutate(rel, text):
+        if rel == 'gen-certs.sh':
+            return text.replace('chmod 0644 "$key" 2>/dev/null || true', '')
+        return text
+    return mutate
+
+
+def case_no_external_ip(files):
+    # The defect: overriding `command` drops the image's CMD, so no
+    # external IP is advertised and every relayed session is dead.
+    def mutate(rel, text):
+        if rel == 'docker-compose.yml':
+            return text.replace('      - --external-ip=$(detect-external-ip)\n', '')
+        return text
+    return mutate
+
+
+def case_evidence_undocumented(files):
+    # The defect: the README never says how to tell TLS from plain.
+    def mutate(rel, text):
+        if rel == 'README.md':
+            return text.replace('cipher=', 'CIPHER_PLACEHOLDER_')
+        return text
+    return mutate
+
+
+def case_placeholder_not_substituted(files):
+    # The defect: the WSL config has a placeholder and nothing fills it.
+    def mutate(rel, text):
+        if rel == 'run-native.sh':
+            return text.replace('@TURN_ROOT@', 'PLACEHOLDER')
+        return text
+    return mutate
+
+
+case('the TLS listener is moved off 5349',
+     ['docker-compose.yml'], case_tls_port_moved, 'tls-listening-port')
+
+case('a config line names an option coturn does not have',
+     ['turnserver.conf'], case_unknown_option, 'no-dtlsv1')
+
+case("one developer's absolute path is committed",
+     ['turnserver.wsl.conf'], case_machine_path, 'machine-specific absolute path')
+
+case('the private key is left unreadable by the server user',
+     ['gen-certs.sh'], case_key_not_readable, 'private key')
+
+case('no external IP is advertised',
+     ['docker-compose.yml'], case_no_external_ip, 'external-ip')
+
+case('the README does not say how to tell TLS from plain',
+     ['README.md'], case_evidence_undocumented, 'cipher=')
+
+case('the WSL placeholder is never substituted',
+     ['run-native.sh'], case_placeholder_not_substituted, '@TURN_ROOT@')
+
+
+def main():
+    failures = []
+
+    code, out = run_check(ROOT)
+    if code != 0:
+        failures.append('the tree as it stands does not pass the check:\n' + out)
+    else:
+        print('OK   the tree as it stands passes')
+
+    for name, files, mutate, needle in CASES:
+        code, out = with_mutated(files, mutate(files))
+        if code == 0:
+            failures.append(f'NOT CAUGHT: {name}')
+        elif needle not in out:
+            failures.append(
+                f'CAUGHT BUT WRONG REASON: {name}\n'
+                f'  expected the message to mention {needle!r}\n' + out)
+        else:
+            print(f'OK   caught: {name}')
+
+    if failures:
+        print('\nFAILURES:', file=sys.stderr)
+        for f in failures:
+            print('  ' + f, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

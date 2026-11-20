@@ -37,7 +37,7 @@ Requirements: Docker (with Compose v2) for the container path, and
 # Once: generate the CA, the server certificate and the credential file.
 ./gen-certs.sh
 
-# The positive server: TLS-only on 5349 (and 443).
+# The positive server: TLS-only on 5349.
 docker compose up -d
 
 # The negative control: plain TURN on the SAME port 5349, TLS off.
@@ -59,6 +59,7 @@ the tree):
 | `secrets/tls/turn.key` | The server's private key. |
 | `secrets/creds.txt` | The realm and the static long-term credential. |
 | `secrets/logs/turnserver.log` | The server log — N1's "TLS handshake visible in the log" evidence. |
+| `secrets/logs/turnserver-plain.log` | The negative control's log, kept separate so the two runs do not overwrite each other's evidence. |
 
 Regenerating the certificate rotates the trust anchor and breaks every
 client pinned to the old one, so it is an explicit act (`--force`), not
@@ -66,15 +67,23 @@ a side effect.
 
 ### The native path (what CI uses)
 
-The same `turnserver.conf` runs without Docker:
+The same configuration runs without Docker, through `run-native.sh`:
 
 ```bash
-turnserver -c /path/to/turnserver.conf
+./run-native.sh                      # this directory
+./run-native.sh /path/to/turn-server # or an explicit root
 ```
 
-with the three container paths rewritten to local ones (`cert=`,
-`pkey=`, `log-file=`).  This is what CI's Linux leg does (v1.4 plan §5
-**N5-2**), because GitHub's hosted runners have no Docker daemon.
+The script substitutes the machine-specific paths into a temporary copy
+of the configuration and starts `turnserver` with it.  It exists because
+**coturn does not expand environment variables in its config file** —
+there is no `getenv` in its config reader — so the paths have to be
+written down, and they cannot be written down for *one* machine.  The
+WSL variant (`turnserver.wsl.conf`) therefore carries a placeholder and
+`run-native.sh` fills it in.
+
+This is what CI's Linux leg does (v1.4 plan §5 **N5-2**), because
+GitHub's hosted runners have no Docker daemon.
 
 ---
 
@@ -89,7 +98,11 @@ load-bearing decisions:
   TLS 1.0 is testing a protocol the client cannot negotiate in the field.
 * **No TURN-over-DTLS** (`no-dtls=1`).  N1's scope is RFC 5766
   long-term credentials over a TCP control stream wrapped in TLS
-  (RFC 6062 § 3.2) — no alternate auth, no DTLS.
+  (RFC 6062 § 3.2) — no alternate auth, no DTLS.  There is **no
+  `no-dtlsv1` option**: coturn has one DTLS switch, not a version
+  ladder, and a config line it does not recognise is discarded with a
+  "Bad configuration format" warning.  The file therefore states the
+  floor it can actually enforce.
 * **Loopback peers are allowed** (`allow-loopback-peers=1`).  The sample
   and the tests run on one host, so the relay peer *is* loopback; without
   this the allocation is refused and the failure looks like a credential
@@ -116,6 +129,53 @@ load-bearing decisions:
   cannot be used together"*.  The CLI password guards coturn's
   administrative console, not the TURN protocol — but without it the
   server will not run with the loopback peers the tests need.
+
+---
+
+## 3a. How to tell that the server is *actually* serving TLS
+
+This is the question the whole directory exists to answer, so it is
+worth stating exactly — because a TURN server that has quietly lost its
+TLS listener looks completely healthy from the outside.
+
+**A container that is up is not a container that is serving TLS.**
+coturn's response to an unreadable certificate or key is *not* to fail:
+it logs a warning, sets `no_tls = true`, and **starts anyway with the
+TLS listener disabled**.  The port stays published, the health check
+passes, and the client fails to connect — to a server that looks like a
+TLS server.  Three things cause that, and all three are handled here:
+
+| What goes wrong | How it is prevented |
+|---|---|
+| The certificate path does not exist (a config copied to another machine) | `gen-certs.sh` writes the paths the compose file mounts, and `run-native.sh` refuses to start without a certificate |
+| The private key is unreadable by the server's user (OpenSSL writes keys 0600; the container runs as `nobody`) | `gen-certs.sh` widens the key's mode and the directories' |
+| The log directory is not writable, so the evidence never lands | `gen-certs.sh` makes `secrets/logs` writable |
+
+**The check itself.**  coturn prints the negotiated cipher and the TLS
+version on the session line, and it prints them **only for a TLS
+socket**:
+
+```
+session 003000000000000001: new, realm=<nimrtc.local>, username=<nimrtc>,
+  lifetime=600, cipher=ECDHE-RSA-AES256-GCM-SHA384, method=TLSv1.2
+```
+
+A **plain** session has no `cipher=` and no `method=` at all — the
+format string is a different one.  So the log line is the evidence,
+and its *absence* is the failure signal:
+
+```bash
+# Positive: the handshake happened.
+grep -q 'cipher=.*method=TLSv1' secrets/logs/turnserver.log && echo TLS-OK
+
+# Negative control: no TLS session was ever created.
+grep -q 'cipher=' secrets/logs/turnserver-plain.log && echo LEAKED || echo NO-TLS
+```
+
+(`fingerprint=1` in the config is a **different** thing — it is
+RFC 5766's FINGERPRINT attribute, a TURN-protocol integrity check.  It
+does not print the TLS cipher, and it is not what proves the handshake
+happened.)
 
 ---
 
@@ -181,6 +241,19 @@ configuration.
 Both paths present the same thing to the test — a TURN URI and a
 credential — which is what keeps the claim honest regardless of which
 path brought the server up.
+
+Two things the native path has to do that the compose file does not:
+
+* **Set the external IP explicitly.**  The compose file passes
+  `--external-ip=$(detect-external-ip)`, which resolves the machine's
+  public address over DNS.  A CI runner has no public address, so the
+  native path sets `--external-ip` to the runner's own address, or
+  leaves it alone and lets the relay advertise the runner's address
+  directly.  What it must *not* do is advertise a container address.
+* **Check that the TLS listener is up**, with the `cipher=` grep from
+  §3a, before believing a green result.  On a runner the certificate is
+  generated fresh, and a permission problem there is indistinguishable
+  from a protocol failure unless the log is looked at.
 
 ---
 

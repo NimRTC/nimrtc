@@ -42,14 +42,25 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# The help text is this file's own header, so it is read from *this*
+# file.  `$0` is the path the script was invoked with, and it is
+# resolved to an absolute path **before** the `cd` below -- after the
+# cd, that relative path would no longer name anything.
+self="$0"
+case "$self" in
+    /*) ;;
+    *) self="$(pwd)/$self" ;;
+esac
+self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")"
+
+cd "$(dirname "$self")"
 
 force=0
 for arg in "$@"; do
     case "$arg" in
         --force|-f) force=1 ;;
         -h|--help)
-            sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,45p' "$self" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -123,6 +134,47 @@ TURN_PASSWORD=nimrtc-test-secret
 EOF
 
 mkdir -p secrets/logs
+
+# ---------------------------------------------------------------------------
+# The permissions the *server* needs
+# ---------------------------------------------------------------------------
+#
+# The container runs as `nobody:nogroup` (the coturn image's own
+# `USER nobody:nogroup`), and the host bind-mount at /etc/coturn carries
+# the ownership and modes of the files this script just wrote.  Two
+# consequences, and both of them are silent:
+#
+# 1. **OpenSSL writes private keys 0600.**  The key would be owned by
+#    whoever ran this script (the developer, on the host) and unreadable
+#    by `nobody` inside the container.  coturn's response to an
+#    unreadable key is not an error exit -- it logs
+#    "cannot start TLS and DTLS listeners because private key file is
+#    not set properly" and **starts anyway with the TLS listener
+#    disabled**.  The container then comes up healthy, the port is
+#    published, and the N1 client fails to connect -- to a server that
+#    looks like it is serving TLS.  That is the worst possible shape
+#    for a *negative control*, because it is indistinguishable from the
+#    defect the control is meant to catch.
+#
+# 2. **The log directory is not writable by `nobody`.**  coturn creates
+#    the log file itself; if it cannot, the file never appears and N1's
+#    "the TLS handshake is visible in the server log" evidence is
+#    missing -- again silently.
+#
+# So the key is widened to be *readable* by the server (0644 is enough
+# for a test key; it is not a production secret, and the CA key below
+# is the one that would actually hurt), and the directories are made
+# group-agnostic-writable so that whoever runs the container -- root
+# or `nobody` -- can write them.
+#
+# `chmod` is applied with `|| true` on purpose: on a filesystem without
+# POSIX permissions (some Windows and WSL mounts) these calls fail, and
+# a failure here must not stop the certificate from being generated.
+# ---------------------------------------------------------------------------
+chmod 0644 "$key" 2>/dev/null || true
+chmod 0644 "$cert" 2>/dev/null || true
+chmod 0755 secrets secrets/tls secrets/ca secrets/logs 2>/dev/null || true
+chmod 0777 secrets/logs 2>/dev/null || true
 
 echo "gen-certs.sh: done"
 echo "  server chain : $cert"

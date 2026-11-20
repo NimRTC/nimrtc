@@ -523,6 +523,28 @@ jobs:
       - name: Check the plugin catalogue against the code
         run: python tools/check_doc_contract.py
 
+      # `examples/turn-server/` is the reference TURN deployment (v1.4
+      # plan item N5).  It is a *deployment*: nothing in it is compiled,
+      # and the CI leg that would use it is N5's follow-up, not this
+      # one.  So it has no compiler to catch a mistake in it and no test
+      # to catch a mistake in it.
+      #
+      # And every mistake in it fails **silently**: coturn's response to
+      # an unreadable certificate is to start anyway with the TLS
+      # listener disabled, so the container comes up, the port is
+      # published, and the property the deployment exists to establish
+      # -- that a client told "use TLS" cannot fall back to plain TCP --
+      # is false.  The check pins the seven ways that happens, each of
+      # which was a real defect in this directory.
+      - name: Check the reference TURN server's deployment
+        run: python tools/check_turn_server.py --verbose
+
+      # A guard that cannot fail is not a guard, so each rule is
+      # re-introduced into a scratch copy of the tree and the check is
+      # required to fail.
+      - name: Self-test the TURN-server deployment guard
+        run: python tools/check_turn_server_selftest.py
+
       # Architecture-remediation D2: "either wire it in, or delete it."
       # A module under src/modules/ with a complete implementation and
       # passing tests, but no path from the composition root, is the

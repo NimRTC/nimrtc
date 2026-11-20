@@ -7,20 +7,20 @@
  * `IVideoBitrateController` has three inputs.  Two of them were wired
  * before this work:
  *
- *   - `on_bandwidth_estimate(bps)` 鈥?the link's opinion, fed from the
+ *   - `on_bandwidth_estimate(bps)` — the link's opinion, fed from the
  *     tick;
  *   - and the controller's level is read back on every frame and pushed
  *     into the encoder.
  *
- * The third one 鈥?the controller's own *reaction* to what the peer says
- * 鈥?was not wired at all:
+ * The third one — the controller's own *reaction* to what the peer says
+ * — was not wired at all:
  *
- *   - `on_measured_bitrate(bps)` 鈥?what the encoder is actually putting
+ *   - `on_measured_bitrate(bps)` — what the encoder is actually putting
  *     on the wire.  Without it the controller's multiplicative
  *     decrease (`BitrateController::budget()`) could never fire, so the
  *     closed loop the saturation benchmark measures was not the loop
  *     the product runs;
- *   - `on_keyframe_requested()` 鈥?the peer asking for a key frame.
+ *   - `on_keyframe_requested()` — the peer asking for a key frame.
  *
  * This file pins that the engine *calls* both seams, using a recording
  * controller registered in place of the built-in one.  The *rules* the
@@ -32,7 +32,8 @@
  *
  * The built-in controller is a *policy*: it decides which rung to sit
  * on, and it hides the fact that it was called at all.  The wiring
- * question 鈥?"did the engine feed this seam, with this number?" 鈥? * needs an observer, not a policy.  So the test registers its own
+ * question — "did the engine feed this seam, with this number?" —
+ * needs an observer, not a policy.  So the test registers its own
  * controller under a test id and watches what the engine hands it.
  */
 
@@ -65,7 +66,7 @@ namespace np = nimrtc::plugins;
  *
  * The counters live in a *static* struct because the engine owns the
  * controller it creates (it deletes it on `close()`), so the factory
- * must hand out a freshly allocated instance every time 鈥?a static
+ * must hand out a freshly allocated instance every time — a static
  * controller object would be deleted by the engine and the heap
  * corrupted.
  */
@@ -95,7 +96,7 @@ struct RecordingState {
  * nothing.
  *
  * It is registered under a test id, so the engine resolves *this*
- * object through the registry's video-bitrate-controller slot 鈥?the
+ * object through the registry's video-bitrate-controller slot — the
  * same seam the built-in controller is resolved through (Layout
  * Invariant 4: the engine never names a concrete module).
  */
@@ -244,7 +245,7 @@ protected:
      *
      *  The frame needs *pixels*: the engine stages it into a
      *  codec-facing buffer, and a hardware encoder rejects a null
-     *  buffer.  A flat grey I420 picture is enough 鈥?the test is about
+     *  buffer.  A flat grey I420 picture is enough — the test is about
      *  the byte counters, not the picture. */
     static np::Status send_one_frame(NimRTCEngine& engine) {
         constexpr std::uint32_t kWidth  = 320;
@@ -268,7 +269,7 @@ protected:
         return engine.send_video(frame);
     }
 
-    /** Build a PSFB message (RFC 4585 搂6.3) for `fmt`.
+    /** Build a PSFB message (RFC 4585 §6.3) for `fmt`.
      *
      *  The PLI (FMT 1) and the FIR (FMT 4) both say "send me a key
      *  frame"; they differ in how insistently they say it. */
@@ -311,7 +312,7 @@ TEST_F(EngineVideoRateControlWiring,
 
     EXPECT_EQ(state_->measured_calls.load(), 0u)
         << "the first observation has no interval, so no rate may be "
-           "reported 鈥?a rate over a zero-length interval would be a "
+           "reported — a rate over a zero-length interval would be a "
            "division by zero dressed up as a number";
 }
 
@@ -333,7 +334,7 @@ TEST_F(EngineVideoRateControlWiring,
 
     ASSERT_EQ(state_->measured_calls.load(), 1u)
         << "the engine must feed the controller what the encoder is "
-           "actually putting on the wire 鈥?without this seam the "
+           "actually putting on the wire — without this seam the "
            "controller's multiplicative decrease can never fire";
     EXPECT_GT(state_->last_measured_bps.load(), 0u)
         << "the reported rate must be the measured rate, not a zero "

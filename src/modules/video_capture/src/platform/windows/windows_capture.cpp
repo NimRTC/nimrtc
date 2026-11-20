@@ -1,6 +1,6 @@
 // modules/video_capture/src/platform/windows/windows_capture.cpp
 // ----------------------------------------------------------------------------
-// The Windows capture device 锟?the seam implementation that ties the two
+// The Windows capture device — the seam implementation that ties the two
 // Windows backends to the portable capture layer.
 //
 // See include/nimrtc/video_capture/windows_capture.hpp for the contract.
@@ -9,7 +9,8 @@
 //
 // The device owns a thread.  It does the DXGI acquire / WGC poll there,
 // and it does *all* the device calls there.  The engine's tick thread
-// only ever touches the bounded `CaptureQueue` 锟?never a device object 锟?// so it can never be parked by a slow GPU.
+// only ever touches the bounded `CaptureQueue` — never a device object —
+// so it can never be parked by a slow GPU.
 //
 // ## The two delivery paths
 //
@@ -20,8 +21,8 @@
 //     queue copies the pixels into host memory, which is exactly what
 //     the zero-copy path exists to avoid.
 //
-//   - **CPU (staged).**  When there is no GPU callback 锟?or when the GPU
-//     staging failed 锟?the frame is read back into host memory and
+//   - **CPU (staged).**  When there is no GPU callback — or when the GPU
+//     staging failed — the frame is read back into host memory and
 //     pushed through the `CaptureQueue`, and the copied bytes are
 //     counted in `CaptureStats::bytes_copied`.  The fallback is honest:
 //     the statistics show that the fast path was not taken.
@@ -324,7 +325,7 @@ public:
         if (!wgc_->open(target, handle, want_width, want_height,
                         cfg_.want_cursor, opts_.require_consent, error)) {
             // The consent refusal and the missing device are distinct
-            // conditions and get distinct codes 锟?the host reacts
+            // conditions and get distinct codes — the host reacts
             // differently to "ask the user" and to "that display is
             // gone".
             report_error(error,
@@ -391,7 +392,7 @@ public:
             }
         }
 
-        // WGC reports no dirty rectangles 锟?the honest answer is "the
+        // WGC reports no dirty rectangles — the honest answer is "the
         // whole frame changed".
         plugins::CaptureDirtyRects dirty;
         dirty.full_frame = true;
@@ -462,7 +463,7 @@ public:
                     return;
                 }
             }
-            // The GPU staging failed 锟?fall through to the CPU path and
+            // The GPU staging failed — fall through to the CPU path and
             // *count the copy*, so the statistics tell the truth.
         }
 
@@ -891,7 +892,7 @@ WindowsCapture::supported_formats(const std::string& device_id) const noexcept {
         format.has_dirty_rects =
             (opts_.backend == WindowsCaptureBackend::kDxgiDesktopDuplication);
         // A format that is not the native size is delivered by cropping
-        // the source, which is a device-side copy 锟?still zero-copy in
+        // the source, which is a device-side copy — still zero-copy in
         // the sense that the pixels never reach host memory.
         formats.push_back(std::move(format));
     }
@@ -907,7 +908,7 @@ plugins::CaptureCapabilities WindowsCapture::capabilities() const noexcept {
     caps.cursor_composited = (opts_.backend == WindowsCaptureBackend::kWgc);
     caps.region_selection = true;
     caps.enumeration = true;
-    caps.max_pixels = 0;   // unbounded 锟?bounded by the device itself
+    caps.max_pixels = 0;   // unbounded — bounded by the device itself
     caps.max_fps = 0;
     caps.backend = std::string(windows_capture_backend_name(opts_.backend));
     return caps;

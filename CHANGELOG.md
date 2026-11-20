@@ -439,11 +439,11 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **An H.265 mid-stream parameter-set change is asserted on the hardware
   decoder (v1.3 plan item `Q1b`).**
   Q1 proved the H.264 mechanism on the software decoder.  Q1b is the
-  H.265 counterpart, and it is asserted where H.265 actually runs here 鈥?  on **NVDEC**, against a stream produced by **NVENC**:
+  H.265 counterpart, and it is asserted where H.265 actually runs here —   on **NVDEC**, against a stream produced by **NVENC**:
 
   - `src/modules/nvcodec/src/hevc_pts.{hpp,cpp}` is a new private helper
     that parses `profile_tier_level` and the SPS geometry fields
-    (ITU-T H.265 搂7.3.3, 搂7.3.2.2.1) **independently of the driver**, and
+    (ITU-T H.265 §7.3.3, §7.3.2.2.1) **independently of the driver**, and
     summarises an Annex-B access unit into `plugins::HevcPtsSummary`:
     the visible size, FNV-1a hashes of the **VPS / SPS / PPS** RBSPs, and the
     profile idc with its compatibility flags.  The summary is what lets a
@@ -457,14 +457,14 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     and asserts the **first** decode call after the switch returns `kOk`
     with a 640脳480 picture, the decoder's SPS hash equal to the
     encoder's, and the receiver's key-frame-request counter still at
-    zero 鈥?i.e. no PLI on the wire.
+    zero — i.e. no PLI on the wire.
   -   `HwPtsSwitch.ParameterSetChangeAtTheSameGeometryIsNoticed` covers
   MAIN 鈫?MAIN10 at the same size, the case a width/height comparison
   cannot see.
 
   The private parser reads `general_reserved_zero_44bits` (a 44-bit
   field, longer than any machine word) without truncation, skips the
-  sub-layer ordering-info block with the 搂7.3.3 rule that
+  sub-layer ordering-info block with the §7.3.3 rule that
   `maxNumSubLayersMinus1 > 0` is followed by `8 - maxNumSubLayersMinus1`
   `reserved_zero_2bits` words, and decodes `ue(v)` as
   `(1 << leading) - 1 + suffix`.  Each of those is a place a hand-rolled
@@ -479,7 +479,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   receiver's declared framing, not re-framed unconditionally.**
   `ReceiverConfig::h264_annex_b` now decides the single-NAL path: with
   the flag **off** (the default) the packet is handed to the decoder
-  byte for byte, which is the RFC 6184 搂5.1 shape 鈥?a bare NAL unit
+  byte for byte, which is the RFC 6184 §5.1 shape — a bare NAL unit
   arrives as `NaluFormat::kRaw`.  With the flag **on**, a bare unit gets
   an Annex-B start code and a unit that already carries one is forwarded
   as-is, so a frame assembled from a bare SPS + PPS + slice is still a

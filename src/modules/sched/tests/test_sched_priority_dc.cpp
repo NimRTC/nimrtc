@@ -1,31 +1,31 @@
 /**
  * @file test_sched_priority_dc.cpp
- * @brief DC-2: P-family + S-family cross-plane priority integration �?DataChannel × RTP.
+ * @brief DC-2: P-family + S-family cross-plane priority integration — DataChannel × RTP.
  *
  * ## Purpose
  *
  * Verify that the unified `Scheduler` correctly handles simultaneous
  * traffic from two planes:
  *
- *   - **DC plane (S-family)** �?DataChannel streams via `enqueue_for_stream_*()`
+ *   - **DC plane (S-family)** — DataChannel streams via `enqueue_for_stream_*()`
  *     and `select_next_packet()` / `set_stream_priority()`.
  *
- *   - **RTP plane (P-family)** �?Media/control packets via `enqueue()` /
+ *   - **RTP plane (P-family)** — Media/control packets via `enqueue()` /
  *     `drain()` with `plugins::Priority`.
  *
  * These two systems are orthogonal in the implementation:
- *   P-family `drain()` / `drain_with()`   �?drains the 5-level plugins::Priority queues.
- *   S-family `select_next_packet()`        �?drains the 3-level StreamPriority buckets.
+ *   P-family `drain()` / `drain_with()`   — drains the 5-level plugins::Priority queues.
+ *   S-family `select_next_packet()`        — drains the 3-level StreamPriority buckets.
  *
  * Each plane is independently correct (covered by test_priority.cpp and
  * test_scheduler.cpp).  This file covers their **interaction**.
  *
  * ## What is NOT tested here
  *
- * - Pure S-family bucket ordering (�?test_priority.cpp)
- * - Pure P-family priority ordering and BWE (�?test_scheduler.cpp)
- * - WebTransportDataChannel network I/O (�?integration tests)
- * - Real DC stream creation (�?DC-1 integration tests)
+ * - Pure S-family bucket ordering (→ test_priority.cpp)
+ * - Pure P-family priority ordering and BWE (→ test_scheduler.cpp)
+ * - WebTransportDataChannel network I/O (→ integration tests)
+ * - Real DC stream creation (→ DC-1 integration tests)
  *
  * ## Scope note (DC-2 under the default `web_transport` backend)
  *
@@ -44,9 +44,9 @@
  * | # | Scenario                         | Key invariant verified                |
  * |---|----------------------------------|---------------------------------------|
  * | 1 | DC_Plane_Integration            | P-family and S-family operate independently      |
- * | 2 | Cross_Plane_Priority            | P-family kControl �?S-family High bucket         |
+ * | 2 | Cross_Plane_Priority            | P-family kControl ≥ S-family High bucket         |
  * | 3 | Datachannel_Stream_Id_Isolation | Multiple DC streams keep own priority|
- * | 4 | Priority_Promotion_Effects_RTP  | S-family promote �?bucket switch, P-family unchanged|
+ * | 4 | Priority_Promotion_Effects_RTP  | S-family promote → bucket switch, P-family unchanged|
  * | 5 | Select_Next_Respects_Budget      | select_next_packet(max) limits drain |
  * | 6 | P_S_Isolation_No_Cross_Pollution | drain() never sees S-family-only packets |
  *
@@ -146,7 +146,7 @@ std::vector<std::uint32_t> drain_all_s_stream_ids(nimrtc::sched::Scheduler& sch)
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 1 �?DC_Plane_Integration
+// Scenario 1 — DC_Plane_Integration
 // ---------------------------------------------------------------------------
 
 /**
@@ -232,7 +232,7 @@ TEST(StreamPriorityCrossPlane, DC_Plane_Integration_MultiCycle) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 2 �?Cross_Plane_Priority
+// Scenario 2 — Cross_Plane_Priority
 // ---------------------------------------------------------------------------
 
 /**
@@ -331,7 +331,7 @@ TEST(StreamPriorityCrossPlane, Cross_Plane_Priority_AllLevels) {
         EXPECT_EQ(counts[4], 1);  // kBestEffort
     }
 
-    // ---- S-family select_next_packet: High �?Normal �?Low ----
+    // ---- S-family select_next_packet: High → Normal → Low ----
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 3u);
@@ -342,7 +342,7 @@ TEST(StreamPriorityCrossPlane, Cross_Plane_Priority_AllLevels) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 3 �?Datachannel_Stream_Id_Isolation
+// Scenario 3 — Datachannel_Stream_Id_Isolation
 // ---------------------------------------------------------------------------
 
 /**
@@ -371,7 +371,7 @@ TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation) {
     EXPECT_EQ(sch.get_stream_priority(kDCStreamNormal), nimrtc::sched::StreamPriority::Normal);
     EXPECT_EQ(sch.get_stream_priority(kDCStreamLow),    nimrtc::sched::StreamPriority::Low);
 
-    // Verify drain order: High �?Normal �?Low
+    // Verify drain order: High → Normal → Low
     auto ids = drain_all_s_stream_ids(sch);
     ASSERT_EQ(ids.size(), 3u);
     EXPECT_EQ(ids[0], kDCStreamHigh   & 0xFF);
@@ -397,14 +397,14 @@ TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation_DemoteOne) {
     sch.enqueue_for_stream_owned(kDCStreamLow,
                                  make_s_payload(kDCStreamLow), dst);
 
-    // Demote kDCStreamHigh from High �?Low
+    // Demote kDCStreamHigh from High → Low
     sch.set_stream_priority(kDCStreamHigh, nimrtc::sched::StreamPriority::Low);
 
     // Verify others are unchanged
     EXPECT_EQ(sch.get_stream_priority(kDCStreamNormal), nimrtc::sched::StreamPriority::Normal);
     EXPECT_EQ(sch.get_stream_priority(kDCStreamLow),    nimrtc::sched::StreamPriority::Low);
 
-    // Drain order should now be: Normal (1) �?High+Low (2) �?High moved to Low bucket
+    // Drain order should now be: Normal (1) → High+Low (2) — High moved to Low bucket
     auto ids = drain_all_s_stream_ids(sch);
     ASSERT_EQ(ids.size(), 3u);
     // First: Normal (rank 1)
@@ -420,7 +420,7 @@ TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation_DemoteOne) {
  */
 TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation_UnseenDefault) {
     nimrtc::sched::Scheduler sch{};
-    // kDCStreamAlt has never been seen �?should default to Normal
+    // kDCStreamAlt has never been seen — should default to Normal
     EXPECT_EQ(sch.get_stream_priority(kDCStreamAlt),
               nimrtc::sched::StreamPriority::Normal);
 
@@ -441,11 +441,11 @@ TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation_UnseenDefault) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 4 �?Priority_Promotion_Effects_RTP
+// Scenario 4 — Priority_Promotion_Effects_RTP
 // ---------------------------------------------------------------------------
 
 /**
- * Promoting a DC stream from Low �?High should switch it to the High bucket
+ * Promoting a DC stream from Low → High should switch it to the High bucket
  * and cause it to preempt Normal/Low streams on the next drain.
  * P-family (RTP) packets are unaffected by S-family priority changes.
  */
@@ -465,7 +465,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP) {
     sch.enqueue_for_stream_owned(kDCStreamNormal,
                                  make_s_payload(kDCStreamNormal), dst);
 
-    // ---- Baseline: S-family drains Normal �?Low ----
+    // ---- Baseline: S-family drains Normal → Low ----
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 2u);
@@ -494,7 +494,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP) {
     // Verify the promotion took effect
     EXPECT_EQ(sch.get_stream_priority(kDCStreamLow), nimrtc::sched::StreamPriority::High);
 
-    // ---- S-family drain: High (kDCStreamLow) �?Normal (kDCStreamNormal) ----
+    // ---- S-family drain: High (kDCStreamLow) → Normal (kDCStreamNormal) ----
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 2u);
@@ -507,7 +507,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP) {
 }
 
 /**
- * Demoting a DC stream from High �?Normal should place it behind existing
+ * Demoting a DC stream from High → Normal should place it behind existing
  * Normal streams and ahead of Low streams.
  */
 TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
@@ -525,7 +525,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
     sch.enqueue_for_stream_owned(kDCStreamLow,
                                  make_s_payload(kDCStreamLow), dst);
 
-    // Baseline: High �?Normal �?Low
+    // Baseline: High → Normal → Low
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 3u);
@@ -534,7 +534,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
         EXPECT_EQ(ids[2], kDCStreamLow    & 0xFF);
     }
 
-    // Re-enqueue and demote kDCStreamHigh from High �?Normal
+    // Re-enqueue and demote kDCStreamHigh from High → Normal
     sch.set_stream_priority(kDCStreamHigh,   nimrtc::sched::StreamPriority::High);
     sch.set_stream_priority(kDCStreamNormal, nimrtc::sched::StreamPriority::Normal);
     sch.set_stream_priority(kDCStreamLow,    nimrtc::sched::StreamPriority::Low);
@@ -547,12 +547,12 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
 
     sch.set_stream_priority(kDCStreamHigh, nimrtc::sched::StreamPriority::Normal);
 
-    // Drain: High bucket empty, Normal bucket (Normal + demoted High) �?Low
+    // Drain: High bucket empty, Normal bucket (Normal + demoted High) → Low
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 3u);
         // High bucket empty (no streams at High)
-        // Normal bucket: Normal (enqueued first) �?High (demoted)
+        // Normal bucket: Normal (enqueued first) → High (demoted)
         EXPECT_EQ(ids[0], kDCStreamNormal & 0xFF);  // Normal
         EXPECT_EQ(ids[1], kDCStreamHigh   & 0xFF);  // High (now Normal)
         EXPECT_EQ(ids[2], kDCStreamLow    & 0xFF);  // Low
@@ -560,7 +560,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 5 �?Select_Next_Respects_Budget
+// Scenario 5 — Select_Next_Respects_Budget
 // ---------------------------------------------------------------------------
 
 /**
@@ -692,7 +692,7 @@ TEST(StreamPriorityCrossPlane, Select_Next_Respects_Budget_P_Unaffected) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 6 �?P_S_Isolation_No_Cross_Pollution
+// Scenario 6 — P_S_Isolation_No_Cross_Pollution
 // ---------------------------------------------------------------------------
 
 /**

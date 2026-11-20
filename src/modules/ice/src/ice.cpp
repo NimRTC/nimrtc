@@ -28,6 +28,7 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -47,14 +48,76 @@ namespace {
 
 // -----------------------------------------------------------------------------
 // libjuice → nimrtc::core::log bridge (one-shot init).
+//
+// ## Why the level is INFO and not VERBOSE
+//
+// libjuice's VERBOSE and DEBUG levels are *per-datagram*: "Receiving
+// datagram", "Sending datagram, size=%d", "Demultiplexing incoming
+// datagram from %s", "Bookkeeping...", "Entering poll for %d ms" and
+// their DEBUG siblings are written once per packet in each direction.
+//
+// The 2026-11-20 Q5 impaired soak measured this: of 772 043 log lines
+// in 950 s, 660 620 (85 %) were libjuice's, and 71 % of the log's *bytes*
+// were per-datagram noise.  The projection for a 24 h window was ~3.2 GB
+// of log, of which ~2.3 GB was libjuice's per-datagram chatter.
+//
+// That is not a trace, it is a firehose, and it has the same defect the
+// engine's own DTLS line had: it buries the lines that matter.  A soak
+// log is evidence, and evidence nobody can read is not evidence.
+//
+// INFO is the right cut.  libjuice's INFO level carries exactly the
+// lifecycle lines a reader needs and nothing per-packet:
+//
+//     Changing state to %s
+//     Candidate gathering done
+//     STUN server binding successful
+//     Got STUN mapped address %s from server
+//     STUN entry %d: Consent expired for candidate pair
+//     Connectivity timer expired
+//     TURN allocation failed
+//
+// The failure lines that the Q5 analysis needed -- "Consent expired",
+// "Lost connectivity", "Changing state to failed" -- are INFO and WARN,
+// and they survive this cut.
+//
+// VERBOSE is not gone: `NIMRTC_ICE_VERBOSE=1` turns it back on for the
+// case where a developer *is* chasing a packet-level problem.  The
+// default has to be the one a 24 h run can afford.
+//
+// ## Why the handler promotes rather than filters
+//
+// The level filter lives in `core::log::Logger`, whose default minimum
+// is Info.  libjuice's DEBUG and VERBOSE lines are routed through
+// `logger.info()` rather than `logger.debug()` so they would show up in
+// test output even at the default level -- that was the point of the
+// original hook, and it is why the cut has to happen at the *source*
+// (`juice_set_log_level`) rather than in the handler.
+//
+// A consequence worth stating: the handler's promotion means the
+// *core* log level cannot be used to filter libjuice.  Turning the core
+// level down to Warn would also silence libjuice's INFO lines.  That is
+// the pre-existing behaviour and this change does not alter it.
 // -----------------------------------------------------------------------------
 
 std::atomic<bool> g_log_hooked{false};
 
+/// True when the developer asked for libjuice's per-datagram trace.
+bool juice_verbose_requested() noexcept {
+    static const bool requested = [] {
+        const char* value = std::getenv("NIMRTC_ICE_VERBOSE");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return requested;
+}
+
 void hook_libjuice_logging_once() noexcept {
     if (g_log_hooked.exchange(true)) return;
 
-    juice_set_log_level(JUICE_LOG_LEVEL_VERBOSE);
+    // The cut is here, at the source: `juice_log_write()` drops a line
+    // whose level is below this one *before* it formats the message, so
+    // the per-datagram lines cost nothing but a comparison.
+    juice_set_log_level(juice_verbose_requested() ? JUICE_LOG_LEVEL_VERBOSE
+                                                   : JUICE_LOG_LEVEL_INFO);
 
     juice_set_log_handler([](juice_log_level_t level, const char* message) {
         auto& logger = core::log::Logger::instance();

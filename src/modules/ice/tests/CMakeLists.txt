@@ -30,6 +30,7 @@ if(NOT GTEST_FOUND)
 endif()
 
 add_executable(test_ice_test test_ice.cpp)
+add_executable(test_ice_log_volume_test test_ice_log_volume.cpp)
 add_executable(test_consent_freshness_test test_consent_freshness.cpp)
 add_executable(test_ice_restart_test test_ice_restart.cpp)
 add_executable(test_turn_relay_test test_turn_relay.cpp)
@@ -40,6 +41,8 @@ add_executable(test_turn_tls_test test_turn_tls.cpp)
 # Enable the legacy behaviour so nimrtc_ice.lib's PUBLIC deps
 # (nimrtc::core, nimrtc::plugins) appear in the link line.
 set_target_properties(test_ice_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_ice_log_volume_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 set_target_properties(test_consent_freshness_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
@@ -52,6 +55,9 @@ set_target_properties(test_turn_tls_test PROPERTIES
 
 nimrtc_apply_options(test_ice_test LENIENT)
 nimrtc_link_libjuice(test_ice_test)
+
+nimrtc_apply_options(test_ice_log_volume_test LENIENT)
+nimrtc_link_libjuice(test_ice_log_volume_test)
 
 nimrtc_apply_options(test_consent_freshness_test LENIENT)
 nimrtc_link_libjuice(test_consent_freshness_test)
@@ -66,6 +72,13 @@ nimrtc_apply_options(test_turn_tls_test LENIENT)
 nimrtc_link_libjuice(test_turn_tls_test)
 
 target_link_libraries(test_ice_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+target_link_libraries(test_ice_log_volume_test PRIVATE
     nimrtc::ice
     nimrtc::core
     nimrtc::plugins
@@ -110,6 +123,9 @@ target_link_libraries(test_turn_tls_test PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_ice_test
         PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
+    gtest_discover_tests(test_ice_log_volume_test
+        PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_consent_freshness_test
         PROPERTIES TIMEOUT 30

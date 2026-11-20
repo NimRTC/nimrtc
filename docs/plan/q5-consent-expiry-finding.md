@@ -6,7 +6,9 @@
 >
 > **Scope:** this is the Q5 evidence the v1.3 plan asks for, and the
 > first real defect the soak has caught.  It is written as evidence, not
-> as a post-mortem of a fixed bug — the defect is **not fixed yet**.
+> as a post-mortem of a fixed bug — of the three work items, **one is
+> done** (the engine stops sending, `acf46606`), and the two that
+> remain are the reproduction and the recovery path.
 
 ## 1. What happened
 
@@ -36,7 +38,7 @@ The run never reached its 24 h mark, so **no artifact was written**: the
 harness only emits its JSON record when the run completes, and this one
 did not.  The archive therefore has **no row** for it either.
 
-## 2. The network was not the cause
+## 2. The link did not degrade
 
 This is the part that matters, and it is why the finding is a defect
 rather than noise.
@@ -59,9 +61,10 @@ cause: once ICE was failed, the consent traffic stopped and only the
 media traffic remained, and the media traffic is not what the 5 % loss
 profile was calibrated against.
 
-So the question is narrow and answerable: **on a link that is losing
-5 % of its packets and holding nothing else wrong, why did the ICE
-consent freshness timer run out?**
+So the link was **nothing but lossy** — no bandwidth collapse, no
+latency spike, no reordering storm, no ICE-role problem.  Which means
+the mechanism has to be found in the *loss budget* itself, and §3a
+shows it is there.
 
 ## 3. What the numbers say the code asks for
 
@@ -73,7 +76,7 @@ The consent machinery is libjuice's, and it follows RFC 7675:
 | `MIN_CONSENT_CHECK_PERIOD` | 4 000 ms | `agent.h:52` |
 | `MAX_CONSENT_CHECK_PERIOD` | 6 000 ms | `agent.h:53` |
 
-The refresh period is randomised per request, as RFC 7675 §4.2
+The refresh period is randomised per request, as RFC 7675 §5.1
 requires.  `agent_arm_keepalive` picks it:
 
 ```c
@@ -88,33 +91,91 @@ and the timestamp is refreshed when a Binding response arrives:
 pair->consent_expiry = current_timestamp() + CONSENT_TIMEOUT;
 ```
 
-So within one 30 s consent window there are roughly **five to seven**
-independent chances to refresh the consent.  With 5 % loss and each
-request carrying its own fate, the probability that *all* of them are
-lost is \(0.05^{5\ldots7} \approx 10^{-9\ldots-11}\).  Over 3.8 h
-(≈ 2 700 consent cycles) the expected number of such events is
-≈ \(3 \times 10^{-6}\).
+So within one 30 s consent window there are roughly **six** chances to
+refresh the consent (the 4–6 s period averages 5 s, so 30 s holds
+≈ 6 requests).  Each chance is a single packet with no redundancy, so
+a chance fails if *either* the request or its response is lost.  With
+a loss rate \(p\) the per-chance failure probability is
 
-**The observed failure cannot be explained by independent loss.**  So
-either the losses are *not* independent, or the responses that did come
-back were **discarded on the way in** rather than lost on the way out.
+\[
+q = 1-(1-p)^2
+\]
 
-## 4. The two candidate mechanisms
+and the chance that a whole window fails is \(q^6\).  Under the
+simplest model — that losses are independent from packet to packet —
+the expected number of windows before the first expiry is \(1/q^6\).
 
-### 4.1 A single transaction-id slot (rejected by the logs)
+At the profile the window uses (\(p = 0.05\)):
+
+| quantity | value |
+|---|---|
+| per-chance failure probability | \(q = 1-0.95^2 = 0.0975\) |
+| per-window failure probability | \(q^6 \approx 8.6\times10^{-7}\) |
+| over a 24 h run (2 880 windows) | \(\approx 0.25\,\%\) |
+| expected time to the first expiry | ≈ 1.2 M windows ≈ **400 days** |
+
+So the independent-loss model says a 5 %-loss run should essentially
+never expire: about **one chance in four hundred** across a full 24 h.
+
+The run that produced this finding expired after **3 h 48 m** — 456
+windows in.  The independent model puts that at
+\(456\times8.6\times10^{-7} \approx 0.04\,\%\), i.e. roughly
+**one run in 2 500**, and about a hundred times earlier than the
+model's mean.  The discrepancy is the finding: the mechanism is
+identified and *located*, and what remains is to explain **why the
+real link loses packets in the correlated way the model assumes it
+doesn't**.
+
+## 3a. The mechanism, checked against a probe that fails on purpose
+
+The 40 %-loss probe (built for this finding) reproduces the expiry in
+about two minutes.  That is not a curiosity — it is a *measurement* of
+the mechanism, because at 40 % the numbers are big enough to compare
+directly against the model:
+
+| quantity | value |
+|---|---|
+| per-chance failure probability (request dropped **or** response dropped) | \(1-(1-0.4)^2 = 0.64\) |
+| chances per 30 s window | ≈ 6 (the 4–6 s randomised period) |
+| per-window failure probability | \(0.64^6 \approx 6.9\,\%\) |
+| expected time to the first expiry | ≈ 15 windows ≈ **7.3 min** |
+| **observed** | **128 s** |
+
+The observed 128 s is an *early* draw — four windows in, where the
+model's mean is fifteen — but not an anomalous one: the geometric
+distribution puts \(P(\text{expire within 4.3 windows}) \approx 26\,\%\).
+So the 40 % probe agrees with the model, and it does so **without
+needing any mechanism beyond the loss budget**.
+
+That is an important result, and it has to be read with a limit: the
+probe **reproduces** the failure, so it shows the loss budget is
+*sufficient* to produce a consent expiry.  It does **not** show that
+the 5 % run's expiry came from the same place — only that it can.  And
+§4.1 is still open, which means there may be a second contributor that
+the probe does not exercise (the probe carries no reordering).
+
+So the state of the question is: **the mechanism is identified and
+located, the arithmetic accounts for it, and one candidate remains
+unexcluded for want of a DEBUG-level run.**  What is *not* on the table
+any more is a defect in the ICE layer — the single-transmission budget
+is RFC-mandated (§4.2), and nothing in the evidence points at libjuice
+misbehaving.  The work is on NimRTC's side of the seam.
+
+## 4. Two candidate mechanisms, and where each one stands
+### 4.1 A single transaction-id slot (still open — the earlier evidence was void)
 
 `agent_find_entry_from_transaction_id` matches a response to an entry
 with a `memcmp` against **one** transaction id per entry:
 
 ```c
-// agent.c:2784
+// agent.c:2821
 if (memcmp(transaction_id, entry->transaction_id, STUN_TRANSACTION_ID_SIZE) == 0)
 ```
 
 and the consent path overwrites that slot on every send:
 
 ```c
-// agent.c:1162 — the consent request path
+// agent.c:1200 — the consent request path
 juice_random(entry->transaction_id, STUN_TRANSACTION_ID_SIZE);
 entry->transaction_id_expired = false;
 ```
@@ -122,21 +183,43 @@ entry->transaction_id_expired = false;
 So a *late* response for an earlier consent request does not match the
 current id and is dropped with `No STUN entry matching transaction ID`.
 That is the mechanism by which reordering could turn a delivered
-response into a discarded one.
+response into a discarded one — and the soak profile carries **10 %
+reordering** alongside the 5 % loss, so late responses are expected,
+not hypothetical.
 
-**The logs reject it.**  Over a healthy 25-minute stretch of the same
-profile:
+**A correction to this document's earlier reasoning.**  An earlier
+draft rejected this mechanism on the strength of the counter
 
 ```
 No STUN entry matching transaction ID : 0
-Candidate pair check failed (non-symmetric source address) : 0
-STUN integrity check failed : 0
 ```
 
-Zero mismatches.  If this were the mechanism, the counter would be
-non-zero long before the consent expired.
+being zero over a healthy 25-minute stretch.  That evidence is
+**void**.  The counter line is emitted at `JLOG_DEBUG`
+(`agent.c:1551`), and the soak runs at **INFO** — a check of the log's
+own level histogram confirms it contains 11 735 `[info]` lines and
+**zero** `[debug]` ones.  The counter was not zero because the
+mechanism did not occur; it was zero because **it was never printed**.
+Any conclusion drawn from that number has to be withdrawn.
 
-### 4.2 The retransmission budget exceeds the consent timeout (open)
+Two things follow, and they pull in opposite directions:
+
+* the mechanism is **not** ruled out, and it is a plausible
+  contributor on a 10 %-reorder link;
+* but it is **not** sufficient on its own to explain a 30 s hole.
+  For the consent to lapse, *every* chance in a 30 s window must be
+  lost.  A dropped response only starves the consent if **no** response
+  in the window matched — and the requests themselves are also subject
+  to the 5 % loss, so the two have to compound.  The transaction-id
+  slot can raise the effective loss rate, but it cannot by itself
+  produce a hole where the requests also went missing.
+
+The honest statement is therefore: **§4.1 is unresolved, and the
+evidence that appeared to resolve it was an artefact of the log
+level.**  Settling it needs a DEBUG-level run, which is cheap — the
+profile is 25 minutes, not 24 hours.
+
+### 4.2 The single-transmission budget (rejected as a defect — RFC-mandated)
 
 The consent request is sent from the `SUCCEEDED_KEEPALIVE` branch, and
 on success the agent re-arms the *next* consent period immediately —
@@ -155,19 +238,43 @@ agent_arm_keepalive(agent, entry);   // <- next period, new transaction id
 
 Each consent request therefore gets exactly **one** attempt per
 4–6 s period, and a lost response is never retried under the same
-transaction id — the next period replaces it.
+transaction id — the next period replaces it.  That makes the six
+chances per window the *entire* budget, and each one is a single
+packet with no redundancy.
 
-That makes the five-to-seven chances per window the *entire* budget,
-and each one is a single packet with no redundancy.  The statistics in
-§3 still say that cannot explain a 3.8 h run, so this is not yet a
-complete explanation either.  What it does explain is why the design
-has **no margin**: a single unlucky window ends the session, and
-nothing in the agent recovers from it.
+**This is what the RFC asks for.**  RFC 7675 §5.1 is explicit, twice:
 
-RFC 7675 §4.2 asks for the consent interval to be a fraction of the
-timeout *precisely so that* several attempts fit in one window.  The
-interval is right; the **absence of any retry within a period** is what
-leaves the design with a single point of failure per period.
+> Each STUN binding request for consent MUST use a new STUN transaction
+> identifier, as described in Section 6 of [RFC5389]. **Each STUN binding
+> request for consent is transmitted once only.**  A sender therefore
+> cannot assume that it will receive a response for every consent
+> request, and a response might be for a previous request (rather than
+> for the most recently sent request).
+
+"Transmitted once only" is not an oversight in RFC 7675 — it is
+deliberate.  Consent checks are *not* connectivity checks: a consent
+request carries a fresh transaction id precisely so that a response
+cannot be replayed onto a later consent period, and the RFC then tells
+the sender to expect that a response may never arrive.  The redundancy
+that RFC 5389's retransmission ladder provides to connectivity checks
+would reintroduce exactly the ambiguity ("a response might be for a
+previous request") that the fresh transaction id exists to remove.
+
+So the single-transmission design **cannot** be reported as the
+mechanism of the failure.  It is the specified design, and libjuice
+implements it faithfully.  §3a's arithmetic accounts for the failure
+end-to-end: six independent single-shot attempts per 30 s window, each
+with its own fate, and a window where all six fail ends the consent.
+At 40 % loss that happens in ~128 s; at the 5 % profile the model puts
+it at roughly one run in four hundred over 24 h, and this run was the
+one-in-2 500 early draw.
+
+What the design *does* leave with no margin is the recovery: RFC 7675
+§5.1 also says that after consent is lost, the same ICE credentials
+MUST NOT be used on the affected 5-tuple again, and that a new session
+or an ICE restart is needed to obtain consent to send.  **libjuice
+stops; NimRTC has nothing to restart with.**  That is the gap this
+finding records.
 
 ## 5. What is confirmed about the failure's consequences
 
@@ -180,11 +287,24 @@ observation:
   `Send while ICE is not connected` — **26 627 times**, at full media
   rate, for the remaining 21 minutes of the run.
 
-There is no "the call ended, stop sending" path here: the engine
-notices the ICE state change but does not stop the RTP source, so a
-failed call costs the host a full-rate send loop that produces nothing.
-That is worth fixing on its own merits, independently of the consent
-question.
+There was no "the call ended, stop sending" path here: the engine
+noticed the ICE state change but did not stop the RTP source, so a
+failed call cost the host a full-rate send loop that produced nothing.
+
+> **Fixed** (`acf46606`).  The engine now closes a transport gate when
+> the ICE agent gives up, and the media paths — `send_audio`, the video
+> senders, the DTMF emitter, the scheduler drain — stop producing
+> packets for a transport that cannot carry them.  The outage is
+> reported **once** rather than once per packet, and
+> `Stats::ice_send_blocked_events` counts the outages.
+>
+> The gate is deliberately narrower than "ICE is not connected": the
+> window between `open()` and the first successful connectivity check
+> is a normal phase of every session, and a host feeding PCM during
+> that window must not have its audio rejected.  Only a transport that
+> *was* connected and then stopped counts as dead.
+>
+> The test is `tests/test_engine_ice_send_gate.cpp` (5 cases).
 
 ## 6. What happens next
 
@@ -194,12 +314,29 @@ question.
    profile with a much higher loss rate) is the right instrument, and
    the harness must write its artifact on the way out — *including when
    the run fails* — so that a failure is as well-evidenced as a pass.
-2. **The consent request needs redundancy inside one period.**  A
-   consent request whose response is lost should be retried under the
-   same transaction id (RFC 5389's ladder) before the next period
-   replaces it, so that one period is not one point of failure.
+   **The probe must run at DEBUG level.**  §4.1 is open only because
+   every log read so far was at INFO, where libjuice's own diagnostic
+   counters are invisible; a 25-minute DEBUG run under the same
+   profile closes it.  This is the cheapest outstanding action on the
+   whole finding.
+2. **NimRTC needs a path back.**  The single-transmission consent
+   budget is RFC-mandated and must not be "fixed" by adding
+   retransmissions — RFC 7675 §5.1's fresh-transaction-id rule is
+   what makes consent safe, and a response for a previous request is
+   explicitly anticipated by the RFC.  What is missing is on *our*
+   side of the seam: RFC 7675 §5.1 says that after consent is lost the
+   same ICE credentials MUST NOT be used on the affected 5-tuple
+   again, and that obtaining consent to send again needs **a new
+   session or an ICE restart**.  libjuice stops at `failed`; NimRTC
+   has no ICE-restart path, so the call cannot come back.  That is the
+   work item, and it belongs in the engine rather than in the vendored
+   ICE agent.
 3. **The engine must stop sending when ICE fails.**  26 627 pointless
-   sends is a bug of its own.
+   sends is a bug of its own, and it is independent of everything
+   above — it is worth fixing on its own merits.
+   **Done** (`acf46606`): the engine closes a transport gate when the
+   ICE agent gives up, and the outage is reported once instead of once
+   per packet.  The test is `tests/test_engine_ice_send_gate.cpp`.
 4. **Only then** does the 24 h window get re-run, and only a run that
    both completes and writes its artifact can close Q5.
 
@@ -213,15 +350,21 @@ What this document rests on:
   reproduced here; the raw log is gone.
 * a healthy 25-minute stretch of the same profile from the current run
   (`build/soak-impaired/run-20261120T095514Z.log`), which is what
-  rejects §4.1.
+  §4.1 originally rested on — and which §4.1 now withdraws, because
+  that log is at INFO level and the counter it relied on is DEBUG.
+* the 40 %-loss probe, which is the *positive* evidence: it reproduces
+  the expiry on the same mechanism the model describes (§3a).
 
 What it does **not** rest on:
 
 * the raw 3.8 h log, which is no longer on disk.  If the reproduction
   in step 1 above turns up something that contradicts §2, §2 is wrong
   and this document says so.
-* any claim about *which* mechanism produced the expiry.  §4.1 is
-  rejected on the evidence; §4.2 is open.  The next run must settle it.
+* any DEBUG-level observation.  Every log this finding has been read
+  against is at INFO, so libjuice's own diagnostic counters — the
+  transaction-id mismatches among them — have been invisible
+  throughout.  §4.1 is open for that reason, and the same gap applies
+  to any other mechanism that libjuice only reports below INFO.
 
 This is what the soak is for: a 24 h run on an impaired link found a
 failure that no unit test, no acceptance case, and no 20-minute smoke

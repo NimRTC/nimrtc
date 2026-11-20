@@ -59,6 +59,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <nimrtc/core/log.hpp>

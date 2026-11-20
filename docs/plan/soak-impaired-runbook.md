@@ -148,6 +148,30 @@ procedure, and the local box is the one that owns a 24 h run.
 A `FAIL` is **evidence**, not a nuisance: the archive keeps every
 record, so a failing run cannot be erased by a later pass.
 
+### 7.1 When the *recorder* dies but the run survives
+
+A 24 h run outlives the shell that launched it. If the recorder is
+killed — a terminal task that times out, a closed shell, a sleeping
+laptop — the harness keeps running and, at the end of its window,
+writes its measurements to the `--json` artifact.
+
+The harness's output goes to a **file** (`run-<stamp>.log`) next to it,
+so nothing is lost and nothing is buffered in the recorder's memory.
+
+Fold the orphaned artifact back into the evidence:
+
+```bash
+python tools/run_soak_impaired.py --recover \
+    build/soak-impaired/run-<stamp>.json --out-dir build/soak-impaired
+```
+
+The record it writes is marked `"recovered": true` and carries a
+`recovery_note` saying the two things it cannot know: the elapsed time
+is the window the harness was **asked** to run (it runs the window to
+completion before writing the artifact, so the two agree), and the
+provenance is the tree at **recovery** time, not at launch time. If the
+tree moved since the run, check the commit by hand.
+
 ## 8. Verifying the collector itself
 
 ```bash
@@ -156,5 +180,7 @@ python tools/run_soak_impaired.py --self-test
 
 The self-test builds a synthetic evidence file and asserts that the
 recorder still distinguishes `PASS` / `FAIL` / `INCONCLUSIVE`, that a
-dirty-tree run is marked, and that `--expect-q5` refuses a short run. A
+dirty-tree run is marked, that `--expect-q5` refuses a short run, and
+that an orphaned artifact folds back in as a recovered record (and a
+recovered run whose numbers fail the criteria stays a `FAIL`). A
 guard that cannot fail is a decoration, so the self-test runs in CI.

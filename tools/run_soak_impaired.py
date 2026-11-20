@@ -396,6 +396,41 @@ def _self_test():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # 11. The recovery path: an orphaned harness's artifact is folded
+    #     into the evidence file, and the record says it was recovered.
+    tmp = Path(tempfile.mkdtemp(prefix="nimrtc-soak-impaired-selftest-"))
+    try:
+        measurement = _green_measurement()
+        measurement["params"]["seconds"] = float(Q5_MIN_SECONDS)
+        artifact = tmp / "run-orphan.json"
+        with artifact.open("w", encoding="utf-8") as handle:
+            json.dump(measurement, handle)
+
+        record = recover(tmp, artifact)
+        check(record["status"] == "PASS",
+              "an orphaned artifact folds back in as a PASS")
+        check(record.get("recovered") is True,
+              "the recovered record says it was recovered")
+        check(record["elapsed_seconds"] == float(Q5_MIN_SECONDS),
+              "the recovered record carries the harness's own run window")
+        check(record["provenance"].get("git_commit") is not None,
+              "the recovered record carries the tree's provenance")
+        check(summarize(tmp, expect_q5=True) == 0,
+              "a recovered 24 h run satisfies the Q5 gate")
+
+        # A recovered run whose numbers are not green stays a failure.
+        bad = _green_measurement()
+        bad["params"]["seconds"] = float(Q5_MIN_SECONDS)
+        bad["audio"]["packets_sent"] = 0
+        bad_artifact = tmp / "run-bad.json"
+        with bad_artifact.open("w", encoding="utf-8") as handle:
+            json.dump(bad, handle)
+        bad_record = recover(tmp, bad_artifact)
+        check(bad_record["status"] == "FAIL",
+              "a recovered run whose numbers fail the criteria is a FAIL")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
     print("self-test: %d failure(s)" % failures)
     return 1 if failures else 0
 
@@ -416,7 +451,14 @@ def run_once(args):
             "the soak-p2p harness was not found -- build it first:\n"
             "    cmake --build build --target soak-p2p")
 
-    artifact = out_dir / ("run-%s.json" % stamp.strftime("%Y%m%dT%H%M%SZ"))
+    # The artifact path is **absolute**.  The harness resolves it against
+    # its own working directory, which is the repository root, not the
+    # directory the recorder was started from -- so a relative path puts
+    # the evidence somewhere the recorder will not look for it.
+    artifact = (out_dir / ("run-%s.json" % stamp.strftime("%Y%m%dT%H%M%SZ"))
+                ).resolve()
+    log_path = (out_dir / ("run-%s.log" % stamp.strftime("%Y%m%dT%H%M%SZ"))
+                ).resolve()
     cmd = [
         str(harness),
         "--seconds", str(args.seconds),
@@ -449,17 +491,34 @@ def run_once(args):
         "host": host_provenance(),
         "harness": str(harness),
         "artifact": str(artifact),
+        "log": str(log_path),
         "measurement": None,
         "failures": [],
     }
 
     started = time.monotonic()
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT,
-                              stdin=subprocess.DEVNULL,
-                              cwd=str(REPO_ROOT),
-                              timeout=args.seconds + args.timeout_slack)
+        # The harness's own output goes to a **file**, not to a pipe.
+        #
+        # A pipe would make the recorder the only reader, and that is a
+        # 24 h liability: the harness logs on every ICE/DTLS event, so a
+        # pipe buffers the run's whole output in the recorder's memory and
+        # the recorder dies when the harness is done -- taking the
+        # evidence with it.  A file also survives the recorder's death:
+        # the harness keeps writing to the descriptor it inherited, and
+        # the *artifact* (the JSON the recorder folds) lands on disk
+        # whatever happens to the recorder.
+        #
+        # `errors="replace"` matters here: the harness's log carries
+        # bytes that are not valid UTF-8 on every run (the DTLS
+        # keylog's binary blobs), and a decode error in the reader would
+        # turn a green run into a traceback.
+        with open(log_path, "w", encoding="utf-8", errors="replace") as log:
+            proc = subprocess.run(cmd, stdout=log,
+                                  stderr=subprocess.STDOUT,
+                                  stdin=subprocess.DEVNULL,
+                                  cwd=str(REPO_ROOT),
+                                  timeout=args.seconds + args.timeout_slack)
         elapsed = time.monotonic() - started
         record["exit_code"] = proc.returncode
         record["elapsed_seconds"] = round(elapsed, 3)
@@ -506,6 +565,95 @@ def _read_artifact(path):
             return json.load(handle)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Recovery -- folding an orphaned run's artifact back into the evidence
+# ---------------------------------------------------------------------------
+
+def recover(out_dir, artifact_path):
+    """Fold an orphaned harness's artifact into the evidence file.
+
+    A 24 h run outlives the recorder that launched it: the recorder can
+    be killed (a terminal task that times out, a laptop that sleeps, a
+    shell that is closed) while the harness keeps streaming and, at the
+    end, writes its measurements to the ``--json`` artifact.  The
+    measurements are the evidence; the recorder was only the thing that
+    folded them into a record.
+
+    This is that fold, done after the fact.  It is deliberately strict
+    about the two things it cannot know:
+
+    * the **elapsed time** is taken from the artifact's own
+      ``params.seconds`` -- the window the harness was asked to run, not
+      a wall-clock measurement, because the recorder that would have
+      measured it is gone.  The harness runs its window to completion
+      before it writes the artifact, so the requested window and the
+      measured window agree; the record says which one it is.
+    * the **provenance** is read from the tree *now*.  If the tree moved
+      since the run, the record says so (``git_dirty`` and the commit
+      are what the tree is now) and the operator is told to check.
+
+    The record is marked ``recovered`` so a reader can tell it apart
+    from a record the recorder wrote itself.
+    """
+    artifact = Path(artifact_path)
+    measurement = _read_artifact(artifact)
+    if measurement is None:
+        raise ToolError("no readable harness artifact at %s" % artifact)
+
+    params = measurement.get("params") or {}
+    requested = float(params.get("seconds") or 0.0)
+    if requested <= 0.0:
+        raise ToolError("the artifact records no run window")
+
+    stamp = datetime.fromtimestamp(artifact.stat().st_mtime, timezone.utc)
+    failures = evaluate_green(measurement)
+    if not failures and not measurement.get("green"):
+        failures.append(
+            "the harness reported a failure the archived numbers do not "
+            "reproduce")
+
+    record = {
+        "schema": SCHEMA,
+        "status": "PASS" if not failures else "FAIL",
+        # The run's own start is not in the artifact; the file's mtime
+        # is the end.  Say so rather than inventing a start.
+        "started_at": None,
+        "finished_at": stamp.isoformat(),
+        "duration_seconds": requested,
+        "elapsed_seconds": requested,
+        "recovered": True,
+        "recovered_from": str(artifact.resolve()),
+        "recovery_note":
+            "the recorder that launched this run did not survive to fold "
+            "it; the elapsed time is the window the harness was asked to "
+            "run, and the provenance is the tree at recovery time, not at "
+            "launch time",
+        "profile": {
+            "loss_pct": float(params.get("loss_pct") or 0.0),
+            "delay_ms": float(params.get("delay_ms") or 0.0),
+            "jitter_ms": float(params.get("jitter_ms") or 0.0),
+            "reorder_pct": float(params.get("reorder_pct") or 0.0),
+            "rate_bps": int(params.get("rate_bps") or 0),
+            "seed": params.get("seed"),
+            "seconds": requested,
+        },
+        "provenance": git_provenance(),
+        "host": host_provenance(),
+        "harness": None,
+        "artifact": str(artifact.resolve()),
+        "measurement": measurement,
+        "failures": failures,
+    }
+
+    evidence = Path(out_dir) / ("%s%s" % (sys.platform, RECORD_SUFFIX))
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    with evidence.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+    print(json.dumps(record, indent=2, sort_keys=True))
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +790,10 @@ def build_parser():
                              "plan's Q5 impairments (loss + jitter + reorder)")
     parser.add_argument("--self-test", action="store_true",
                         help="run the built-in self-test and exit")
+    parser.add_argument("--recover", metavar="ARTIFACT",
+                        help="fold an orphaned harness artifact (the JSON a "
+                             "harness wrote after its recorder died) into the "
+                             "evidence file, and exit")
     return parser
 
 
@@ -669,6 +821,14 @@ def main(argv=None):
 
     if args.self_test:
         return _self_test()
+
+    if args.recover:
+        try:
+            record = recover(args.out_dir, args.recover)
+        except ToolError as exc:
+            print("error: %s" % exc, file=sys.stderr)
+            return 2
+        return 0 if record["status"] == "PASS" else 1
 
     apply_profile(args)
 

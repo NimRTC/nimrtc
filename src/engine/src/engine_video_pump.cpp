@@ -36,6 +36,13 @@
  * the call.
  */
 #include "engine_impl.hpp"
+#include "engine_capture_reconnect.hpp"
+
+// v1-device-policy D4: the optional device-change-notification seam.
+#include <nimrtc/plugins/capture_device_events.hpp>
+
+#include <set>
+#include <string>
 
 namespace nimrtc::engine {
 
@@ -77,6 +84,9 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     //      instead of being invisible.
     recover_capture_device();
     publish_capture_device_counters();
+    // v1-device-policy D4: device-list changes (Route A: the device's own
+    // notifications; Route B: the polling fallback).
+    poll_capture_device_changes();
 
     // ---- The zero-copy path (remote-desktop plan B10) -------------------
     //
@@ -273,18 +283,34 @@ void NimRTCEngine::recover_capture_device() noexcept {
     if (!video_capture_) return;
 
     auto& vstate = impl_->video_state;
+    auto& reconnect = vstate.capture_reconnect;
+    const std::int64_t now = detail::steady_now_us();
 
+    // ---- 1. Did the device report an error? -------------------------------
+    //
     // The device's error counter only ever grows, so a plain comparison
     // would fire on every tick.  The baseline is what makes the
     // comparison meaningful.
     const plugins::CaptureStats stats = video_capture_->stats();
-    if (stats.device_errors <= vstate.capture_seen_device_errors) return;
+    if (stats.device_errors > vstate.capture_seen_device_errors) {
+        vstate.capture_seen_device_errors = stats.device_errors;
+        ++vstate.video_capture_device_errors;
 
-    vstate.capture_seen_device_errors = stats.device_errors;
-    ++vstate.video_capture_device_errors;
+        core::log::Logger::instance().warn(
+            "engine: the video capture device reported an error; "
+            "entering the reconnect backoff");
+        reconnect.note_lost(now);
+    }
 
-    core::log::Logger::instance().warn(
-        "engine: the video capture device reported an error; reopening it");
+    // ---- 2. Drive the backoff state machine (v1-device-policy D4) --------
+    //
+    // A device that is lost stays lost for a while, so the engine retries
+    // with an exponential backoff (100 ms, capped at 5 s, at most 20
+    // attempts) instead of reopening it once and giving up, or retrying
+    // it every tick.  The "device was removed" path
+    // (`poll_capture_device_changes()`) feeds the same machine.
+    if (reconnect.state() != detail::CaptureReconnect::State::kBackoff) return;
+    if (!reconnect.due(now)) return;
 
     // A device that is reopened restarts its counters from zero, so the
     // baselines have to follow -- otherwise the next delta would be a
@@ -297,30 +323,106 @@ void NimRTCEngine::recover_capture_device() noexcept {
     video_capture_->close();
     const plugins::Status rc = video_capture_->open();
     if (rc != plugins::kOk) {
-        core::log::Logger::instance().error(
-            "engine: the video capture device could not be reopened; "
-            "the capture pump is stopped");
-        if (on_error_) {
-            on_error_(core::kVideoCaptureOpenFailed,
-                      "engine: the video capture device could not be "
-                      "reopened; the capture pump is stopped");
+        reconnect.note_failed(now);
+        if (reconnect.state() == detail::CaptureReconnect::State::kStopped) {
+            core::log::Logger::instance().error(
+                "engine: the video capture device could not be recovered "
+                "after " + std::to_string(reconnect.attempts()) +
+                " attempts; the capture pump is stopped");
+            if (on_error_) {
+                on_error_(core::kVideoCaptureOpenFailed,
+                          "engine: the video capture device could not be "
+                          "recovered; the capture pump is stopped");
+            }
         }
         return;
     }
 
     ++vstate.video_capture_restarts;
+    reconnect.note_succeeded(now);
 
     const plugins::CaptureStats fresh = video_capture_->stats();
     vstate.capture_seen_frames_captured = fresh.frames_captured;
     vstate.capture_seen_frames_dropped  = fresh.frames_dropped;
     vstate.capture_seen_bytes_copied    = fresh.bytes_copied;
-    vstate.capture_seen_device_errors  = fresh.device_errors;
+    vstate.capture_seen_device_errors   = fresh.device_errors;
 
     // The device may have renegotiated while it was away.
     const plugins::CaptureConfig again = video_capture_->config();
     vstate.capture_negotiated_width  = again.format.width;
     vstate.capture_negotiated_height = again.format.height;
     vstate.capture_negotiated_tag    = again.format.tag;
+}
+
+void NimRTCEngine::poll_capture_device_changes() noexcept {
+    if (!video_capture_) return;
+
+    auto& vstate = impl_->video_state;
+    const std::int64_t now = detail::steady_now_us();
+
+    // ---- Throttle ---------------------------------------------------------
+    //
+    // Enumeration is not cheap on every backend (V4L2 ioctls, Media
+    // Foundation COM enumeration), so the diff runs on a 500 ms cadence
+    // rather than on every tick.
+    if (now - vstate.capture_last_poll_us < detail::kCaptureDevicePollIntervalUs) {
+        return;
+    }
+    vstate.capture_last_poll_us = now;
+
+    // ---- Route A: the device reports structured change events ------------
+    //
+    // `ICaptureDeviceEventSource` is an optional capability probed with a
+    // `dynamic_cast` (the stable-capture-seam extension pattern).  A
+    // device that implements it reports exactly which device changed and
+    // how — no enumeration needed.
+    if (auto* source = dynamic_cast<plugins::ICaptureDeviceEventSource*>(
+            video_capture_.get())) {
+        const std::vector<plugins::CaptureDeviceChangeEvent> events =
+            source->take_device_changes();
+        for (const auto& ev : events) {
+            ++vstate.video_capture_device_changes;
+            if (ev.change == plugins::CaptureDeviceChange::kRemoved) {
+                core::log::Logger::instance().warn(
+                    "engine: the video capture device \"" + ev.device_name +
+                    "\" (" + ev.device_id + ") was removed; entering the "
+                    "reconnect backoff");
+                vstate.capture_reconnect.note_lost(now);
+            }
+        }
+        return;
+    }
+
+    // ---- Route B: diff the enumeration against the last snapshot ---------
+    //
+    // A device without change notifications gets the polling fallback.
+    // The first poll *seeds* the snapshot — the seed is not a change.
+    const std::vector<plugins::CaptureDevice> devices =
+        video_capture_->enumerate_devices();
+    std::set<std::string> ids;
+    for (const auto& d : devices) ids.insert(d.id);
+
+    if (!vstate.capture_device_ids_seeded) {
+        vstate.capture_seen_device_ids = std::move(ids);
+        vstate.capture_device_ids_seeded = true;
+        return;
+    }
+
+    for (const auto& id : ids) {
+        if (!vstate.capture_seen_device_ids.count(id)) {
+            ++vstate.video_capture_device_changes;
+        }
+    }
+    for (const auto& id : vstate.capture_seen_device_ids) {
+        if (!ids.count(id)) {
+            ++vstate.video_capture_device_changes;
+            core::log::Logger::instance().warn(
+                "engine: the video capture device \"" + id +
+                "\" was removed; entering the reconnect backoff");
+            vstate.capture_reconnect.note_lost(now);
+        }
+    }
+    vstate.capture_seen_device_ids = std::move(ids);
 }
 
 void NimRTCEngine::publish_capture_device_counters() noexcept {

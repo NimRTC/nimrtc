@@ -868,6 +868,32 @@ The two doors are counted separately because they call for completely
 different fixes: a rising `..._from_loss` means the network is lossy,
 a rising `..._from_decode_failure` means the bitstream is undecodable.
 
+### 9.4 The default device policy (v1-device-policy D3)
+
+```cpp
+static DevicePolicyInfo default_device_policy() noexcept;
+```
+
+Read-only query for the current platform's default capture-backend ids —
+the table `EngineConfig::video_capture_name = "auto"` resolves through.
+`DevicePolicyInfo` is a value type carrying four `std::string`s:
+
+| Field | Meaning |
+|---|---|
+| `screen_capture_backend` | default screen-capture backend plugin id |
+| `camera_capture_backend` | default camera backend plugin id |
+| `audio_capture_backend` | **reserved** (empty until D1 — the engine has no audio-device layer yet) |
+| `audio_playback_backend` | **reserved** (empty until D1) |
+
+The screen / camera values are `"windows-wgc"` / `"camera-mediafoundation"`
+on Windows, `"macos-screencapturekit"` / `"camera-avfoundation"` on
+macOS, `"linux-x11"` / `"camera-v4l2"` on Linux and
+`"synthetic"` / `"synthetic-camera"` elsewhere.  A host that names a
+device explicitly never consults this — the explicit id always wins.  A
+policy backend that this build does not register is **not** an error:
+`"auto"` degrades to "no capture device" (warn) instead of firing
+`kVideoCapturePluginMissing`.
+
 ---
 
 ## 10. DataChannel control plane
@@ -1875,7 +1901,8 @@ header; its section note above it is the definition.
 | 151 | `video_stage_total_p95_us` | `std::uint64_t` | The summed p95 of the four outbound stages, in microseconds. |
 | 152 | `qoe` | `plugins::QoeSnapshot` | The quality-of-experience metrics (plan J3 / J6). The freeze count, the end-to-end latency percentiles, the viewer's frame rate, the sharpness proxy and the input-to-photon latency. The metrics are measured whenever a QoE collector is resolved -- which, by default, is the built-in `"rd-qoe"` (see `EngineConfig::qoe_collector_name`). A host that turns the metrics off says so with `EngineConfig::qoe_collector_enabled` (or with an empty name). Without a collector this snapshot carries the **frame counters** -- the presented and dropped frame counts, which the engine keeps anyway -- and zeroes for the metrics, which is the honest answer to "what was the latency percentile?" when it was not measured. |
 | 153 | `remote_desktop` | `RemoteDesktopStats` | The remote-desktop pipeline breakdown (v1.2 plan **S7**). The QoE block above answers "how did the session *feel*"; this block answers "**where did the time go**". It is a remote-desktop-shaped view of the per-stage instrumentation (`video_stage_*`): the capture / encode / decode means in milliseconds, the frame rates they imply, and the count of frames that were captured but never encoded (the gap between two stages is a frame that was dropped in between). The shape follows the pipeline: `capture`, `encode` and `decode`, each with its own rate, cost and count — so a host compares the halves ("the capture ran at 30 fps and the encoder only at 24") instead of guessing which prefix carries which half. Every value here is **derived** from a measurement that already exists — nothing is timed a second time. The definitions are in `RemoteDesktopStats` above. |
-**153 fields.**
+| 154 | `video_capture_device_changes` | `std::uint64_t` | Device-list changes (v1-device-policy D4): each "removed" or "added" event counts once, cumulative since open(). Distinct from `video_capture_restarts` — the physical world changed this many times, the engine reopened the device that many times. |
+**154 fields.**
 
 ---
 ## 14. Lifecycle diagram

@@ -586,6 +586,16 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  the factory at `open()` time and the resolved instance is
      *  reachable through the `video_capture()` accessor.
      *
+     *  The literal `"auto"` is a *third* meaning added by the default
+     *  device policy (v1-device-policy D3): resolve through the
+     *  platform's default policy instead of naming one specific id.
+     *  Which default is chosen follows D3-1 — `video_content_hint ==
+     *  kText` selects the screen-capture backend, every other hint
+     *  selects the camera backend.  A policy backend that this build
+     *  does not register is **not** an error: the engine warns and
+     *  degrades to "no capture device", unlike an unknown *explicit* id,
+     *  which fires `kVideoCapturePluginMissing`.
+     *
      *  The `IVideoCapture` seam is deliberately *separate* from
      *  `IVideoSource`: capture is a *device* (enumeration, format
      *  negotiation, region selection, dirty-rect metadata), while the
@@ -2667,6 +2677,11 @@ struct NIMRTC_API_STABLE RemoteDesktopStats {
  * Per ADR-015 §Decision 3: v0.x → v1.0.0 may mark DEPRECATED
  * but does not REMOVE any symbol. */
 
+// The read-only device-policy value type, defined at the end of this
+// namespace (v1-device-policy D3).  Forward-declared here because the
+// class's static `default_device_policy()` returns it.
+struct NIMRTC_API_STABLE DevicePolicyInfo;
+
 class NIMRTC_API_STABLE NimRTCEngine {
 public:
     // STABLE: the four fundamental engine lifecycle entry points; every
@@ -2678,6 +2693,17 @@ public:
 
     NIMRTC_API_STABLE NimRTCEngine(const NimRTCEngine&)            = delete;
     NIMRTC_API_STABLE NimRTCEngine& operator=(const NimRTCEngine&) = delete;
+
+    /** The current platform's default device policy (read-only).
+     *
+     *  A host that wants to know what `video_capture_name = "auto"`
+     *  would resolve to reads this.  The four strings name the default
+     *  screen-capture backend, camera backend and the (reserved, empty
+     *  until D1) audio capture / playback backends for the current
+     *  platform.  See `DevicePolicyInfo` at the end of this header.
+     *
+     *  @note v1-device-policy D3.  Always available; never throws. */
+    static NIMRTC_API_STABLE DevicePolicyInfo default_device_policy() noexcept;
 
     // Lifecycle -----------------------------------------------------------
     //
@@ -4527,6 +4553,9 @@ public:
         std::uint64_t video_capture_restarts    = 0;  // times the device was reopened
         std::uint64_t video_capture_format_changes = 0;  // negotiated format changed
         std::uint64_t video_capture_bytes_copied = 0;  // CPU<->GPU bytes (0 = zero-copy)
+        // v1-device-policy D4: device-list changes (each "removed" or
+        // "added" event counts once, cumulative since open()).
+        std::uint64_t video_capture_device_changes = 0;
         // ---- Codec telemetry (remote-desktop plan B15, additive) ---------
         //
         // The numbers that make a live session *explainable*: which
@@ -5892,22 +5921,48 @@ private:
     void wire_capture_gpu_callback() noexcept;
 
     /**
-     * @brief Reopen the capture device after it reported an error.
+     * @brief Drive the capture-device reconnect backoff state machine
+     *        (v1-device-policy D4).
      *
-     * A device that is *lost* — a display that was unplugged, a portal
-     * that was revoked, a compositor that restarted — fails on the
-     * producer side, so the queue simply stays empty and the pump
-     * looks like a device that never delivers anything.  The device's
-     * own error counter is what tells the two apart.
+     * A device that is *lost* — a display that was unplugged, a camera
+     * that was disconnected, a portal that was revoked — fails on the
+     * producer side, so the queue simply stays empty and the pump looks
+     * like a device that never delivers anything.  The device's own
+     * error counter (or a device-list change detected by
+     * `poll_capture_device_changes()`) is what tells the two apart.
      *
-     * The device is reopened **once**: a transient loss does not end
-     * the session, and a device that cannot be reopened is reported
-     * through the error callback.
+     * The retry is **bounded**: the device is reopened with an
+     * exponential backoff (100 ms → 5 s ceiling, at most 20 attempts)
+     * instead of being reopened once or retried every tick.  A transient
+     * loss does not end the session; a device that cannot be recovered
+     * within the bound is reported through the error callback
+     * (`kVideoCaptureOpenFailed`) and the capture pump stops.
      *
-     * A no-op when there is no capture device, or when the device has
-     * not reported a new error.
+     * A no-op when there is no capture device, when the device is in
+     * `kIdle`, or when the backoff window has not elapsed.
      */
     void recover_capture_device() noexcept;
+
+    /**
+     * @brief Detect capture-device-list changes (v1-device-policy D4).
+     *
+     * Two routes, tried in order:
+     *  - Route A: the device implements `plugins::ICaptureDeviceEventSource`
+     *    (probed with `dynamic_cast`) — take the structured change events
+     *    it reports since the last poll.
+     *  - Route B: poll `IVideoCapture::enumerate_devices()` and diff the
+     *    device-id set against the previous snapshot.
+     *
+     * Polling is throttled (500 ms) because enumeration is not cheap on
+     * some backends (V4L2 ioctls, Media Foundation COM enumeration).
+     * Each removed/added event increments the cumulative
+     * `video_capture_device_changes` counter; a *removed* event also
+     * sends the reconnect state machine to `kBackoff`.
+     *
+     * A no-op when there is no capture device or the poll interval has
+     * not elapsed.
+     */
+    void poll_capture_device_changes() noexcept;
 
     /**
      * @brief Publish the capture device's own counters (plan A11).
@@ -6366,6 +6421,29 @@ private:
      *          etc.).  On failure, partial state is rolled back enough to
      *          leave the engine re-callable. */
     uint32_t init_modules_once() noexcept;
+};
+
+/**
+ * @brief The current platform's default device policy (read-only).
+ *
+ * A value type carrying the four default backend plugin ids the engine
+ * would resolve for `EngineConfig::video_capture_name = "auto"`
+ * (v1-device-policy D3).  A host that wants to print or reason about the
+ * defaults reads this through `NimRTCEngine::default_device_policy()`.
+ *
+ * An empty string means "no default on this platform".  The audio fields
+ * are **reserved**: the engine has no audio-device layer yet (D1), so
+ * they are always empty until D1 lands.
+ */
+struct NIMRTC_API_STABLE DevicePolicyInfo {
+    /** Default screen-capture backend plugin id. */
+    std::string screen_capture_backend;
+    /** Default camera backend plugin id. */
+    std::string camera_capture_backend;
+    /** Default audio-capture device plugin id (reserved, empty until D1). */
+    std::string audio_capture_backend;
+    /** Default audio-playback device plugin id (reserved, empty until D1). */
+    std::string audio_playback_backend;
 };
 
 } // namespace nimrtc::engine

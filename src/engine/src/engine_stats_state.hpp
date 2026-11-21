@@ -148,6 +148,9 @@ namespace nimrtc::engine::detail {
     X(video_capture_restarts, core::StatSemantics::kCumulative)                      \
     X(video_capture_format_changes, core::StatSemantics::kCumulative)                \
     X(video_capture_bytes_copied, core::StatSemantics::kCumulative)                  \
+    /* v1-device-policy D4: device-list changes (each removed/added
+       event counts once).  Cumulative since open(). */                              \
+    X(video_capture_device_changes, core::StatSemantics::kCumulative)                \
     /* ---- The codec ---- */                                                        \
     X(video_codec_bitrate_bps, core::StatSemantics::kGauge)                          \
     X(video_codec_actual_bps, core::StatSemantics::kGauge)                           \

@@ -25,6 +25,7 @@
 // R1 (v1.1): core TU of the five-way engine.cpp split.
 // Behaviour unchanged; see engine_impl.hpp.
 #include "engine_impl.hpp"
+#include "engine_device_policy.hpp"
 
 #include <mutex>
 
@@ -882,6 +883,14 @@ void NimRTCEngine::default_on_error(uint32_t err, std::string_view msg) noexcept
             std::snprintf(hex, sizeof(hex), "%04X", static_cast<unsigned>(err));
             return std::string(hex) + ": " + std::string(msg);
         })());
+}
+
+DevicePolicyInfo NimRTCEngine::default_device_policy() noexcept {
+    const detail::DevicePolicy p = detail::default_device_policy();
+    return {.screen_capture_backend = p.screen_capture_backend,
+            .camera_capture_backend = p.camera_capture_backend,
+            .audio_capture_backend = p.audio_capture_backend,
+            .audio_playback_backend = p.audio_playback_backend};
 }
 
 

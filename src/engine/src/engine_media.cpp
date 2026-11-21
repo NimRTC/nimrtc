@@ -7,6 +7,9 @@
  */
 #include "engine_impl.hpp"
 
+// v1-device-policy D3: the default device policy ("auto" resolution).
+#include "engine_device_policy.hpp"
+
 // v1.2.0 (video plan F8): the per-stream share rule of the session
 // bandwidth budget.  The audio path is the first consumer — the audio
 // is the session's *reserved* stream.
@@ -555,26 +558,52 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             capture_cfg.format.zero_copy = true;
         }
 
-        (void)pal::make_plugin<&pal::resolve_video_capture>(
-            config_.video_capture_name,
-            video_capture_,
-            std::move(capture_cfg),
-            {.err_open_failed = core::kVideoCaptureOpenFailed,
-             .err_missing = core::kVideoCapturePluginMissing,
-             .open_fail_mode = pal::PluginFailureMode::Error,
-             .missing_mode = pal::PluginFailureMode::Error,
-             .on_error = on_error_,
-             // The capture device knows *why* it refused -- another
-             // program holds the desktop-duplication slot, the display
-             // does not support duplication, the consent prompt was
-             // declined -- and that reason is what the operator can act
-             // on.  It is read while the device is still alive.
-             .open_failure_detail =
-                 [](const void* plugin) -> std::string {
-                     if (plugin == nullptr) return {};
-                     return static_cast<const plugins::IVideoCapture*>(plugin)
-                         ->last_error_message();
-                 }});
+        // "auto" (v1-device-policy D3) resolves through the platform's
+        // default policy instead of naming one id.  D3-1: kText -> screen
+        // backend, every other hint (incl. kUnspecified) -> camera.  A
+        // policy backend that this build does not register is NOT an
+        // error — it degrades to "no capture device" (warn), unlike an
+        // unknown *explicit* id below, which fires
+        // kVideoCapturePluginMissing.
+        std::string resolved = config_.video_capture_name;
+        if (resolved == "auto") {
+            const detail::DevicePolicy policy = detail::default_device_policy();
+            const bool want_camera =
+                config_.video_content_hint != plugins::ContentHint::kText;
+            resolved = detail::resolve_auto_capture_backend(
+                policy, want_camera,
+                [](std::string_view id) noexcept {
+                    return pal::resolve_video_capture(id) != nullptr;
+                });
+            if (resolved.empty()) {
+                core::log::Logger::instance().warn(
+                    "engine: video_capture_name=\"auto\" did not resolve "
+                    "to a registered capture backend on this platform; "
+                    "continuing without a capture device");
+            }
+        }
+        if (!resolved.empty()) {
+            (void)pal::make_plugin<&pal::resolve_video_capture>(
+                resolved,
+                video_capture_,
+                std::move(capture_cfg),
+                {.err_open_failed = core::kVideoCaptureOpenFailed,
+                 .err_missing = core::kVideoCapturePluginMissing,
+                 .open_fail_mode = pal::PluginFailureMode::Error,
+                 .missing_mode = pal::PluginFailureMode::Error,
+                 .on_error = on_error_,
+                 // The capture device knows *why* it refused -- another
+                 // program holds the desktop-duplication slot, the display
+                 // does not support duplication, the consent prompt was
+                 // declined -- and that reason is what the operator can act
+                 // on.  It is read while the device is still alive.
+                 .open_failure_detail =
+                     [](const void* plugin) -> std::string {
+                         if (plugin == nullptr) return {};
+                         return static_cast<const plugins::IVideoCapture*>(plugin)
+                             ->last_error_message();
+                     }});
+        }
     }
 
 
@@ -3350,6 +3379,8 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_capture_restarts       = impl_->video_state.video_capture_restarts;
     out.video_capture_format_changes = impl_->video_state.video_capture_format_changes;
     out.video_capture_bytes_copied   = impl_->video_state.video_capture_bytes_copied;
+    // v1-device-policy D4: device-list changes, cumulative.
+    out.video_capture_device_changes = impl_->video_state.video_capture_device_changes;
 
     // ---- Codec telemetry (remote-desktop plan B15) ------------------------
     //

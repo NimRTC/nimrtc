@@ -87,6 +87,12 @@ add_library(nimrtc_engine STATIC
     # report's age live in one private collaborator, so the engine's
     # receive-side feedback has ONE visible owner.
     src/engine_feedback_guard.cpp
+    # v1-device-policy D3: the per-platform default device policy.  The
+    # platform backend table that used to live in the remote-desktop
+    # example now lives here, in the engine core (private TU — the table
+    # is a list of plugin ids, which the public engine header must not
+    # grow).
+    src/engine_device_policy.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and
@@ -377,3 +383,12 @@ target_include_directories(nimrtc_engine
         ${CMAKE_BINARY_DIR}/include)
 
 add_library(nimrtc::engine ALIAS nimrtc_engine)
+
+# v1-device-policy (D3 / D4): the engine's own deterministic tests — the
+# device-policy resolution rules and the capture-reconnect backoff machine
+# are engine-private, so their tests live inside the engine rather than in
+# the top-level tests/ directory.
+if(NIMRTC_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    enable_testing()
+    add_subdirectory(tests)
+endif()

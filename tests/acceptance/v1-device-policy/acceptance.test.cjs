@@ -484,6 +484,11 @@ test('写集边界：本片改动仅限写集范围；验证方式：改动清�
         'docs/api/public_headers.manifest',
         'tests/acceptance/v1-device-policy',
         'specs/slices/v1-device-policy.md',
+        // 公开头基线：新增 capture_device_events.hpp 让公开头数量
+        // 196 -> 197，kBaselineHeaderCount 必须跟着 bump（ADR-015）。
+        // 规格「范围」最初漏了这个文件 —— agent 在实现期越界被拦，
+        // 人审后扩了写集，验收清单随之同步。
+        'tests/test_api_classification.cpp',
         // —— 会话前已存在的子模块脏状态 ——
         'src/third_party/googletest',
         'src/third_party/libopus/src',

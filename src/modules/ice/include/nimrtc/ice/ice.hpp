@@ -90,6 +90,7 @@ struct NIMRTC_API_STABLE Candidate {
     std::uint16_t port = 0;
     std::string   related_address;
     std::uint16_t related_port = 0;
+    std::string   tcptype;             // "active" / "passive" / "so"; empty for UDP
 
     /** SDP attribute line (without leading "a="), e.g.
      *  "candidate:1 1 UDP 2113929471 192.0.2.1 5000 typ host". */

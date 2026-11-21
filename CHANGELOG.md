@@ -9,6 +9,14 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.3.0`.
 
+- **ICE-over-TCP (RFC 6544) — the TCP candidate shape (`slice v2-ice`).**
+  NimRTC now gathers host TCP candidates (`tcptype active` / `passive`)
+  on top of the UDP-only libjuice ICE layer, and its SDP serialisation
+  emits the full `a=candidate:… tcp <pri> <host> <port> typ host tcptype`
+  line.  This adds one public header (`ice/tcp_candidate.hpp`), so the
+  ADR-015 baseline is bumped 197 → 198 and the frozen manifest grows by
+  that one path — an explicit, reviewed bump, not a silent drift.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

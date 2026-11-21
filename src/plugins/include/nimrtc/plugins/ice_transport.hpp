@@ -161,10 +161,7 @@ struct NIMRTC_API_STABLE IceCandidate {
     /** The candidate's port. */
     std::uint16_t port = 0;
 
-    /** The candidate's transport protocol, lower-cased: "udp" or "tcp".
-     *
-     *  ICE-over-TCP (RFC 6544) is not implemented yet (plan C2), so this
-     *  is "udp" for every pair a v1.2.0 engine can select. */
+    /** The candidate's transport protocol, lower-cased: "udp" or "tcp". */
     std::string protocol;
 
     /** The candidate's type, lower-cased: "host", "srflx", "prflx" or
@@ -174,6 +171,11 @@ struct NIMRTC_API_STABLE IceCandidate {
      *  single most useful thing a host can learn from this field: it
      *  says the path is not a direct one. */
     std::string type;
+
+    /** For a TCP candidate, the connection-role half (RFC 6544 §4.1):
+     *  "active", "passive" or "so".  Empty for UDP candidates, so a host
+     *  can test `!tcptype.empty()` to learn the pair runs over TCP. */
+    std::string tcptype;
 };
 
 /** The candidate pair the agent selected (RFC 8445 §5.1.2).

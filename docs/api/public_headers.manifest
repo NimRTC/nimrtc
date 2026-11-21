@@ -9,7 +9,7 @@
 #
 # Regenerate with: python scripts/check_api_manifest.py --write
 #
-# count: 197
+# count: 198
 
 src/core/include/nimrtc/core/api_version.hpp
 src/core/include/nimrtc/core/bytes.hpp
@@ -63,6 +63,7 @@ src/modules/h265/include/nimrtc/h265/codec_plugin.hpp
 src/modules/h265/include/nimrtc/h265/decoder.hpp
 src/modules/h265/include/nimrtc/h265/hw_backends.hpp
 src/modules/ice/include/nimrtc/ice/ice.hpp
+src/modules/ice/include/nimrtc/ice/tcp_candidate.hpp
 src/modules/jb/include/nimrtc/jb/jb_plugin.hpp
 src/modules/jb/include/nimrtc/jb/jitter_buffer.hpp
 src/modules/jb_strategy/include/nimrtc/jb_strategy/adaptive_delay.hpp

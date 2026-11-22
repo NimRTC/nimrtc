@@ -93,6 +93,10 @@ add_library(nimrtc_engine STATIC
     # is a list of plugin ids, which the public engine header must not
     # grow).
     src/engine_device_policy.cpp
+    # v1.4 (v3-n4-d6, D6): the connectivity profile.  A private TU — the
+    # profile's policy defaults are engine-internal knowledge that must
+    # not leak into the public engine header (Layout Invariant 4).
+    src/engine_connectivity_profile.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and

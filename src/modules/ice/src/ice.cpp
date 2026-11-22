@@ -52,12 +52,32 @@ namespace {
 
 std::atomic<bool> g_log_hooked{false};
 
+// Process-wide latch: a configured TURN server rejected the credentials
+// during some gathering round.  libjuice exposes the rejection *only*
+// through its log handler (agent.c `agent_process_turn_allocate`:
+// "TURN authentication failed" once the realm is known), so the fact is
+// captured here and each IceTransport clears it when it starts a fresh
+// gathering round — see `turn_credentials_rejected()`.  With several
+// transports in one process the latch reports the *latest* rejection,
+// which is exactly what the sequential acceptance scenarios need.
+std::atomic<bool> g_turn_auth_rejected{false};
+
 void hook_libjuice_logging_once() noexcept {
     if (g_log_hooked.exchange(true)) return;
 
     juice_set_log_level(JUICE_LOG_LEVEL_VERBOSE);
 
     juice_set_log_handler([](juice_log_level_t level, const char* message) {
+        // The one failure libjuice has no public callback for: a TURN
+        // server rejecting the credentials.  agent.c logs "TURN
+        // authentication failed" (after receiving a 401/403 with a known
+        // realm) before failing the allocation entry — see
+        // `turn_credentials_rejected()`.
+        if (level == JUICE_LOG_LEVEL_ERROR && message != nullptr &&
+            std::strstr(message, "TURN authentication failed") != nullptr) {
+            g_turn_auth_rejected.store(true, std::memory_order_release);
+        }
+
         auto& logger = core::log::Logger::instance();
         switch (level) {
             case JUICE_LOG_LEVEL_ERROR:
@@ -346,6 +366,19 @@ struct IceTransport::Impl {
     std::string                          srflx_addr;
     std::uint16_t                        srflx_port = 0;
 
+    // ---- Connectivity diagnostics (v1.4 plan Track N / N4) ----------------
+    //
+    // The gathering phase is derived from `agent` and `gathering_done`
+    // (above).  The three TURN facts are recorded here because libjuice
+    // exposes none of them through a public callback: the relayed-candidate
+    // attribution uses the configured-server order (agent.h has no
+    // server identity on `agent_add_local_relayed_candidate`), and a
+    // credentials rejection is only observable through the module's log
+    // hook (the process-wide `g_turn_auth_rejected` latch).
+    bool                                 unsupported_turn_transport_ = false;
+    unsigned                             relay_candidates_seen_ = 0;
+    std::optional<TurnTransport>         turn_transport_used_;
+
     plugins::IceState                             state = plugins::IceState::Disconnected;
     std::deque<Packet>                   rx_queue;
     plugins::RecvCallback                recv_cb_;     // renamed to avoid collision with static on_recv
@@ -545,6 +578,20 @@ struct IceTransport::Impl {
                 } else {
                     patch_related_address(line, self->srflx_addr, self->srflx_port);
                 }
+                // Attribute the relayed candidate to its configured TURN
+                // server.  libjuice reports relayed candidates in the order
+                // the servers produced allocations, which is the config
+                // order, so the k-th relayed candidate comes from the k-th
+                // configured server.  With a single configured server —
+                // every acceptance scenario — the attribution is exact.
+                if (!self->config.turn_servers.empty()) {
+                    const std::size_t idx =
+                        std::min<std::size_t>(self->relay_candidates_seen_,
+                                              self->config.turn_servers.size() - 1);
+                    self->turn_transport_used_ =
+                        self->config.turn_servers[idx].transport;
+                    ++self->relay_candidates_seen_;
+                }
                 break;
 
             default:
@@ -725,6 +772,11 @@ struct IceTransport::Impl {
             std::lock_guard<std::mutex> lk(mu);
             local_candidates.clear();
             gathering_done = false;
+            // A fresh gathering round starts with the credentials latch
+            // and the TURN facts cleared (same as open()).
+            g_turn_auth_rejected.store(false, std::memory_order_release);
+            turn_transport_used_.reset();
+            relay_candidates_seen_ = 0;
             state = plugins::IceState::Disconnected;
             selected_local_str.clear();
             selected_remote_str.clear();
@@ -1016,6 +1068,13 @@ void IceTransport::add_turn_server(const TurnServer& server) noexcept {
     // else, so say so instead.  Both TURN over TCP (RFC 8656 section 12)
     // and TURN over TLS (RFC 6062) are implemented.
     if (!turn_transport_supported(server.transport)) {
+        {
+            std::lock_guard<std::mutex> lk(impl_->mu);
+            // Remember the unsupported transport: the allocation to this
+            // server will fail, and the N4 diagnostics surface it as
+            // "transport-unsupported" instead of a mysterious no-relay.
+            impl_->unsupported_turn_transport_ = true;
+        }
         core::log::Logger::instance().warn(
             std::string("ice: TURN transport ") +
             (server.transport == TurnTransport::Tls ? "TLS" : "TCP") +
@@ -1090,6 +1149,37 @@ IceConfig::Mode IceTransport::resolved_mode() const noexcept {
     return resolve_mode(impl_->config);
 }
 
+// ---------------------------------------------------------------------------
+// Connectivity diagnostics (v1.4 plan Track N / N4)
+// ---------------------------------------------------------------------------
+
+GatheringState IceTransport::gathering_state() const noexcept {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    // No agent means gathering has not started (the transport is not
+    // open).  Otherwise the module's own `gathering_done` flag — set by
+    // libjuice's gathering-done callback — is the source of the phase.
+    if (impl_->agent == nullptr) return GatheringState::New;
+    return impl_->gathering_done ? GatheringState::Complete
+                                 : GatheringState::Gathering;
+}
+
+std::optional<TurnTransport> IceTransport::turn_transport_used() const noexcept {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->turn_transport_used_;
+}
+
+bool IceTransport::has_unsupported_turn_transport() const noexcept {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->unsupported_turn_transport_;
+}
+
+bool IceTransport::turn_credentials_rejected() const noexcept {
+    // The process-wide latch is cleared by open()/restart() when a fresh
+    // gathering round starts, so this answers "did a configured TURN
+    // server reject our credentials during the current gathering round?".
+    return g_turn_auth_rejected.load(std::memory_order_acquire);
+}
+
 void IceTransport::set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept {
     impl_->config.local_port_range_begin = begin;
     impl_->config.local_port_range_end   = end;
@@ -1119,6 +1209,16 @@ plugins::Status IceTransport::open() noexcept {
         return plugins::kOk;   // already open
     }
     impl_->restart_count_ = 0;
+    {
+        // A fresh gathering round starts from a clean slate: the
+        // process-wide credentials latch and the per-transport TURN facts
+        // belong to the session being opened, not the previous one.
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        g_turn_auth_rejected.store(false, std::memory_order_release);
+        impl_->gathering_done = false;
+        impl_->turn_transport_used_.reset();
+        impl_->relay_candidates_seen_ = 0;
+    }
     if (!impl_->create_agent()) {
         return plugins::kErrInternal;
     }
@@ -1150,6 +1250,13 @@ void IceTransport::close() noexcept {
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->rx_queue.clear();
     impl_->state = plugins::IceState::Disconnected;
+
+    // The diagnostics state belongs to the session being closed.  The
+    // gathering phase resets to New (agent is gone above), and the TURN
+    // facts start over on the next open().
+    impl_->gathering_done = false;
+    impl_->turn_transport_used_.reset();
+    impl_->relay_candidates_seen_ = 0;
 
     // The TCP fallback (RFC 6544) is torn down with the UDP agent: its
     // sockets are retired and its check thread joined.
@@ -1684,6 +1791,29 @@ std::string_view IceTransportFactory::display_name() const noexcept {
 
 plugins::IICETransport* IceTransportFactory::create_ice() const {
     return new IceTransport(default_config_);
+}
+
+// ---------------------------------------------------------------------------
+// Connectivity diagnostics — the module facts behind the N4 statistics.
+//
+// The engine holds its ICE transport through the `plugins::IICETransport`
+// seam and never casts it at the engine layer (a documented invariant in
+// engine_impl.hpp).  The four facts below are concrete-module knowledge
+// the seam does not carry, so this free function — the *only* engine-facing
+// downcast — resolves them.  A foreign `IICETransport` implementation
+// reports nothing rather than guessing.
+// ---------------------------------------------------------------------------
+
+IceConnectivityDiagnostics
+connectivity_diagnostics_of(const plugins::IICETransport& t) noexcept {
+    IceConnectivityDiagnostics out;
+    const auto* ice = dynamic_cast<const IceTransport*>(&t);
+    if (ice == nullptr) return out;   // not one of ours — no module facts
+    out.gathering                 = ice->gathering_state();
+    out.turn_transport_used       = ice->turn_transport_used();
+    out.turn_transport_unsupported = ice->has_unsupported_turn_transport();
+    out.turn_credentials_rejected = ice->turn_credentials_rejected();
+    return out;
 }
 
 // ---------------------------------------------------------------------------

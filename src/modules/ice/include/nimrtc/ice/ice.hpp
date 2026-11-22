@@ -76,6 +76,23 @@ enum class NIMRTC_API_STABLE CandidateType : std::uint8_t {
     Relay,
 };
 
+/** The phase of the local candidate gathering (RFC 8445 §5.1).
+ *
+ *  - `New` — gathering has not started (the transport is not open).
+ *  - `Gathering` — gathering is in progress.
+ *  - `Complete` — gathering has finished.
+ *
+ *  This is the state of the *gathering action* alone, deliberately
+ *  independent of `IceState` (the agent's state machine): an agent can
+ *  be Connected while gathering is still running (a late server-reflexive
+ *  candidate is still being sought), and `Gathering` here does not mean
+ *  the agent is in its Gathering state. */
+enum class NIMRTC_API_STABLE GatheringState : std::uint8_t {
+    New,
+    Gathering,
+    Complete,
+};
+
 // -----------------------------------------------------------------------------
 // Candidate — parsed SDP-form candidate info.
 // -----------------------------------------------------------------------------
@@ -510,6 +527,45 @@ public:
     /** Trigger a fresh gathering round. open() calls this automatically. */
     plugins::Status gather_candidates() noexcept;
 
+    // ---- Connectivity diagnostics (v1.4 plan Track N / N4) ----------------
+
+    /** The phase of the local candidate gathering.  Independent of
+     *  `state()`: an agent can be Connected while gathering is still
+     *  running (a late server-reflexive candidate is still being
+     *  sought), and `Gathering` here does not mean the agent is in its
+     *  Gathering state. */
+    GatheringState gathering_state() const noexcept;
+
+    /** The transport of the configured TURN server the relayed path was
+     *  actually allocated through, or nullopt when no relay candidate was
+     *  gathered (the session is not relayed).
+     *
+     *  Attribution: each relayed candidate is assigned to the configured
+     *  TURN server in config order — the k-th relayed candidate libjuice
+     *  reports comes from the k-th server it attempted.  With a single
+     *  configured server (the common case, and every acceptance
+     *  scenario) the attribution is exact; with several it is the order
+     *  in which the servers produced allocations, which is also the
+     *  order they were attempted. */
+    std::optional<TurnTransport> turn_transport_used() const noexcept;
+
+    /** True when the host added a TURN server whose transport this build
+     *  cannot speak.
+     *
+     *  The allocation to that server will fail; the fact is reported
+     *  here (and surfaced as "transport-unsupported") so a diagnosis can
+     *  name the cause instead of guessing at a failed relay. */
+    bool has_unsupported_turn_transport() const noexcept;
+
+    /** True when a configured TURN server rejected the credentials
+     *  during the current gathering round (a 401/403 on the Allocate
+     *  request).
+     *
+     *  libjuice exposes the rejection only through its log handler
+     *  ("TURN authentication failed"), so the fact is captured there and
+     *  cleared when a fresh gathering round starts. */
+    bool turn_credentials_rejected() const noexcept;
+
     // ---- BWE / Scheduler injection (IICETransport override) ---------------
 
     /** @override plugins::IICETransport */
@@ -522,6 +578,37 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// -----------------------------------------------------------------------------
+// Connectivity diagnostics — the module facts behind the N4 statistics.
+//
+// The engine holds its ICE transport through the `plugins::IICETransport`
+// seam and never casts it at the engine layer (a documented invariant:
+// engine_impl.hpp).  The four facts below — the gathering phase and the
+// three TURN facts — are concrete-module knowledge that the seam does not
+// carry, so the module exposes them through one free function that
+// performs the *only* downcast.  For a foreign `IICETransport`
+// implementation the function reports nothing rather than guessing.
+// -----------------------------------------------------------------------------
+
+/** The concrete-module connectivity facts behind the N4 statistics
+ *  surface.  A nullopt gathering phase (or a false flag) means the
+ *  transport is not one of ours — the engine then reports nothing for
+ *  that field instead of inventing a value. */
+struct NIMRTC_API_STABLE IceConnectivityDiagnostics {
+    std::optional<GatheringState> gathering;
+    std::optional<TurnTransport>  turn_transport_used;
+    bool turn_transport_unsupported = false;
+    bool turn_credentials_rejected  = false;
+};
+
+/** The connectivity diagnostics of any `plugins::IICETransport`, resolved
+ *  when it is really an `IceTransport`.
+ *
+ *  This function is where the engine-facing downcast lives: callers never
+ *  `dynamic_cast` the seam themselves. */
+NIMRTC_API_STABLE IceConnectivityDiagnostics
+connectivity_diagnostics_of(const plugins::IICETransport& t) noexcept;
 
 // -----------------------------------------------------------------------------
 // IceTransportFactory — registers an IICETransport under the id "ice".

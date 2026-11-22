@@ -1,6 +1,7 @@
 # engine/tests/CMakeLists.txt
 # =============================================================================
-# The v1-device-policy (D3 / D4) deterministic tests.
+# The v1-device-policy (D3 / D4) and v3-n4-d6 connectivity (N4 / D6)
+# deterministic tests.
 #
 # They live *inside* the engine rather than in the top-level tests/ dir
 # because the two halves they pin are engine-private:
@@ -15,6 +16,12 @@
 # binary needs the same link set: the engine, the software H.264 adapter for
 # the capture pump's encoder, the pipeline's "reference"/"headless" plugins
 # and the datachannel registrar (referenced by the unified registrar table).
+#
+# The connectivity half (`test_engine_connectivity.cpp`) pins the N4
+# projection vocabulary (`TransportStatsProjector`) and the D6 profile
+# resolution (`engine_connectivity_profile.hpp`) — both private engine
+# collaborators — with pure functions, so it needs no network and no
+# plugin backends.
 # =============================================================================
 
 add_executable(test_engine_device_policy
@@ -73,6 +80,50 @@ nimrtc_copy_wolfssl_certs(test_engine_device_policy)
 nimrtc_copy_msquic_dll(test_engine_device_policy)
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_engine_device_policy
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES TIMEOUT 60
+        DISCOVERY_TIMEOUT 10)
+endif()
+
+# -----------------------------------------------------------------------------
+# v3-n4-d6 connectivity (N4 / D6) — pure-function tests of the two private
+# engine collaborators.
+# -----------------------------------------------------------------------------
+add_executable(test_engine_connectivity
+    test_engine_connectivity.cpp
+    )
+
+if(WIN32)
+    target_link_libraries(test_engine_connectivity PRIVATE ws2_32)
+endif()
+
+# The connectivity tests call only the private engine collaborators, so
+# they need no concrete plugin backends — the engine library carries the
+# two TUs (`engine_transport_stats.cpp`, `engine_connectivity_profile.cpp`)
+# whose symbols the tests resolve.
+target_link_libraries(test_engine_connectivity PRIVATE
+    nimrtc::engine
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main)
+
+target_include_directories(test_engine_connectivity PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src"
+    "${CMAKE_SOURCE_DIR}/src/modules/ice/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include")
+
+if(WIN32)
+    target_compile_definitions(test_engine_connectivity PRIVATE _WIN32_WINNT=0x0601)
+endif()
+
+nimrtc_apply_options(test_engine_connectivity LENIENT)
+
+nimrtc_copy_msquic_dll(test_engine_connectivity)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_connectivity
         DISCOVERY_MODE PRE_TEST
         PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 10)

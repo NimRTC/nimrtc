@@ -17,6 +17,23 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ADR-015 baseline is bumped 197 → 198 and the frozen manifest grows by
   that one path — an explicit, reviewed bump, not a silent drift.
 
+- **Connectivity diagnostics (N4) + connectivity profiles (D6) —
+  (`slice v3-n4-d6-connectivity`).**
+  `TransportStats` gains six diagnostic fields: `ice_gathering_state`
+  (`"new"` / `"gathering"` / `"complete"`, independent of the ICE agent
+  state machine), per-type candidate counts (`ice_host_candidates` /
+  `ice_srflx_candidates` / `ice_relay_candidates`, summing to the
+  gathered set), a closed-vocabulary `ice_failure_reason`
+  (`transport-unsupported` → `credentials-rejected` → `no-candidates` →
+  `no-pair` → `checks-failed` → `none`, first match reports first), and
+  `turn_transport_used` (`"udp"` / `"tcp"` / `"tls"`).  Separately,
+  `EngineConfig::connectivity_profile` defaults to `"auto"` — STUN on,
+  TURN/TLS when credentials exist, TCP after UDP — with an explicit
+  host STUN server always winning over the profile's default, and
+  `profiles/connectivity/connectivity-profiles.json` ships as the reviewed template.
+  Fields only — no new public headers — so the ADR-015 baseline stays at
+  198.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

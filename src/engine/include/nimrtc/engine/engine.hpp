@@ -491,6 +491,24 @@ struct NIMRTC_API_STABLE EngineConfig {
     std::string stun_server_host;
     std::uint16_t stun_server_port = 3478;
 
+    /** The connectivity profile: a named set of policy defaults for
+     *  STUN / TURN / TCP fallback (v1.4 plan Track D / D6).
+     *
+     *  Default "auto" — which is *on* (D6-1): STUN gathering is enabled,
+     *  TURN/TLS is preferred when credentials are available, and TCP
+     *  fallback runs after UDP fails.  Recognized names: "auto",
+     *  "conference", "remote-desktop".  An unknown name falls back to
+     *  "auto" — the policy is never the reason a session fails.
+     *
+     *  The profile carries **policy defaults, not seam values**: a key
+     *  the host sets explicitly — the STUN server above, the TURN servers
+     *  added through `add_turn_server()` — always wins over the profile.
+     *  The profile only fills in the keys the host left unset.  The
+     *  templates live in `profiles/connectivity/connectivity-profiles.json` (a
+     *  documentation artifact, **not** on the engine's profile loading
+     *  path and not managed by `profiles/schema/`). */
+    std::string connectivity_profile = "auto";
+
     /** Local UDP port range for ICE. 0 = OS picks.
      *
      *  Leave both at 0 (the default) unless you have a specific reason
@@ -2181,6 +2199,50 @@ struct NIMRTC_API_STABLE TransportStats {
      *  branches on: a relayed path has a different latency profile and
      *  a different failure mode than a direct one. */
     bool relayed = false;
+
+    // ---- Connectivity diagnostics (v1.4 plan Track N / N4) ----------------
+
+    /** The phase of the local candidate gathering, lower-cased: "new",
+     *  "gathering" or "complete".
+     *
+     *  This is the state of the *gathering action* alone and is
+     *  deliberately independent of `ice_state` (the agent's state
+     *  machine): an agent can be "connected" while gathering is still
+     *  running (a late server-reflexive candidate is still being sought),
+     *  and "gathering" here does not mean the agent is in its Gathering
+     *  state.  Empty before the engine has a transport. */
+    std::string ice_gathering_state;
+
+    /** The local host candidates gathered (RFC 8445 §5.1.1.1).
+     *
+     *  Includes TCP candidates (a TCP host candidate is still a host
+     *  candidate, just over a different transport). */
+    std::uint32_t ice_host_candidates = 0;
+
+    /** The local server-reflexive candidates gathered
+     *  (RFC 8445 §5.1.1.2). */
+    std::uint32_t ice_srflx_candidates = 0;
+
+    /** The local relayed candidates gathered (RFC 8445 §5.1.1.3). */
+    std::uint32_t ice_relay_candidates = 0;
+
+    /** Why the session is not connected, from a closed vocabulary:
+     *  "none" / "no-candidates" / "no-pair" / "checks-failed" /
+     *  "credentials-rejected" / "transport-unsupported".
+     *
+     *  The priority order (first match reports first):
+     *  transport-unsupported > credentials-rejected > no-candidates >
+     *  no-pair > checks-failed > none.  "none" means no failure has been
+     *  established — a healthy session is never assigned a fabricated
+     *  reason.  Empty before the engine has a transport. */
+    std::string ice_failure_reason;
+
+    /** The transport the session's TURN relay path uses: "udp", "tcp" or
+     *  "tls".
+     *
+     *  Empty when no relay candidate was gathered (the session is not
+     *  relayed). */
+    std::string turn_transport_used;
 
     /** The round-trip time, in milliseconds, as measured by the peer's
      *  Receiver Reports.

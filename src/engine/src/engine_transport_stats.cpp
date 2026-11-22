@@ -71,6 +71,64 @@ std::string TransportStatsProjector::dtls_state_name(
     return out;
 }
 
+const char* TransportStatsProjector::ice_gathering_state_name(
+    ice::GatheringState state) noexcept {
+    switch (state) {
+        case ice::GatheringState::New:       return "new";
+        case ice::GatheringState::Gathering: return "gathering";
+        case ice::GatheringState::Complete:  return "complete";
+    }
+    return "unknown";
+}
+
+const char* TransportStatsProjector::turn_transport_name(
+    ice::TurnTransport transport) noexcept {
+    switch (transport) {
+        case ice::TurnTransport::Udp: return "udp";
+        case ice::TurnTransport::Tcp: return "tcp";
+        case ice::TurnTransport::Tls: return "tls";
+    }
+    return "";
+}
+
+TransportStatsProjector::CandidateCounts
+TransportStatsProjector::count_candidates(
+    const std::vector<std::string>& lines) noexcept {
+    CandidateCounts out;
+    for (const auto& line : lines) {
+        const auto c = ice::parse_candidate(line);
+        if (!c) continue;
+        switch (c->type) {
+            case ice::CandidateType::Host:  ++out.host;  break;
+            case ice::CandidateType::Srflx: ++out.srflx; break;
+            case ice::CandidateType::Relay: ++out.relay; break;
+            // Prflx is a peer-reflexive *remote* type; it never appears
+            // in the local gathered set, so it is not counted.
+            default: break;
+        }
+    }
+    return out;
+}
+
+std::string TransportStatsProjector::ice_failure_reason(
+    const FailureInputs& in) noexcept {
+    // The spec's priority order: first match reports first.
+    if (in.turn_transport_unsupported) return "transport-unsupported";
+    if (in.turn_credentials_rejected)  return "credentials-rejected";
+    if (in.gathering_complete &&
+        in.counts.host == 0 && in.counts.srflx == 0 && in.counts.relay == 0) {
+        return "no-candidates";
+    }
+    // "no-pair" fires as soon as there are candidates and no pair is
+    // selected (the checks have not nominated one yet).  It outranks
+    // "checks-failed" per the spec's first-match order.
+    if (in.counts.host != 0 || in.counts.srflx != 0 || in.counts.relay != 0) {
+        if (!in.pair_selected) return "no-pair";
+    }
+    if (in.agent_failed) return "checks-failed";
+    return "none";
+}
+
 }  // namespace nimrtc::engine::detail
 
 // ---------------------------------------------------------------------------
@@ -115,8 +173,8 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
     // so a copy in the engine would be a second answer that could
     // disagree with the first.
     if (ice_t_ != nullptr) {
-        out.ice_state = detail::TransportStatsProjector::ice_state_name(
-            ice_t_->state());
+        const plugins::IceState state = ice_t_->state();
+        out.ice_state = detail::TransportStatsProjector::ice_state_name(state);
         out.ice_restart_count = ice_t_->restart_count();
 
         const auto pair = ice_t_->selected_pair();
@@ -132,6 +190,47 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
             out.relayed = (pair->local.type == "relay") ||
                           (pair->remote.type == "relay");
         }
+
+        // ---- Connectivity diagnostics (v1.4 plan Track N / N4) ------------
+        //
+        // The gathering phase and the TURN facts are concrete-module
+        // knowledge the seam does not carry, so they are resolved through
+        // the module's own free function — the only engine-facing
+        // downcast (the engine never casts `ice_t_` itself; a foreign
+        // IICETransport reports nothing for these fields).  The candidate
+        // counts are derived from the same gathered candidates the seam
+        // already exposes.
+        const auto diag = ice::connectivity_diagnostics_of(*ice_t_);
+        const auto counts =
+            detail::TransportStatsProjector::count_candidates(
+                ice_t_->gathered_local_candidates());
+
+        if (diag.gathering) {
+            out.ice_gathering_state =
+                detail::TransportStatsProjector::ice_gathering_state_name(
+                    *diag.gathering);
+        }
+        out.ice_host_candidates  = counts.host;
+        out.ice_srflx_candidates = counts.srflx;
+        out.ice_relay_candidates = counts.relay;
+        if (diag.turn_transport_used) {
+            out.turn_transport_used =
+                detail::TransportStatsProjector::turn_transport_name(
+                    *diag.turn_transport_used);
+        }
+
+        // The failure reason is a pure decision over the facts above, in
+        // the spec's priority order (first match reports first).
+        detail::TransportStatsProjector::FailureInputs fi;
+        fi.gathering_complete = diag.gathering &&
+                                *diag.gathering == ice::GatheringState::Complete;
+        fi.counts = counts;
+        fi.pair_selected = pair.has_value();
+        fi.agent_failed = state == plugins::IceState::Failed;
+        fi.turn_transport_unsupported = diag.turn_transport_unsupported;
+        fi.turn_credentials_rejected = diag.turn_credentials_rejected;
+        out.ice_failure_reason =
+            detail::TransportStatsProjector::ice_failure_reason(fi);
     }
 
     // ---- The round-trip time --------------------------------------------

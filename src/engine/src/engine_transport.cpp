@@ -6,6 +6,7 @@
  * behaviour unchanged. Shares engine_impl.hpp.
  */
 #include "engine_impl.hpp"
+#include "engine_connectivity_profile.hpp"
 
 namespace nimrtc::engine {
 
@@ -599,7 +600,19 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
     // set_bind_address / set_stun_server / set_local_port_range are safe
     // on null-instance ICE returns from RawUdpArqStack (they are no-ops).
     ice_t_->set_bind_address(config_.local_bind_address);
-    ice_t_->set_stun_server(config_.stun_server_host, config_.stun_server_port);
+
+    // The connectivity profile (D6) fills the keys the host left unset:
+    // with `stun: true` (every built-in profile) and no explicit STUN
+    // server, the engine configures its built-in default.  An explicit
+    // host STUN server always wins — the profile carries policy
+    // defaults, not seam values.
+    const auto stun = detail::resolve_stun_server(config_.connectivity_profile,
+                                                  config_.stun_server_host,
+                                                  config_.stun_server_port);
+    if (!stun.host.empty()) {
+        ice_t_->set_stun_server(stun.host, stun.port);
+    }
+
     ice_t_->set_local_port_range(config_.local_port_range_begin,
                                   config_.local_port_range_end);
     // TURN servers are added via NimRTCEngine::add_turn_server() *before*

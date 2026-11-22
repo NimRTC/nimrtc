@@ -38,6 +38,7 @@ add_executable(test_tcp_candidate_test test_tcp_candidate.cpp)
 add_executable(test_tcp_framing_test test_tcp_framing.cpp)
 add_executable(test_tcp_stun_test test_tcp_stun.cpp)
 add_executable(test_ice_tcp_test test_ice_tcp.cpp)
+add_executable(test_connectivity_diagnostics_test test_connectivity_diagnostics.cpp)
 
 # The VS multi-config generator sets LinkLibraryDependencies=false on
 # Application targets, which strips transitive PUBLIC deps from the vcxproj.
@@ -60,6 +61,8 @@ set_target_properties(test_tcp_framing_test PROPERTIES
 set_target_properties(test_tcp_stun_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 set_target_properties(test_ice_tcp_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_connectivity_diagnostics_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
 nimrtc_apply_options(test_ice_test LENIENT)
@@ -88,6 +91,9 @@ nimrtc_link_libjuice(test_tcp_stun_test)
 
 nimrtc_apply_options(test_ice_tcp_test LENIENT)
 nimrtc_link_libjuice(test_ice_tcp_test)
+
+nimrtc_apply_options(test_connectivity_diagnostics_test LENIENT)
+nimrtc_link_libjuice(test_connectivity_diagnostics_test)
 
 target_link_libraries(test_ice_test PRIVATE
     nimrtc::ice
@@ -156,6 +162,16 @@ target_link_libraries(test_ice_tcp_test PRIVATE
     GTest::gtest_main
     GTest::gtest)
 
+# N4 connectivity diagnostics: relay tests stand up the in-tree TURN server
+# (juice_server_create, which is why the vendored libjuice keeps NO_SERVER=OFF),
+# and the gathering tests use the module's gathering-state seam.
+target_link_libraries(test_connectivity_diagnostics_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
 # The framing and STUN tests reach into the module's src/ headers
 # (tcp_framing.hpp, tcp_ice.hpp) that are not part of the public include dir.
 target_include_directories(test_tcp_framing_test PRIVATE
@@ -191,6 +207,10 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 30
         DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_ice_tcp_test
+        PROPERTIES TIMEOUT 120
+        DISCOVERY_TIMEOUT 60)
+    # Relay allocations and the blackhole-STUN windows are slower.
+    gtest_discover_tests(test_connectivity_diagnostics_test
         PROPERTIES TIMEOUT 120
         DISCOVERY_TIMEOUT 60)
 endif()

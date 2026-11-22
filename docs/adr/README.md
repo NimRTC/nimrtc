@@ -46,6 +46,7 @@ Write an ADR when a decision:
 | [ADR-025](ADR-025-sdp-rtp-not-pluggable.md) | SDP / RTP are not pluggable — and the engine's concrete includes are enumerated, not hidden | Phase 4 (v1.2.0) |
 | [ADR-026](ADR-026-scheduler-c-abi.md) | The scheduler's C ABI — a real `extern "C"` surface | Phase 4 (v1.2.0) |
 | [ADR-027](ADR-027-turn-over-tls-libjuice-seam.md) | TURN over TLS — a narrow TLS seam in the vendored libjuice, and no plaintext fallback | v1.4 (N1) |
+| [ADR-028](ADR-028-ice-over-tcp-nimrtc-side.md) | ICE-over-TCP — a NimRTC-side TCP candidate layer, and libjuice stays UDP-only | v1.4 (N2) |
 
 ### Reserved numbers
 

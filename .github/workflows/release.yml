@@ -216,7 +216,7 @@ jobs:
           fi
           echo "Tag '$tag' is an ancestor of main."
 
-      # The seven-day soak evidence, read AT THE TAG.
+      # The soak evidence, read AT THE TAG.
       #
       # This step did not exist: the release was cut with no reading of
       # the soak evidence at all, and the plan's "7-day soak before the
@@ -552,19 +552,30 @@ jobs:
           # `Get-FileHash` as a pipeline command writes a 3-column tabular
           # line (Algorithm/Hash/Path) which is PowerShell-specific and not
           # consumable by `sha256sum -c` on Linux/macOS downstream. Read
-          # the structured object's `.Hash` property instead, lowercase
-          # it, and write the bare hex (no `sha256:` prefix, no path) so
-          # the sidecar matches the `sha256sum -c` "binary" mode that
-          # the Linux/macOS jobs already produce. Detected at v0.14.0
-          # cut: the Windows sidecar was the odd one out and downstream
-          # verification (`sha256sum -c` against the published file)
-          # failed because the first token was the word "Algorithm" not
-          # a hex digest. The v0.14.0 release asset has been manually
-          # replaced with the correct bare-hex sidecar (using the OCI
-          # digest GitHub exposes on the asset object as the source of
-          # truth); this fix prevents the same regression in future cuts.
+          # the structured object's `.Hash` property instead and lowercase
+          # it.  Detected at v0.14.0 cut: the Windows sidecar was the odd
+          # one out and downstream verification (`sha256sum -c` against the
+          # published file) failed because the first token was the word
+          # "Algorithm" not a hex digest.
+          #
+          # The bare hex alone is NOT enough either.  `sha256sum -c` needs
+          # a *checksum line* -- a hex digest, two spaces, and a file name
+          # -- and it rejects a line that carries no name at all ("no
+          # properly formatted SHA256 checksum lines found").  That is
+          # the shape the v1.3.0 cut shipped for Windows, and the README
+          # documents `sha256sum -c` as the way to verify a bundle, so the
+          # command the README prints was the command that failed.  The
+          # name is the BASENAME, without the `build/` prefix the Linux
+          # jobs leave in, so the sidecar works when the file has been
+          # downloaded next to it.
+          #
+          # The line ending must be LF.  `Set-Content` on Windows writes
+          # CRLF, and `sha256sum -c` then reads the `\r` as part of the
+          # file name ("...tar.xz'$'\r': No such file or directory").
+          # `[IO.File]::WriteAllText` with an explicit `\n` avoids it.
           $hash = (Get-FileHash -Algorithm SHA256 $bundle).Hash.ToLower()
-          Set-Content -Path "$bundle.sha256" -Value $hash -NoNewline
+          $leaf = Split-Path -Leaf $bundle
+          [IO.File]::WriteAllText("$bundle.sha256", "$hash  $leaf`n")
           Get-Content "$bundle.sha256"
 
       - name: Upload artefact bundle
@@ -661,7 +672,15 @@ jobs:
             echo "::error::bundle is $size bytes — refusing to publish"
             exit 1
           fi
+          # `sha256sum` writes the path it was given, so the sidecar would
+          # say "build/nimrtc-...tar.xz" -- and `sha256sum -c` then looks
+          # for a file *under a `build/` directory that does not exist*
+          # once the bundle has been downloaded next to its sidecar
+          # ("No such file or directory").  Strip the directory prefix:
+          # the sidecar must name the file the way the reader has it.
+          # The same is true of the macOS job's `shasum` below.
           sha256sum "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz" \
+            | awk '{print $1"  "substr($2,index($2,"/")+1)}' \
             > "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz.sha256"
 
       - name: Upload artefact bundle
@@ -775,7 +794,10 @@ jobs:
             echo "::error::bundle is $size bytes — refusing to publish"
             exit 1
           fi
+          # Strip the `build/` prefix -- see the linux-gcc job above for
+          # why `sha256sum -c` needs the basename.
           sha256sum "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz" \
+            | awk '{print $1"  "substr($2,index($2,"/")+1)}' \
             > "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz.sha256"
 
       - name: Upload artefact bundle
@@ -982,6 +1004,35 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Verify the `.sha256` sidecars are `sha256sum -c` compatible
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The README tells a reader to verify a bundle with
+          # `sha256sum -c <file>.sha256`, so every published sidecar has
+          # to be a checksum line: a digest, whitespace, and the name of
+          # the file the digest belongs to.  The v1.3.0 cut shipped three
+          # sidecars that were not: the Windows one was the bare hex with
+          # no name at all ("no properly formatted SHA256 checksum lines
+          # found") and the two Linux ones said `build/<file>`, so
+          # `sha256sum -c` looked for a file under a directory that does
+          # not exist next to a downloaded bundle ("No such file or
+          # directory").  The digest was always right; the *line* was
+          # not, and the release log could not see that.
+          #
+          # This gate is the format check.  The digest itself is checked
+          # by `sha256sum -c` below, which verifies each sidecar against
+          # the bundle it sits next to.
+          python3 tools/check_sha256_sidecars.py dist/
+
+          # And now the real thing: run the command the README prints.
+          for sidecar in dist/*.sha256; do
+            [[ -f "$sidecar" ]] || continue
+            bundle="${sidecar%.sha256}"
+            [[ -f "$bundle" ]] || continue
+            ( cd dist && sha256sum -c "$(basename "$sidecar")" )
+          done
 
       - name: Sign each artefact (detached GPG signature)
         if: needs.preflight.outputs.configured == 'true'

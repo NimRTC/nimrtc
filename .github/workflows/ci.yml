@@ -702,16 +702,25 @@ jobs:
         run: python tools/check_bundle_apm.py --self-test
 
       # The soak collector's whole value is in its evidence, so its
-      # streak semantics are pinned by a self-test: seven calendar-
-      # consecutive green days are a streak of seven, a gap or a failing
-      # or an inconclusive day ends it, a FAIL hidden behind a later
-      # PASS does not make the day green, and a day measured on a tree
-      # other than the candidate branch is not green at all.  Without
-      # this running on every push, a change to the gate could make the
-      # window overstate itself -- and the window is what the release
-      # tag waits on.
+      # streak semantics are pinned by a self-test: five calendar-
+      # consecutive green days are a streak of five, a gap or a failing
+      # or an inconclusive day ends it, a FAIL behind a later PASS does
+      # not make the day red, a day whose every run failed is not green,
+      # and a day measured on a tree other than the candidate branch is
+      # not green at all.  Without this running on every push, a change
+      # to the gate could make the window overstate itself -- and the
+      # window is what the release tag waits on.
       - name: Self-test the soak evidence collector
         run: python tools/run_soak.py --self-test
+
+      # The published `.sha256` sidecar is what a reader runs
+      # `sha256sum -c` against, and at the v1.3.0 cut three of the four
+      # were not in the shape that command accepts.  The gate's rules --
+      # a digest, whitespace, and the bare name of the file -- are
+      # pinned here so a future edit to the sidecar writer cannot quietly
+      # change what the guard accepts.
+      - name: Self-test the sha256 sidecar guard
+        run: python tools/check_sha256_sidecars.py --self-test
 
       # The fetcher is how the CI half of the window is read back.  It
       # must not lose a record (a day measured twice keeps both sets)

@@ -65,7 +65,7 @@ struct NIMRTC_API_STABLE TcpCandidate {
     std::string to_sdp() const;
 };
 
-inline std::uint32_t TcpCandidate::priority() const noexcept {
+inline NIMRTC_API_STABLE std::uint32_t TcpCandidate::priority() const noexcept {
     // RFC 6544 §4.3 prescribes the type preferences: 110 for active,
     // 100 for passive.  RFC 8445 §5.1.2.1 computes the priority as
     //   (2^24)*type_preference + (2^8)*local_preference + component_id.

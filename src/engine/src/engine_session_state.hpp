@@ -38,6 +38,8 @@
 #include <nimrtc/sdp/session_description.hpp>
 #include <nimrtc/web_transport/web_transport_session_iface.hpp>
 
+#include "engine_ice_recovery.hpp"
+
 namespace nimrtc::engine::detail {
 
 /** The session / transport-plane state. */
@@ -118,6 +120,18 @@ struct SessionState {
     plugins::IceState last_ice_state = plugins::IceState::Disconnected;
     bool ice_connected_once = false;
     bool ice_rehandshake_armed = false;
+
+    // ---- ICE recovery -> automatic restart (v1.4 N3, additive) ----------
+    // The engine-driven reconnection policy (ADR-031).  The machine is
+    // owned here and driven by poll_ice_recovery() on the tick thread — an
+    // independent state machine that shares only the `ice_connected_once`
+    // gate with the flap detector above.  `ice_recovery_last_state` is this
+    // machine's own observation register, so it never disturbs
+    // `last_ice_state` (the flap detector's).
+    IceRecovery ice_recovery;
+    IceRecoveryPolicy ice_recovery_policy = IceRecoveryPolicy::kAuto;
+    plugins::IceState ice_recovery_last_state = plugins::IceState::Disconnected;
+    bool ice_recovery_terminal_reported = false;
 
     // ---- DataChannel DTLS-transport cookie (v1.x follow-up) ------------
     //

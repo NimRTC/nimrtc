@@ -32,6 +32,8 @@ nimrtc::engine::NimRTCEngine
 │   ├── set_on_video_frame(cb)
 │   ├── set_on_error(cb)
 │   ├── set_on_state_change(cb)
+│   ├── set_on_ice_restart(cb)        -- peer restarted ICE, host re-answers
+│   ├── set_on_ice_recovery(cb)       -- v1.4 N3: auto/manual restart reports
 │   ├── set_on_data_message(cb)
 │   ├── set_on_data_message_ex(cb)    -- v1.2.0: adds the channel identity
 │   └── set_on_data_state(cb)
@@ -44,7 +46,12 @@ nimrtc::engine::NimRTCEngine
 │   ├── ice_state_string() → cstring
 │   ├── local_ufrag() / local_password()
 │   ├── add_turn_server(...)
-│   └── set_remote_ice(string) → bool
+│   ├── set_remote_ice(string) → bool
+│   ├── restart_ice() → bool             -- v1.4 N3: budgeted manual restart
+│   ├── ice_restart_count() → uint32
+│   ├── set_on_ice_restart(cb)           -- peer restarted ICE
+│   ├── set_on_ice_recovery(cb)          -- v1.4 N3: restart reports
+│   └── reset_ice_recovery_budget()      -- v1.4 N3: top up the restart budget
 │
 ├── DTLS / SRTP inspection
 │   ├── dtls_state() → DtlsState
@@ -189,6 +196,8 @@ methods are written defensively.
 | `on_video_frame` | A decoded H.264 NAL is available on the receive path (pre-render) | `void(const uint8_t* nal, size_t len, bool keyframe)` |
 | `on_error` | Any subsystem error fires (transport, DTLS, audio3A, codec, scheduler) | `void(uint32_t err, std::string_view msg)` |
 | `on_state_change` | Engine state transitions (e.g. ICE → connected) | `void(const char* state)` |
+| `on_ice_restart` | The *peer* restarted ICE (RFC 8445 §9.1.1.1); the host must answer with a fresh offer | `void()` |
+| `on_ice_recovery` | An ICE restart the engine initiated (v1.4 N3, ADR-031) — every success *and* every terminal report | `void(const engine::IceRecoveryReport& report)` |
 | `on_data_message` | A DataChannel message arrives | `plugins::DataMessageCallback` |
 | `on_data_state` | A DataChannel state transition (open / closed / error) | `plugins::DataChannelStateCallback` |
 | `on_dtmf` | A completed DTMF key press arrives (RFC 4733; only when `EngineConfig::dtmf_enabled` is true) | `void(const plugins::DtmfEvent& event)` |
@@ -320,6 +329,88 @@ overload of `add_turn_server()`: a second virtual with the same name
 would be hidden by every existing `add_turn_server()` declaration in a
 derived class, which breaks out-of-tree plugins that implement the
 interface.
+
+### 6.5 `restart_ice()`
+
+```cpp
+bool restart_ice() noexcept;
+```
+
+Force a local ICE restart (RFC 8445 §9.1.1.1): fresh ufrag / pwd,
+fresh candidate gathering.  The host that calls `restart_ice()` still
+owns the two-step contract — the engine does **not** re-negotiate for
+the host:
+
+```cpp
+engine.restart_ice();
+// then put the new ICE credentials in front of the peer:
+engine.send_to_peer(engine.create_offer());
+```
+
+The engine's part is **budgeted** (v1.4 N3, ADR-031): every restart —
+automatic or this manual one — draws from the same sliding 10-minute
+budget of 5 restarts.  Returns `false` (and fires
+`kIceRecoveryExhausted` once per terminal episode, §6.8) when the
+budget is exhausted, before the transport is touched.  Returns `false`
+too when the engine has no ICE transport yet (before `pre_open()`).
+
+### 6.6 `ice_restart_count()`
+
+```cpp
+std::uint32_t ice_restart_count() const noexcept;
+```
+
+The ICE restarts performed so far on the live transport (RFC 8445
+§9.1.1.1); 0 means the session never restarted.  This is the **ICE
+agent's** lifetime count.  The engine's *recovery-policy* consumption
+is a separate number, projected as `Stats::ice_recovery_restarts`
+(§13.5) and scoped to the sliding window.
+
+### 6.7 `set_on_ice_restart()`
+
+```cpp
+void set_on_ice_restart(plugins::OnIceRestart cb) noexcept;  // void()
+```
+
+Install the callback fired when the *peer* restarts ICE: the peer's
+fresh ufrag / pwd arrive on the wire, and the host must answer with a
+fresh offer (`create_offer()` picks the new credentials up).
+
+### 6.8 The ICE recovery policy (v1.4 N3, ADR-031)
+
+`EngineConfig::ice_recovery_policy` selects who restarts ICE when the
+network flaps:
+
+| Value | Meaning |
+|---|---|
+| `"auto"` (default) | The engine runs the reconnection policy: after a session that *has* connected, a `Disconnected` observation enters a 5-second grace window; when the grace lapses, the engine restarts ICE on a 1 / 2 / 4 / 8 / 8 s backoff, capped at **5 restarts per sliding 10-minute window**. |
+| `"off"` | The engine never restarts ICE on its own (`TransportStats::ice_recovery_state` reports `"disabled"`). |
+| anything else | Resolves to `"off"` — a misspelled policy must not silently run a policy the host did not ask for (deliberately the opposite of `connectivity_profile`'s `"auto"` fallback). |
+
+Automatic and manual restarts draw from the same budget.  When it is
+exhausted the machine reaches **terminal** and reports once:
+`on_error_` receives `kIceRecoveryExhausted` (0x1F01), a warn log line
+is written, and `set_on_ice_recovery` receives a terminal
+`IceRecoveryReport` (the callback fires on *every* terminal report;
+`on_error_` and the log line fire once per episode).
+
+```cpp
+struct NIMRTC_API_STABLE IceRecoveryReport {
+    std::string reason;               // "local-address-changed" / "manual"
+    std::uint32_t restart_count = 0;       // restarts used in this window
+    std::uint32_t remaining_budget = 0;    // restarts left in this window
+    bool terminal = false;
+    std::string terminal_reason;      // "budget-exhausted" / "manual-blocked"
+};
+
+void set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept;  // void(const IceRecoveryReport&)
+void reset_ice_recovery_budget() noexcept;
+```
+
+`reset_ice_recovery_budget()` tops the budget back up to 5 and clears
+the terminal latch.  It does **not** reset the sliding window's start,
+so an exhausted window does not instantly re-restart once the budget
+returns.
 
 ---
 
@@ -1483,6 +1574,9 @@ struct Stats {
 |---|---|
 | `ice_state` | The agent's state: `"disconnected"`, `"gathering"`, `"connecting"`, `"connected"`, `"completed"` or `"failed"`.  Empty before the engine has a transport.  The same vocabulary as `ice_state_string()`. |
 | `ice_restart_count` | The ICE restarts performed so far (RFC 8445 §9.1.1.1).  0 means the session never restarted. |
+| `ice_recovery_state` | The engine's reconnection-policy state (v1.4 N3, ADR-031): `"idle"` / `"grace"` / `"backoff"` / `"terminal"` — or `"disabled"` when `EngineConfig::ice_recovery_policy` is not `"auto"`. |
+| `ice_recovery_restarts` | The restarts the *recovery policy* consumed in the current sliding 10-minute window (0 when disabled).  Distinct from `ice_restart_count` — the ICE agent's lifetime count. |
+| `ice_recovery_terminal_reason` | `"budget-exhausted"` / `"manual-blocked"` once the machine is terminal; empty otherwise (including when disabled). |
 | `selected_pair` | The candidate pair the agent nominated, or empty.  Empty until the connectivity checks settle on a path, which is *after* the agent reaches Connected. |
 | `relayed` | True when the selected pair goes through a TURN relay.  *Derived* from the pair's candidate types, published separately because it is the one bit a host actually branches on. |
 | `rtt_ms` | The round-trip time in milliseconds, **instantaneous** (the latest measurement, not a running total).  0 until a Receiver Report with a usable LSR / DLSR pair has arrived. |

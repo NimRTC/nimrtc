@@ -314,6 +314,60 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
             ? static_cast<std::uint64_t>(impl_->security.srtp_stats_drop)
             : 0u;
     }
+
+    // ---- ICE recovery (v1.4 N3, ADR-031) ---------------------------------
+    //
+    // NOTE: the ICE-recovery policy fields are projected onto the **flat
+    // `Stats`** (not onto this nested transport entry) — see
+    // `append_ice_recovery_stats()` below.  ADR-031 §3.2 and the slice
+    // spec §六(b) name them `Stats::ice_recovery_state` /
+    // `Stats::ice_recovery_restarts` / `Stats::ice_recovery_terminal_reason`.
+}
+
+// ---------------------------------------------------------------------------
+// ICE recovery (v1.4 N3, ADR-031)
+// ---------------------------------------------------------------------------
+
+/**
+ * Project the reconnection policy onto the flat `Stats`.
+ *
+ * The three fields answer "what is the reconnection policy doing right
+ * now" **from the stats alone** — a session that never recovers says
+ * why without the host having to subscribe to a callback (ADR-031 §3.2).
+ *
+ * When `ice_recovery_policy` is not "auto" the machine is not driven at
+ * all, so the surface says "disabled" rather than pretending to track an
+ * idle machine (spec §六 25).
+ */
+void NimRTCEngine::append_ice_recovery_stats(Stats& out) const noexcept {
+    if (impl_ == nullptr) return;
+
+    const auto& sst = impl_->session_state;
+    if (sst.ice_recovery_policy != detail::IceRecoveryPolicy::kAuto) {
+        out.ice_recovery_state = "disabled";
+        out.ice_recovery_restarts = 0;
+        out.ice_recovery_terminal_reason = "";
+        return;
+    }
+
+    const std::int64_t now_us = detail::steady_now_us();
+    const auto& rec = sst.ice_recovery;
+    switch (rec.state()) {
+        case detail::IceRecovery::State::kIdle:
+            out.ice_recovery_state = "idle";
+            break;
+        case detail::IceRecovery::State::kGrace:
+            out.ice_recovery_state = "grace";
+            break;
+        case detail::IceRecovery::State::kBackoff:
+            out.ice_recovery_state = "backoff";
+            break;
+        case detail::IceRecovery::State::kTerminal:
+            out.ice_recovery_state = "terminal";
+            break;
+    }
+    out.ice_recovery_restarts = rec.restarts_used(now_us);
+    out.ice_recovery_terminal_reason = std::string(rec.terminal_reason());
 }
 
 }  // namespace nimrtc::engine

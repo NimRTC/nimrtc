@@ -868,8 +868,19 @@ bool NimRTCEngine::restart_ice() noexcept {
             "restart_ice: ICE transport not yet created — call pre_open() first");
         return false;
     }
+    // v1.4 N3: the manual restart shares the engine's reconnection budget
+    // (ADR-031 §2.3).  A blocked manual restart returns false without
+    // touching the transport.
+    const std::int64_t now_us = detail::steady_now_us();
+    auto& rec = impl_->session_state.ice_recovery;
+    if (!rec.note_restart_attempted(now_us, "manual-blocked")) {
+        report_ice_recovery_terminal("manual", "manual-blocked");
+        return false;
+    }
     const auto rc = ice_t_->restart();
     if (rc != plugins::kOk) {
+        // The attempt already consumed its budget slot (spec §方案 语义 3).
+        rec.note_restart_failed(now_us);
         core::log::Logger::instance().error(
             std::string{"restart_ice: ICE restart failed, status="} +
             plugins::status_string(rc));
@@ -877,6 +888,7 @@ bool NimRTCEngine::restart_ice() noexcept {
     }
     core::log::Logger::instance().info(
         "restart_ice: ICE restart done, new local ufrag=" + ice_t_->local_ufrag());
+    fire_ice_recovery_report("manual", false, "");
     return true;
 }
 
@@ -886,6 +898,20 @@ std::uint32_t NimRTCEngine::ice_restart_count() const noexcept {
 
 void NimRTCEngine::set_on_ice_restart(plugins::OnIceRestart cb) noexcept {
     on_ice_restart_ = std::move(cb);
+}
+
+void NimRTCEngine::set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept {
+    on_ice_recovery_ = std::move(cb);
+}
+
+void NimRTCEngine::reset_ice_recovery_budget() noexcept {
+    if (impl_ != nullptr) {
+        // Clears the count and the terminal flag only — the sliding
+        // window's origin is deliberately kept (ADR-031 §2.3), so the
+        // host's "retry" stays bounded by the same 5-per-10-minutes rule.
+        impl_->session_state.ice_recovery.reset_budget();
+        impl_->session_state.ice_recovery_terminal_reported = false;
+    }
 }
 
 

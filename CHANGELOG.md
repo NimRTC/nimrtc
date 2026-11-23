@@ -53,6 +53,25 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `video_sink_backend_reason`.  Fields only — no new public headers — so
   the ADR-015 baseline stays at 198.
 
+- **The engine runs the ICE reconnection policy (`slice v1-ice-recovery`,
+  N3 / ADR-031).**
+  `EngineConfig::ice_recovery_policy` defaults to `"auto"`: after a
+  session that *has* connected, a `Disconnected` observation enters a
+  5-second grace window and, when the grace lapses, the engine restarts
+  ICE on a 1 / 2 / 4 / 8 / 8 s backoff — capped at **5 restarts per
+  sliding 10-minute window** (`"off"` disables it; an unknown name
+  resolves to `"off"`, never a policy the host did not ask for).  Manual
+  `restart_ice()` draws from the *same* budget.  When the budget is
+  exhausted the engine reports once, in three places: `on_error_`
+  receives `kIceRecoveryExhausted` (0x1F01), a warn log line is written,
+  and `set_on_ice_recovery` receives a terminal `IceRecoveryReport`
+  (`reason` / `restart_count` / `remaining_budget` / `terminal` /
+  `terminal_reason`).  `reset_ice_recovery_budget()` tops the budget back
+  up.  `TransportStats` gains `ice_recovery_state`,
+  `ice_recovery_restarts`, and `ice_recovery_terminal_reason`.  Fields
+  and one new error code only — no new public headers — so the ADR-015
+  baseline stays at 198.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

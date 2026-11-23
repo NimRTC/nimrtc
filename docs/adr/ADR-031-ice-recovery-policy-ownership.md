@@ -164,6 +164,10 @@ std::string ice_recovery_terminal_reason;
 
 **明确不做**：不加「old pair / new pair」字段（那是 N8 的活，且 N8 会加在 `IceRecoveryReport` 上）；不加 call-state 枚举（D7 的活）。本 ADR 只保证 N3 这一层是**自洽且可观测**的。
 
+**这三个字段落在**扁平 `Stats`** 上，不在 `Stats::transport` 里。**
+
+**为什么**：重连策略是**策略事实**，不是传输面的测量结果。传输面的事实（gathering 状态、失败原因）住在 `TransportStats` 里是对的；「现在处于重连策略的哪个状态」不是传输面测出来的，是策略机自己的状态。宿主读 `stats().ice_recovery_state` 不应该还得先知道重连策略躲在 `stats().transport` 后面 —— 那是一条只有知道实现细节的人才走对的路径。规格 §六(b) 与本 ADR §3.2 的措辞都是 `Stats::ice_recovery_state`（不是 `TransportStats::`），实现按此对齐。
+
 ### 2.5 决策五：数字取计划书 §N3-1 的默认值
 
 | 参数 | 值 | 来源 |
@@ -230,3 +234,69 @@ D7 的 call-state 回调（`connecting` → `connected` → `reconnecting` → `
 | 终态只报 `on_error_` | 只轮询 stats 的宿主拿不到；只挂回调的宿主在日志里看不到；线上排障需要日志 |
 | 未知 policy 名字当 `"auto"` | 打错的 key 不该让引擎在宿主没预期的时刻偷偷重启；与 D6 的 fallback 方向相反是刻意的 |
 | grace 窗取消 | 瞬时抖动会触发重 ICE（重建 libjuice agent），代价重 |
+
+## 5. 落地时发现的两处「规格/实现不闭环」
+
+本片落地时（agent 跑完、门禁②跑验收）暴露了两处**实现本身没写全**的地方。两处都记在这
+里，因为它们不是「实现写错了」，而是**规格与写集没有把实现需要的东西列全** —— 写集少一
+个文件，实现就少做一件事，而门禁要等验收跑起来才发现。
+
+### 5.1 写集漏了 `src/engine/tests/CMakeLists.txt`
+
+**病灶**：写集里有 `src/engine/tests/test_engine_ice_recovery.cpp`（测试**源文件**），却没
+有 `src/engine/tests/CMakeLists.txt`（让这个源文件**被编译成二进制**的那张表）。结果：
+新测试文件躺在树里，但**从来没有被编译过**。
+
+**为什么门禁②还是绿的**：`test` 这一步跑的是 ctest —— ctest 跑的是**CMake 注册过**的
+目标。没注册的目标，ctest 不知道它存在，于是「全绿」。**测试通过不代表测试跑过。**
+
+**为什么验收能抓住**：验收测试用 `spawnSync` 直接跑 `build/src/engine/tests/Debug/
+test_engine_ice_recovery.exe` 这个**路径**。二进制不存在 → `exit=null` → 断言失败。
+验收层抓的是「二进制跑起来 + 用例 OK」，不看 ctest 的汇总。
+
+**修法**：写集补 `src/engine/tests/CMakeLists.txt`（ADR-092 允许 frozen 下扩写集并留痕），
+并按 `test_engine_connectivity` 的形状注册 `test_engine_ice_recovery` 目标。
+
+**给后续切片的教训**：**凡是在写集里新增一个测试源文件，就必须同时把它的 CMake 注册
+一并写进写集** —— 否则「测试写了但没编译」是静默失败。
+
+### 5.2 写集漏了 `src/engine/src/engine_media.cpp`
+
+**病灶**：三个 `Stats` 字段按 §2.4 落在**扁平 `Stats`** 上，而扁平 `Stats` 是由
+`engine_media.cpp` 的 `stats()` 装配的（`append_transport_stats(out.transport)` 就在那里
+被调）。实现最初把字段投影到了**嵌套的 `Stats::transport`** 上 —— 那里是唯一现成的投影
+入口，且 N4 的 `ice_failure_reason` 也住在那里，看着「合群」。
+
+**为什么这会编译不过**：验收测试读的是 `Stats::ice_recovery_state`（按规格），实现写的是
+`TransportStats::ice_recovery_state` —— 编译期就报「不是 `NimRTCEngine::Stats` 的成员」。
+**规格说的和实现做的不是同一个 struct，而 C++ 编译器替我们抓到了。**
+
+**修法**：新增 `append_ice_recovery_stats(Stats&)`，在 `engine_media.cpp` 的 `stats()` 里
+调用；三个字段从 `TransportStats` 移回扁平 `Stats`。写集补 `src/engine/src/engine_media.cpp`
+与 `src/engine/src/engine_transport_stats.hpp`。
+
+**给后续切片的教训**：**「往公开面上加字段」要连带确认「谁在装配那个面」**。本项目的
+装配点分散在多个 TU（`engine_media.cpp` 装配扁平 `Stats`，`engine_transport_stats.cpp` 装配
+`TransportStats`），猜错装配点就会把字段加到没人读的 struct 里。
+
+### 5.3 顺带修掉的 v2-ice 遗留缺陷：`tcp_candidate.hpp` 少一个标记
+
+验收判据 31-33 要求 `scripts/api_freeze_scan.js` 跑绿（0 missing）。它报了一个 missing：
+
+```
+src/modules/ice/include/nimrtc/ice/tcp_candidate.hpp
+  → inline std::uint32_t TcpCandidate::priority() const noexcept   // 缺 NIMRTC_API_STABLE
+```
+
+**这不是本片造成的**：`priority()` 的**类内声明**带 `NIMRTC_API_STABLE`，但**类外的
+out-of-line 定义**没带 —— 而扫描器按「符号出现处」判定，带标记的声明与不带标记的定义会
+被判成两个符号，取无标记的那个报 missing。这个缺陷从 `v2-ice`（`dd396cd5`）就在基线上
+（`15e1515`），`tests/acceptance/v2-ice/` 的验收**今天也照样失败**。
+
+**为什么本片要顺手修**：判据 31-33 把它拦在门禁②上。不修就签字不了，而签字不了的
+理由是「一个跟重连策略毫无关系的、别片留下的分类标记漏了」。
+
+**修法**：给 out-of-line 定义补上 `NIMRTC_API_STABLE`（一行）。
+
+**教训**：**API 分类扫描是「全库级别」的判据** —— 它扫所有公开头，所以任何一个别片留下的
+漏标都会拦住当前片。扫描器不区分「谁写的」，只区分「标了没有」。

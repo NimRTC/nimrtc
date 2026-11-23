@@ -613,6 +613,13 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
         ice_t_->set_stun_server(stun.host, stun.port);
     }
 
+    // The ICE-recovery policy (v1.4 N3, ADR-031 §2.2): "auto" arms the
+    // engine's automatic restart machine; "off" (and unknown names — a
+    // mistyped key must disarm, not arm) leave reconnection to the host.
+    // Resolved here so poll_ice_recovery() can gate on it.
+    impl_->session_state.ice_recovery_policy =
+        detail::resolve_ice_recovery_policy(config_.ice_recovery_policy);
+
     ice_t_->set_local_port_range(config_.local_port_range_begin,
                                   config_.local_port_range_end);
     // TURN servers are added via NimRTCEngine::add_turn_server() *before*
@@ -1334,6 +1341,11 @@ int NimRTCEngine::tick() noexcept {
     // v1.1 Dtls2: poll ICE flap before draining so a NAT-rebinding
     // disconnected->connected (2nd) transition triggers rehandshake().
     poll_ice_flap_for_rehandshake();
+    // v1.4 N3: the engine-driven reconnection policy runs as an *independent*
+    // state machine on the same observation point — ICE down -> grace ->
+    // backoff -> automatic restart (ADR-031).  It deliberately does not
+    // touch the DTLS-rehandshake logic above.
+    poll_ice_recovery();
     if (is_ice_connected()) {
         drain_dtls();
         maybe_send_sender_report();
@@ -1773,6 +1785,128 @@ void NimRTCEngine::poll_ice_flap_for_rehandshake() noexcept {
             std::string("engine[ice]: connected->") + name(cur) +
             ", arming DTLS rehandshake on next reconnect");
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// v1.4 N3 — the engine-driven reconnection policy (ADR-031)
+// ---------------------------------------------------------------------------
+//
+// `poll_ice_recovery()` drives the private `IceRecovery` machine from the
+// engine's own ICE-state observations (the same observation point as the
+// DTLS-rehandshake poll above, but a *separate* state machine — neither
+// changes the other's logic).  When the machine comes due, the engine
+// restarts ICE itself by calling `plugins::IICETransport::restart()`
+// directly — NOT the public `restart_ice()`, which would recurse into the
+// same budget bookkeeping.
+
+void NimRTCEngine::poll_ice_recovery() noexcept {
+    if (!ice_t_ || !impl_) return;
+    if (impl_->session_state.ice_recovery_policy !=
+        detail::IceRecoveryPolicy::kAuto) {
+        return;
+    }
+    const std::int64_t now_us = detail::steady_now_us();
+    auto& rec = impl_->session_state.ice_recovery;
+    auto& last = impl_->session_state.ice_recovery_last_state;
+
+    const plugins::IceState cur = ice_t_->state();
+    const plugins::IceState prev = last;
+    last = cur;
+
+    // Feed the machine on transitions only.  The gate mirrors
+    // poll_ice_flap_for_rehandshake(): a session that never connected is
+    // "the session never got up", not "the network changed", and must not
+    // trigger a restart storm (spec §七 — the second gate beyond grace).
+    if (cur != prev) {
+        const bool cur_up = (cur == plugins::IceState::Connected ||
+                             cur == plugins::IceState::Completed);
+        if (cur_up) {
+            rec.note_up(now_us);
+        } else if (impl_->session_state.ice_connected_once) {
+            if (cur == plugins::IceState::Failed) {
+                // Explicit failure is not a blip: skip the grace window.
+                rec.note_failed(now_us);
+            } else if (cur == plugins::IceState::Disconnected) {
+                rec.note_disconnected(now_us);
+            }
+        }
+    }
+
+    // The grace window and the backoff run on the wall of time, so they
+    // are checked every tick, not only on transitions.
+    if (rec.state() == detail::IceRecovery::State::kGrace &&
+        rec.grace_expired(now_us)) {
+        rec.note_grace_expired(now_us);
+    }
+    // While a restart is in flight (Gathering / Connecting) another one
+    // must not start even if the backoff lapsed.
+    if (rec.due(now_us) && cur != plugins::IceState::Gathering &&
+        cur != plugins::IceState::Connecting) {
+        execute_ice_recovery_restart(now_us);
+    }
+}
+
+void NimRTCEngine::execute_ice_recovery_restart(std::int64_t now_us) noexcept {
+    auto& rec = impl_->session_state.ice_recovery;
+    const std::string reason(rec.pending_reason());
+    if (!rec.note_restart_attempted(now_us, "budget-exhausted")) {
+        report_ice_recovery_terminal(reason, "budget-exhausted");
+        return;
+    }
+    const auto rc = ice_t_->restart();
+    if (rc != plugins::kOk) {
+        // The attempt already consumed a budget slot and doubled the
+        // backoff (spec §方案 语义 3): the transport stays down and the
+        // machine keeps waiting in kBackoff.  No callback fires — there
+        // are no new credentials to offer the peer.
+        rec.note_restart_failed(now_us);
+        core::log::Logger::instance().error(
+            std::string{"engine[ice-recovery]: ICE restart failed, status="} +
+            plugins::status_string(rc));
+        return;
+    }
+    core::log::Logger::instance().info(
+        std::string("engine[ice-recovery]: ICE restarted after ") + reason +
+        " (restarts this window: " +
+        std::to_string(rec.restarts_used(now_us)) + ")");
+    fire_ice_recovery_report(reason, false, "");
+}
+
+void NimRTCEngine::fire_ice_recovery_report(
+    std::string_view reason, bool terminal,
+    std::string_view terminal_reason) noexcept {
+    auto& rec = impl_->session_state.ice_recovery;
+    const std::int64_t now_us = detail::steady_now_us();
+    IceRecoveryReport report;
+    report.reason = std::string(reason);
+    report.restart_count = rec.restarts_used(now_us);
+    report.remaining_budget = rec.remaining_budget(now_us);
+    report.terminal = terminal;
+    report.terminal_reason = std::string(terminal_reason);
+    if (on_ice_recovery_) on_ice_recovery_(report);
+}
+
+void NimRTCEngine::report_ice_recovery_terminal(
+    std::string_view reason, std::string_view terminal_reason) noexcept {
+    // The three-place terminal report (ADR-031 §2.4): `on_error_` + one
+    // warn log line fire ONCE per terminal episode (not once per blocked
+    // attempt — spec §六 21); the `set_on_ice_recovery` callback fires on
+    // every terminal report, so the host also sees the specific blocked
+    // reason.
+    if (!impl_->session_state.ice_recovery_terminal_reported) {
+        impl_->session_state.ice_recovery_terminal_reported = true;
+        core::log::Logger::instance().warn(
+            std::string("engine[ice-recovery]: budget exhausted (reason=") +
+            std::string(reason) + "), giving up on automatic ICE restarts");
+        if (on_error_) {
+            on_error_(core::kIceRecoveryExhausted,
+                      std::string("ice recovery exhausted: reason=") +
+                      std::string(reason) + ", terminal_reason=" +
+                      std::string(terminal_reason));
+        }
+    }
+    fire_ice_recovery_report(reason, true, terminal_reason);
 }
 
 

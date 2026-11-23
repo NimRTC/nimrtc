@@ -514,6 +514,23 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  path and not managed by `profiles/schema/`). */
     std::string connectivity_profile = "auto";
 
+    /** Reconnection policy (v1.4 N3).
+     *
+     *  "auto" (default) — the engine manages reconnection: when ICE goes
+     *  down it restarts ICE on its own, bounded by a grace window, an
+     *  exponential backoff (1 / 2 / 4 / 8 s) and a sliding budget
+     *  (5 restarts per 10 minutes), and tells the host through
+     *  `set_on_ice_recovery` that a fresh offer should be sent.
+     *
+     *  "off" — the engine does nothing on an ICE drop; the host owns
+     *  reconnection and calls `restart_ice()` itself.
+     *
+     *  An unknown name is treated as "off" (ADR-031 §2.2) — the opposite
+     *  of `connectivity_profile`'s fallback, and deliberate: a mistyped
+     *  key must not arm the engine to restart ICE at a moment the host did
+     *  not expect. */
+    std::string ice_recovery_policy = "auto";
+
     /** Local UDP port range for ICE. 0 = OS picks.
      *
      *  Leave both at 0 (the default) unless you have a specific reason
@@ -2402,6 +2419,17 @@ struct NIMRTC_API_STABLE TransportStats {
      *  it is repeated here so a host that reads only the transport
      *  entry has the complete picture of the SRTP plane. */
     std::uint64_t srtp_drops = 0;
+
+    // ---- ICE recovery (v1.4 N3, ADR-031) ---------------------------------
+    //
+    // The three ICE-recovery fields live on the **flat `Stats`** (not on
+    // this nested transport entry): ADR-031 §3.2 and the slice spec §6(b)
+    // both name them `Stats::ice_recovery_state` /
+    // `Stats::ice_recovery_restarts` / `Stats::ice_recovery_terminal_reason`.
+    // A host that reads only `stats().ice_recovery_state` must not have to
+    // know that the reconnection policy sits behind `stats().transport`.
+    // (The ICE *transport* facts — gathering state, failure reason — do
+    // live here, because they describe the transport plane.)
 };
 
 // ---------------------------------------------------------------------------
@@ -3617,6 +3645,59 @@ public:
      *
      *  Pass a null callback to clear. */
     NIMRTC_API_STABLE void set_on_ice_restart(plugins::OnIceRestart cb) noexcept;
+
+    /** The result of a local ICE restart (v1.4 N3).
+     *
+     *  This is the N3 landing point; N8 will *add* `old_pair` / `new_pair`
+     *  fields (an addition — the existing fields' semantics do not change).
+     *
+     *  `reason` says why the restart happened: "local-address-changed"
+     *  (an ICE drop), "ice-failed" (the agent failed explicitly) or
+     *  "manual" (`restart_ice()` was called). */
+    struct NIMRTC_API_STABLE IceRecoveryReport {
+        /** Why the restart happened: "local-address-changed" /
+         *  "ice-failed" / "manual". */
+        std::string reason;
+        /** Restarts spent in the current sliding window (this one
+         *  included). */
+        std::uint32_t restart_count = 0;
+        /** Budget slots left in the window (0 = the budget is spent). */
+        std::uint32_t remaining_budget = 0;
+        /** Terminal: the budget is exhausted, reconnection has stopped. */
+        bool terminal = false;
+        /** Terminal reason (empty when not terminal): "budget-exhausted" /
+         *  "restart-failed" / "manual-blocked". */
+        std::string terminal_reason;
+    };
+
+    /** Fired after a local ICE restart (v1.4 N3).
+     *
+     *  The host's action is the *opposite* of `set_on_ice_restart`'s: a
+     *  peer restart needs an answer, a local restart needs a fresh offer —
+     *  the engine restarted ICE and regenerated its credentials, so the
+     *  host must send the peer a new offer that carries them.
+     *
+     *  Runs on the tick thread, the same thread rule as
+     *  `set_on_state_change`.  Pass a null callback to clear. */
+    using NIMRTC_API_STABLE EngineIceRecoveryCallback =
+        std::function<void(const IceRecoveryReport&)>;
+
+    /** Install the callback fired after a local ICE restart (v1.4 N3).
+     *
+     *  `restart_ice()` fires it too (reason "manual"), and the terminal
+     *  state is reported through it as well. */
+    NIMRTC_API_STABLE void set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept;
+
+    /** Reset the reconnection budget (v1.4 N3).
+     *
+     *  After the terminal state the engine no longer restarts ICE on its
+     *  own.  A host that wants to give it another chance (the user clicked
+     *  "retry") calls this explicitly.
+     *
+     *  The budget window (10 minutes) is NOT cleared by it — the window is
+     *  sliding, and only the "restarts used" count and the terminal flag
+     *  are reset (ADR-031 §2.3). */
+    NIMRTC_API_STABLE void reset_ice_recovery_budget() noexcept;
 
     /** Inbound raw bytes — alternative entry point for test injection.
      *
@@ -5275,6 +5356,34 @@ public:
          * definitions are in `RemoteDesktopStats` above.
          */
         RemoteDesktopStats remote_desktop{};
+
+        // ---- ICE recovery (v1.4 N3, ADR-031) -----------------------------
+        //
+        // These three fields answer "what is the reconnection policy
+        // doing right now" **from the stats alone** — a session that
+        // never recovers says why without the host having to subscribe
+        // to a callback (ADR-031 §3.2).
+        //
+        // They live on the **flat `Stats`**, not on the nested
+        // `Stats::transport`: the reconnection policy is a *policy* fact,
+        // not a transport-plane measurement, and the spec (§6(b)) names
+        // them `Stats::ice_recovery_state` / `Stats::ice_recovery_restarts`
+        // / `Stats::ice_recovery_terminal_reason`.
+
+        /** The reconnection-policy state (v1.4 N3): "idle" / "grace" /
+         *  "backoff" / "terminal" / "disabled".
+         *
+         *  "disabled" means `ice_recovery_policy` is not "auto" — the
+         *  engine is not managing reconnection.  "terminal" means the
+         *  budget is spent and no more automatic restarts happen. */
+        std::string ice_recovery_state;
+
+        /** Restarts spent in the current sliding window (v1.4 N3). */
+        std::uint32_t ice_recovery_restarts = 0;
+
+        /** Terminal reason (v1.4 N3) — empty when not terminal:
+         *  "budget-exhausted" / "restart-failed" / "manual-blocked". */
+        std::string ice_recovery_terminal_reason;
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -5533,6 +5642,11 @@ private:
      *  transport calls it when the peer's description carries new ICE
      *  credentials.  The host has to answer with the new credentials. */
     plugins::OnIceRestart on_ice_restart_;
+
+    /** Fired after a *local* ICE restart (v1.4 N3, ADR-031).  Set by
+     *  `set_on_ice_recovery()`; called on the tick thread by the
+     *  ICE-recovery poll and by `restart_ice()`. */
+    EngineIceRecoveryCallback on_ice_recovery_;
 
     // ---- DTMF (v1.2.0, session capability plan D1 / D2) ----------------
     //
@@ -5814,6 +5928,23 @@ private:
      *  feedback messages all come from the same reporter. */
     std::uint32_t rtcp_reporter_ssrc() noexcept;
     void poll_ice_flap_for_rehandshake() noexcept;
+    /** Drive the ICE-recovery machine (v1.4 N3, ADR-031) and execute
+     *  automatic restarts.  Called from tick() after
+     *  `poll_ice_flap_for_rehandshake()`; an independent state machine that
+     *  shares only the `ice_connected_once` gate with the flap detector. */
+    void poll_ice_recovery() noexcept;
+    /** Execute one automatic ICE restart: book the budget, call
+     *  `ice_t_->restart()` directly (not the public `restart_ice()`, which
+     *  would recurse into the same bookkeeping), and report the outcome. */
+    void execute_ice_recovery_restart(std::int64_t now_us) noexcept;
+    /** Fire the `set_on_ice_recovery` callback with a filled report. */
+    void fire_ice_recovery_report(std::string_view reason, bool terminal,
+                                  std::string_view terminal_reason) noexcept;
+    /** The three-place terminal report (ADR-031 §2.4): `on_error_` +
+     *  one warn log line fire once per terminal episode, then the
+     *  `set_on_ice_recovery` callback. */
+    void report_ice_recovery_terminal(std::string_view reason,
+                                      std::string_view terminal_reason) noexcept;
     void init_bwe_scheduler() noexcept;
     void shutdown_bwe_scheduler() noexcept;
     /** Hand the aggregated network-feedback snapshot to the bandwidth
@@ -6070,6 +6201,19 @@ private:
      *  DTLS session's state and role, the SRTP context's counters and
      *  the feedback path's round-trip time onto one `TransportStats`. */
     void append_transport_stats(TransportStats& out) const noexcept;
+
+    /** Fill the ICE-recovery policy fields of the **flat** `Stats`
+     *  (v1.4 N3, ADR-031 §3.2).
+     *
+     *  The reconnection policy is a *policy* fact, not a transport-plane
+     *  measurement, so its three fields live on the flat `Stats`:
+     *  `ice_recovery_state` / `ice_recovery_restarts` /
+     *  `ice_recovery_terminal_reason`.
+     *
+     *  When `ice_recovery_policy` is not "auto" the machine is not
+     *  driven at all, so the surface says "disabled" rather than
+     *  pretending to track an idle machine (spec §六 25). */
+    void append_ice_recovery_stats(Stats& out) const noexcept;
     /** Close and release every extra stream's plugins. */
     void shutdown_extra_video_streams() noexcept;
 

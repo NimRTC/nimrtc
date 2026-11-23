@@ -3922,6 +3922,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // reports, not a second measurement of it.
     append_transport_stats(out.transport);
 
+    // ---- The reconnection policy (v1.4 N3, ADR-031) --------------------
+    //
+    // Three fields on the **flat** `Stats`: `ice_recovery_state` /
+    // `ice_recovery_restarts` / `ice_recovery_terminal_reason`.  They
+    // are policy facts rather than transport-plane measurements, so they
+    // do not ride along on `out.transport` (ADR-031 §3.2).
+    append_ice_recovery_stats(out);
+
     // ---- The data-channel plane (plan Track S / S6) ---------------------
     //
     // One entry per channel the host opened.  The **inbound** half is

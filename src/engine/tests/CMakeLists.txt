@@ -188,3 +188,48 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# v1-ice-recovery (N3) — tests of the private ICE-recovery state machine.
+#
+# `engine_ice_recovery.hpp` is a **private** engine TU header (same shape as
+# `engine_transport_stats.hpp` / `engine_connectivity_profile.hpp`), so the
+# include path needs `src/engine/src`. The live-engine cases also reach the
+# public `engine.hpp` and the plugin `ice_transport.hpp` seam.
+# -----------------------------------------------------------------------------
+add_executable(test_engine_ice_recovery
+    test_engine_ice_recovery.cpp
+    )
+
+if(WIN32)
+    target_link_libraries(test_engine_ice_recovery PRIVATE ws2_32)
+endif()
+
+target_link_libraries(test_engine_ice_recovery PRIVATE
+    nimrtc::engine
+    nimrtc::core
+    nimrtc::plugins
+    nimrtc::datachannel
+    GTest::gtest_main)
+
+target_include_directories(test_engine_ice_recovery PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src"
+    "${CMAKE_SOURCE_DIR}/src/modules/ice/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include")
+
+if(WIN32)
+    target_compile_definitions(test_engine_ice_recovery PRIVATE _WIN32_WINNT=0x0601)
+endif()
+
+nimrtc_apply_options(test_engine_ice_recovery LENIENT)
+
+nimrtc_copy_msquic_dll(test_engine_ice_recovery)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_ice_recovery
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES TIMEOUT 60
+        DISCOVERY_TIMEOUT 10)
+endif()

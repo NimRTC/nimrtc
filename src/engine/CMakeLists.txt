@@ -108,6 +108,11 @@ add_library(nimrtc_engine STATIC
     # profile's policy defaults are engine-internal knowledge that must
     # not leak into the public engine header (Layout Invariant 4).
     src/engine_connectivity_profile.cpp
+    # v1.4 (v1-ice-recovery, N3): the ICE-recovery state machine.  A
+    # private TU — the engine's reconnection policy (grace window, backoff,
+    # restart budget, terminal state) is engine-internal knowledge driven
+    # by the tick thread through `plugins::IceState` / `IICETransport`.
+    src/engine_ice_recovery.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and

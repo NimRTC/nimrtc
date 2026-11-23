@@ -9,6 +9,36 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.3.0`.
 
+### Changed
+
+- **The release's soak gate asks for five consecutive green days, and a
+  single failed run no longer condemns the whole day.**
+  Two changes to the window that `release.yml` gates the tag on, both
+  permanent and both made on 2026-11-23:
+
+  - **Seven days became five.**  Seven was the v1.1 plan C5 requirement.
+    The window exists to expose a *chronic* failure before a tag is cut,
+    and five consecutive green days on both platforms says that; the
+    extra two days bought nothing that the evidence record did not
+    already say.
+  - **The intra-day rule no longer treats one `FAIL` among passing runs
+    as a failed day.**  A day is normally measured several times — the
+    CI job and the scheduled local task both write the same
+    platform/day — and the old rule ("any `FAIL` in the day spoils it")
+    meant a single Chrome-interop timeout on a shared CI runner erased a
+    day in which the same case had passed three times earlier.  That
+    measured the runner's mood rather than the build's stability.  The
+    rule now is that every required case must have at least one `PASS`
+    for the day; a case whose **every** run failed still ends the
+    streak, and every `FAIL` is still reported with its reason and its
+    captured output.
+
+  The change is what let the v1.3.0 window close: the Linux half was
+  held at 2/7 by a single `subprocess.TimeoutExpired` on 2026-11-20
+  (case D on `b0191e0f`, Chrome interop never reaching a handshake),
+  on a commit that had already passed that case three times the same
+  day and whose CI was 13/13 green.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

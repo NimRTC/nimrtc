@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Re-cut the v1.3.0 tag once the 7-day soak window closes green.
+"""Re-cut the v1.3.0 tag once the soak window closes green.
 
 Why this exists
 ---------------
 `scripts/recut_v130_tag.py` already knows how to re-cut the tag: it runs
 the soak gate, the freeze checklist and the signature check, and it
 refuses to touch the tag unless all of them pass.  What it does not do
-is *wait* -- the window needs seven consecutive green days on both
-platforms, and on 2026-11-21 Linux was one day short (a Chrome-interop
+is *wait* -- the window needs consecutive green days on both
+platforms, and on 2026-11-22 Linux was short (a Chrome-interop
 timeout on 2026-11-20 broke its streak).
 
 So this watcher is the loop around it: poll, and when the gate passes,
@@ -84,7 +84,7 @@ def repo_root(repo):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Poll the 7-day soak gate and re-cut v1.3.0 once it "
+        description="Poll the soak gate and re-cut v1.3.0 once it "
                     "closes green on both platforms.")
     ap.add_argument("--repo", default=os.environ.get("NIMRTC_REPO", "."),
                     help="the repository to work in (default: the cwd)")

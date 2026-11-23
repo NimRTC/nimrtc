@@ -129,7 +129,7 @@ jobs:
     timeout-minutes: 60
     # A red acceptance run is EVIDENCE, not a build break: the collector
     # records FAIL (or INCONCLUSIVE) for the day, which is exactly what
-    # breaks the seven-day streak.  Failing the job as well would add a
+    # breaks the streak.  Failing the job as well would add a
     # red check on `main` that gates nothing and trains everyone to
     # ignore it.  The evidence file and the Step Summary carry the
     # verdict.

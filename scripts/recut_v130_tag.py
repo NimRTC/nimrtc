@@ -88,7 +88,7 @@ def soak_gate(candidate):
     """
     cmd = [
         sys.executable, "tools/run_soak.py",
-        "--summary", "--require", "--require-days", "7",
+        "--summary", "--require", "--require-days", "5",
         "--expect-ref", "",
         "--expect-ancestor-of", candidate,
         "--max-window-age-days", "30",

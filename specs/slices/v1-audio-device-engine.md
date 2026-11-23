@@ -18,7 +18,7 @@
 
 ### 与 D3/D4 的关系（别重复做、别越界）
 
-`specs/slices/v1-device-policy.md`（D3/D4，已完成）在「本片的边界」一节里**明确**把音频留给本片：
+只读 `specs/slices/v1-device-policy.md`（D3/D4，已完成）—— 它的「本片的边界」一节**明确**把音频留给本片：
 
 > 核实结论：引擎里没有音频设备的承载体 …… 那属于计划书 §D1「引擎驱动设备层」，而 **D1 不在 v1 版本计划里**。所以本片：只做视频侧；策略表里**给音频预留位置**，字段存在但值为空。
 
@@ -40,7 +40,7 @@
 | `src/core/src/plugin_registry.cpp` | 两个 `register_*` 的实现（与 `register_video_capture` 同形） |
 | `src/engine/include/nimrtc/engine/pal/engine_plugin_resolver.hpp` | 加 `resolve_audio_source(id)` / `resolve_audio_sink(id)`（与 `resolve_video_capture` 同形） |
 
-**`core → plugins` 是既有依赖**（`src/core/CMakeLists.txt` 里 `nimrtc_core` 链接 `nimrtc::plugins`；`registry.hpp` 已经在用 `plugins::IVideoCaptureFactory`），本片只是在这个既有的边上再加两个类型 —— **不引入新的依赖方向**。
+**`core → plugins` 是既有依赖**（只读 `src/core/CMakeLists.txt` 里 `nimrtc_core` 链接 `nimrtc::plugins`；`registry.hpp` 已经在用 `plugins::IVideoCaptureFactory`），本片只是在这个既有的边上再加两个类型 —— **不引入新的依赖方向**。
 
 **枚举值的位置**：`Category` 是**无值的枚举**（`enum class Category { kTransport, ... }`），加两个值**不改变**既有值 —— 但注意 `Registrar` 的 `switch` 必须补齐，否则 `-Wswitch` 会报错（本项目 `Warnings→errors: ON`）。
 
@@ -85,9 +85,9 @@ audio_sink_config    : plugins::AudioSinkConfig       // 设备配置（device_i
 
 **`"none"` 与空值为什么要分开**：计划书 §D1 的原话是 `"none"` = the explicit opt-out。空值是「没提要求」（默认按今天的语义走），`"none"` 是「明确不要设备」。两者在**今天**效果相同，但语义不同 —— 显式 opt-out 让「我不想要设备但我也不想继承默认」这个意图可表达。
 
-### 四、引擎侧设备泵（`engine_audio_device_pump.cpp`）
+### 四、引擎侧设备泵（`src/engine/src/engine_audio_device_pump.cpp`）
 
-新文件 `src/engine/src/engine_audio_device_pump.cpp`，与 `engine_video_pump.cpp` 同形。
+新文件 `src/engine/src/engine_audio_device_pump.cpp`，与 `src/engine/src/engine_video_pump.cpp` 同形。
 
 **采集侧**（源 → 出站）：
 
@@ -279,7 +279,7 @@ D3 的 `DevicePolicy` 里预留了 `audio_capture_backend` / `audio_playback_bac
 
 17. **接缝没被破坏**：`plugins/audio_source.hpp` / `audio_sink.hpp` / `audio_device.hpp` 的 `IAudioSource` / `IAudioSink` 声明与本片开始前**逐字相同**（`git diff` 这三个头不含成员变更）。验证方式：静态检查。
 
-18. **公开头清单同步**：`docs/api/public_headers.manifest` 与实际公开头一致。验证方式：`python scripts/check_api_manifest.py` 通过。
+18. **公开头清单同步**：`docs/api/public_headers.manifest` 与实际公开头一致。验证方式：只读 `scripts/check_api_manifest.py`，跑它确认通过。
 
 19. **`EngineConfig` 新字段有文档**：`docs/api/engine_api.md` 里 `audio_source_name` / `audio_sink_name` / `audio_source_config` / `audio_sink_config` 四个字段都有说明，且**说明了空值语义**。验证方式：静态检查 —— 文档里出现这四个字段名，且提到空值 = 宿主自己喂。
 

@@ -134,10 +134,31 @@ def sign(candidate, target):
     On a machine with no EDITOR that fails with "Terminal is dumb, but
     EDITOR unset" -- and the script would report a failure for a tag
     it had already signed correctly.
+
+    The local tag is only replaced once the new one exists: the script
+    signs a throw-away tag first, and only then points the real tag at
+    the signed tag OBJECT.  Deleting first and signing second would
+    leave the repository with NO local tag at all if the signing
+    failed -- and on a machine where the local tag is the only copy of
+    a signature, that is not a recoverable state.
+
+    The swap uses `git update-ref`, not `git tag <name> <other-tag>`:
+    the latter resolves the other tag to its COMMIT and creates a new
+    lightweight tag, which throws the signature away.  `update-ref`
+    points the ref at the tag object itself, so the annotation and the
+    signature survive intact.
     """
-    rc, out = run(["git", "tag", "-d", candidate])
-    rc, out = run(["git", "tag", "-s", "-m", "NimRTC %s" % TAG, candidate,
+    probe = candidate + "-staged"
+    run(["git", "tag", "-d", probe])
+    rc, out = run(["git", "tag", "-s", "-m", "NimRTC %s" % TAG, probe,
                    target])
+    if rc != 0:
+        say(out.strip())
+        run(["git", "tag", "-d", probe])
+        return False
+    signed = run(["git", "rev-parse", probe])[1].strip()
+    rc, out = run(["git", "update-ref", "refs/tags/%s" % candidate, signed])
+    run(["git", "tag", "-d", probe])
     if rc != 0:
         say(out.strip())
         return False

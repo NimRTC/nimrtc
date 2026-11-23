@@ -16,13 +16,13 @@
 
 > **归属**：`version/v3`。N7 要改 `EngineConfig`（加一个回调字段）、公开头（加一个回调类型 + 一个 `Stats` 字段）、`engine.cpp` / `engine_transport.cpp`（接线）—— 与 N3（`8abb815a`）、D1 / D2 / D6 撞同一片区域，必须**顺序**做。
 >
-> **前置**：N3（`8abb815a`）已在 `version/v3` 上 —— N7 的「重连时重新咨询凭据」依赖 N3 的重连状态机（`engine_ice_recovery.hpp`）。
+> **前置**：N3（`8abb815a`）已在 `version/v3` 上 —— N7 的「重连时重新咨询凭据」依赖 N3 的重连状态机（只读 `engine_ice_recovery.hpp` —— 参照它的形状，本片**不**改它）。
 
 ### 现状核实（写规格时的树状态）
 
 - **`add_turn_server()` 是唯一入口，且是手动的**：`engine.hpp:3584` 明写 "Must be called BEFORE open()"；`engine.cpp:835` 的实现先查 `ice_t_` 是否存在，否则返回非零并打 "call pre_open() first"。
 - **凭据进到 ICE 模块是一次性的**：`IceTransport::add_turn_server()`（`ice.cpp:1051`）把 `TurnServer` **push 进** `impl_->config.turn_servers`；`ice.cpp:655-671` 在**建 agent 时**（`juice_config`）把这份 vector 拷进 libjuice。**建 agent 之后就再也不会变** —— 过期了没有任何地方会更新它。
-- **ICE 模块已经能识别「凭据被拒」**：`ice.cpp:63` 的进程级闩锁 `g_turn_auth_rejected`，由 `ice.cpp:78` 在 libjuice 的日志钩子里置位（agent.c 收到 401/403 时打 "TURN authentication failed"）；`ice.cpp:376` 的注释明写 "credentials rejection is only observable through the module's log hook"。
+- **ICE 模块已经能识别「凭据被拒」**：`ice.cpp:63` 的进程级闩锁 `g_turn_auth_rejected`，由 `ice.cpp:78` 在 libjuice 的日志钩子里置位（只读 `agent.c` —— 它是 vendored 的 libjuice 源码，收到 401/403 时打 "TURN authentication failed"）；`ice.cpp:376` 的注释明写 "credentials rejection is only observable through the module's log hook"。
 - **N4 的失败原因词汇已经包含它**：`Stats::ice_failure_reason` 的闭合词汇里有 `"credentials-rejected"`（`engine_transport_stats.cpp` 的 `ice_failure_reason()`）—— N7 要做的是让这个原因**真的能被报出来**，而不是笼统的 `"checks-failed"`。
 - **TURN 传输的选择已经在接缝上**：`plugins::IICETransport::add_turn_server_with_transport()`（`ice_transport.hpp:361`）与 `TurnTransport` 枚举（`ice_transport.hpp:115`）—— N7 的回调要能带传输方式，否则宿主没法表达「TURN/TLS」。
 - **`TurnServer` 是 ICE 模块的公开结构体**：`ice.hpp:155`，带 `host` / `port` / `username` / `password` / `transport` / `tls_server_name`。
@@ -224,7 +224,7 @@ public:
 | 验收（`tests/acceptance/v1-turn-credentials/acceptance.test.cjs`） | 跑真实 gtest 二进制 + 静态断言 | 22 条验收标准逐条落成真实断言（无 `todo` 用例） |
 | 回归 | `src/engine/tests/test_engine_*.cpp` 一整套 | 新增之后**仍然全绿** |
 
-**为什么单元测试用「纯函数 + 显式时钟」**：与 N3 的 `engine_ice_recovery` 同一形状（D4 的 `engine_capture_reconnect` 是它的先例）—— 状态机不该有真实时间，测试才能确定性。
+**为什么单元测试用「纯函数 + 显式时钟」**：与 N3 的 `engine_ice_recovery` 同一形状（只读 `engine_capture_reconnect` —— D4 的采集重连退避，是它的先例）—— 状态机不该有真实时间，测试才能确定性。
 
 **为什么验收要跑真实 gtest 二进制**：门禁②要求「每一条验收标准对应一条真正跑起来的用例」。验收层用 `spawnSync` 直接跑二进制并检查 `[       OK ] <case>`，不看 ctest 汇总 —— **ctest 汇总全绿不代表新测试跑过**（N3 的 ADR-031 §5.1 记了这个坑）。
 

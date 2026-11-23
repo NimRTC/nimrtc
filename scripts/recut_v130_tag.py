@@ -116,10 +116,28 @@ def freeze_check():
 # 3. the signature
 # --------------------------------------------------------------------------
 
-def sign(candidate):
-    """Create a signed annotated tag, replacing any existing local one."""
+def sign(candidate, target):
+    """Create a signed annotated tag on `target`, replacing any local one.
+
+    The tag must point at `target` -- the commit the gates were run
+    against -- and NOT at HEAD.  Signing HEAD is wrong twice over: the
+    working tree may be on a branch that is not the candidate (a
+    re-cut run from a feature branch would then publish that branch),
+    and the tag would disagree with the commit the soak evidence was
+    measured against.
+
+    `git tag -s -m <message> <name> <commit>` creates the annotated tag
+    on `target` directly, so no separate `git tag -f` is needed.  That
+    matters because `git tag -f <name> <commit>` does NOT mean "move
+    the tag": with `tag.gpgSign=true` it asks git to create a *signed
+    annotated* tag, and with no `-m` it opens an editor for the message.
+    On a machine with no EDITOR that fails with "Terminal is dumb, but
+    EDITOR unset" -- and the script would report a failure for a tag
+    it had already signed correctly.
+    """
     rc, out = run(["git", "tag", "-d", candidate])
-    rc, out = run(["git", "tag", "-s", "-m", "NimRTC %s" % TAG, candidate])
+    rc, out = run(["git", "tag", "-s", "-m", "NimRTC %s" % TAG, candidate,
+                   target])
     if rc != 0:
         say(out.strip())
         return False
@@ -188,14 +206,44 @@ def main():
         return 1
 
     step(4, total, "sign and verify")
-    if not sign(tag):
-        say("FATAL: could not sign the tag")
-        run(["git", "tag", "-d", "recut-candidate"])
-        return 2
-    if not verify_signature(tag):
-        say("FATAL: the signature does not verify -- the tag was NOT pushed")
-        run(["git", "tag", "-d", tag])
-        return 2
+    # In `--check-only` mode the real tag must not be touched at all: the
+    # point of that mode is to report whether a cut WOULD succeed.  So
+    # the signing ability is proven on a throw-away tag, which is
+    # deleted again, and the real tag is left exactly as it was.
+    # (Signing it for real would mean deleting and recreating a tag the
+    # caller asked not to touch -- and on a repository where the local
+    # tag is the only copy of a signature, that is not a harmless
+    # side effect.)
+    if args.check_only:
+        probe = "recut-sign-probe"
+        if not sign(probe, target):
+            say("FATAL: could not sign a tag at all")
+            run(["git", "tag", "-d", "recut-candidate"])
+            return 2
+        ok = verify_signature(probe)
+        run(["git", "tag", "-d", probe])
+        if not ok:
+            say("FATAL: the signature does not verify")
+            run(["git", "tag", "-d", "recut-candidate"])
+            return 2
+    else:
+        if not sign(tag, target):
+            say("FATAL: could not sign the tag")
+            run(["git", "tag", "-d", "recut-candidate"])
+            return 2
+        if not verify_signature(tag):
+            say("FATAL: the signature does not verify -- the tag was NOT pushed")
+            run(["git", "tag", "-d", tag])
+            return 2
+        # The tag now points at the target and carries a signature; there
+        # is no separate "move" step, and none is needed.
+        rc, out = run(["git", "rev-parse", "%s^{}" % tag])
+        landed = out.strip()
+        if landed != target:
+            say("FATAL: the tag points at %s, not at %s" % (landed, target))
+            run(["git", "tag", "-d", tag])
+            return 2
+        say("local tag %s now points at %s" % (tag, target))
     run(["git", "tag", "-d", "recut-candidate"])
 
     if args.check_only:
@@ -203,13 +251,6 @@ def main():
         say("The tag %s still points at the old commit and will still" % tag)
         say("fail the release.  Re-run without --check-only to re-cut it.")
         return 0
-
-    # Move the tag to the target and force-push it.
-    rc, out = run(["git", "tag", "-f", tag, target])
-    if rc != 0:
-        say(out.strip())
-        return 2
-    say("local tag %s now points at %s" % (tag, target))
 
     rc, out = run(["git", "push", "--force", ORIGIN, "refs/tags/%s" % tag])
     say(out.strip())

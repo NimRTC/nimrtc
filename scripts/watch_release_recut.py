@@ -118,8 +118,14 @@ def main():
             if rc2 == 0:
                 log("=== the tag was re-cut and pushed ===")
                 return 0
-            log("the re-cut failed (rc=%d); the tag was not moved by this "
-                "watcher -- the script above says why" % rc2)
+            # The re-cut may have created the local tag before it
+            # failed, so "the tag was not moved" would be a claim this
+            # watcher cannot make.  What IS true is that this watcher
+            # did not push anything: origin still carries whatever it
+            # carried before.
+            log("the re-cut failed (rc=%d); nothing was pushed, so origin "
+                "still carries the old tag -- the script above says why"
+                % rc2)
             return rc2
 
         # The gate said no.  Keep the reason: it is the whole point of

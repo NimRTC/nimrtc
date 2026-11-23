@@ -1,8 +1,14 @@
 # ADR-029: 引擎驱动音频设备层（音频设备注册表槽位 + 引擎侧设备泵）
 
-**状态**：Proposed
-**日期**：2026-11-22
-**相关**：`docs/plan/v1.4-plan.md` §D1（"the engine runs the device layer"）、`docs/adr/ADR-015-api-stability-policy.md`、`docs/adr/ADR-023-plugin-id-naming-contract.md`、`docs/adr/ADR-001-plugin-system.md`、`specs/slices/v1-device-policy.md`（D3/D4，其「本片的边界」一节明确把音频留给本 ADR）
+| | |
+|---|---|
+| Number | 029 |
+| Status | **Accepted** |
+| Date | 2026-11-22 |
+| Phase | v1.4 (D1) |
+| Bound to | v1.4.0 |
+| Supersedes | — |
+| Related | `docs/plan/v1.4-plan.md` §D1（"the engine runs the device layer"）；`docs/adr/ADR-015-api-stability-policy.md`；`docs/adr/ADR-023-plugin-id-naming-contract.md`；`docs/adr/ADR-001-plugin-system.md`；`specs/slices/v1-device-policy.md`（D3/D4，其「本片的边界」一节明确把音频留给本 ADR）；`specs/slices/v1-audio-device-engine.md` |
 
 ---
 
@@ -140,4 +146,4 @@ audio_sink_config   : plugins::AudioSinkConfig
 
 ## 6. 状态
 
-Proposed —— 等人签字。本 ADR 覆盖 §D1 的**架构决策**；D1 的切片规格在 `specs/slices/v1-audio-device-engine.md`。
+**Accepted**（2026-11-22）。本 ADR 覆盖 §D1 的**架构决策**；D1 的切片规格在 `specs/slices/v1-audio-device-engine.md`（已冻结，frozenHash `sha256:a7ac12aadb54542ee2e893b2e1dc8233668ba1362bb0323cdd1d51b568711eb4`）。

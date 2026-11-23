@@ -1015,6 +1015,21 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > - **The ABR benchmark measures a loop the engine drives.**  The engine feeds the controller `BitrateController::on_measured_bitrate()` with a one-second closed window over the encoder's outbound byte counters, and `on_keyframe_requested()` when the peer asks for a key frame (PLI / FIR).  The *estimator*, the *pacer* and the *resolution ladder* under test are the shipped ones, and the loop is closed in production as well as in the benchmark.
 > - **HEVC has no software decoder.** x265 is GPL-2.0, which the licence review excludes, so the HEVC screen-content path is hardware-only.
 > - **The QoE latency percentiles are measured but the freeze *finding* is only wired on the video path.** The input-to-photon measurement covers the control transport, as the acceptance criterion requires.
+> - **The v1.2.0 bundles ship no third-party licence text.**  The
+>   licence obligation was noticed during the v1.3.0 review and is
+>   discharged *from v1.3.0 onward*, not retroactively: the collector
+>   (`tools/collect_licenses.py`) and the `release.yml` step that runs it
+>   were both introduced on 2026-11-19 (`1dbc9f32`, `d6c3e38c`), one day
+>   *after* this tag was cut, and the v1.2.0 `cmake/NimRTCInstall.cmake`
+>   installs only headers, libraries and the CMake package config --
+>   there is no `install()` rule for a licence file.  The `sbom.json`
+>   published alongside each v1.2.0 bundle carries the SPDX identifiers
+>   and upstream URLs for all 18 vendored components, so the components
+>   are *identifiable*, but the BSD-3-Clause and Apache-2.0 notice texts
+>   that must accompany a binary redistribution are absent from the
+>   published archives.  The v1.3.0 bundles carry them under
+>   `licenses/`; anyone redistributing a v1.2.0 binary should add the
+>   upstream notices themselves.
 
 
 ### Added

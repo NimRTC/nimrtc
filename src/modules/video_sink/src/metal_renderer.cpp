@@ -188,6 +188,12 @@ struct MetalRenderer::Impl {
     /** The presentation target's size (the layer's drawable size). */
     std::uint32_t target_w_ = 0;
     std::uint32_t target_h_ = 0;
+
+    /** The `NSWindow` the renderer created for itself when the host
+     *  supplied no `native_window` (v1-video-render-engine D2).  Owned —
+     *  released in `destroy_metal_objects()`; nil when the host window is
+     *  used instead. */
+    NSWindow* self_window_ = nil;
 #endif
 
     /** The presentation cadence, in frames per second. */
@@ -209,6 +215,12 @@ struct MetalRenderer::Impl {
 #if defined(__APPLE__)
     /** Create the Metal device, the queue and the display surface. */
     bool create_metal_objects();
+
+    /** Create the renderer's own `NSWindow` + `CAMetalLayer` (used when
+     *  the host supplied no `native_window`).  Returns false when no
+     *  window can be created — the caller then falls back to the
+     *  offscreen target. */
+    bool create_self_window();
 
     /** Release every Metal / AVFoundation object. */
     void destroy_metal_objects();
@@ -287,18 +299,30 @@ bool MetalRenderer::Impl::create_metal_objects() {
 
     // ---- The display surface ----------------------------------------------
     //
-    // `native_window` is an `NSView*`.  If the view already carries a
-    // `CAMetalLayer` we draw into it; if it carries an
-    // `AVSampleBufferDisplayLayer` we use that (the CPU path); otherwise
-    // we install a `CAMetalLayer` of our own.
-    const bool want_surface = !cfg_.offscreen && cfg_.native_window != nullptr;
+    // `native_window` is an `NSView*`.  The host may have supplied one;
+    // when it did not (and the sink is not forced offscreen) the renderer
+    // builds its own `NSWindow` + `CAMetalLayer`, mirroring the EGL
+    // renderer's self-created surface (v1-video-render-engine D2 /
+    // ADR-030 decision three — the engine never touches the window
+    // system).  When even that fails (no WindowServer session, a headless
+    // CI leg) the renderer falls through to the offscreen target below,
+    // exactly as before.
+    //
+    // If the view already carries a `CAMetalLayer` we draw into it; if it
+    // carries an `AVSampleBufferDisplayLayer` we use that (the CPU path);
+    // otherwise we install a `CAMetalLayer` of our own.
+    const bool want_surface =
+        !cfg_.offscreen &&
+        (cfg_.native_window != nullptr || create_self_window());
 
     if (want_surface) {
         // `native_window` is an opaque `void*` that carries the `NSView*`.
         // Under ARC a `void*` cannot be cast to an Objective-C pointer
         // directly -- the cast has to be spelled `__bridge`, which says
         // "this is the same object, but ARC does not manage it".
-        NSView* view = (__bridge NSView*)cfg_.native_window;
+        NSView* view = (cfg_.native_window != nullptr)
+            ? (__bridge NSView*)cfg_.native_window
+            : [self_window_ contentView];
         CALayer* layer = [view layer];
 
         if ([layer isKindOfClass:[CAMetalLayer class]]) {
@@ -356,6 +380,50 @@ void MetalRenderer::Impl::destroy_metal_objects() {
     display_layer_ = nil;
     queue_  = nil;
     device_ = nil;
+    // The self-created window is released last: the layer it carried is
+    // released above, and the window's content view held that layer.
+    self_window_ = nil;
+}
+
+bool MetalRenderer::Impl::create_self_window() {
+    @autoreleasepool {
+        const CGFloat w = cfg_.width  > 0 ? cfg_.width  : 1280.0;
+        const CGFloat h = cfg_.height > 0 ? cfg_.height : 720.0;
+        const NSRect rect = NSMakeRect(0, 0, w, h);
+
+        self_window_ = [[NSWindow alloc]
+            initWithContentRect:rect
+                      styleMask:(NSWindowStyleMaskTitled |
+                                 NSWindowStyleMaskClosable |
+                                 NSWindowStyleMaskResizable)
+                        backing:NSBackingStoreBuffered
+                          defer:NO];
+        if (self_window_ == nil) {
+            NIMRTC_LOG_ERROR("metal renderer: NSWindow creation failed — "
+                             "falling back to offscreen");
+            return false;
+        }
+
+        NSView* view = [[NSView alloc] initWithFrame:rect];
+        [view setWantsLayer:YES];
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        if (layer == nil) {
+            self_window_ = nil;   // ARC releases the window
+            NIMRTC_LOG_ERROR("metal renderer: CAMetalLayer creation failed — "
+                             "falling back to offscreen");
+            return false;
+        }
+        [view setLayer:layer];
+        // `create_metal_objects()` reads the view's layer back and picks
+        // the CAMetalLayer branch, so installing it here is enough.
+        metal_layer_ = layer;
+        [self_window_ setContentView:view];
+        [self_window_ orderFront:nil];
+        NIMRTC_LOG_INFO("metal renderer: created a viewport window ("
+                        << static_cast<int>(w) << "x"
+                        << static_cast<int>(h) << ")");
+        return true;
+    }
 }
 
 bool MetalRenderer::Impl::ensure_pipeline() {

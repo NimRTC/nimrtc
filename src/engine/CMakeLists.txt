@@ -99,6 +99,11 @@ add_library(nimrtc_engine STATIC
     # is a list of plugin ids, which the public engine header must not
     # grow).
     src/engine_device_policy.cpp
+    # v1-video-render-engine D2: the per-platform default render policy.
+    # The "auto" sink-backend table lives here, private to the engine (the
+    # table is a list of plugin ids, which the public engine header must
+    # not grow).  It is the render-side sibling of engine_device_policy.cpp.
+    src/engine_render_policy.cpp
     # v1.4 (v3-n4-d6, D6): the connectivity profile.  A private TU — the
     # profile's policy defaults are engine-internal knowledge that must
     # not leak into the public engine header (Layout Invariant 4).

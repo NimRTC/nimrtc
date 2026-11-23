@@ -67,7 +67,7 @@ D2 照抄这个语义：`"auto"` 解析不到、或解析到的渲染器 `open()
 
 **破坏面的处理。** 默认值改变会影响 42 个 `.cpp` 构造点，但影响**不是均匀的**：
 
-- **bench 必须显式设 `"headless"`** —— `tests/bench_engine_hotpath.cpp`、`src/engine/tests/bench_capture_encode.cpp`、`bench_control_saturation.cpp` 这三个测的是引擎热路径，渲染器的 GPU 开销会污染测量。规格里点名要求它们显式设 `"headless"`。
+- **bench 必须显式设 `"headless"`** —— `tests/bench_engine_hotpath.cpp`、`tests/bench/bench_capture_encode.cpp`、`tests/bench/bench_control_saturation.cpp` 这三个测的是引擎热路径，渲染器的 GPU 开销会污染测量。规格里点名要求它们显式设 `"headless"`。
 - **单元测试大多无所谓** —— 它们断言的是别的字段，`"auto"` 解析出来的 sink 行为与 `"headless"` 在「帧被计数」这一层等价。
 - **example 会弹窗** —— 这正是这一版要的效果（宿主不碰 D3D11/Metal/EGL）。
 

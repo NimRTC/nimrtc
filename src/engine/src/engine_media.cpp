@@ -10,6 +10,10 @@
 // v1-device-policy D3: the default device policy ("auto" resolution).
 #include "engine_device_policy.hpp"
 
+// v1-video-render-engine D2: the default render policy ("auto" sink
+// resolution and its degrade ladder).
+#include "engine_render_policy.hpp"
+
 // v1.2.0 (video plan F8): the per-stream share rule of the session
 // bandwidth budget.  The audio path is the first consumer — the audio
 // is the session's *reserved* stream.
@@ -456,6 +460,85 @@ void NimRTCEngine::set_video_sink(std::unique_ptr<plugins::IVideoSink> sink) noe
 }
 
 
+// ---------------------------------------------------------------------------
+// "auto" sink resolution and its degrade ladder (v1-video-render-engine D2)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::resolve_auto_sink() noexcept {
+    const detail::RenderPolicy policy = detail::default_render_policy();
+    if (policy.preferred_backend.empty()) {
+        // No platform default on this build (a non-desktop target):
+        // "auto" cannot resolve, so it degrades.  This is the D2
+        // "no-platform-backend" case.
+        degrade_sink("headless", "no-platform-backend");
+        return;
+    }
+
+    const std::string id = detail::resolve_auto_sink_backend(
+        policy,
+        [](std::string_view candidate) noexcept {
+            return pal::resolve_video_sink(candidate) != nullptr;
+        });
+    if (id.empty()) {
+        // The policy named a backend this build does not register.
+        // "auto" is a recommendation, not a requirement — degrade.
+        degrade_sink("headless", "backend-not-registered");
+        return;
+    }
+
+    // "auto" opens in Fallback mode: a sink that cannot open is a
+    // *normal* machine (no display in CI, a driver that refuses), so the
+    // engine warns and degrades instead of failing the session.  The
+    // enum spells this Warn — it logs the warning and lets the caller
+    // fall back; it is deliberately NOT the Error mode the explicit-id
+    // path uses below.
+    const bool opened = pal::make_plugin<&pal::resolve_video_sink>(
+        id,
+        video_sink_,
+        resolve_sink_config(),
+        {.err_open_failed = core::kVideoSinkOpenFailed,
+         .err_missing = core::kVideoSinkPluginMissing,
+         .open_fail_mode = pal::PluginFailureMode::Warn,
+         .missing_mode = pal::PluginFailureMode::Warn,
+         .on_error = on_error_});
+    if (opened) {
+        video_sink_backend_ = id;
+        video_sink_backend_reason_ = "";
+    } else {
+        degrade_sink("headless", "backend-open-failed");
+    }
+}
+
+void NimRTCEngine::degrade_sink(std::string_view fallback_id,
+                                std::string_view reason) noexcept {
+    core::log::Logger::instance().warn(
+        std::string{"engine: video_sink_name=\"auto\" could not use the "
+                    "platform renderer ("} + std::string{reason} +
+        "); degrading to '" + std::string{fallback_id} + "'");
+    // The fallback is the last rung of the ladder ("headless"), so a
+    // sink always exists after "auto".  It is opened with the Error
+    // modes: if even the fallback is missing that is a registration
+    // failure worth reporting loudly rather than another silent degrade.
+    (void)pal::make_plugin<&pal::resolve_video_sink>(
+        fallback_id,
+        video_sink_,
+        resolve_sink_config(),
+        {.err_open_failed = core::kVideoSinkOpenFailed,
+         .err_missing = core::kVideoSinkPluginMissing,
+         .open_fail_mode = pal::PluginFailureMode::Error,
+         .missing_mode = pal::PluginFailureMode::Error,
+         .on_error = on_error_});
+    if (video_sink_) {
+        video_sink_backend_ = std::string(fallback_id);
+        video_sink_backend_reason_ = std::string(reason);
+    } else {
+        // Even the fallback could not be installed: no sink at all.
+        video_sink_backend_.clear();
+        video_sink_backend_reason_ = std::string(reason);
+    }
+}
+
+
 void NimRTCEngine::set_video_source(
     std::unique_ptr<plugins::IVideoSource> source) noexcept {
     if (video_source_) {
@@ -725,19 +808,71 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     }
 
     // ---- Video Sink --------------------------------------------------------
+    //
+    // The value table (v1-video-render-engine D2):
+    //   ""       → "headless" (today's behaviour, verbatim).
+    //   "auto"   → the platform renderer; on any failure it degrades to
+    //              "headless" with a warn, and open() never fails.  A
+    //              sink is an *output* device, and a missing output
+    //              device must not fail the session (ADR-030 decision
+    //              two — the audio side degrades the same way).
+    //   "none"   → explicit opt-out: no sink instance at all.
+    //   "<id>"   → an explicit backend.  Explicit ids are promises: an
+    //              unknown id fails with kVideoSinkPluginMissing, an
+    //              open() failure with kVideoSinkOpenFailed (the same
+    //              hard-error rule the capture side applies).
     if (!video_sink_) {
-        // PAL Slice 1.5 — replaces the 5-step "factory → create → null-check
-        // → open → report" dance with one helper call. The Error/Error
-        // policy matches the original on_error_ path.
-        (void)pal::make_plugin<&pal::resolve_video_sink>(
-            config_.video_sink_name,
-            video_sink_,
-            resolve_sink_config(),                    // plan E7: the presentation
-            {.err_open_failed = core::kVideoSinkOpenFailed,
-             .err_missing = core::kVideoSinkPluginMissing,
-             .open_fail_mode = pal::PluginFailureMode::Error,
-             .missing_mode = pal::PluginFailureMode::Error,
-             .on_error = on_error_});
+        const std::string_view configured = config_.video_sink_name;
+        if (configured == "none") {
+            // Explicit opt-out.  No sink instance is created; the render
+            // path below reports kVideoSinkIncompatible, and
+            // `set_on_video_frame` keeps firing (it is the host's
+            // decoded-frame callback, unrelated to the sink).
+            video_sink_backend_ = "";
+            video_sink_backend_reason_ = "";
+        } else if (configured.empty() || configured == "headless") {
+            // "" is today's behaviour, verbatim; "headless" is the
+            // explicit spelling of the same sink.
+            (void)pal::make_plugin<&pal::resolve_video_sink>(
+                "headless",
+                video_sink_,
+                resolve_sink_config(),                    // plan E7: the presentation
+                {.err_open_failed = core::kVideoSinkOpenFailed,
+                 .err_missing = core::kVideoSinkPluginMissing,
+                 .open_fail_mode = pal::PluginFailureMode::Error,
+                 .missing_mode = pal::PluginFailureMode::Error,
+                 .on_error = on_error_});
+            video_sink_backend_ = video_sink_ ? "headless" : "";
+            video_sink_backend_reason_ = "";
+        } else if (configured == "auto") {
+            resolve_auto_sink();
+        } else {
+            // An explicit id is a promise.  A factory that is missing or
+            // a sink that refuses to open is a hard error that fails the
+            // session — never a silent degrade.
+            const bool opened = pal::make_plugin<&pal::resolve_video_sink>(
+                configured,
+                video_sink_,
+                resolve_sink_config(),
+                {.err_open_failed = core::kVideoSinkOpenFailed,
+                 .err_missing = core::kVideoSinkPluginMissing,
+                 .open_fail_mode = pal::PluginFailureMode::Error,
+                 .missing_mode = pal::PluginFailureMode::Error,
+                 .on_error = on_error_});
+            if (opened) {
+                video_sink_backend_ = std::string(configured);
+                video_sink_backend_reason_ = "";
+            } else {
+                const bool missing =
+                    pal::resolve_video_sink(configured) == nullptr;
+                const uint32_t rc = missing
+                    ? core::kVideoSinkPluginMissing
+                    : core::kVideoSinkOpenFailed;
+                impl_->session_state.last_open_rc = rc;
+                shutdown_video_plugins();
+                return rc;
+            }
+        }
     }
 
     // ---- Video Bitrate Controller (remote-desktop plan D1) -----------------
@@ -1704,6 +1839,12 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     close_all(video_receiver_);
     close_all(video_sender_);
     close_all(video_codec_);
+    // v1-video-render-engine D2: the negotiated sink backend and its
+    // degradation reason are per-session, so a re-open() starts from a
+    // clean slate (an old "backend-open-failed" must not leak into the
+    // next session's stats).
+    video_sink_backend_.clear();
+    video_sink_backend_reason_.clear();
     // Remote-desktop plan D1: the rate controller closes with the rest
     // of the video plugins.
     close_all(video_bitrate_controller_);
@@ -3628,6 +3769,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.video_sink_render_errors          = ss.render_errors;
         out.video_sink_present_fps             = ss.present_fps;
     }
+
+    // ---- The negotiated sink backend (v1-video-render-engine D2) ------
+    //
+    // The backend id and the degradation reason are engine-owned (they
+    // are strings, not counters), so they are read from the private
+    // members set at open() time rather than from the sink plugin.
+    out.video_sink_backend       = video_sink_backend_;
+    out.video_sink_backend_reason = video_sink_backend_reason_;
 
     // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
     //

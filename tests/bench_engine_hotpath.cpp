@@ -337,6 +337,11 @@ SendVideoResult bench_send_video(int width, int height, int frames, int warmup) 
     cfg.video_sender_name      = "reference";
     cfg.video_receiver_name    = "reference";
     cfg.video_source_name      = "memory";
+    // v1-video-render-engine D2: the video_sink_name default is now "auto"
+    // (a platform renderer).  This benchmark measures the engine's hot
+    // path, so it explicitly pins "headless" — a renderer's GPU / window
+    // cost must not pollute the send_video() budget.
+    cfg.video_sink_name        = "headless";
     cfg.video_width            = static_cast<std::uint32_t>(width);
     cfg.video_height           = static_cast<std::uint32_t>(height);
     // The zero-allocation gate measures the *engine's* hot path, not the
@@ -442,6 +447,10 @@ TickResult bench_tick(int ticks, int warmup) {
     EngineConfig cfg;
     cfg.transport_strategy_name = "shell";
     cfg.stun_server_host       = "";
+    // v1-video-render-engine D2: pin the sink to "headless" — the default
+    // is now "auto", and this benchmark measures the tick path, not window
+    // creation.
+    cfg.video_sink_name        = "headless";
 
     NimRTCEngine engine(cfg);
     if (engine.open() != 0u) {

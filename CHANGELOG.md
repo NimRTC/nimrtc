@@ -34,6 +34,25 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fields only — no new public headers — so the ADR-015 baseline stays at
   198.
 
+- **The engine runs the renderer (`slice v1-video-render-engine`).**
+  `EngineConfig::video_sink_name` now defaults to `"auto"`: the engine
+  resolves the platform renderer (D3D11 on Windows, Metal on macOS, EGL on
+  Linux) and **degrades instead of failing** — a machine with no display is
+  a normal machine, not an error.  The degrade is never silent: the sink
+  falls back to `"headless"` and `Stats::video_sink_backend_reason` says
+  why (`no-platform-backend` / `backend-not-registered` /
+  `backend-open-failed`).  The value table adds `"none"` (an explicit
+  opt-out — no sink instance) alongside today's `""` / `"headless"` (both
+  the headless sink, verbatim), and an explicit backend id stays a
+  *promise*: unknown id → `kVideoSinkPluginMissing`, open failure →
+  `kVideoSinkOpenFailed`, never a silent degrade.  The platform renderers
+  now create their own window when the host hands over none
+  (`CreateWindowExW` / `ShowWindow(SW_SHOWNOACTIVATE)` on Windows, an
+  `NSWindow` with a `CAMetalLayer` on macOS), so a host that wants a
+  picture writes no window code.  Stats gains `video_sink_backend` and
+  `video_sink_backend_reason`.  Fields only — no new public headers — so
+  the ADR-015 baseline stays at 198.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

@@ -580,8 +580,10 @@ bool EglRenderer::Impl::open_backend() {
     }
     #endif
 
-    NIMRTC_LOG_ERROR("egl renderer: no usable window-system backend "
-                     "(neither Wayland nor X11 is available)");
+    NIMRTC_LOG_ERROR("egl renderer: no display available (neither a "
+                     "Wayland compositor nor an X11 server could be "
+                     "reached) — the engine degrades to the headless "
+                     "sink and reports video_sink_backend_reason");
     return false;
 }
 

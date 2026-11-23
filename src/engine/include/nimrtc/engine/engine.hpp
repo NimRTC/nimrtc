@@ -721,8 +721,30 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  with no capture device there is nothing to pump. */
     bool video_capture_pump = true;
 
-    /** IVideoSink plugin id (e.g. "headless", "pinned", or HW renderer id). */
-    std::string video_sink_name   = "headless";
+    /** IVideoSink plugin id (v1-video-render-engine D2).
+     *
+     *  The value table (D2-4):
+     *    `""`        today's behaviour, verbatim: equivalent to
+     *                `"headless"` (count frames, drop pixels).
+     *    `"auto"`    the platform renderer, resolved through the
+     *                registry (Windows `d3d11` / macOS `metal` /
+     *                Linux `egl`).  "auto" is a *recommendation*, not a
+     *                requirement: when the platform backend cannot run
+     *                (not registered, `open()` fails, no platform
+     *                backend on this build) the engine degrades to
+     *                `"headless"`, warns, and reports the reason in
+     *                `Stats::video_sink_backend_reason` — `open()`
+     *                never fails for "auto".
+     *    `"none"`    explicit opt-out: no sink instance is created and
+     *                the engine renders nothing (`video_sink()` returns
+     *                null; `set_on_video_frame` still fires).
+     *    `"headless"`  explicit "count frames but drop pixels".
+     *    `"<id>"`    an explicit backend id (e.g. `"pinned"`, or any
+     *                registered renderer).  Explicit ids are promises:
+     *                an unknown id or an `open()` failure fails the
+     *                session (`kVideoSinkPluginMissing` /
+     *                `kVideoSinkOpenFailed`). */
+    std::string video_sink_name   = "auto";
 
     /** IVideoBitrateController plugin id (remote-desktop plan D1).
      *
@@ -5022,6 +5044,23 @@ public:
         std::uint64_t video_sink_render_errors          = 0;
         std::uint32_t video_sink_present_fps             = 0;
 
+        // ---- The negotiated sink backend (v1-video-render-engine D2) ----
+        //
+        // "auto" resolves to a platform renderer or degrades to
+        // headless; these two fields make the degradation observable
+        // (D2-1: "never a silent drop").
+        //
+        // `video_sink_backend` is the id of the sink that is actually
+        // installed ("d3d11" / "metal" / "egl" / "headless" / ...);
+        // empty = no sink ("none").  `video_sink_backend_reason` is
+        // non-empty only when the host's request was degraded:
+        // "no-platform-backend" (no default on this build),
+        // "backend-not-registered" (the platform backend is not in the
+        // registry), "backend-open-failed" (the backend's open() failed),
+        // "no-display" (the backend found no usable display).
+        std::string video_sink_backend;
+        std::string video_sink_backend_reason;
+
         // ---- The render clock (remote-desktop plan E5) ---------------------
         //
         // The *video half* of the A/V-sync contract: what the render
@@ -5399,6 +5438,23 @@ private:
     std::unique_ptr<plugins::IVideoSink>        video_sink_;
     std::unique_ptr<plugins::IVideoReceiver>    video_receiver_;
     std::unique_ptr<plugins::IVideoSender>      video_sender_;
+
+    // v1-video-render-engine D2: the sink backend that was actually
+    // negotiated, and the degradation reason.  They live here (not in a
+    // video-state collaborator) because they are plain strings the
+    // engine's public `Stats` mirrors — see the Stats fields of the same
+    // names.
+    std::string video_sink_backend_;
+    std::string video_sink_backend_reason_;
+
+    // v1-video-render-engine D2: the "auto" ladder.  `resolve_auto_sink()`
+    // resolves "auto" to the platform renderer through the private render
+    // policy; `degrade_sink()` installs the fallback and records why.
+    // Both are member helpers because they touch the sink slot, the
+    // config, the error callback and the negotiated-backend strings.
+    void resolve_auto_sink() noexcept;
+    void degrade_sink(std::string_view fallback_id,
+                      std::string_view reason) noexcept;
     // Remote-desktop plan A1 / A10: the capture-*device* plugin.  Present
     // only when `EngineConfig::video_capture_name` names a registered
     // factory; null otherwise (the normal case — the host feeds frames

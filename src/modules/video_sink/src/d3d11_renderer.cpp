@@ -185,6 +185,12 @@ struct D3D11Renderer::Impl {
     /** The upload texture's current size. */
     std::uint32_t upload_w_ = 0;
     std::uint32_t upload_h_ = 0;
+
+    /** The viewport window the renderer created for itself when the host
+     *  supplied no `native_window` (v1-video-render-engine D2).  Owned —
+     *  destroyed in `destroy_d3d_objects()`; null when the host window
+     *  is used instead. */
+    HWND self_hwnd_ = nullptr;
 #endif
 
     /** The presentation cadence, in frames per second. */
@@ -214,6 +220,12 @@ struct D3D11Renderer::Impl {
     /** Create the D3D11 device, the swap chain (or the offscreen
      *  target) and the render target view. */
     bool create_d3d_objects();
+
+    /** Create the renderer's own viewport window (used when the host
+     *  supplied no `native_window`).  Returns false when no window can
+     *  be created — the caller then falls back to the offscreen target.
+     */
+    bool create_self_window();
 
     /** Release every D3D11 / DXGI object. */
     void destroy_d3d_objects();
@@ -432,15 +444,23 @@ bool D3D11Renderer::Impl::create_d3d_objects() {
 
     // ---- The output surface ----------------------------------------------
     //
-    // A swap chain needs a window.  Without one (or in offscreen mode)
-    // the renderer renders into a plain texture — the presentation clock
-    // and the drop accounting still work, which is what makes the
-    // frame-rate assertion testable without a display.
+    // A swap chain needs a window.  The host may have supplied one; when
+    // it did not (and the sink is not forced offscreen) the renderer
+    // builds its own viewport window, mirroring the EGL renderer's
+    // self-created surface (v1-video-render-engine D2 / ADR-030 decision
+    // three — the engine never touches the window system).  When even
+    // that fails (no display device, a headless CI session) the renderer
+    // falls through to the offscreen target below, exactly as before:
+    // the presentation clock and the drop accounting still work, which
+    // is what makes the frame-rate assertion testable without a display.
     const bool want_swap_chain =
-        !cfg_.offscreen && cfg_.native_window != nullptr;
+        !cfg_.offscreen &&
+        (cfg_.native_window != nullptr || create_self_window());
 
     if (want_swap_chain) {
-        HWND hwnd = static_cast<HWND>(cfg_.native_window);
+        HWND hwnd = cfg_.native_window != nullptr
+            ? static_cast<HWND>(cfg_.native_window)
+            : self_hwnd_;
         RECT rect{};
         if (!::GetClientRect(hwnd, &rect)) {
             NIMRTC_LOG_ERROR("d3d11 renderer: GetClientRect failed");
@@ -550,6 +570,44 @@ bool D3D11Renderer::Impl::resize_offscreen(std::uint32_t width,
     return true;
 }
 
+bool D3D11Renderer::Impl::create_self_window() {
+    // The window class is registered once per process; a duplicate
+    // registration is the normal second-caller case, not an error.
+    constexpr const wchar_t* kClassName = L"NimRTCD3D11Viewport";
+    static const bool s_class_registered = []() {
+        WNDCLASSEXW wc{};
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = DefWindowProcW;
+        wc.hInstance     = ::GetModuleHandleW(nullptr);
+        wc.hCursor       = ::LoadCursorW(
+            nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+        wc.lpszClassName = kClassName;
+        return ::RegisterClassExW(&wc) != 0 ||
+               ::GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }();
+    (void)s_class_registered;
+
+    const int w = static_cast<int>(cfg_.width  > 0 ? cfg_.width  : 1280);
+    const int h = static_cast<int>(cfg_.height > 0 ? cfg_.height : 720);
+    self_hwnd_ = ::CreateWindowExW(
+        0, kClassName, L"NimRTC", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, w, h,
+        nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+    if (self_hwnd_ == nullptr) {
+        NIMRTC_LOG_ERROR("d3d11 renderer: CreateWindowExW failed (err="
+                         << ::GetLastError() << ") — falling back to "
+                         "offscreen");
+        return false;
+    }
+    // Show without activating, so the viewport does not steal focus from
+    // the host's own windows.
+    ::ShowWindow(self_hwnd_, SW_SHOWNOACTIVATE);
+    NIMRTC_LOG_INFO("d3d11 renderer: created a viewport window ("
+                    << w << "x" << h << ")");
+    return true;
+}
+
 void D3D11Renderer::Impl::destroy_d3d_objects() {
     if (upload_)      { upload_->Release();      upload_ = nullptr; }
     if (offscreen_rtv_){ offscreen_rtv_->Release(); offscreen_rtv_ = nullptr; }
@@ -559,6 +617,9 @@ void D3D11Renderer::Impl::destroy_d3d_objects() {
     if (swap_chain_)  { swap_chain_->Release();  swap_chain_ = nullptr; }
     if (context_)     { context_->Release();     context_ = nullptr; }
     if (device_)      { device_->Release();      device_ = nullptr; }
+    // The self-created viewport is destroyed after the swap chain that
+    // presented into it (the swap chain is released above).
+    if (self_hwnd_)   { ::DestroyWindow(self_hwnd_); self_hwnd_ = nullptr; }
 }
 
 bool D3D11Renderer::Impl::do_present() {

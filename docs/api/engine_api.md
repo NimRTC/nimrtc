@@ -950,6 +950,45 @@ policy backend that this build does not register is **not** an error:
 `"auto"` degrades to "no capture device" (warn) instead of firing
 `kVideoCapturePluginMissing`.
 
+### 9.5 The engine-driven video renderer (v1.4 / plan D2)
+
+By default the engine **runs the renderer**: `EngineConfig::video_sink_name`
+resolves a video sink plugin, the same pluggable surface the host used to
+fill by hand.  The host keeps the ownership rules from the old days — no
+D3D11 / Metal / EGL code, and usually no window code either (the platform
+renderers create their own window when `plugins::VideoSinkConfig::native_window`
+is null, see below).
+
+| Config field | Meaning |
+|---|---|
+| `video_sink_name` | Which sink the engine installs.  `"auto"` (the default) resolves the platform renderer and **degrades instead of failing**; `""` is today's behaviour verbatim (headless); `"none"` installs no sink at all; `"headless"` is the explicit spelling; any other value is an explicit backend id — a promise. |
+
+**The value table.**
+
+| value | behaviour |
+|---|---|
+| `""` | The headless sink — today's behaviour, **verbatim**.  `video_sink()` is non-null, `video_sink_backend == "headless"`. |
+| `"auto"` | The new default.  Resolves the per-platform preference table (Windows `d3d11`, macOS `metal`, Linux `egl`, fallback `headless`).  **`open()` never fails under `"auto"`**: if the platform renderer cannot be used the engine warns and degrades to `"headless"`, and `Stats::video_sink_backend_reason` says why (`no-platform-backend` on a non-desktop build, `backend-not-registered` when the build registers no such backend, `backend-open-failed` when the renderer refused to open — a machine with no display is a normal machine, not an error). |
+| `"none"` | An explicit opt-out: **no sink instance** is created.  `video_sink()` is null and `video_sink_backend` is empty. |
+| `"headless"` | The explicit spelling of `""`. |
+| `"<id>"` | An explicit backend id.  Explicit ids are **promises**: an unknown id fails `open()` with `kVideoSinkPluginMissing`, an id whose `open()` fails is a hard error (`kVideoSinkOpenFailed`) — the exact opposite of `"auto"`, never a silent degrade. |
+
+**Window ownership.**  With `"auto"` on a desktop build the engine opens
+the platform renderer; when the host did not hand over a `native_window`
+the renderer creates its own top-level window — `CreateWindowExW` /
+`ShowWindow(SW_SHOWNOACTIVATE)` on Windows, an `NSWindow` backed by a
+`CAMetalLayer` on macOS.  The EGL renderer already self-created its
+Wayland surface / X11 window.  A host that wants no window keeps using
+`offscreen` or `"none"`.
+
+**Inspection.**  `video_sink()` returns the installed
+`plugins::IVideoSink*` (null only for `"none"` or an uninstallable
+fallback).  `Stats` reports which backend actually runs:
+`Stats::video_sink_backend` is the installed sink's id
+(`"headless"`, the platform id, or the explicit id) and
+`Stats::video_sink_backend_reason` is the degrade reason (empty when the
+session did **not** degrade).
+
 ---
 
 ## 10. DataChannel control plane
@@ -1963,6 +2002,8 @@ header; its section note above it is the definition.
 | 156 | `audio_source_backend` | `std::string` | The resolved capture backend factory id, or empty when no source device is in use. |
 | 157 | `audio_sink_device_id` | `std::string` | The *negotiated* playback device id, or empty when no sink device is in use. |
 | 158 | `audio_sink_backend` | `std::string` | The resolved playback backend factory id, or empty when no sink device is in use. |
+| 159 | `video_sink_backend` | `std::string` | The id of the sink that is actually installed (v1.4 / plan D2): the platform id when `"auto"` resolved, `"headless"` when it degraded (or was asked for explicitly), the explicit id, or empty when `"none"` / no sink. |
+| 160 | `video_sink_backend_reason` | `std::string` | Why `"auto"` did not use the platform renderer (`no-platform-backend`, `backend-not-registered`, `backend-open-failed`), or **empty** when the session did not degrade. |
 | 159 | `audio_device_pumped_frames` | `std::uint64_t` | Frames the audio capture pump pulled from the source device and ran through the outbound chain (v1.4 / plan D1). Moving is the proof that the automatic path works: no `send_audio()` call from the host. |
 | 160 | `audio_device_pump_errors` | `std::uint64_t` | Audio pump failures: a non-`kOk`/`kErrNotReady` device read, or an outbound chain rejection. |
 **160 fields.**

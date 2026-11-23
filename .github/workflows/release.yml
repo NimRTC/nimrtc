@@ -385,9 +385,38 @@ jobs:
           submodules: recursive
           ref: ${{ needs.preflight.outputs.release_tag }}
 
+      # EVERY pwsh step below opens with this preamble.  GitHub's pwsh
+      # shell appends `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) {
+      # exit $LASTEXITCODE }` to the END of the script, so it checks only
+      # the LAST native command's exit code.  A failure in the middle of
+      # a multi-command step is silently ignored, and the step reports
+      # success.
+      #
+      # That is not hypothetical.  In release run 45103898215 (the
+      # v1.3.0 cut, 2026-11-23) `python tools/collect_licenses.py`
+      # printed
+      #
+      #     ERROR: vendor(s) linked into the bundle whose licence text
+      #     was not found: svt-av1
+      #
+      # and exited 1 -- and the Windows job still reported SUCCESS,
+      # because `make_release_bundle.py` (the next command) succeeded.
+      # The bundle it uploaded shipped svt-av1's static codec library
+      # with NO licence text, which is the BSD-2-Clause / AOM-Patent
+      # obligation the collector exists to discharge.  A published
+      # bundle that violates a licence is worse than a failed release.
+      #
+      # `$ErrorActionPreference = 'Stop'` turns a non-terminating error
+      # into a terminating one, and the explicit `if ($LASTEXITCODE -ne
+      # 0) { exit $LASTEXITCODE }` after each native command catches the
+      # case the preference cannot: a native command that failed but
+      # wrote nothing to the error stream.
       - name: Install Ninja
         shell: pwsh
-        run: choco install -y ninja
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install -y ninja
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Set up MSVC dev environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -410,8 +439,11 @@ jobs:
       - name: Install meson (for WebRTC APM prebuild)
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           python -m pip install --user --quiet "meson>=1.10"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $userScripts = python -c "import sysconfig; print(sysconfig.get_path('scripts', scheme='nt_user'))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "Adding to GITHUB_PATH: $userScripts"
           Add-Content -Path $env:GITHUB_PATH -Value $userScripts
 
@@ -444,11 +476,15 @@ jobs:
       - name: Prebuild WebRTC APM
         id: apm_prebuild
         shell: pwsh
-        run: python tools/fetch_webrtc_apm.py
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python tools/fetch_webrtc_apm.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Configure
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           # W3 (flipped 2026-11-06): the APM prebuild is a hard gate, so
           # the mode is pinned to ON — there is no degraded fallback
           # branch any more.
@@ -464,19 +500,25 @@ jobs:
             -DNIMRTC_BUILD_TESTS=OFF `
             -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON `
             -DNIMRTC_INSTALL=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force -Path build | Out-Null
           "3a=$apm" | Set-Content -Path build/3a-status-windows.txt
 
       - name: Build
         shell: pwsh
-        run: cmake --build build --config Release -j
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build build --config Release -j
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install into staging dir
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $version = "$env:RELEASE_TAG" -replace '^v',''
           $staging = "build/_install/windows"
           cmake --install build --prefix $staging --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           # BSD-3-Clause and Apache-2.0 both require the licence text to
           # travel with a binary redistribution.  The SBOM names each
@@ -487,6 +529,7 @@ jobs:
           # `licenses/` inside the staging tree, and fail the cut if a
           # distributed vendor has no licence file.
           python tools/collect_licenses.py --staging $staging
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           # Bundle name: nimrtc-${version}-windows-x86_64-msvc.tar.xz
           $bundle = "build/nimrtc-$version-windows-x86_64-msvc.tar.xz"
@@ -505,6 +548,7 @@ jobs:
           # layout of the Linux/macOS jobs, and fails the step if the bundle
           # comes out empty or unreasonably large.
           python tools/make_release_bundle.py --staging $staging --output $bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # `Get-FileHash` as a pipeline command writes a 3-column tabular
           # line (Algorithm/Hash/Path) which is PowerShell-specific and not
           # consumable by `sha256sum -c` on Linux/macOS downstream. Read

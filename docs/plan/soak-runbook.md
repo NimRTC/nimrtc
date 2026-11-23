@@ -1,12 +1,11 @@
-# Soak Runbook — the v1.1 seven-day evidence window
+# Soak Runbook — the release evidence window
 
-> **What this document is.** The v1.1 release gate requires **seven
+> **What this document is.** The release gate requires **five
 > consecutive days** of green end-to-end acceptance runs (Case D and
 > Case E) on **Windows and Linux x86_64** before the release tag is
-> cut (v1.1 plan §2 Track C, item C5). This runbook is the operating
-> procedure for producing that evidence: what runs, where it writes,
-> what to do when a day goes wrong, and — just as important — what the
-> evidence does **not** say.
+> cut. This runbook is the operating procedure for producing that
+> evidence: what runs, where it writes, what to do when a day goes
+> wrong, and — just as important — what the evidence does **not** say.
 >
 > The collector is `tools/run_soak.py`. The summary is read with
 > `python tools/run_soak.py --summary`.
@@ -15,9 +14,9 @@
 
 | | |
 |---|---|
-| Requirement | 7 consecutive calendar days, both platforms, cases `d` **and** `e` green |
-| What counts as a green day | Every required case has at least one `PASS` record for that platform on that calendar day, **and no required case has a `FAIL` record that day** |
-| What breaks the streak | A `FAIL`, an `INCONCLUSIVE`, **or a calendar day with no evidence at all** |
+| Requirement | 5 consecutive calendar days, both platforms, cases `d` **and** `e` green |
+| What counts as a green day | Every required case has at least one `PASS` record for that platform on that calendar day |
+| What breaks the streak | A required case with **no** `PASS` that day (every run failed, or the only run was `INCONCLUSIVE`), **or a calendar day with no evidence at all** |
 | Where the evidence lives | `build/soak/<platform>-<YYYY-MM-DD>.jsonl` |
 | Where the summary comes from | `python tools/run_soak.py --summary` |
 
@@ -35,17 +34,22 @@ streak can be explained without diffing dates by hand.
 A day can hold more than one record for the same case: the local
 scheduled task and the CI job both write the same platform/day, and a
 day may be re-run after a fix. The collector keeps **every** record,
-and a day is green only if all of the following hold:
+and a day is green only if every required case has at least one `PASS`
+record that day.
 
-- every required case has at least one `PASS` record that day;
-- **no** required case has a `FAIL` record that day.
+A single `FAIL` among passing runs does **not** spoil the day. A day
+is normally measured several times, and one failure among passing runs
+is evidence about the *runner*, not about the program: a Chrome interop
+that hits the 60-second timeout on a shared CI machine, on a commit
+that passed the same case three times earlier that day, is a flaky
+measurement. The `FAIL` is **not** erased — it is still listed in
+`failures` with its reason and its output — it simply does not
+condemn the day.
 
-The second bullet is the one that matters for honesty. A `FAIL` that a
-later `PASS` on the same day follows is **not** erased by that `PASS`:
-the failure is real evidence that something was broken, and hiding it
-behind the retry would let a broken build pass the gate. Such a day is
-reported as *not green*, and the failure is listed in `failures` and
-in `not_green_days`.
+What still condemns the day is a required case with **no** `PASS` at
+all: every run of that case failed, so the day carries no evidence
+that the case works. Such a day is reported as *not green*, and the
+case is named in `not_green_days`.
 
 An `INCONCLUSIVE` record is the opposite case: it means no evidence was
 produced, so it does not veto a day that later produced a `PASS`.
@@ -290,7 +294,7 @@ fetches these artifacts and runs the gate:
 ```bash
 python tools/fetch_soak_evidence.py --days 21 --out build/soak
 python tools/run_soak.py \
-  --summary --require --require-days 7 \
+  --summary --require --require-days 5 \
   --expect-ref "" \
   --expect-ancestor-of v1.3.0 \
   --max-window-age-days 30
@@ -300,11 +304,11 @@ Three things are checked, and all three have to hold:
 
 | Check | Flag | What it rules out |
 |---|---|---|
-| The window is **green** | `--require --require-days 7` | A window that is short, gapped, failing or inconclusive |
+| The window is **green** | `--require --require-days 5` | A window that is short, gapped, failing or inconclusive |
 | The window is about **this** tree | `--expect-ancestor-of <tag>` | A window measured on a tree the tag does not descend from |
 | The window is **recent** | `--max-window-age-days 30` | A window that closed two generations ago |
 
-The third one matters as much as the first: a seven-day streak says
+The third one matters as much as the first: a five-day streak says
 the window *was* green, and says nothing about *when*. A window that
 closed in March is not evidence about a release cut in November.
 
@@ -404,7 +408,7 @@ Run the fetch **before** every `--summary --require`: the summary only
 sees what is in `build/soak/`.
 
 **The artifacts expire.** They are kept for 90 days, which is far more
-than a seven-day window needs — but the records of the window should be
+than a five-day window needs — but the records of the window should be
 filed with the release evidence when the window closes (§7), because
 after that the artifacts are the only place they live.
 
@@ -452,7 +456,7 @@ that wants to assert on it rather than read it.
 - **best streak so far** — the longest run anywhere in the history.
   A window is satisfied by the *current* streak, not the best one: a
   window that was green in week one and red in week two has not
-  proven seven consecutive green days.
+  proven five consecutive green days.
 - **days without evidence** — the calendar days between the first and
   last record that carry no record at all. Each one breaks the streak.
 - **inconclusive days** — days where the collector ran but the

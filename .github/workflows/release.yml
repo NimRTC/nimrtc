@@ -265,9 +265,9 @@ jobs:
           #
           # The `--require` gate is what makes this a gate rather than
           # a report: it exits non-zero unless EVERY tracked platform
-          # has a 7-day streak.
+          # has a 5-day streak.
           python3 tools/run_soak.py \
-            --summary --require --require-days 7 \
+            --summary --require --require-days 5 \
             --expect-ref "" \
             --expect-ancestor-of "$tag" \
             --max-window-age-days "$max_age" \

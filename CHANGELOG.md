@@ -76,10 +76,12 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 >   the tree; the runner is what is missing.
 
 > **The release gates are read, not assumed.**  The `release` workflow's
-> preflight now verifies the seven-day soak window at the tag, checks that
-> the tag is an ancestor of `main`, and confirms the README already
-> describes the release being published.  The release lines and the
-> release tags are protected by rulesets.
+> preflight now verifies the soak window at the tag (five consecutive
+> green days on each platform -- seven until the 2026-11-23 change
+> recorded under `[Unreleased]`), checks that the tag is an ancestor of
+> `main`, and confirms the README already describes the release being
+> published.  The release lines and the release tags are protected by
+> rulesets.
 
 > **Q1b (the H.265 half of the parameter-set switch) is a `1.3.x` item.**
 > The codec-level assertion and the engine-level hardware case both ship

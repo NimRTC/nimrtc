@@ -1,8 +1,9 @@
 name: soak
 
-# The daily evidence collector for the seven-day release gate
-# (v1.1 plan §2 Track C, item C5).  The gate needs SEVEN CONSECUTIVE
-# green days of Case D + Case E on Windows AND Linux x86_64; the
+# The daily evidence collector for the release's soak gate
+# (v1.1 plan §2 Track C, item C5).  The gate needs FIVE CONSECUTIVE
+# green days of Case D + Case E on Windows AND Linux x86_64 (it was
+# seven until the 2026-11-23 change recorded in `CHANGELOG.md`); the
 # collector is `tools/run_soak.py` and its operating procedure is
 # `docs/plan/soak-runbook.md`.
 #

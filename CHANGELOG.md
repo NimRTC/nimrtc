@@ -39,6 +39,57 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on a commit that had already passed that case three times the same
   day and whose CI was 13/13 green.
 
+### Fixed
+
+- **The published `.sha256` sidecars were not `sha256sum -c` compatible,
+  and the README documents that exact command.**
+  The README tells a reader to verify a bundle with
+
+  ```bash
+  sha256sum -c nimrtc-<version>-<platform>.tar.xz.sha256
+  ```
+
+  and at the v1.3.0 cut that command failed for **three of the four**
+  platforms:
+
+  - the **Windows** sidecar was the bare hex digest with no file name at
+    all, and `sha256sum -c` rejected it with *"no properly formatted
+    SHA256 checksum lines found"*;
+  - the **linux-x86_64** and **linux-aarch64** sidecars named
+    `build/nimrtc-...tar.xz`, so `sha256sum -c` looked for the bundle
+    under a `build/` directory that does not exist next to a downloaded
+    file -- *"No such file or directory"*;
+  - the **macos-arm64** sidecar was already right (the macOS job strips
+    the path itself), which is why the defect was invisible: three
+    platforms agreed with each other in the wrong way, and the release
+    log had nothing to say about it.
+
+  The digests were always correct -- all four match the OCI digest
+  GitHub exposes on the asset object -- so this was a *line format*
+  defect, and a digest check alone would never have caught it.  The
+  three broken sidecars of the published v1.3.0 release have been
+  replaced in place with the correct checksum lines (same digests), so
+  the command the README prints now works for every platform.
+
+  The three build jobs now write the sidecar the same way: the digest,
+  two spaces, and the **basename** of the bundle.  The Windows job gets
+  the file name from `Split-Path -Leaf`; the two Linux jobs pipe
+  `sha256sum` through `awk` to strip the `build/` prefix, the way the
+  macOS job already did.
+
+  `tools/check_sha256_sidecars.py` is the new gate: it parses every
+  sidecar the way `sha256sum -c` does and rejects a sidecar with no
+  file name, a directory component in the name, a malformed digest, or a
+  name that disagrees with the bundle it sits next to.  The release job
+  runs it on `dist/` and then runs `sha256sum -c` itself, so the command
+  the README prints is exercised on every cut.  Its `--self-test` pins
+  the rules and runs in CI.
+
+  The same defect is present in the published **v1.2.0** sidecars
+  (Windows bare hex, both Linux sidecars with the `build/` prefix); the
+  v1.2.0 release is not re-published for this, and the fact is recorded
+  in that release's section.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable
@@ -1032,6 +1083,18 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 >   published archives.  The v1.3.0 bundles carry them under
 >   `licenses/`; anyone redistributing a v1.2.0 binary should add the
 >   upstream notices themselves.
+> - **The published v1.2.0 `.sha256` sidecars are not `sha256sum -c`
+>   compatible.**  The Windows sidecar is the bare hex digest with no
+>   file name, and the two Linux sidecars name `build/nimrtc-...tar.xz`,
+>   so the verification command the README documents
+>   (`sha256sum -c <file>.sha256`) cannot read them.  The digests
+>   themselves are correct -- they match the OCI digest GitHub exposes on
+>   the asset object -- so a digest check would not have caught it; the
+>   *line* is what is wrong.  The defect was found at the v1.3.0 cut,
+>   fixed there, and the v1.3.0 sidecars were replaced in place with
+>   the correct lines.  The v1.2.0 sidecars are not re-published: a
+>   reader who wants to verify a v1.2.0 bundle should compare the
+>   digest GitHub shows for the asset against the file they downloaded.
 
 
 ### Added

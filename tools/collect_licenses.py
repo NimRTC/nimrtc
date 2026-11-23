@@ -54,11 +54,38 @@ import sys
 from pathlib import Path
 
 # The names upstream projects use for the file that carries the terms.
-LICENSE_PATTERNS = (
-    "LICENSE", "LICENSE.txt", "LICENSE.md", "LICENSE.TXT",
-    "LICENCE", "LICENCE.txt", "COPYING", "COPYING.txt", "COPYRIGHT",
-    "NOTICE", "NOTICE.txt", "PATENTS", "PATENTS.TXT", "COPYING.LIB",
+# These are PREFIXES, not exact names: the file that carries a licence
+# is named after its stem plus whatever extension upstream chose --
+# `LICENSE` (libvpx), `COPYING` (dav1d), `LICENSE.md` (svt-av1),
+# `LICENSE-BSD2.md` (svt-av1's second grant), `PATENTS.md` (svt-av1's
+# patent grant), `LICENSE.MIT` (nlohmann_json).
+#
+# The list used to enumerate whole names, mixing cases -- it held both
+# `LICENSE.txt` and `LICENSE.TXT` but only `LICENSE.md` -- while the
+# matcher compared `name.upper()` against it.  Every licence file with
+# an extension was therefore invisible: `LICENSE.md` upper-cased to
+# `LICENSE.MD`, which was not in the list.  That is how svt-av1 came
+# to be reported as unlicensed and blocked the v1.3.0 cut, even though
+# its `LICENSE.md` and `PATENTS.md` were sitting in the tree the whole
+# time.  Matching the stem as a prefix fixes the class of bug rather
+# than the one instance.
+LICENSE_STEMS = (
+    "LICENSE",
+    "LICENCE",
+    "COPYING",
+    "COPYRIGHT",
+    "NOTICE",
+    "PATENTS",
+    "THIRD-PARTY-NOTICES",
 )
+
+# Files whose *name* merely resembles a licence but carries no terms.
+# `LICENSE_PLEASE_READ.txt` (libopus) asks the reader to accept a
+# licence; it is not one, and shipping it as the licence text would
+# put the wrong document in the bundle.
+NOT_A_LICENCE = frozenset({
+    "LICENSE_PLEASE_READ.TXT",
+})
 
 # Vendors that are *not* linked into the distributed libraries: they are
 # test-only, build-only, or documentation.  Their obligations do not
@@ -116,6 +143,24 @@ def tree_is_empty(directory: Path) -> bool:
     return not any(p.is_file() for p in directory.rglob("*"))
 
 
+def is_license_file(name: str) -> bool:
+    """Whether a file name is the one carrying a licence's terms.
+
+    The name is matched on its STEM -- the part before the first dot --
+    against `LICENSE_STEMS`, so `LICENSE`, `LICENSE.md`,
+    `LICENSE-BSD2.md` and `LICENSE.MIT` all qualify while `README.md`
+    does not.
+
+    `NOT_A_LICENCE` names the exception: a file that asks the reader to
+    accept a licence is not the licence.
+    """
+    upper = name.upper()
+    if upper in NOT_A_LICENCE:
+        return False
+    stem = upper.split(".", 1)[0]
+    return stem in LICENSE_STEMS
+
+
 def find_license_files(vendor_dir: Path) -> list:
     """Licence-like files under a vendor's tree.
 
@@ -134,7 +179,7 @@ def find_license_files(vendor_dir: Path) -> list:
         if not directory.is_dir():
             continue
         for name in sorted(os.listdir(directory)):
-            if name.upper() in LICENSE_PATTERNS:
+            if is_license_file(name):
                 path = directory / name
                 if path.is_file() and path not in seen:
                     seen.add(path)
@@ -322,6 +367,23 @@ def self_test() -> int:
                                                    encoding="utf-8")
         (dav1d / "src" / "COPYING").write_text("BSD-2-Clause text\n",
                                                encoding="utf-8")
+        # A vendor whose licence file carries an EXTENSION.  svt-av1
+        # ships `LICENSE.md` and `PATENTS.md`; the matcher used to
+        # compare `name.upper()` against a list of whole names that held
+        # `LICENSE.txt` and `LICENSE.TXT` but only `LICENSE.md`, so
+        # `LICENSE.md` upper-cased to `LICENSE.MD` and was not in the
+        # list.  Every licence file with an extension was invisible, and
+        # svt-av1 was reported as unlicensed -- which blocked the
+        # v1.3.0 cut.
+        extended = tp / "svt-av1"
+        (extended / "src").mkdir(parents=True)
+        (extended / "src" / "LICENSE.md").write_text("BSD-2-Clause Clear\n",
+                                                     encoding="utf-8")
+        (extended / "src" / "PATENTS.md").write_text("AOM Patent License\n",
+                                                    encoding="utf-8")
+        # A file whose NAME resembles a licence but carries no terms.
+        (extended / "src" / "LICENSE_PLEASE_READ.txt").write_text(
+            "please read the licence\n", encoding="utf-8")
         # A vendor that does not: must fail the gate when distributed.
         bad = tp / "openh264"
         (bad / "src").mkdir(parents=True)
@@ -342,6 +404,9 @@ def self_test() -> int:
              "upstream_url": "https://x/dav1d", "commit_sha": "def"},
             {"name": "openh264", "license": "BSD-2-Clause",
              "upstream_url": "https://x/openh264", "commit_sha": "ghi"},
+            {"name": "svt-av1",
+             "license": "BSD-2-Clause Clear + AOM Patent License 1.0",
+             "upstream_url": "https://x/svt-av1", "commit_sha": "mno"},
             {"name": "libyuv", "license": "BSD-3-Clause",
              "upstream_url": "https://x/libyuv", "commit_sha": "ghi"},
             {"name": "portaudio", "license": "MIT",
@@ -359,6 +424,14 @@ def self_test() -> int:
                "the licence text must be copied into the bundle")
         expect((staging / "licenses" / "dav1d" / "COPYING").is_file(),
                "a COPYING file at the submodule root must be collected")
+        expect((staging / "licenses" / "svt-av1" / "LICENSE.md").is_file(),
+               "a licence file with an extension must be collected")
+        expect((staging / "licenses" / "svt-av1" / "PATENTS.md").is_file(),
+               "a patent grant must be collected as a licence text")
+        expect(not (staging / "licenses" / "svt-av1"
+                    / "LICENSE_PLEASE_READ.txt").is_file(),
+               "a file that only asks the reader to accept a licence is "
+               "not a licence and must not be shipped as one")
         expect("BSD-3-Clause" in notice and "libvpx" in notice,
                "the notice file must name the vendor and its SPDX id")
         expect("NO LICENCE" not in notice,

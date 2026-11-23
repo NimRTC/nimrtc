@@ -80,9 +80,36 @@ DEFAULT_DAYS = 30
 # (`linux-x86_64`), so the run id is split off from the right.
 ARTIFACT_PREFIX = "soak-"
 
+# Every network call in this tool carries a timeout.  `urlopen` without
+# one blocks on the socket until the OS gives up, which on Windows is
+# minutes to hours -- and the release gate runs this tool unattended.
+#
+# Observed on 2026-11-23: the v1.3.0 re-cut's evidence fetch sat for 25
+# minutes on a single blob-store download with 5 s of CPU and no child
+# process, and the gate could only proceed when a human killed it.  The
+# fetch was not slow -- it was stalled, and nothing in the code could
+# tell the difference.
+#
+# The timeouts are deliberately different for the two kinds of call:
+# the API endpoints answer in a second or two, while an artifact is a
+# ZIP of a day's acceptance logs and can legitimately take longer.
+API_TIMEOUT = 30.0
+ARTIFACT_TIMEOUT = 120.0
+
 
 class FetchError(Exception):
     """A recoverable problem while talking to GitHub."""
+
+
+def is_transient(message: str) -> bool:
+    """Whether a failure is worth another attempt.
+
+    Two conditions are transient: a connection that could not be
+    established or was reset mid-transfer, and a request that timed
+    out.  Neither says anything about whether the artifact exists; a
+    second attempt is the right answer to both.
+    """
+    return "cannot reach" in message or "timed out" in message
 
 
 def _probe_repo(token: str) -> bool:
@@ -104,7 +131,7 @@ def _probe_repo(token: str) -> bool:
         },
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
             return resp.status == 200
     except Exception:
         return False
@@ -156,14 +183,22 @@ def api_get(path: str, token: str, raw: bool = False):
         },
     )
     opener = urllib.request.build_opener(_redirect_no_auth(None))
+    timeout = ARTIFACT_TIMEOUT if raw else API_TIMEOUT
     try:
-        with opener.open(req) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             payload = resp.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:400]
         raise FetchError(f"HTTP {exc.code} for {url}\n{detail}") from None
     except urllib.error.URLError as exc:
         raise FetchError(f"cannot reach {url}: {exc.reason}") from None
+    except TimeoutError as exc:
+        # A socket that never answers.  Without this branch the timeout
+        # surfaces as a bare `TimeoutError` out of `main()`, which reads
+        # like a crash; here it is the same recoverable condition as a
+        # reset connection, and the caller's retry loop sees it.
+        raise FetchError(f"the request to {url} timed out after "
+                         f"{timeout:g} s") from exc
     if raw:
         return payload
     return json.loads(payload.decode("utf-8"))
@@ -201,6 +236,11 @@ def download_artifact(token: str, artifact: dict) -> bytes:
     the connection often enough to matter over a window of dozens of
     artifacts.  A reset is a transport hiccup, not a missing
     artifact, so it is worth a second try; an HTTP error is not.
+
+    A timeout is the same kind of condition as a reset -- the
+    connection stalled rather than answered wrongly -- so it is
+    retried too.  Before the timeout existed, a stalled download was
+    not retried and not reported either: it blocked forever.
     """
     last = None
     for attempt in range(3):
@@ -208,7 +248,7 @@ def download_artifact(token: str, artifact: dict) -> bytes:
             return api_get(artifact["archive_download_url"], token, raw=True)
         except FetchError as exc:
             last = exc
-            if "cannot reach" not in str(exc):
+            if not is_transient(str(exc)):
                 raise
             time.sleep(2 * (attempt + 1))
     raise last
@@ -356,6 +396,21 @@ def _self_test() -> int:
             os.environ.pop("GITHUB_TOKEN", None)
         else:
             os.environ["GITHUB_TOKEN"] = saved
+
+    # A stalled connection is a transient failure, not a broken one, and
+    # a request that times out must be retried rather than blocking
+    # forever.  Before the timeout existed, a stalled blob-store
+    # download hung the release gate with no output and no way to tell
+    # it from slow progress.
+    check(is_transient("cannot reach https://api.github.com: timed out"),
+          "a reset connection is transient")
+    check(is_transient("the request to https://example.invalid timed out "
+                       "after 120 s"),
+          "a timed-out request is transient")
+    check(not is_transient("HTTP 404 for https://api.github.com/x"),
+          "an HTTP error is not transient")
+    check(API_TIMEOUT > 0 and ARTIFACT_TIMEOUT >= API_TIMEOUT,
+          "both timeouts are set, and the artifact timeout is the longer one")
 
     print("self-test: %d failure(s)" % len(failures))
     for message in failures:

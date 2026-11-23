@@ -5,6 +5,10 @@
 
 #include "engine_device_policy.hpp"
 
+#include <array>
+#include <string>
+#include <string_view>
+
 namespace nimrtc::engine::detail {
 
 DevicePolicy default_device_policy() noexcept {
@@ -55,6 +59,34 @@ std::string resolve_auto_capture_backend(const DevicePolicy& policy,
     // The policy named a backend this build does not register.  That is a
     // *recommendation*, not a host requirement, so it degrades to "no
     // capture device" instead of firing kVideoCapturePluginMissing.
+    return "";
+}
+
+namespace {
+// The "auto" default order.  Capture and playback share the same order
+// today ("portaudio" when usable, else "synthetic"); the direction is
+// still a parameter so a backend that is capture-only (the system-audio
+// loopback) can join the capture list without changing this signature.
+constexpr std::array<std::string_view, 2> kAutoAudioDefaultsCapture = {
+    "portaudio", "synthetic"};
+constexpr std::array<std::string_view, 2> kAutoAudioDefaultsPlayback = {
+    "portaudio", "synthetic"};
+}  // namespace
+
+std::string resolve_auto_audio_backend(bool capture,
+                                       bool (*is_registered)(
+                                           std::string_view id) noexcept) noexcept {
+    const std::array<std::string_view, 2>& defaults = capture
+        ? kAutoAudioDefaultsCapture
+        : kAutoAudioDefaultsPlayback;
+    for (std::string_view id : defaults) {
+        if (is_registered(id)) {
+            return std::string(id);
+        }
+    }
+    // Neither backend is registered on this build.  "auto" is a
+    // recommendation, not a host requirement, so it degrades to "no
+    // audio device" instead of failing open().
     return "";
 }
 

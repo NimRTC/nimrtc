@@ -78,4 +78,30 @@ std::string resolve_auto_capture_backend(const DevicePolicy& policy,
                                          bool (*is_registered)(
                                              std::string_view id) noexcept) noexcept;
 
+/**
+ * The engine's audio "auto" rule (v1-audio-device-engine D1).
+ *
+ * Audio "auto" resolves through **runtime availability**, not the device
+ * policy table: the reserved `audio_capture_backend` /
+ * `audio_playback_backend` fields are deliberately empty (v1-device-policy
+ * D3), and whether the PortAudio backend is usable is only known at run
+ * time.  Registry membership *is* the availability signal, because the
+ * audio_device module registers "portaudio" only when
+ * `portaudio_available()` is true.
+ *
+ * The rule picks the first registered candidate in order: "portaudio"
+ * when usable, else "synthetic".  If neither is registered on this build
+ * it returns "" -- the engine then degrades to "no audio device" (warn)
+ * rather than failing `open()`.
+ *
+ * `capture` selects the slot direction (the audio-source registry for
+ * capture, the audio-sink registry for playback); `is_registered` is the
+ * registry-membership check, injected so the rule can be unit-tested
+ * without a process-wide registry (same shape as
+ * `resolve_auto_capture_backend`).
+ */
+std::string resolve_auto_audio_backend(bool capture,
+                                       bool (*is_registered)(
+                                           std::string_view id) noexcept) noexcept;
+
 }  // namespace nimrtc::engine::detail

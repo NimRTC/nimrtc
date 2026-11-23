@@ -1229,6 +1229,19 @@ int NimRTCEngine::tick() noexcept {
     // common case, because the capture cadence is slower than the tick.
     pump_video_capture();
 
+    // ---- Pump the audio source device into the outbound path (plan D1) --
+    //
+    // The audio counterpart of the video pump above: one frame is popped
+    // from the audio source device's bounded queue and run through the
+    // same outbound chain the host drives with `send_audio()`.  It runs
+    // here, on the tick thread, so the 3A and the codec are only ever
+    // touched from one thread (RD-6) — the device fills its queue from
+    // its own thread, and the engine only polls it.
+    //
+    // `pump_audio_capture()` is a no-op when there is no audio source
+    // device or when the queue is empty.
+    pump_audio_capture();
+
     // ---- Re-offer the held key-frame request (plan B14) -----------------
     //
     // The key-frame storm limiter *defers* a request that arrives too

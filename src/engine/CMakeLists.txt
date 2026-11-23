@@ -50,6 +50,12 @@ add_library(nimrtc_engine STATIC
     # host ever calling send_video().  RD-6: no new thread — the
     # capture device owns its own, the engine only polls it.
     src/engine_video_pump.cpp
+    # Remote-desktop plan D1: the audio device → outbound pump plus the
+    # audio device open/close helpers.  The pump polls the audio source
+    # device's bounded queue on the tick thread and feeds the same
+    # outbound chain the host drives with send_audio() — without the
+    # host.  RD-6: no new thread.
+    src/engine_audio_device_pump.cpp
     # Remote-desktop plan G1 / G2 / G6: the remote-desktop control
     # channel.  This TU owns the channel's engine-side plumbing — the
     # registry resolution (the seam), the transport selection (the DTLS
@@ -196,6 +202,28 @@ endif()
 # deliberately no fallback receiver (spec B-16).
 if(NIMRTC_MODULE_AUDIO_RX)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::audio_rx)
+endif()
+
+# v1.4 (remote-desktop plan D1): the audio *device* module.
+#
+# The engine reaches the devices only through `plugins::IAudioSource` /
+# `plugins::IAudioSink` and the registry's audio-source / audio-sink
+# slots — it never includes this module's header (Layout Invariant 4).
+# The link dependency exists so the module is part of the engine's
+# composition and its registrar symbol is resolvable by every consumer:
+# `pal_default_registrars.cpp` carries the guarded
+# `&nimrtc::audio_device::register_default_plugins` entry (the
+# `kDefaultRegistrars[]` table), which materialises once the
+# `NIMRTC_HAS_AUDIO_DEVICE` mirror lands in `src/core/CMakeLists.txt`.
+# Until then hosts / tests register the backends explicitly by calling
+# `nimrtc::audio_device::register_default_plugins()` (the documented
+# "call the module-specific entry point directly" pattern, registry.hpp).
+#
+# When the module is not built, "auto" audio resolution degrades to "no
+# device" (spec §五) and an explicit audio device id reports
+# `kEngineInternal` — there is no audio-device fallback backend.
+if(NIMRTC_MODULE_AUDIO_DEVICE)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::audio_device)
 endif()
 
 # Network-feedback collector seam (v1.2.0 M1, F2): the engine routes the

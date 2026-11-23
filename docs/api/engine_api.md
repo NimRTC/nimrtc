@@ -56,7 +56,9 @@ nimrtc::engine::NimRTCEngine
 │
 ├── Audio I/O
 │   ├── send_audio(const float* pcm, size_t n) → Status
-│   └── remote_audio_format(AudioFormat* out) → bool
+│   ├── remote_audio_format(AudioFormat* out) → bool
+│   ├── audio_source() / audio_sink()   -- opened devices (v1.4, D1)
+│   └── Stats: audio_device_pumped_frames / audio_device_pump_errors
 │
 ├── DTMF (RFC 4733, optional — off by default)
 │   ├── send_dtmf(event_code, duration_ms) → bool
@@ -452,7 +454,61 @@ missing receive pipeline is a hard error (`kAudioDecoderMissing` /
 disables the audio track; the inbound packets are then counted and
 dropped, never decoded.
 
-### 8.5 DTMF (RFC 4733)
+### 8.5 The engine-driven audio device layer (v1.4 / plan D1)
+
+By default the engine is a **transport for PCM**: the host pushes
+microphone samples with `send_audio()` and reads decoded playback
+samples through `set_on_audio_frame_info()`.  With
+`EngineConfig::audio_source_name` / `EngineConfig::audio_sink_name`,
+the engine itself opens the capture and playback devices, so a host
+that has a mic and a loudspeaker needs no PCM plumbing at all.
+
+| Config field | Meaning |
+|---|---|
+| `audio_source_name` | The capture (microphone) backend id.  Empty or `"none"` (the default) — the host feeds PCM itself, exactly today's behavior. |
+| `audio_sink_name` | The playback (loudspeaker) backend id.  Empty or `"none"` — the host plays PCM itself. |
+| `audio_source_config` | `plugins::AudioSourceConfig` handed to the source plugin's `open()`. |
+| `audio_sink_config` | `plugins::AudioSinkConfig` handed to the sink plugin's `open()`. |
+
+**The `"auto"` rule.**  An empty value is *no device*; `"auto"` resolves
+through the same availability table `video_capture_name = "auto"` uses
+(§9.4), with the audio candidate order `"portaudio"`, then
+`"synthetic"`.  When nothing is registered — a CI machine with no sound
+card — the engine **warns and degrades**: `open()` still succeeds and
+`audio_source()` / `audio_sink()` stay null.  A machine with no
+microphone is a normal machine, not an error.
+
+**An explicit id is a promise.**  A non-empty, non-`"auto"` id that
+cannot be resolved or opened is a hard error: `open()` fails with
+`kEngineInternal`, exactly like the video side's non-empty
+`video_capture_name`.
+
+**The capture pump.**  With a source opened, `tick()` pulls one frame
+from the device's bounded queue and runs it through the **same**
+outbound chain as `send_audio()` — 3A → codec → RTP → SRTP → transport —
+so the automatic and the manual paths cannot drift apart.  The engine
+only polls; it never installs the source's frame-delivery callback, so
+the 3A / codec seams are touched from exactly one thread (RD-6).  The
+proof that the path works is `Stats::audio_device_pumped_frames`
+moving with no `send_audio()` call.  A frame the outbound chain rejects
+increments `Stats::audio_device_pump_errors`.
+
+**The playback path.**  With a sink opened, the decoded inbound PCM is
+written to the device, and the host PCM callbacks
+(`set_on_audio_frame_info()`) are suppressed — the sink is now the
+renderer, and firing the host callback too would double-drive the 3A.
+The 3A's render-delivered counter uses the device's own
+`played_samples()` delta so the AEC feedback tracks what actually left
+the loudspeaker.
+
+**Inspection.**  `audio_source()` and `audio_sink()` return the opened
+`plugins::IAudioSource*` / `plugins::IAudioSink*` (null when no device
+is in use).  `Stats` reports the *negotiated* ids
+(`audio_source_device_id` / `audio_sink_device_id`) and the resolved
+backend ids (`audio_source_backend` / `audio_sink_backend`) — empty
+strings when no device is in use.
+
+### 8.6 DTMF (RFC 4733)
 
 DTMF is an **optional, in-band** capability: the digits travel as
 `telephone-event` payloads on the audio m-line, not as a separate
@@ -526,7 +582,7 @@ pipeline).
 
 ---
 
-### 8.6 RTCP Extended Reports (RFC 3611)
+### 8.7 RTCP Extended Reports (RFC 3611)
 
 The **Extended Report** (XR, RTCP payload type 207) is an optional
 QoE / network-statistics channel.  NimRTC both *receives and decodes*
@@ -601,7 +657,7 @@ broken report.  `Stats::xr_report_blocks` counts the XR sub-packets
 that were routed to the consumer — a peer that sends extended reports
 and a counter stuck at zero means the routing is not wired.
 
-#### 8.6.1 The outbound side
+#### 8.7.1 The outbound side
 
 Setting `EngineConfig::rtcp_xr_enabled = true` makes the engine emit
 one XR report per RTCP interval (one second), carrying:
@@ -647,7 +703,7 @@ attribute but send me no XR blocks".
 
 ---
 
-### 8.7 TMMBR / TMMBN (RFC 5104)
+### 8.8 TMMBR / TMMBN (RFC 5104)
 
 The **Temporary Maximum Media Bit Rate** request is the receiver's
 statement of the highest rate it can accept; the **TMMBN** is the
@@ -731,7 +787,7 @@ overrides `tmmbr_enabled`.
 
 ---
 
-### 8.8 The RTCP support matrix
+### 8.9 The RTCP support matrix
 
 What the engine understands on the RTCP plane, so a host does not have
 to guess.  "Send" means the engine *emits* the message; "Receive"
@@ -751,11 +807,11 @@ means it *parses* it.
 | PSFB | 206 | FMT 1 — PLI | receive (video keyframe request) |
 | PSFB | 206 | FMT 2 — SLI | receive (video keyframe request) |
 | PSFB | 206 | FMT 15 — REMB | receive (bandwidth collector) |
-| XR | 207 | BT 4 / 5 / 6 | **receive + send** (see §8.6) |
+| XR | 207 | BT 4 / 5 / 6 | **receive + send** (see §8.7) |
 
 The XR block types NimRTC does *not* parse (Loss RLE BT=1, Duplicate
 RLE BT=2, Packet Receipt Times BT=3, VoIP Metrics BT=7) are skipped
-by their length field, never an error — see §8.6.
+by their length field, never an error — see §8.7.
 
 The codec-control-message family (RFC 5104) is **partially**
 implemented: `tmmbr` is supported, `fir` / `tstr` / `tstn` / `vbcm`
@@ -994,6 +1050,7 @@ Pointers can be `nullptr` if the configured id was not registered
 |---|---|---|
 | `transport()` / `ice_transport()` | `plugins::ITransport*` / `IICETransport*` | Direct ICE inspection / extra candidate listening. |
 | `audio3a()` | `IAudio3A*` | Setting up pre/post-3A PCM taps for ASR. See `examples/demo-agent-gateway`. |
+| `audio_source()` / `audio_sink()` | `IAudioSource*` / `IAudioSink*` | The capture / playback devices the engine opened (v1.4 / plan D1), or `nullptr` when no device is in use. |
 | `codec_plugin()` | `ICodec*` | Codec-specific statistics / introspection. |
 | `video_source()` / `video_sink()` | `IVideoSource*` / `IVideoSink*` | Running your own capture / render loops outside the engine frame cadence. |
 | `video_receiver()` / `video_sender()` | `IVideoReceiver*` / `IVideoSender*` | RTP-level instrumentation (NACK, FU-A). |
@@ -1902,7 +1959,13 @@ header; its section note above it is the definition.
 | 152 | `qoe` | `plugins::QoeSnapshot` | The quality-of-experience metrics (plan J3 / J6). The freeze count, the end-to-end latency percentiles, the viewer's frame rate, the sharpness proxy and the input-to-photon latency. The metrics are measured whenever a QoE collector is resolved -- which, by default, is the built-in `"rd-qoe"` (see `EngineConfig::qoe_collector_name`). A host that turns the metrics off says so with `EngineConfig::qoe_collector_enabled` (or with an empty name). Without a collector this snapshot carries the **frame counters** -- the presented and dropped frame counts, which the engine keeps anyway -- and zeroes for the metrics, which is the honest answer to "what was the latency percentile?" when it was not measured. |
 | 153 | `remote_desktop` | `RemoteDesktopStats` | The remote-desktop pipeline breakdown (v1.2 plan **S7**). The QoE block above answers "how did the session *feel*"; this block answers "**where did the time go**". It is a remote-desktop-shaped view of the per-stage instrumentation (`video_stage_*`): the capture / encode / decode means in milliseconds, the frame rates they imply, and the count of frames that were captured but never encoded (the gap between two stages is a frame that was dropped in between). The shape follows the pipeline: `capture`, `encode` and `decode`, each with its own rate, cost and count — so a host compares the halves ("the capture ran at 30 fps and the encoder only at 24") instead of guessing which prefix carries which half. Every value here is **derived** from a measurement that already exists — nothing is timed a second time. The definitions are in `RemoteDesktopStats` above. |
 | 154 | `video_capture_device_changes` | `std::uint64_t` | Device-list changes (v1-device-policy D4): each "removed" or "added" event counts once, cumulative since open(). Distinct from `video_capture_restarts` — the physical world changed this many times, the engine reopened the device that many times. |
-**154 fields.**
+| 155 | `audio_source_device_id` | `std::string` | The *negotiated* capture device id (what the source plugin reports after `open()`), or empty when no source device is in use (v1.4 / plan D1). |
+| 156 | `audio_source_backend` | `std::string` | The resolved capture backend factory id, or empty when no source device is in use. |
+| 157 | `audio_sink_device_id` | `std::string` | The *negotiated* playback device id, or empty when no sink device is in use. |
+| 158 | `audio_sink_backend` | `std::string` | The resolved playback backend factory id, or empty when no sink device is in use. |
+| 159 | `audio_device_pumped_frames` | `std::uint64_t` | Frames the audio capture pump pulled from the source device and ran through the outbound chain (v1.4 / plan D1). Moving is the proof that the automatic path works: no `send_audio()` call from the host. |
+| 160 | `audio_device_pump_errors` | `std::uint64_t` | Audio pump failures: a non-`kOk`/`kErrNotReady` device read, or an outbound chain rejection. |
+**160 fields.**
 
 ---
 ## 14. Lifecycle diagram

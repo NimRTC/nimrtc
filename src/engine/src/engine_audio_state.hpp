@@ -363,6 +363,45 @@ struct AudioState {
     //
     // See `engine_audio_stream_state.hpp`.
     AudioStreamState audio_streams;
+
+    // ---- Audio device layer (remote-desktop plan D1) ---------------------
+    //
+    // The engine's audio *device* half: the negotiated device ids and
+    // backends that `Stats` reports, and the playback-consumption
+    // baseline the 3A reference uses when a sink drives the loudspeaker.
+    //
+    // The device ids are the **actually negotiated** ones (read back
+    // from `IAudioSource::config()` / `IAudioSink::config()` after
+    // open()), not the ids the host requested — a device may fall back
+    // to a different format or device.
+    /** The negotiated audio capture device id ("" = no device). */
+    std::string audio_source_device_id;
+    /** The resolved audio capture backend id ("" = none). */
+    std::string audio_source_backend;
+    /** The negotiated audio playback device id ("" = no device). */
+    std::string audio_sink_device_id;
+    /** The resolved audio playback backend id ("" = none). */
+    std::string audio_sink_backend;
+
+    /** `played_samples()` as of the last decoded frame.
+     *
+     *  `IAudioSink::played_samples()` is a cumulative, monotonic count
+     *  of the samples the device actually consumed.  The AEC reference
+     *  must see the *delivered* signal, so when a sink is present the
+     *  engine reports the delta since the last frame rather than the
+     *  frame's own sample count — the frame just written sits in the
+     *  sink's queue and has not reached the speaker yet. */
+    std::uint64_t audio_sink_played_baseline = 0;
+
+    /** The pump's counters, symmetric to the video side's
+     *  `video_capture_pumped_frames` / `video_capture_pump_errors`
+     *  (spec §六). */
+    /** Frames the engine pulled from the capture device and ran through
+     *  the outbound path (cumulative). */
+    std::uint64_t audio_device_pumped_frames = 0;
+    /** Pump errors: a failed `read_samples()` (other than an empty
+     *  queue) or a failed `send_audio()` (cumulative). */
+    std::uint64_t audio_device_pump_errors = 0;
 };
 
 }  // namespace nimrtc::engine::detail

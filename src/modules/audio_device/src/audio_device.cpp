@@ -3,6 +3,7 @@
 
 #include <nimrtc/audio_device/audio_device.hpp>
 #include <nimrtc/audio_device/system_audio.hpp>
+#include <nimrtc/core/registry.hpp>
 
 #include <string_view>
 
@@ -80,6 +81,34 @@ const plugins::IAudioSinkFactory* sink_factory(std::string_view id) noexcept {
         return &g_portaudio_sink_factory;
     }
     return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Unified registration entry point
+// ---------------------------------------------------------------------------
+
+void register_default_plugins() noexcept {
+    static bool registered = false;
+    if (registered) return;
+    registered = true;
+    core::PluginRegistry& reg = core::PluginRegistry::instance();
+    if (portaudio_available()) {
+        reg.register_audio_source(g_portaudio_source_factory.id(),
+                                  &g_portaudio_source_factory);
+        reg.register_audio_sink(g_portaudio_sink_factory.id(),
+                                &g_portaudio_sink_factory);
+    }
+    reg.register_audio_source(g_synthetic_source_factory.id(),
+                              &g_synthetic_source_factory);
+    reg.register_audio_sink(g_synthetic_sink_factory.id(),
+                            &g_synthetic_sink_factory);
+    // The system-audio backends are registered under their OWN ids, so a
+    // host that resolves "the microphone" never gets the system output by
+    // accident (same rule as source_factory()).
+    reg.register_audio_source(g_system_audio_source_factory.id(),
+                              &g_system_audio_source_factory);
+    reg.register_audio_source(g_synthetic_system_audio_source_factory.id(),
+                              &g_synthetic_system_audio_source_factory);
 }
 
 // ---------------------------------------------------------------------------

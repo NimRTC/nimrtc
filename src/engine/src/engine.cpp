@@ -326,6 +326,16 @@ uint32_t NimRTCEngine::open() noexcept {
         return video_rc;
     }
 
+    // ---- Audio devices (remote-desktop plan D1) --------------------------
+    //
+    // The audio capture / playback devices are opened after the video
+    // plugins.  An "auto" device that cannot open degrades to "no device"
+    // with a warn and does not fail the session; an explicit id that
+    // cannot open is a hard error, exactly like the video side (spec §五).
+    if (const uint32_t audio_rc = init_audio_devices(); audio_rc != 0) {
+        return audio_rc;
+    }
+
     // ---- Session base state (v1.2.0, session capability plan N1) --------
     //
     // The video m-line only exists when the video pipeline resolved, so
@@ -436,6 +446,9 @@ void NimRTCEngine::close() noexcept {
         audio_receiver_->close();
         audio_receiver_.reset();
     }
+    // Remote-desktop plan D1: the audio devices are closed with the
+    // session, after the plugins that consume their PCM.
+    close_audio_devices();
     audio3a_plugin_.reset();
     impl_->audio3a_concrete.reset();
     codec_plugin_.reset();

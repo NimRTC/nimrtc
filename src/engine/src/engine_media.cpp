@@ -362,21 +362,60 @@ void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame
         audio3a_plugin_->process_render(frame.pcm, samples_per_ch, channels);
     }
 
-    if (on_audio_frame_) {
-        on_audio_frame_(frame.pcm, total_floats);
-    }
+    // When the engine drives the loudspeaker through the audio sink
+    // (remote-desktop plan D1), the legacy and detailed callbacks are
+    // *not* invoked: the frame was consumed by the engine, and a host
+    // that also played it from `on_audio_frame()` would hear double
+    // audio (spec risk 2).  The write happens on this thread, so the
+    // 3A / codec are only ever touched from one thread (RD-6).
+    if (audio_sink_) {
+        const plugins::Status wrc =
+            audio_sink_->write(frame.pcm, samples_per_ch, channels);
+        if (wrc != plugins::kOk) {
+            // The frame is lost, but never silently: a closed device or a
+            // malformed call is visible instead of turning into silence.
+            if (on_error_) {
+                on_error_(core::kEngineInternal,
+                          "audio_sink write failed: the decoded audio "
+                          "frame could not reach the playback device");
+            }
+        }
+    } else {
+        if (on_audio_frame_) {
+            on_audio_frame_(frame.pcm, total_floats);
+        }
 
-    // The detailed callback fires *after* the legacy one (spec E-2):
-    // both receive the same buffer, and the detailed one adds the
-    // metadata (RTP timestamp, playout instant, capture instant, the
-    // concealment / FEC flags).
-    deliver_audio_frame_info(frame);
+        // The detailed callback fires *after* the legacy one (spec E-2):
+        // both receive the same buffer, and the detailed one adds the
+        // metadata (RTP timestamp, playout instant, capture instant, the
+        // concealment / FEC flags).
+        deliver_audio_frame_info(frame);
+    }
 
     // The frame has been handed over for playback — tell the 3A plugin
     // that the reference signal reached the speaker so it can track the
     // system delay.
     if (audio3a_plugin_) {
-        audio3a_plugin_->set_render_delivered(samples_per_ch);
+        if (audio_sink_) {
+            // With a sink the frame is *queued*, not audible yet.  What
+            // actually reached the speaker is the sink's `played_samples()`
+            // delta since the last frame — the AEC reference must see the
+            // delivered signal, or it converges on the queue latency
+            // instead of the acoustic delay (spec §四 / risk 3).
+            const std::uint64_t played = audio_sink_->played_samples();
+            const std::uint64_t baseline =
+                impl_->audio_state.audio_sink_played_baseline;
+            std::size_t delivered = 0;
+            if (played >= baseline) {
+                delivered = static_cast<std::size_t>(played - baseline);
+            }
+            impl_->audio_state.audio_sink_played_baseline = played;
+            audio3a_plugin_->set_render_delivered(delivered);
+        } else {
+            // Today's behaviour, unchanged: the frame has been handed to
+            // the host, so the engine assumes it reached the speaker.
+            audio3a_plugin_->set_render_delivered(samples_per_ch);
+        }
     }
 
     // ---- The audio side of the render clock (remote-desktop plan E5) ---
@@ -3511,6 +3550,20 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_capture_pumped_frames   = impl_->video_state.video_capture_pumped_frames;
     out.video_capture_pump_errors     = impl_->video_state.video_capture_pump_errors;
     out.video_capture_pumped_metadata = impl_->video_state.video_capture_pumped_metadata;
+
+    // ---- The audio device layer (remote-desktop plan D1) ----------------
+    //
+    // The device ids are the *actually negotiated* ones (read back from
+    // the plugin's `config()` at open() time), not the ids the host
+    // requested — a device may fall back to a different device or
+    // format.  Empty strings mean no device (the host feeds / plays PCM
+    // itself, or the "auto" device could not be opened and degraded).
+    out.audio_source_device_id  = impl_->audio_state.audio_source_device_id;
+    out.audio_source_backend    = impl_->audio_state.audio_source_backend;
+    out.audio_sink_device_id    = impl_->audio_state.audio_sink_device_id;
+    out.audio_sink_backend      = impl_->audio_state.audio_sink_backend;
+    out.audio_device_pumped_frames = impl_->audio_state.audio_device_pumped_frames;
+    out.audio_device_pump_errors   = impl_->audio_state.audio_device_pump_errors;
 
     // ---- The zero-copy seam (remote-desktop plan B10) ------------------
     //

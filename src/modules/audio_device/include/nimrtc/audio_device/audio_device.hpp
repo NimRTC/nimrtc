@@ -315,6 +315,24 @@ source_factory(std::string_view id) noexcept;
 sink_factory(std::string_view id) noexcept;
 
 // ---------------------------------------------------------------------------
+// Unified registration entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Register the module's factories into the process-wide registry.
+ *
+ * Populates the registry's audio-source / audio-sink slots
+ * (`register_audio_source` / `register_audio_sink`) under the ids
+ * "portaudio" (only when the PortAudio backend is usable), "synthetic",
+ * "system-audio" and "synthetic-system-audio".  Idempotent.
+ *
+ * The factories registered here are the same static objects the module's
+ * `source_factory()` / `sink_factory()` lookups return, so the two entry
+ * paths can never diverge into two implementations.
+ */
+NIMRTC_API_STABLE void register_default_plugins() noexcept;
+
+// ---------------------------------------------------------------------------
 // Playback progress (remote-desktop plan F3)
 // ---------------------------------------------------------------------------
 

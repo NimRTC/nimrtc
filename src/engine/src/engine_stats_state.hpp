@@ -222,6 +222,9 @@ namespace nimrtc::engine::detail {
     X(video_capture_pumped_metadata, core::StatSemantics::kCumulative)               \
     X(video_capture_gpu_frames, core::StatSemantics::kCumulative)                    \
     X(video_capture_gpu_errors, core::StatSemantics::kCumulative)                    \
+    /* ---- The audio-device pump (remote-desktop plan D1) ---- */                   \
+    X(audio_device_pumped_frames, core::StatSemantics::kCumulative)                  \
+    X(audio_device_pump_errors, core::StatSemantics::kCumulative)                    \
     /* ---- The format normalisation ---- */                                         \
     X(video_format_conversions, core::StatSemantics::kCumulative)                    \
     X(video_format_copies, core::StatSemantics::kCumulative)                         \

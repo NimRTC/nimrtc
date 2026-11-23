@@ -86,6 +86,66 @@ if(COMMAND gtest_discover_tests)
 endif()
 
 # -----------------------------------------------------------------------------
+# v1-audio-device-engine (D1) — the engine-driven audio device layer.
+#
+# The audio-device half drives a real `NimRTCEngine` with fake capture /
+# playback devices and the same fake ICE / DTLS / codec set the top-level
+# audio tests use, so the binary needs the device-policy link set plus the
+# audio_device module (whose registrar entry is inert in the unified table:
+# `NIMRTC_HAS_AUDIO_DEVICE` is not defined for `nimrtc_core_objects`).
+# -----------------------------------------------------------------------------
+add_executable(test_engine_audio_device
+    test_engine_audio_device.cpp
+    )
+
+if(WIN32)
+    target_link_libraries(test_engine_audio_device PRIVATE ws2_32)
+endif()
+
+target_link_libraries(test_engine_audio_device PRIVATE
+    nimrtc::engine
+    nimrtc::core
+    nimrtc::plugins
+    nimrtc::video_source
+    nimrtc::video_sink
+    nimrtc::video_pipeline
+    nimrtc::video_capture
+    nimrtc::h264
+    nimrtc::datachannel
+    GTest::gtest_main)
+
+if(NIMRTC_MODULE_AUDIO_DEVICE)
+    target_link_libraries(test_engine_audio_device PRIVATE nimrtc::audio_device)
+endif()
+
+target_include_directories(test_engine_audio_device PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src"
+    "${CMAKE_SOURCE_DIR}/src/modules/audio_device/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include")
+
+if(WIN32)
+    target_compile_definitions(test_engine_audio_device PRIVATE _WIN32_WINNT=0x0601)
+endif()
+
+nimrtc_apply_options(test_engine_audio_device LENIENT)
+
+add_test(NAME engine_audio_device_tests
+    COMMAND test_engine_audio_device)
+set_tests_properties(engine_audio_device_tests PROPERTIES TIMEOUT 60)
+
+nimrtc_copy_wolfssl_certs(test_engine_audio_device)
+nimrtc_copy_msquic_dll(test_engine_audio_device)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_audio_device
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES TIMEOUT 60
+        DISCOVERY_TIMEOUT 10)
+endif()
+
+# -----------------------------------------------------------------------------
 # v3-n4-d6 connectivity (N4 / D6) — pure-function tests of the two private
 # engine collaborators.
 # -----------------------------------------------------------------------------

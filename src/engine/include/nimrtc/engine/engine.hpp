@@ -102,6 +102,11 @@
 #include <nimrtc/plugins/audio3a.hpp>
 #include <nimrtc/plugins/audio_decoder.hpp>
 #include <nimrtc/plugins/audio_receiver.hpp>
+// v1.4 (remote-desktop plan D1): the audio *device* seams.  The engine
+// resolves an `IAudioSourceFactory` / `IAudioSinkFactory` through the
+// registry and pumps / sinks the device's PCM on its tick thread.
+#include <nimrtc/plugins/audio_source.hpp>
+#include <nimrtc/plugins/audio_sink.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/dtmf.hpp>          // v1.2.0 (session plan D1/D2) — RFC 4733 seam
 #include <nimrtc/plugins/net_feedback.hpp>   // v1.2.0 M1 (F2) — feedback collector seam
@@ -561,6 +566,60 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  — the two cannot drift apart.
      */
     std::uint32_t audio_ssrc = 0;
+
+    // ---- Audio device config (remote-desktop plan D1) ----
+
+    /** IAudioSource plugin id — the audio *capture* device seam.
+     *
+     *  Empty = the host feeds PCM itself via `send_audio()` — today's
+     *  behavior, unchanged.  `"none"` = explicit opt-out (no device is
+     *  opened, and the engine does not fail for device reasons).
+     *  `"auto"` = the platform default audio backend, resolved at run
+     *  time ("portaudio" when usable, else "synthetic").  Any other
+     *  value names a specific registered backend id.
+     *
+     *  An `"auto"` backend whose `open()` fails is **not** an error:
+     *  the engine warns and degrades to "no capture device" — a host
+     *  with no microphone is a normal machine, not a misconfiguration.
+     *  An explicit id that fails to open is a hard error, exactly like
+     *  the video side's non-empty `video_capture_name`.
+     *
+     *  @see `plugins/audio_source.hpp`. */
+    std::string audio_source_name;
+
+    /** The capture request handed to the audio-source plugin.
+     *
+     *  Empty by default — the backend picks its default input device
+     *  and format.  After `open()` succeeds, the plugin reports the
+     *  *actually negotiated* configuration through `config()`; read it
+     *  back rather than assuming the request was granted.
+     *
+     *  @see `plugins::AudioSourceConfig`. */
+    plugins::AudioSourceConfig audio_source_config;
+
+    /** IAudioSink plugin id — the audio *playback* device seam.
+     *
+     *  Empty = the host plays decoded PCM itself (from the
+     *  `on_audio_frame()` callback) — today's behavior, unchanged.
+     *  `"none"` = explicit opt-out.  `"auto"` = the platform default
+     *  audio backend, resolved like `audio_source_name`.  Any other
+     *  value names a specific registered backend id.
+     *
+     *  The same degradation rule applies: an `"auto"` backend that
+     *  fails to open degrades to "no playback device" with a warn; an
+     *  explicit id that fails to open is a hard error.
+     *
+     *  @see `plugins/audio_sink.hpp`. */
+    std::string audio_sink_name;
+
+    /** The playback request handed to the audio-sink plugin.
+     *
+     *  Empty by default — the backend picks its default output device
+     *  and format.  Read back `config()` after `open()` for the
+     *  actually-negotiated configuration.
+     *
+     *  @see `plugins::AudioSinkConfig`. */
+    plugins::AudioSinkConfig audio_sink_config;
 
     // ---- JitterBuffer config ----
 
@@ -3807,6 +3866,30 @@ public:
     NIMRTC_API_UNSTABLE plugins::IVideoCapture*     video_capture()     noexcept { return video_capture_.get(); }
     NIMRTC_API_UNSTABLE const plugins::IVideoCapture* video_capture() const noexcept { return video_capture_.get(); }
 
+    /** The audio *capture* device plugin (remote-desktop plan D1).
+     *
+     *  Returns nullptr when `EngineConfig::audio_source_name` was empty
+     *  (the host feeds PCM itself), `"none"` (explicit opt-out), or an
+     *  "auto" backend degraded at open time.  Otherwise it is the device
+     *  the engine resolved and opened at `open()` time.
+     *
+     *  UNSTABLE: plugin-seam handle; the audio-device ABI is still
+     *  evolving as the backend surface lands (remote-desktop plan M1-c). */
+    NIMRTC_API_UNSTABLE plugins::IAudioSource* audio_source() noexcept { return audio_source_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IAudioSource* audio_source() const noexcept { return audio_source_.get(); }
+
+    /** The audio *playback* device plugin (remote-desktop plan D1).
+     *
+     *  Returns nullptr when `EngineConfig::audio_sink_name` was empty
+     *  (the host plays decoded PCM itself), `"none"` (explicit opt-out),
+     *  or an "auto" backend degraded at open time.  Otherwise it is the
+     *  device the engine resolved and opened at `open()` time.
+     *
+     *  UNSTABLE: plugin-seam handle; the audio-device ABI is still
+     *  evolving as the backend surface lands (remote-desktop plan M1-c). */
+    NIMRTC_API_UNSTABLE plugins::IAudioSink* audio_sink() noexcept { return audio_sink_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IAudioSink* audio_sink() const noexcept { return audio_sink_.get(); }
+
     /** Replace the video sink at runtime (e.g. swap "headless" for an SDL
      *  renderer). Closes the previous sink and transfers ownership of @p sink.
      *  Safe to call before or after open(); if called before open(), the
@@ -4816,6 +4899,28 @@ public:
         std::uint64_t video_capture_pump_errors     = 0;
         std::uint64_t video_capture_pumped_metadata = 0;
 
+        // ---- Audio device stats (remote-desktop plan D1) ------------------
+        //
+        // The two audio devices the engine opened, and the audio capture
+        // pump's counters.  The device ids are the *negotiated* values
+        // (the plugin reports what it actually opened after `open()`,
+        // which may differ from the host's request), and the backend is
+        // the factory id the engine resolved.  Empty strings mean no
+        // device is in use ("none" / "" config, or an "auto" backend
+        // that degraded at open time).
+        std::string audio_source_device_id;   // negotiated capture device id
+        std::string audio_source_backend;     // resolved capture backend id
+        std::string audio_sink_device_id;     // negotiated playback device id
+        std::string audio_sink_backend;       // resolved playback backend id
+        // The pump's own counters — the analog of
+        // `video_capture_pumped_frames` / `video_capture_pump_errors`.
+        // `audio_device_pumped_frames` moving is the proof that the
+        // automatic path works: a capture source plus the outbound audio
+        // path produce an RTP stream with no `send_audio()` call from
+        // the host.
+        std::uint64_t audio_device_pumped_frames = 0;
+        std::uint64_t audio_device_pump_errors   = 0;
+
         // ---- The zero-copy hand-off (remote-desktop plan B10) ------------
         //
         // The counters that prove the capture → encoder hand-off ran
@@ -5274,6 +5379,21 @@ private:
     // reported through `on_error_`).
     std::unique_ptr<plugins::IAudioReceiver>     audio_receiver_;
 
+    // ---- Audio device layer (v1.4, remote-desktop plan D1) ----------------
+    //
+    // The engine drives the audio *device* half through the
+    // `plugins::IAudioSource` / `plugins::IAudioSink` seams: it resolves
+    // the factories through the registry's audio-source / audio-sink
+    // slots and pumps / sinks the device's PCM on its tick thread, so a
+    // host that configures `audio_source_name` / `audio_sink_name` never
+    // has to feed or drain PCM by hand.
+    //
+    // `nullptr` means "no device": either the host did not ask for one
+    // (empty name), opted out (`"none"`), or an "auto" backend degraded
+    // at open time.
+    std::unique_ptr<plugins::IAudioSource>      audio_source_;
+    std::unique_ptr<plugins::IAudioSink>        audio_sink_;
+
     // ---- Video plugins (resolved from core::PluginRegistry) ----
     std::unique_ptr<plugins::IVideoSource>      video_source_;
     std::unique_ptr<plugins::IVideoSink>        video_sink_;
@@ -5725,6 +5845,29 @@ private:
     uint32_t init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
 
+    // ---- The audio device layer (remote-desktop plan D1) ------------------
+    //
+    // `init_audio_devices()` opens the audio capture / playback devices
+    // the configuration asked for; `close_audio_devices()` tears them
+    // down.  Unlike the video capture device, an audio device is
+    // *optional*: a host with no microphone or no speakers is a normal
+    // machine, so an `"auto"` device that cannot open degrades to "no
+    // device" with a warn instead of failing `open()`.  An explicit id
+    // that cannot open is a hard error, exactly like the video side
+    // (spec §五 / criterion 12).
+
+    /** Open the configured audio capture / playback devices.
+     *
+     *  Called from `open()` after the video plugins.  Returns 0 on
+     *  success (including an `"auto"` device that degraded to "no
+     *  device"); returns an error code when an *explicit* id could not
+     *  be resolved or opened — the engine then fails `open()` rather
+     *  than silently continuing without the device the host named. */
+    uint32_t init_audio_devices() noexcept;
+
+    /** Close and release the audio devices. Called from `close()`. */
+    void close_audio_devices() noexcept;
+
     // ---- The multi-stream video plane (remote-desktop plan H1 / H2 / H4) --
     //
     // The helpers below implement the additive multi-stream API.  They
@@ -5942,6 +6085,25 @@ private:
      *  @return true when a frame was taken from the device and handed
      *          to the encoder; false when there was nothing to do. */
     bool pump_video_capture() noexcept;
+
+    // ---- Audio device → outbound pump (remote-desktop plan D1) ------------
+    //
+    // The audio counterpart of `pump_video_capture()`: it pops one frame
+    // from the audio source device's bounded queue and runs it through
+    // the very same outbound audio path the host drives with
+    // `send_audio()` — without the host.  RD-6: the pump runs on the
+    // tick thread, so the 3A / codec are only ever touched from one
+    // thread.
+
+    /** Pop one captured audio frame and feed it to the outbound path.
+     *
+     *  Called from `tick()`.  A no-op when there is no audio source
+     *  device or when the queue is empty (the common case — the device's
+     *  cadence is slower than the tick).
+     *
+     *  @return true when a frame was taken from the device and handed
+     *          to the outbound path; false when there was nothing to do. */
+    bool pump_audio_capture() noexcept;
 
     /**
      * @brief Drain one GPU frame from the mailbox and encode it.

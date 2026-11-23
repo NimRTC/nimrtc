@@ -134,6 +134,13 @@ class NIMRTC_API_STABLE INetFeedbackFactory;
 // (Layout Invariant 1).
 class NIMRTC_API_STABLE IAudioDecoderFactory;
 class NIMRTC_API_STABLE IAudioReceiverFactory;
+// v1.4 (remote-desktop plan D1): the audio *device* seams -- the capture
+// half (microphone) and the playback half (loudspeaker).  Forward-declared
+// like the other factory types so the registry's TypedRegistry<> fields can
+// reference them without pulling the seam headers into core (Layout
+// Invariant 1).
+class NIMRTC_API_STABLE IAudioSourceFactory;
+class NIMRTC_API_STABLE IAudioSinkFactory;
 // v1.2.0 (session capability plan, N1 / T1): the session-model seam.
 // The engine drives renegotiation through this interface and never
 // includes `src/modules/session/`'s headers (Layout Invariant 4).
@@ -200,6 +207,14 @@ namespace rtp     { void register_default_plugins() noexcept; }
 namespace sdp     { void register_default_plugins() noexcept; }
 namespace jb      { void register_default_plugins() noexcept; }
 namespace audio3a { void register_default_plugins() noexcept; }
+// v1.4 (remote-desktop plan D1): the audio *device* module.  Its entry
+// point populates the registry's audio-source / audio-sink slots
+// (register_audio_source / register_audio_sink) so
+// `core::register_all_default_plugins()` can wire the built-in
+// PortAudio / synthetic backends through the unified table.
+#ifdef NIMRTC_HAS_AUDIO_DEVICE
+namespace audio_device { void register_default_plugins() noexcept; }
+#endif
 #ifdef NIMRTC_HAS_OPUS
 namespace opus    { void register_default_plugins() noexcept; }
 #endif
@@ -663,6 +678,28 @@ public:
         return video_capture_.list_ids();
     }
 
+    // -- Audio Source (remote-desktop plan F1, v1.4 D1) --------------------
+    void register_audio_source(std::string_view id,
+                               const plugins::IAudioSourceFactory* f);
+    [[nodiscard]] const plugins::IAudioSourceFactory*
+    get_audio_source(std::string_view id) const {
+        return audio_source_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string> list_audio_sources() const {
+        return audio_source_.list_ids();
+    }
+
+    // -- Audio Sink (remote-desktop plan F1, v1.4 D1) ----------------------
+    void register_audio_sink(std::string_view id,
+                             const plugins::IAudioSinkFactory* f);
+    [[nodiscard]] const plugins::IAudioSinkFactory*
+    get_audio_sink(std::string_view id) const {
+        return audio_sink_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string> list_audio_sinks() const {
+        return audio_sink_.list_ids();
+    }
+
     // -- Video Sink ---------------------------------------------------------
     void register_video_sink(std::string_view id,
                              const plugins::IVideoSinkFactory* f);
@@ -1046,6 +1083,12 @@ private:
     // selection and dirty-rect metadata.
     TypedRegistry<plugins::IVideoCaptureFactory> video_capture_{"video-capture"};
     TypedRegistry<plugins::IVideoSinkFactory>    video_sink_{"video-sink"};
+    // v1.4 (remote-desktop plan D1): the audio *device* seams.  Distinct
+    // from the audio decoder / receiver seams above: a source captures
+    // PCM from a microphone, a sink plays PCM to a loudspeaker.  The
+    // built-in backends register under "portaudio" / "synthetic".
+    TypedRegistry<plugins::IAudioSourceFactory>  audio_source_{"audio-source"};
+    TypedRegistry<plugins::IAudioSinkFactory>    audio_sink_{"audio-sink"};
     // Remote-desktop plan D1: the video rate controller slot.  The
     // built-in ladder controller registers under "video-bitrate-control".
     TypedRegistry<plugins::IVideoBitrateControllerFactory>
@@ -1296,6 +1339,26 @@ private:
         NIMRTC_UNIQUE_NAME(_reg_video_capture_){                         \
             ::nimrtc::core::PluginRegistry::instance(),                \
             ::nimrtc::core::detail::Registrar::Category::kVideoCapture,   \
+            #id, factory_ptr }
+
+/** Register an audio *capture* device plugin by ID and factory pointer
+ *  (remote-desktop plan F1, v1.4 D1). */
+#define NIMRTC_REGISTER_AUDIO_SOURCE(id, factory_ptr)                   \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_audio_source_){                          \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kAudioSource,   \
+            #id, factory_ptr }
+
+/** Register an audio *playback* device plugin by ID and factory pointer
+ *  (remote-desktop plan F1, v1.4 D1). */
+#define NIMRTC_REGISTER_AUDIO_SINK(id, factory_ptr)                     \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_audio_sink_){                            \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kAudioSink,     \
             #id, factory_ptr }
 
 /** Register a video sink plugin by ID and factory pointer. */
@@ -1558,6 +1621,11 @@ public:
         // own category because a capture device is not a frame source:
         // it enumerates devices and negotiates a format.
         kVideoCapture,
+        // v1.4 (remote-desktop plan D1): the audio *device* seams.  They
+        // have their own categories because a capture / playback device
+        // is not a codec or a receiver: it enumerates devices and
+        // negotiates a format.
+        kAudioSource, kAudioSink,
         kBwe, kScheduler,
         // v1.2.0 M1 (F2): the receiver-side network-feedback collector
         // seam -- see register_net_feedback().
@@ -1649,6 +1717,14 @@ public:
             case Category::kVideoCapture:
                 reg.register_video_capture(id,
                     static_cast<const plugins::IVideoCaptureFactory*>(factory));
+                break;
+            case Category::kAudioSource:
+                reg.register_audio_source(id,
+                    static_cast<const plugins::IAudioSourceFactory*>(factory));
+                break;
+            case Category::kAudioSink:
+                reg.register_audio_sink(id,
+                    static_cast<const plugins::IAudioSinkFactory*>(factory));
                 break;
             case Category::kVideoSink:
                 reg.register_video_sink(id,

@@ -715,7 +715,7 @@ See [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md).
 |---|---|---|
 | The **real TURN / TLS** transport (deferred out of v1.3) | 🟡 in progress | v1.4 N1 |
 | The **macOS downstream proof** and the **native `coturn`** CI leg | 🟡 in progress | v1.4 N5-2 / N9 |
-| The **H.265 parameter-set assertion's software half** (the Q1 half v1.3 deferred) | ⏳ scheduled on the `1.3.x` line as Q1b | v1.3 §9 |
+| The **H.265 parameter-set assertion's software half** (the Q1 half v1.3 deferred) | **closed 2026-11-23** — the hardware half (Q1b) ran and passed on an RTX 3060 / driver 616.92; the software half stays deferred, because there is still no software H.265 decoder to assert on | v1.3 §9 |
 
 > v1.3.0 is the **published Stable** release — public API frozen per ADR-015
 > (`NIMRTC_API_VERSION` = 10300, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`);

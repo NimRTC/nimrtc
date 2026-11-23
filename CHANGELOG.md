@@ -90,6 +90,41 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   v1.2.0 release is not re-published for this, and the fact is recorded
   in that release's section.
 
+### Verified
+
+- **The H.265 mid-stream parameter-set switch is now asserted end to end
+  on the hardware path (v1.3 plan item `Q1b`, Track R).**
+  `v1.3.0` shipped the two halves of Q1b but could only *prove* one of
+  them: the codec-level case ran on the standard matrix, while the
+  engine-level case needed the `gpu-nvenc` hardware leg, and the
+  repository had no runner registered for it.  The engine-level case
+  (`tests/test_engine_video_hw_h265.cpp`, landed with PR #144 inside the
+  `v1.3.0` tag) was run on 2026-11-23 on a **clean tree at `ce8f783f`**,
+  on an **NVIDIA GeForce RTX 3060, driver 616.92**:
+
+  ```
+  $ ctest --test-dir build/hw -C Release -R "test_engine_video_hw_h265" --output-on-failure
+  1/1 Test #303: test_engine_video_hw_h265 ........   Passed    0.79 sec
+  ```
+
+  The verbose log shows the real hardware path, not a skip: the encoder
+  is **reconfigured** mid-stream (`nvenc: reconfigured the encoder`,
+  320x240 -> 640x480, a fresh IRAP with inline VPS / SPS / PPS) and the
+  **same warm NVDEC session** decodes the new geometry, with no
+  key-frame round trip.  The engine-level loopback row
+  (`test_engine_video_hw_loopback`) passed on the same tree and host, and
+  the codec-level harness produced its `PASS` record again
+  (`encoder=nvenc hw=True frames=3 rtp=3 decoded=3 mae=0.001 r=1.0`,
+  `driver=616.92`, `failures: []`, `git_dirty: false`).
+
+  **The software-decoder half of Q1b stays deferred**, for the reason the
+  plan gave: there is still no software H.265 decoder to assert on.  A
+  half that cannot be written is not an open promise, and the skip reason
+  says so.  What this does *not* close is the `hardware.yml` job's own
+  wiring: `GET /actions/runners` returned `total_count: 0`, so the record
+  was produced by the same recorder and the same harness, driven by hand
+  on the GPU host.  See `docs/plan/v1.3-plan.md` §9.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

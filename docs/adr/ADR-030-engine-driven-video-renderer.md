@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Number | 030 |
-| Status | **Proposed** |
+| Status | **Accepted** |
 | Date | 2026-11-23 |
 | Phase | v1.4 (D2) |
 | Bound to | v1.4.0 |
@@ -204,6 +204,6 @@ video_sink_backend_reason: std::string   // 降级原因（空 = 未降级）
 
 ## 7. 状态
 
-**Proposed**（2026-11-23）。本 ADR 覆盖 §D2 的**架构决策**；D2 的切片规格在 `specs/slices/v1-video-render-engine.md`（待冻结）。
+**Accepted**（2026-11-23，人签字）。本 ADR 覆盖 §D2 的**架构决策**；D2 的切片规格在 `specs/slices/v1-video-render-engine.md`（已冻结，frozenHash `sha256:986a2063a5fe37b4513a595a0a8705b90f798e530ce2b323b0a079fb2cc0c7d6`）。
 
-**待人批准**：本 ADR 含公开面变更（`EngineConfig` 默认值 + 两个 stats 字段），按 ADR-015 需要签字。
+**签字要点**：本 ADR 含公开面变更（`EngineConfig::video_sink_name` 默认值 + 两个 `Stats` 字段），按 ADR-015 需要人批准 —— **已批准**。

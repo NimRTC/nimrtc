@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Number | 031 |
-| Status | **Proposed**（待签字） |
+| Status | **Accepted** |
 | Date | 2026-11-23 |
 | Phase | v1.4 (N3) |
 | Bound to | v1.4.0 |

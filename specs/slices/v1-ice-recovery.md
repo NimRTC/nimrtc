@@ -30,7 +30,7 @@
 - **ICE 状态枚举在插件接缝上**：`plugins::IceState`（`src/plugins/include/nimrtc/plugins/ice_transport.hpp:104`）有 `Disconnected` / `Gathering` / `Connecting` / `Connected` / `Completed` / `Failed` —— 引擎**只**通过接缝看状态，不需要 `nimrtc::ice` 的具体类型。
 - **传输段错误码空着**：`src/core/include/nimrtc/core/engine_errors.hpp:74` 明写 "No transport-only codes are defined yet — add them here when the transport layer grows a richer error vocabulary"。
 - **N4 的失败原因词汇已经在 stats 里**：`Stats::ice_failure_reason`（`engine.hpp:2319`）是闭合词汇 `"none"` / `"no-candidates"` / `"no-pair"` / `"checks-failed"` / `"credentials-rejected"` / `"transport-unsupported"` —— N3 的终态原因是**另一个**维度（重连预算），不混进那个词汇。
-- **私有协作者的先例**：`src/engine/src/engine_capture_reconnect.hpp`（D4 的采集重连退避）—— 同一形状：私有头、时钟**显式传参**、确定性单元测试钉住规则。
+- **私有协作者的先例**：只读 `src/engine/src/engine_capture_reconnect.hpp`（D4 的采集重连退避）—— 同一形状：私有头、时钟**显式传参**、确定性单元测试钉住规则。
 
 ### 与 N8 的边界（本片**不**做）
 
@@ -46,6 +46,25 @@
 ### 与 D7 的边界（本片**不**做）
 
 D7 的 call-state 回调（`connecting` → `connected` → `reconnecting` → `failed` / `closed`）与错误码枚举（`kIceFailed` / `kDtlsFailed` / ...）是 D7 的活。本片只加**一个**传输段错误码 `kIceRecoveryExhausted`（传输段本来空着），**不**碰 D7 的枚举。
+
+## 范围
+
+- src/engine/src/engine_ice_recovery.hpp
+- src/engine/src/engine_ice_recovery.cpp
+- src/engine/src/engine_transport.cpp
+- src/engine/src/engine.cpp
+- src/engine/src/engine_session_state.hpp
+- src/engine/src/engine_transport_stats.cpp
+- src/engine/include/nimrtc/engine/engine.hpp
+- src/core/include/nimrtc/core/engine_errors.hpp
+- src/engine/CMakeLists.txt
+- src/engine/tests/test_engine_ice_recovery.cpp
+- tests/acceptance/v1-ice-recovery/acceptance.test.cjs
+- docs/adr/ADR-031-ice-recovery-policy-ownership.md
+- docs/api/engine_api.md
+- CHANGELOG.md
+
+> 只读 `specs/slices/v1-video-render-engine.md`（D2 的规格）与只读 `specs/slices/v3-n4-d6-connectivity.md`（D6/N4 的规格）—— 本片**不**改它们。N8（old/new pair）与 D7（call-state 枚举）**不在**本片范围，越界会被门禁拦下。
 
 ## 方案
 
@@ -93,7 +112,7 @@ public:
 };
 ```
 
-**时钟显式传参**（与 `engine_capture_reconnect.hpp` 同一条规则）：所有入口拿 `now_us`，测试用虚拟时钟，**不 sleep**。这是「A deterministic test on a virtual clock asserting grace, backoff, cap, terminal state」（§6 N3 验收标准）的前提。
+**时钟显式传参**（与只读 `src/engine/src/engine_capture_reconnect.hpp` 同一条规则）：所有入口拿 `now_us`，测试用虚拟时钟，**不 sleep**。这是「A deterministic test on a virtual clock asserting grace, backoff, cap, terminal state」（§6 N3 验收标准）的前提。
 
 **状态机**：
 
@@ -243,7 +262,7 @@ std::string ice_recovery_terminal_reason;
 - `restart_ice()` 的**行为**变了（预算满 → 返回 `false`）。全树**零**个调用点，所以**没有**现有代码受影响；未来的宿主需要知道这条新规则（写进 `docs/api/engine_api.md`）。
 - `EngineConfig` 加字段 → 所有构造 `EngineConfig` 的地方**照旧**编译（聚合初始化的具名设计器不受影响；只有**聚合位置初始化**会受影响 —— 全树没有这种写法，因为 `EngineConfig` 有几十个字段）。
 - `Stats` 加字段 → 同上，具名赋值。
-- 公开头加符号 → `docs/api/public_headers.manifest` 的**头文件列表不变**（不新增头文件），但 `scripts/api_freeze_scan.js` 的**符号分类**要更新（新符号必须是 `NIMRTC_API_STABLE` 或 `NIMRTC_API_UNSTABLE`）。
+- 公开头加符号 → `docs/api/public_headers.manifest` 的**头文件列表不变**（不新增头文件），但只读 `scripts/api_freeze_scan.js` 的**符号分类**要更新（新符号必须是 `NIMRTC_API_STABLE` 或 `NIMRTC_API_UNSTABLE`）。
 
 ## 写集
 
@@ -321,7 +340,7 @@ std::string ice_recovery_terminal_reason;
 
 31. `docs/api/engine_api.md` 记录：新 key 的取值与**未知名字当 `"off"`** 的规则；新回调与结构体；三个 stats 字段；`restart_ice()` 的新行为（预算满 → `false`）；`reset_ice_recovery_budget()`。
 32. `docs/api/public_headers.manifest` 与实际公开面一致（只读 `scripts/check_api_manifest.py` — 跑它，不改它；本片**不新增头文件**，所以清单**应当不变**）。
-33. 新增的公开符号全部带 `NIMRTC_API_STABLE` 或 `NIMRTC_API_UNSTABLE` 标注（跑 `scripts/api_freeze_scan.js` — 跑它，不改它）。
+33. 新增的公开符号全部带 `NIMRTC_API_STABLE` 或 `NIMRTC_API_UNSTABLE` 标注（跑只读 `scripts/api_freeze_scan.js` — 跑它，不改它）。
 
 ## 本片不做
 

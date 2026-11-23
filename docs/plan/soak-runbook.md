@@ -110,7 +110,7 @@ out of tree must export `NIMRTC_BUILD_DIR` before the scheduled task
 runs, or the day is recorded as `INCONCLUSIVE`.
 
 Build the project before the first day of the window. The window is
-seven days of *evidence*, and a day spent rebuilding is a day the
+five days of *evidence*, and a day spent rebuilding is a day the
 window has not reached.
 
 ## 3. Daily invocation
@@ -488,10 +488,19 @@ that wants to assert on it rather than read it.
 | No record for a day at all | The scheduled task did not run | Check the task history; a machine that was asleep produces a gap, and a gap breaks the streak |
 
 **A day that fails does not "cost" a day that can be recovered.** The
-window is seven *consecutive* green days; a failure resets the streak
+window is five *consecutive* green days; a failure resets the streak
 and the count restarts from the next green day. That is the intended
-behaviour: the gate is asking for a week of unbroken green, and
+behaviour: the gate is asking for an unbroken run of green, and
 patching over a red day would defeat the point of having one.
+
+**A day with a `FAIL` among passing runs is still green.** The
+intra-day rule is that every required case must have at least one
+`PASS` for the day; a case whose *every* run failed still ends the
+streak. A day is normally measured several times -- the CI job and the
+scheduled local task both write the same platform/day -- so one Chrome
+interop timeout on a shared runner must not erase a day in which the
+same case passed three times earlier. Every `FAIL` is still reported
+with its reason and its captured output.
 
 **An INCONCLUSIVE day is not a failure.** It means no evidence was
 produced — the machine was not ready — and it is reported separately
@@ -531,9 +540,10 @@ python tools/run_soak.py --self-test
 
 It asserts, among other things, that gapped green days do not form a
 long streak, that a failing or inconclusive day breaks the streak,
-that a day missing one required case is not green, that six green
-days report a streak of six and not seven, and that the two platforms
-are tracked independently.
+that a day missing one required case is not green, that four green
+days report a streak of four and not five, that a day whose single run
+failed while another run of the same case passed still counts as green,
+and that the two platforms are tracked independently.
 
 It also pins the rules that keep the tool from overstating the
 evidence: a day whose `FAIL` is followed by a `PASS` is **not** green

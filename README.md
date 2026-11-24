@@ -1,20 +1,40 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.3.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.3.1-green.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#platform-support)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Latest release:** v1.3.0 (Stable) — the release that closes the `v1.3` plan: **Track Q** (Q1, Q2, Q3, Q4, Q5, Q6, Q7) is complete. The release's headline is that the engine now **degrades gracefully under a hostile network** — the axis `v1.2.0` explicitly did not claim: a mid-stream parameter-set change is *proven* to decode on its own (Q1/Q1b, H.264 software and H.265 NVDEC), the audio jitter buffer's memory is **bounded** and the bound is **reported** (Q2), retransmissions travel on their own RFC 4588 stream (Q3), the receiver's RTCP feedback is **bounded** and its two doors are **countable** (Q4), the soak can now **impair the network** *and* drive the engine across a simulated NAT with the 24 h window archived and its netem parameters (Q5), the picture is aligned to the sound (Q6, the video half of R3 — the audio half shipped in `v1.2.0`), and the hardware codec path is exercised end-to-end by a re-runnable job on a self-hosted GPU runner (Q7). The tag is annotated and SSH-signed (`git tag -s -a`, ed25519) and verifies with `tools/verify_tag_signature.py`; every bundle ships a detached `.asc` plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10300, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC data exchange (DC-1) via the Chrome WebTransport JS API (`new WebTransport(url)`, not `RTCPeerConnection.createDataChannel()`) over QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; the `"sctp"` backend was retired from the public selectors in v1.2.0 (it was an in-process loopback socket that could never reach a peer). See [CHANGELOG.md](CHANGELOG.md) `## [1.3.0]` and [docs/plan/v1.3-plan.md](docs/plan/v1.3-plan.md).
+> **Latest release:** v1.3.1 (Stable) — a **patch release** over `v1.3.0`. It changes no
+> public API (`NIMRTC_API_VERSION` = 10301) and no engine behaviour: it fixes one
+> *line-format* defect in the release pipeline and gives the release page the
+> integrity data a consumer needs. The `.sha256` sidecars the release publishes are
+> now `sha256sum -c` compatible **at the cut** — the v1.3.0 cut shipped three broken
+> sidecars (Windows: a bare hex digest with no file name; both Linux: a `build/` path
+> prefix) and had them replaced in place afterwards; the build jobs that produced them
+> are fixed here, so the next cut writes the right line the first time.
+> `tools/check_sha256_sidecars.py` gates the cut and `sha256sum -c` runs on every
+> release. The release page now also carries a **SHA-256 / size table for every
+> bundle**, so a consumer checking a mirror has an in-band value to compare against
+> rather than only the sidecar sitting next to the asset on the same server.
+> `SECURITY.md` now names the versions it actually supports (`1.3.x` full, `1.2.x`
+> security fixes) instead of the three-minor-version-stale `1.0.x` / `0.9.x`.
+> The tag is annotated and SSH-signed (`git tag -s -a`, ed25519) and verifies with
+> `tools/verify_tag_signature.py`; every bundle ships a detached `.asc` plus the
+> `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`).
+> Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md).
+> See [CHANGELOG.md](CHANGELOG.md) `## [1.3.1]`.
 >
-> **Current `main` (post-v1.3.0, unreleased):** the trunk carries the **v1.4** track
+> **The `v1.3.0` release** — the one that closes the `v1.3` plan: **Track Q** (Q1, Q2, Q3, Q4, Q5, Q6, Q7) is complete. The release's headline is that the engine now **degrades gracefully under a hostile network** — the axis `v1.2.0` explicitly did not claim: a mid-stream parameter-set change is *proven* to decode on its own (Q1/Q1b, H.264 software and H.265 NVDEC), the audio jitter buffer's memory is **bounded** and the bound is **reported** (Q2), retransmissions travel on their own RFC 4588 stream (Q3), the receiver's RTCP feedback is **bounded** and its two doors are **countable** (Q4), the soak can now **impair the network** *and* drive the engine across a simulated NAT with the 24 h window archived and its netem parameters (Q5), the picture is aligned to the sound (Q6, the video half of R3 — the audio half shipped in `v1.2.0`), and the hardware codec path is exercised end-to-end by a re-runnable job on a self-hosted GPU runner (Q7). `NIMRTC_API_VERSION` = 10300, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC data exchange (DC-1) via the Chrome WebTransport JS API (`new WebTransport(url)`, not `RTCPeerConnection.createDataChannel()`) over QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; the `"sctp"` backend was retired from the public selectors in v1.2.0 (it was an in-process loopback socket that could never reach a peer). See [CHANGELOG.md](CHANGELOG.md) `## [1.3.0]` and [docs/plan/v1.3-plan.md](docs/plan/v1.3-plan.md).
+>
+> **Current `main` (post-v1.3.1, unreleased):** the trunk carries the **v1.4** track
 > (the real TURN / TLS transport, the native `coturn` CI leg and the H.265 parameter-set
 > assertion's software half) — see [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md).
-> The **v1.3.0 bundles** do contain NimRTC's own headers, static library and
+> The **v1.3.x bundles** do contain NimRTC's own headers, static library and
 > `NimRTCConfig.cmake`, so `find_package(NimRTC)` works from a downloaded bundle. See
-> [Current progress](#current-progress-v130-published--main-ahead) and
+> [Current progress](#current-progress-v131-published--main-ahead) and
 > [Roadmap](#roadmap) for the full picture.
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md) · **Try the live demo**: [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/)
@@ -58,7 +78,13 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
-- **Current state:** **v1.3.0 is the latest published release** (Stable). It closes the `v1.3`
+- **Current state:** **v1.3.1 is the latest published release** (Stable). It is a **patch
+  release** over `v1.3.0` and changes no public API (`NIMRTC_API_VERSION` = 10301) and no
+  engine behaviour — it fixes the `.sha256` sidecar *line format* so the README's own
+  `sha256sum -c` command works at the cut rather than only after a hand-patched
+  replacement, adds a SHA-256 / size table for every bundle to the release page, and
+  brings `SECURITY.md`'s supported-version table up to date.
+  The release before it, **v1.3.0**, closes the `v1.3`
   plan — **Track Q** (Q1–Q7) is complete, and the engine now claims the axis `v1.2.0`
   explicitly did not: it **degrades gracefully under a hostile network**. A mid-stream
   parameter-set change decodes on its own (Q1 / Q1b, H.264 software and H.265 NVDEC), the
@@ -67,10 +93,10 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
   **bounded** and its two doors are **countable** (Q4), the soak can **impair the network**
   *and* drive the engine across a simulated NAT with the 24 h window archived (Q5), the
   picture is **aligned to the sound** (Q6), and the hardware codec path is exercised
-  end-to-end by a re-runnable job (Q7). The `main` trunk is post-v1.3.0 and unreleased,
+  end-to-end by a re-runnable job (Q7). The `main` trunk is post-v1.3.1 and unreleased,
   carrying the **v1.4** track — the real TURN / TLS transport, the macOS downstream proof and
   the native `coturn` CI leg. See [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md).
-  Public API is frozen per ADR-015 (`NIMRTC_API_VERSION` = 10300); breaking changes require a
+  Public API is frozen per ADR-015 (`NIMRTC_API_VERSION` = 10301); breaking changes require a
   MINOR/MAJOR bump.
   **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy (DC-3), and `sfu-relay`
   benchmark (BENCH-1) were closed as NO on 2026-10-19 and remain off the critical path** per
@@ -608,7 +634,7 @@ authoritative plan documents are `docs/plan/v1.*-plan.md`.
 | **v1.0.x** | Stable | WebTransport / msquic data plane (DC-1), intra-scheduler ordering (DC-2, see `sched.hpp` § Scope note), Chrome e2e Case D + E | ✅ **v1.0.2 published** 2026-11-03 |
 | **v1.1** | Quality + Packaging + Hardening | Reproducible transport-floor benchmarks with CI artifacts; install rules + `NimRTCConfig.cmake` so `find_package(NimRTC)` works from an installed tree; APM prebuilt shipped with it; release hardening (signed tags, four-platform release legs); transport-stack residuals (`ISctpSocket` lifecycle, ICE `last_recv_packet()` demux, unified `make_transport_instance()`, ARQ tech-preview labelling); media/RTP (SDP `a=rtpmap` video clock rate, p99 strategy validator); DTLS P2 (IPv6 `set_peer()`, NAT-rebinding `rehandshake()`, pump re-entrancy guard); weak-network quality chain (simplified Goog-CC-style BWE, unified adaptive JB, RTCP feedback loop, netem weak-network baselines); `ref_frame` and command-to-frame APIs promoted to the engine's public surface; engine-level video stats; GMSSL vendoring as a submodule + SRTP backend seam; engine source split | ✅ **shipped in v1.2.0** 2026-11-18 |
 | **v1.2** | Convergence + Observability | The eight convergence gates (Track E): frozen public-header baseline, every adapter leaf compiled on macOS + Linux, the vendored AEC measured at 30.35 dB ERLE, both Chrome Case E planes asserted in CI, the DXGI zero-copy hand-off, the ABR behaviour measured on a saturated link, the vendored `usrsctp` tree removed, and the release notes themselves; plus the `getStats()` observability surface (Track S): the snapshot lifecycle, per-SSRC inbound RTP stats, the RTCP feedback broken down by type, the transport / data-channel / remote-desktop planes, and a **145-field stable field set** that CI derives from the header | ✅ **v1.2.0 published** 2026-11-18 |
-| **v1.3** | Resilience + Quality (Track Q) | Graceful degradation under a hostile network: a mid-stream parameter-set change decodes on its own (Q1 / Q1b), the audio jitter buffer's memory is bounded and the bound is reported (Q2), retransmissions travel on their own RFC 4588 stream (Q3), the receiver's RTCP feedback is bounded and its two doors are countable (Q4), the soak can impair the network *and* drive the engine across a simulated NAT with the 24 h window archived (Q5), the picture is aligned to the sound (Q6), the hardware codec path is exercised end-to-end by a re-runnable job (Q7) | ✅ **v1.3.0 published** 2026-11-20 |
+| **v1.3** | Resilience + Quality (Track Q) | Graceful degradation under a hostile network: a mid-stream parameter-set change decodes on its own (Q1 / Q1b), the audio jitter buffer's memory is bounded and the bound is reported (Q2), retransmissions travel on their own RFC 4588 stream (Q3), the receiver's RTCP feedback is bounded and its two doors are countable (Q4), the soak can impair the network *and* drive the engine across a simulated NAT with the 24 h window archived (Q5), the picture is aligned to the sound (Q6), the hardware codec path is exercised end-to-end by a re-runnable job (Q7) | ✅ **v1.3.1 published** 2026-11-24 (patch) · v1.3.0 published 2026-11-20 |
 | **v1.4** | Transport + Reach | The real TURN / TLS transport (N1), the macOS downstream proof (N9), the native `coturn` CI leg (N5-2), the engine decomposition's remaining four behaviours | 🟡 started — see [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md) |
 | **v1.2+** | — | SM4-GCM SRTP implementation, `cloudgame` (long-term candidate), `takeover` (remote-vehicle takeover, P4) | ⏸️ planned |
 | — | Closed | In-process SFU module (`nimrtc_sfu`), DC forwarding policy (DC-3), `sfu-relay` benchmark (BENCH-1) | ❌ **NO** — closed 2026-10-19, BDFL: SFU is not a project core goal (`docs/plan/v1.0-plan.md` §7) |
@@ -618,9 +644,9 @@ Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13 ·
 
 ---
 
-## Current progress (v1.3.0 published — main ahead)
+## Current progress (v1.3.1 published — main ahead)
 
-What you can do today. The table below covers what shipped **up to and including v1.3.0**
+What you can do today. The table below covers what shipped **up to and including v1.3.1**
 (the published release); the block after it lists the work that is **landed on `main` but not
 yet published**.
 

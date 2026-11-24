@@ -1202,19 +1202,27 @@ jobs:
           fi
           # A second, independent guard: the body that is about to be
           # posted must fit, *including* the footers appended below
-          # (the signing status and the per-platform 3A status).  The
-          # tool already budgets for them; this check is what catches
-          # a change to the footers that outgrows the margin.
+          # (the signing status, the digest table and the per-platform
+          # 3A status).  The tool already budgets for them; this check
+          # is what catches a change to the footers that outgrows the
+          # margin.
           #
           # The count is in **characters**, not bytes: GitHub's limit
           # is on characters, and the body carries non-ASCII (arrows,
           # em-dashes) that would make a byte count the wrong number
           # to compare against it.
+          #
+          # This guard runs where it does -- *before* the footers are
+          # appended -- so it can only ever see the body proper.  The
+          # guard that actually protects the published body is the one
+          # in the "Verify the release body length" step below, which
+          # runs after every footer has been appended and therefore
+          # counts the body that is really posted.
           body_chars=$(python3 -c "
           import pathlib, sys
           print(len(pathlib.Path('dist/release_notes.md').read_text(encoding='utf-8')))
           ")
-          echo "release body: ${body_chars} characters"
+          echo "release body: ${body_chars} characters (before the footers)"
           if (( body_chars > 125000 )); then
             echo "::error::The release body is ${body_chars} characters, over GitHub's 125000-character limit."
             exit 1
@@ -1305,6 +1313,53 @@ jobs:
             } >> dist/release_notes.md
           fi
 
+          # The digest table.  The v1.3.0 body told a reader how to check a
+          # GPG signature and how to run `sha256sum -c`, but it never
+          # printed a single digest -- so the only in-band integrity value
+          # was the detached `.sha256` sidecar, which sits next to the
+          # asset on the SAME server.  A consumer checking a mirror, a
+          # mirror-of-a-mirror, or an offline copy had nothing to compare
+          # against.
+          #
+          # The table below is built from the bundles this run is about to
+          # publish: the digest is computed from the file itself, so it
+          # cannot drift from the artefact, and a bundle that was not
+          # built simply does not appear.  It is emitted AFTER the
+          # "which platforms are present" check above, so a partial
+          # release lists exactly the bundles that actually shipped.
+          {
+            echo
+            echo "---"
+            echo
+            echo "> **Bundle digests (SHA-256)**"
+            echo
+            echo "> | Bundle | Platform | Size | SHA-256 |"
+            echo "> |---|---|---|---|"
+            for tarball in dist/nimrtc-*.tar.xz; do
+              [[ -f "$tarball" ]] || continue
+              leaf="$(basename "$tarball")"
+              digest="$(sha256sum "$tarball" | awk '{print $1}')"
+              bytes="$(stat -c%s "$tarball")"
+              platform="${leaf#nimrtc-}"
+              platform="${platform%.tar.xz}"
+              platform="${platform#*-}"
+              echo "> | \`${leaf}\` | \`${platform}\` | ${bytes} bytes | \`${digest}\` |"
+            done
+            echo
+            echo "> The digests above are the **full** SHA-256 of each published"
+            echo "> bundle.  The same value ships in the detached \`.sha256\`"
+            echo "> sidecar next to each asset, in \`sha256sum -c\` format:"
+            echo
+            echo "> \`\`\`bash"
+            echo "> sha256sum -c nimrtc-<version>-<platform>.tar.xz.sha256"
+            echo "> \`\`\`"
+            echo
+            echo "> A digest check alone does not authenticate the bundle --"
+            echo "> it tells you the bytes you received are the bytes that were"
+            echo "> published.  The detached \`.asc\` signature over the same"
+            echo "> file is what establishes *who* published them; verify both."
+          } >> dist/release_notes.md
+
           # W3: per-platform 3A (AEC/ANS/AGC) status.  TWO DIFFERENT
           # facts must be reported per platform, and conflating them is
           # what made the v1.0.2 body wrong:
@@ -1385,6 +1440,36 @@ jobs:
             echo "> a platform counts as \"real 3A bundled\" only when"
             echo "> \`lib/webrtc_apm/\` is actually present in the tarball."
           } >> dist/release_notes.md
+
+      # The guard that actually protects the published body.
+      #
+      # Every footer is now appended: the signing status, the digest
+      # table and the per-platform 3A status.  This is the first point
+      # at which the body that GitHub will really receive can be
+      # measured, so this is the check that has to pass -- the earlier
+      # one (in "Build the release body") runs before the footers and
+      # therefore cannot see them.
+      #
+      # GitHub's limit is on CHARACTERS, not bytes: the body carries
+      # non-ASCII (arrows, em-dashes, the `…` in the 3A table) that
+      # would make a byte count the wrong number to compare against it.
+      # And the failure GitHub reports for an over-long body is a 422
+      # at the publish step, which is far too late and far too
+      # indirect: the body that is over the limit is the *whole*
+      # release notes, and truncating it would lose the release notes.
+      - name: Verify the release body length
+        shell: bash
+        run: |
+          set -euo pipefail
+          body_chars=$(python3 -c "
+          import pathlib
+          print(len(pathlib.Path('dist/release_notes.md').read_text(encoding='utf-8')))
+          ")
+          echo "release body (with every footer): ${body_chars} characters"
+          if (( body_chars > 125000 )); then
+            echo "::error::The release body is ${body_chars} characters, over GitHub's 125000-character limit. The body would be rejected with a 422, or silently truncated. Shorten the CHANGELOG section, or shrink a footer."
+            exit 1
+          fi
 
       - name: Draft GitHub Release
         uses: softprops/action-gh-release@v3

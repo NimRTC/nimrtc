@@ -141,6 +141,23 @@ jobs:
           $url = "https://github.com/${{ github.repository }}.git"
           cd $env:GITHUB_WORKSPACE
 
+          # Windows PowerShell turns a native command's stderr into
+          # *error records*, and the runner runs every step with
+          # `$ErrorActionPreference = 'Stop'` -- so a command that
+          # writes to stderr becomes a terminating error even when
+          # its exit code says the step should carry on.  That is not
+          # a subtlety: `git remote add origin` on an existing origin
+          # writes 'error: remote origin already exists.' to stderr
+          # and, with the error redirected, took the whole step down
+          # with it.
+          #
+          # So the step runs with the preference relaxed.  The exit
+          # codes are still checked -- the loops below test
+          # `$LASTEXITCODE` -- and the failure paths still `exit 1`.
+          # What is given up is only the *termination* of a command
+          # that was expected to be able to complain.
+          $ErrorActionPreference = 'Continue'
+
           # A local clone of this repository, on this same machine,
           # has the commit already -- and the runner and the tree it
           # builds usually are the same machine.  Copying from it is
@@ -168,29 +185,49 @@ jobs:
           $copied = $false
           foreach ($m in $candidates) {
             if (-not (Test-Path (Join-Path $m ".git"))) {
-              Write-Host "mirror $m: not a clone"
+              Write-Host ("mirror {0}: not a clone" -f $m)
               continue
             }
             $have = $null
             if ($ref -match '^[0-9a-f]{40}$') {
-              git -C $m cat-file -e "$ref" 2>$null
+              # A mirror that does not have the commit says so on
+              # stderr.  That is the *expected* answer for a mirror
+              # that is not the right one, so the answer is taken
+              # from the exit code and the complaint is discarded --
+              # `2>&1` and the exit code, rather than a redirection
+              # that turns the complaint into a terminating error
+              # under the runner's `$ErrorActionPreference`.
+              git -C $m cat-file -e "$ref" 2>&1 | Out-Null
               if ($LASTEXITCODE -eq 0) { $have = $ref }
             } else {
-              $have = (git -C $m rev-parse $ref 2>$null)
+              $have = (git -C $m rev-parse $ref 2>&1)
+              if ($LASTEXITCODE -ne 0) { $have = $null }
             }
             if (-not $have) {
-              Write-Host "mirror $m: does not have $ref"
+              Write-Host ("mirror {0}: does not have {1}" -f $m, $ref)
               continue
             }
             Write-Host "using the local mirror $m at $have"
             git init
             git fetch --no-tags "$m" "$have"
             if ($LASTEXITCODE -ne 0) {
-              Write-Host "mirror $m: the fetch failed"
+              Write-Host ("mirror {0}: the fetch failed" -f $m)
               continue
             }
             git checkout --force FETCH_HEAD
-            git remote add origin $url 2>$null
+            # The runner's workspace already has an `origin`, so
+            # `remote add` is the wrong command: it fails with
+            # 'error: remote origin already exists.' and, its stderr
+            # being an error record under the runner's
+            # `$ErrorActionPreference`, took the step down.  The
+            # remote is *replaced* instead, so the url is the one the
+            # job asked for either way.
+            $remotes = @(git remote 2>&1)
+            if ($remotes -contains 'origin') {
+              git remote set-url origin $url
+            } else {
+              git remote add origin $url
+            }
             $copied = $true
             break
           }
@@ -208,8 +245,16 @@ jobs:
           # deletes the whole directory on failure, and on this link
           # the first attempt routinely dies with 'early EOF' after
           # ten minutes.
-          git remote remove origin 2>$null
-          git remote add origin $url
+          # The `origin` remote is *replaced* rather than added, so the
+          # command does not complain about an existing one -- and the
+          # complaint, its stderr being an error record under the
+          # runner's `$ErrorActionPreference`, took the step down.
+          $remotes = @(git remote 2>&1)
+          if ($remotes -contains 'origin') {
+            git remote set-url origin $url
+          } else {
+            git remote add origin $url
+          }
           $attempts = 8
           for ($i = 1; $i -le $attempts; $i++) {
             Write-Host "fetch attempt $i/$attempts"

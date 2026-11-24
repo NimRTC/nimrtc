@@ -3790,3 +3790,39 @@ if(NIMRTC_BUILD_TESTS)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# The PowerShell-step guard.
+#
+# A `run:` block under `shell: pwsh` is PowerShell, and PowerShell reads
+# `$var:` as a *drive reference* -- the `:` is a drive qualifier, not
+# punctuation.  So `Write-Host "mirror $m: not a clone"` is a parser
+# error, not a string with a colon in it, and the step dies before it
+# does anything with `InvalidVariableReferenceWithDrive` in the log and
+# no mention of the mistake.  It landed in the hardware job's
+# mirror-fetching step on 2026-11-24: the step written to make the job
+# survive a broken link was the step that failed.
+#
+# The guard parses every PowerShell step with the PowerShell parser.  It
+# needs that parser, so it only does anything on Windows; elsewhere it
+# reports that it was skipped.  The `${{ ... }}` expressions are masked
+# first -- GitHub substitutes them before the shell sees the script, and
+# `${{` reads as a hashtable literal to PowerShell.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_workflow_powershell
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_workflow_powershell.py"
+                         --self-test)
+        set_tests_properties(test_workflow_powershell PROPERTIES
+            TIMEOUT 120
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the workflow-PowerShell "
+            "guard (tools/check_workflow_powershell.py).  CI runs it as a "
+            "dedicated step.")
+    endif()
+endif()
+

@@ -69,6 +69,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -248,11 +249,37 @@ def publish(records: list[Path], summary_path: Path | None,
             handle.write("```\n")
 
     if outputs_path is not None:
-        # The GitHub output-file format: a heredoc marker, the value,
-        # the marker again.
+        # The GitHub output-file format.  There are two forms, and the
+        # difference is not cosmetic:
+        #
+        #   name=value               -- one line, one value
+        #   name<<DELIMITER
+        #   value
+        #   DELIMITER
+        #
+        # The multi-line form is the only one that can carry a record
+        # that has newlines in it, and it *requires* the
+        # `name<<DELIMITER` prefix: the runner reads the `<<` to know
+        # a heredoc starts there.  A bare marker on its own line --
+        # `EOF_MARKER` / value / `EOF_MARKER` -- is not the format at
+        # all.  The runner reads the first line as `name=value`, finds
+        # no `=` in it, and says:
+        #
+        #     ##[error]Unable to process file command 'output' successfully.
+        #     ##[error]Invalid format 'EOF_NIMRTC_HARDWARE_EVIDENCE'
+        #
+        # and then the *step* fails, even though the record was
+        # written and the evidence itself is fine.  The delimiter must
+        # not appear as a line of the value, so it is derived from a
+        # hash of the body: a record that happened to contain the
+        # marker would otherwise end the heredoc early.
         marker = "EOF_NIMRTC_HARDWARE_EVIDENCE"
-        with outputs_path.open("w", encoding="utf-8") as handle:
-            handle.write("%s\n%s\n%s\n" % (marker, body, marker))
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
+        delimiter = "%s_%s" % (marker, digest)
+        while delimiter in body:
+            delimiter += "_"
+        with outputs_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write("evidence<<%s\n%s%s\n" % (delimiter, body, delimiter))
 
     return body
 
@@ -470,6 +497,29 @@ def self_test() -> int:
               "the output file must carry its marker")
         check(out_text.count('"verdict":"PASS"') == 2,
               "the output file must carry every record")
+        body_text = body
+        # The heredoc form the runner actually accepts.  A bare marker
+        # on its own line is *not* it: the runner reads the first line
+        # as `name=value`, finds no `=`, and fails the step with
+        # "Invalid format".  So the `name<<delimiter` prefix is
+        # pinned here, and the closing delimiter is pinned to a line
+        # of its own.
+        check("evidence<<EOF_NIMRTC_HARDWARE_EVIDENCE" in out_text,
+              "the output file must open the heredoc with 'name<<marker'")
+        lines = out_text.split("\n")
+        check(lines[0].startswith("evidence<<"),
+              "the first line of the output file must open the heredoc")
+        delimiter = lines[0].split("<<", 1)[1]
+        check(delimiter and delimiter in lines,
+              "the closing delimiter must be a line of its own")
+        # The delimiter opens the heredoc (on the first line, after the
+        # `<<`) and closes it (on a line of its own).  It appears twice
+        # in the file -- once inside the opening line, once as the
+        # closing line.
+        check(lines.count(delimiter) == 1,
+              "the closing delimiter must be a line of its own, once")
+        check(delimiter not in body_text,
+              "the delimiter must not appear inside the value")
 
         # --- a missing record is a failure, not an empty success ----
         empty = root / "empty"

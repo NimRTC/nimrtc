@@ -36,8 +36,14 @@ patch release of the previous minor version.
 
 | Version | Supported          |
 |---------|--------------------|
-| 1.0.x   | ✅ Full support     |
-| 0.9.x   | 🔶 LTS bridge for RC users (security fixes only, until 1.0.0 ships + 90 days) |
+| 1.3.x   | ✅ Full support — the current stable line (`v1.3.1`) |
+| 1.2.x   | 🔶 Security fixes only — the previous minor line (`v1.2.0`) |
+| 1.1.x / 1.0.x | ❌ End of life — upgrade to the 1.3.x line |
+| 0.9.x   | ❌ End of life — the LTS bridge for RC users ended 90 days after `v1.0.0` shipped (2026-11-02) |
+
+The lines above are the ones the release process actually maintains
+(`RELEASING.md` §3.5): a fix lands on `main` and is cherry-picked to every
+supported `release/X.Y` branch, and a `vX.Y.(Z+1)` tag is cut from it.
 
 ## Security considerations in NimRTC
 

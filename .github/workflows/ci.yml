@@ -593,6 +593,17 @@ jobs:
       - name: Self-test the hardware-encode recorder
         run: python3 tools/run_hardware_e2e.py --self-test
 
+      # The hardware *job* runner (tools/run_hardware_job.py) is the
+      # script that replaces the two actions the hardware workflow used
+      # to have, and it has to be able to fail too: the evidence
+      # publication must not silently lose a record, and the
+      # environment merge must not leave two spellings of PATH behind
+      # (which would make the child process see whichever one the
+      # environment block happened to write last).  The self-test pins
+      # both, against a synthetic evidence file in the temp directory.
+      - name: Self-test the hardware job runner
+        run: python3 tools/run_hardware_job.py --self-test
+
       # v1.2 Track S / S8: the `Engine::Stats` field reference is a
       # *derived* document.  It is generated from `engine.hpp` by
       # `tools/dump_stats_fields.py`, and this step fails when the file

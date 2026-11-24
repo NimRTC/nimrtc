@@ -169,6 +169,25 @@ gpg --verify nimrtc-1.3.0-linux-x86_64-gcc.tar.xz.asc
 
 签名公钥指纹：`114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`。
 
+> **⚠️ 仅 `v1.2.0`：`.sha256` 副本不兼容 `sha256sum -c`。**
+> `v1.2.0` 的四个副本里有三个无法用上面的命令校验：两个 Linux 副本写的是
+> `build/nimrtc-…tar.xz`（带目录前缀，而下载后的 bundle 与副本是并排放着的，
+> 那个目录并不存在），Windows 副本只有一串裸 hex 摘要、没有文件名，
+> `sha256sum` 会直接报 *"no properly formatted SHA256 checksum lines found"*。
+> 只有 macOS 那个是好的。
+>
+> **摘要本身是正确的** —— 四个都与 GitHub 发布的 bundle 一致，所以这是*行格式*
+> 问题，不是文件损坏，手工校验 `v1.2.0` 的 bundle 是安全的：
+>
+> ```bash
+> sha256sum nimrtc-1.2.0-linux-x86_64-gcc.tar.xz
+> # 与 .sha256 文件里的摘要比对即可，忽略 "build/" 前缀
+> ```
+>
+> `v1.3.0` 出了同样的格式问题，事后把副本换掉了；`v1.3.1` 修好了产生它们的构建
+> 任务，所以副本在切版当时就是对的。`tools/check_sha256_sidecars.py` 现在把这个
+> 格式作为切版门禁。建议直接用 `v1.3.1` 或更新版本。
+
 ---
 
 ## 快速上手

@@ -133,6 +133,88 @@ DEFAULT_EXPECT_REF = "release/1.1"
 # release that wants the stronger guarantee has to ask for it by name.
 # `--expect-ancestor-of` is a commit-ish, not a branch name.
 
+# --------------------------------------------------------------------------
+# The gate rules are VERSIONED
+# --------------------------------------------------------------------------
+# Why this exists
+# ---------------
+# On 2026-11-23 the soak gate was changed on the same day the v1.3.0
+# release was cut: the window went from seven consecutive green days to
+# five, and the intra-day rule went from "any FAIL spoils the day" to
+# "every required case needs at least one PASS".  Both changes were
+# defensible on their own -- the failure that motivated them was a
+# single Chrome-interop timeout on a shared runner, on a commit that had
+# already passed the same case three times that day, whose CI was
+# 13/13 green.
+#
+# The problem was not the judgement.  It was that the *mechanism* allowed
+# the person who wanted the release to change the criterion that was
+# holding the release, on the same day, with no separation between the
+# two.  A gate whose rule can be edited by the party it gates has no
+# value beyond the moment it was written.
+#
+# So the rule is no longer a bare number on the command line.  It is a
+# NAMED, VERSIONED rule with two properties:
+#
+#   1. The rule that applies to a release is the one in force on the
+#      day the release is CUT, not the one in force when the tool was
+#      written.  A tag cut today is judged by today's rule; a tag cut
+#      next month is judged by next month's rule.
+#   2. A rule change cannot take effect for a release until a COOLDOWN
+#      has elapsed.  The cooldown is counted from the day the rule
+#      change landed, and it exists so that the change is on the record
+#      for at least one full window before it can decide a release.
+#      The release that changed the rule is therefore judged by the
+#      OLD rule, and the NEXT release is the first one the new rule
+#      decides.
+#
+# The second property is the whole point.  Without it, "versioned" would
+# be a label on the same hole.
+#
+# What this does NOT do
+# ---------------------
+# It does not make the 7-day rule sacred.  The rule below is a *policy*
+# choice and a later one may change it -- but it must then wait out its
+# cooldown, and the release that changed it is judged by the rule that
+# was in force before.  That is the difference between "the criterion
+# moved" and "the criterion moved, and everybody had a full window to
+# see it move".
+RULE_VERSION = 2
+
+# The rule in force.  `days` is the consecutive-green-day count the gate
+# demands; `intra_day` is how a day with mixed PASS/FAIL evidence is
+# treated:
+#
+#   "any-pass" -- every required case needs at least one PASS.  A FAIL
+#     among passing runs does not spoil the day; a case that failed
+#     EVERY time it ran does (it has no PASS at all, so the first
+#     clause rejects it).
+#   "any-fail" -- a single FAIL among passing runs spoils the day.
+#     This is the pre-2026-11-23 rule.
+#
+# `cooldown_days` is how long a change to this rule must be on the
+# record before it can decide a release.  It is measured in calendar
+# days from the day the change landed.
+GATE_RULE = {
+    "version": RULE_VERSION,
+    "days": 7,
+    "intra_day": "any-pass",
+    "cooldown_days": 7,
+    "effective_from": "2026-11-24",
+}
+
+# The rule that was in force before this one.  It is kept because the
+# release that CHANGES the rule is judged by it -- that is what makes
+# the cooldown bite -- and because a rule change is a diff against the
+# rule it replaces.
+PREVIOUS_GATE_RULE = {
+    "version": 1,
+    "days": 7,
+    "intra_day": "any-fail",
+    "cooldown_days": 7,
+    "effective_from": "2026-11-07",
+}
+
 
 class ToolError(Exception):
     """Raised when the tool itself cannot run (exit code 2)."""
@@ -472,7 +554,7 @@ def load_records(out_dir):
     return records
 
 
-def _day_is_green(cases, required_cases):
+def _day_is_green(cases, required_cases, intra_day="any-pass"):
     """Decide whether one day of evidence counts as green.
 
     `cases` maps a case name to the list of records for that case on
@@ -485,29 +567,40 @@ def _day_is_green(cases, required_cases):
     The first clause is what makes a day green; the second is what it
     says about a case that failed every time it ran.
 
-    A FAIL does not by itself spoil the day.  A day is normally measured
-    several times -- the CI job runs it, the scheduled local task runs
-    it, and either may be re-run after a fix -- and a single FAIL among
-    passing runs is evidence about the *runner*, not about the program:
-    a Chrome interop that hits the 60-second timeout on a shared CI
-    machine, on a commit that passed the same case three times earlier
-    that day, is a flaky measurement.  Demoting the whole day for it
-    measured the runner's mood rather than the build's stability.
+    `intra_day` selects how a day with MIXED evidence is treated:
 
-    What still disqualifies a day is a case that failed *every* time it
-    ran: then no passing run exists for that case, the first clause
-    already rejects it, and the day carries no evidence that the case
-    works at all.
+    "any-pass" -- a FAIL does not by itself spoil the day.  A day is
+      normally measured several times -- the CI job runs it, the
+      scheduled local task runs it, and either may be re-run after a
+      fix -- and one FAIL among passing runs is evidence about the
+      *runner*, not about the program: a Chrome interop that hits the
+      60-second timeout on a shared CI machine, on a commit that
+      passed the same case three times earlier that day, is a flaky
+      measurement.  Demoting the whole day for it measured the runner's
+      mood rather than the build's stability.
 
-    An INCONCLUSIVE record is harmless in the same way -- running twice
-    is harmless -- and otherwise the day simply lacks a PASS for that
-    case and is not green.
+    "any-fail" -- a single FAIL among passing runs DOES spoil the day.
+      This is the stricter, pre-2026-11-23 reading: a day in which any
+      required case failed at least once carries a failure, whatever
+      else it also carries.
+
+    What still disqualifies a day under BOTH rules is a case that
+    failed *every* time it ran: then no passing run exists for that
+    case, the first clause already rejects it, and the day carries no
+    evidence that the case works at all.
+
+    An INCONCLUSIVE record is harmless under "any-pass" -- running
+    twice is harmless -- and otherwise the day simply lacks a PASS for
+    that case and is not green.
 
     Returns True when the day counts towards the streak.
     """
     for case in required_cases:
         records = cases.get(case, [])
         if not any(rec.get("status") == "PASS" for rec in records):
+            return False
+        if intra_day == "any-fail" and any(rec.get("status") == "FAIL"
+                                            for rec in records):
             return False
     return True
 
@@ -765,7 +858,7 @@ def _day_cleanliness(cases):
 
 
 def summarise(records, required_cases, expect_ref=None,
-              expect_ancestor_of=None, resolver=None):
+              expect_ancestor_of=None, resolver=None, intra_day="any-pass"):
     """Compute the per-platform streaks and the gaps.
 
     `expect_ref` is the tree the window is a statement about.  When it
@@ -781,6 +874,11 @@ def summarise(records, required_cases, expect_ref=None,
     BOTH.  That is the strictest reading, and it is the one the
     release gate uses: the window must have been measured on the
     candidate branch AND on a tree the candidate descends from.
+
+    `intra_day` selects the rule for a day with mixed PASS/FAIL
+    evidence -- see `_day_is_green`.  It defaults to the rule in force
+    (`GATE_RULE["intra_day"]`), so a caller that does not care gets the
+    current policy.
     """
     per_platform = {}
     for record in records:
@@ -824,7 +922,7 @@ def summarise(records, required_cases, expect_ref=None,
                 dirty_days.append({"day": day})
             elif cleanliness == "unknown":
                 unknown_days.append({"day": day})
-            green = (_day_is_green(cases, required_cases)
+            green = (_day_is_green(cases, required_cases, intra_day)
                      and on_ref
                      and cleanliness == "clean"
                      and ancestry != "no"
@@ -1098,6 +1196,79 @@ def gate_unsatisfied(summary, required_days):
         if streak < required_days:
             unsatisfied.append("%s (%d/%d)" % (plat, streak, required_days))
     return unsatisfied
+
+
+# --------------------------------------------------------------------------
+# Which rule applies to which release
+# --------------------------------------------------------------------------
+
+def _parse_day(value):
+    """Parse a `YYYY-MM-DD` string, or return None when it is not one."""
+    try:
+        return datetime.strptime(str(value).strip(), "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+
+
+def rule_in_force(cut_date, rule=None, previous=None):
+    """Return the gate rule that applies to a release cut on `cut_date`.
+
+    This is the cooldown, and it is the whole point of versioning the
+    rule.  A rule change lands on `effective_from` and cannot decide a
+    release until `cooldown_days` have passed since then.  So:
+
+      * a release cut BEFORE the change took effect is judged by the
+        previous rule -- the change did not exist yet;
+      * a release cut within the cooldown window is ALSO judged by the
+        previous rule -- the change is on the record but has not been
+        on it long enough to decide anything, so it cannot be used to
+        let a release through;
+      * only a release cut after the cooldown is judged by the new rule.
+
+    The consequence is the one that matters: **the release that changes
+    the rule is judged by the rule that was in force before it.**  The
+    change cannot be used to release the thing it was changed for.
+    After one full window has gone by, the new rule applies normally.
+
+    `cut_date` may be a `YYYY-MM-DD` string or a `datetime`.  A date
+    that cannot be parsed is an error the caller must not swallow: an
+    unparseable cut date would silently fall back to "the newest rule",
+    which is exactly the hole this function exists to close.
+    """
+    rule = rule or GATE_RULE
+    previous = previous or PREVIOUS_GATE_RULE
+
+    cut = _parse_day(cut_date)
+    if cut is None:
+        raise ToolError("the cut date %r is not a YYYY-MM-DD date"
+                        % (cut_date,))
+
+    effective = _parse_day(rule.get("effective_from"))
+    if effective is None:
+        raise ToolError("the rule's effective_from %r is not a YYYY-MM-DD date"
+                        % (rule.get("effective_from"),))
+
+    cooldown = int(rule.get("cooldown_days") or 0)
+    eligible_from = effective + timedelta(days=cooldown)
+    eligible_text = eligible_from.strftime("%Y-%m-%d")
+
+    if cut < eligible_from:
+        # The change cannot decide this release yet.
+        return previous, ("rule v%s applies: the change to v%s takes effect "
+                          "on %s and cannot decide a release before %s"
+                          % (previous.get("version"),
+                             rule.get("version"),
+                             rule.get("effective_from"),
+                             eligible_text))
+    return rule, ("rule v%s applies (effective %s, cooldown %d day(s))"
+                   % (rule.get("version"), rule.get("effective_from"),
+                      cooldown))
+
+
+def rule_requirements(rule):
+    """The (days, intra_day) pair a rule demands."""
+    return (int(rule.get("days", GATE_RULE["days"])),
+            rule.get("intra_day", GATE_RULE["intra_day"]))
 
 
 def _self_test():
@@ -1498,6 +1669,84 @@ def _self_test():
     check(stale_platforms(empty_summary, "2026-11-20", 30) == [],
           "a platform with no green day is not reported as stale")
 
+    # 27. The intra-day rule is selectable, and the two readings really
+    #     do differ.  This is the assertion that keeps the rule from
+    #     being a single hard-coded behaviour with a name attached.
+    mixed = [_record(day, case, "PASS") for day in seven for case in cases]
+    mixed += [_record(seven[3], "d", "FAIL", reason="runner exited 1")]
+    strict = summarise(mixed, cases, intra_day="any-fail")["windows"]
+    loose = summarise(mixed, cases, intra_day="any-pass")["windows"]
+    check(strict["consecutive_green_days"] == 3,
+          "under 'any-fail' a single FAIL among passing runs ends the "
+          "streak (got %d, expected 3)" % strict["consecutive_green_days"])
+    check(loose["consecutive_green_days"] == 7,
+          "under 'any-pass' a single FAIL among passing runs does not "
+          "(got %d, expected 7)" % loose["consecutive_green_days"])
+
+    # 28. Under 'any-fail' a case that failed EVERY time it ran still
+    #     ends the streak -- the stricter reading is not a loophole.
+    allfail = [_record(day, case, "PASS") for day in seven for case in cases]
+    allfail += [_record(seven[3], "d", "FAIL", reason="runner exited 1")]
+    allfail += [_record(seven[3], "e", "FAIL", reason="runner exited 2")]
+    info = summarise(allfail, cases, intra_day="any-fail")["windows"]
+    check(info["consecutive_green_days"] == 3,
+          "under 'any-fail' a case that failed every time ends the streak "
+          "(got %d, expected 3)" % info["consecutive_green_days"])
+
+    # 29. The rule in force is selected by the CUT DATE.  This is the
+    #     versioning: a release cut before the change took effect is
+    #     judged by the OLD rule.
+    rule, note = rule_in_force("2026-11-20")
+    check(rule["version"] == PREVIOUS_GATE_RULE["version"],
+          "a release cut before the change took effect is judged by the "
+          "previous rule (got v%s)" % rule["version"])
+
+    # 30. The release that CHANGES the rule is judged by the rule that
+    #     was in force before it.  This is the assertion that makes the
+    #     cooldown bite: the change cannot be used to release the very
+    #     thing it was changed for.
+    rule, note = rule_in_force("2026-11-24")
+    check(rule["version"] == PREVIOUS_GATE_RULE["version"],
+          "a release cut on the day the rule changed is judged by the "
+          "PREVIOUS rule (got v%s, expected v%s)"
+          % (rule["version"], PREVIOUS_GATE_RULE["version"]))
+    check("cannot decide" in note,
+          "the note says why the previous rule applies")
+
+    # 31. A release cut INSIDE the cooldown is also judged by the
+    #     previous rule.  The change is on the record but has not been
+    #     on it long enough to decide anything.
+    inside = _parse_day(GATE_RULE["effective_from"]) + timedelta(
+        days=max(0, int(GATE_RULE["cooldown_days"]) - 1))
+    rule, _ = rule_in_force(inside.strftime("%Y-%m-%d"))
+    check(rule["version"] == PREVIOUS_GATE_RULE["version"],
+          "a release cut inside the cooldown is judged by the previous "
+          "rule (got v%s)" % rule["version"])
+
+    # 32. Only after the cooldown does the new rule apply.
+    after = _parse_day(GATE_RULE["effective_from"]) + timedelta(
+        days=int(GATE_RULE["cooldown_days"]))
+    rule, _ = rule_in_force(after.strftime("%Y-%m-%d"))
+    check(rule["version"] == GATE_RULE["version"],
+          "a release cut after the cooldown is judged by the new rule "
+          "(got v%s, expected v%s)" % (rule["version"], GATE_RULE["version"]))
+
+    # 33. A cut date that cannot be parsed is an ERROR, not a fallback.
+    #     A silent fallback to "the newest rule" would reopen exactly
+    #     the hole the versioning exists to close.
+    raised = False
+    try:
+        rule_in_force("not-a-date")
+    except ToolError:
+        raised = True
+    check(raised,
+          "an unparseable cut date is refused rather than defaulted")
+
+    # 34. The rule in force demands the day count it says it does.
+    days, intra = rule_requirements(GATE_RULE)
+    check(days == GATE_RULE["days"] and intra == GATE_RULE["intra_day"],
+          "the rule reports its own requirements consistently")
+
     print()
     print("self-test: %d failure(s)" % failures)
     return 0 if failures == 0 else 1
@@ -1526,9 +1775,24 @@ def main(argv=None) -> int:
                         help="make --summary a gate: exit non-zero unless every "
                              "tracked platform has a streak of at least "
                              "--require-days consecutive green days")
-    parser.add_argument("--require-days", type=int, default=5,
+    parser.add_argument("--require-days", type=int, default=None,
                         help="number of consecutive green days the gate demands "
-                             "(default: 5)")
+                             "(default: the rule in force for the cut date; "
+                             "giving it explicitly OVERRIDES the rule and "
+                             "therefore disables the versioning -- the release "
+                             "workflow does not use it)")
+    parser.add_argument("--cut-date", default=None,
+                        help="the date the release is cut, as YYYY-MM-DD.  It "
+                             "selects the gate rule in force on that day, "
+                             "which is what makes the rule versioned: a rule "
+                             "change cannot decide a release until its "
+                             "cooldown has elapsed.  Defaults to the "
+                             "candidate commit's date, or to today when there "
+                             "is no candidate")
+    parser.add_argument("--rule-version", type=int, default=None,
+                        help="require a specific rule version and fail if it "
+                             "is not the one in force (default: no check; "
+                             "the gate accepts whichever rule is in force)")
     parser.add_argument("--expect-ref", default=DEFAULT_EXPECT_REF,
                         help="the tree the window is a statement about; a day "
                              "measured on any other tree is not green "
@@ -1577,8 +1841,43 @@ def main(argv=None) -> int:
                     "the summary would not mean what it claims to\n"
                     % args.expect_ancestor_of)
                 return 2
+
+        # Which rule applies to THIS release.  The cut date decides it:
+        # the rule in force on the day the release is cut is the rule
+        # that judges it, and a rule change cannot decide a release
+        # until its cooldown has elapsed.  Without this, the version
+        # number on the rule would be a label rather than a mechanism.
+        cut_date = args.cut_date
+        if cut_date is None:
+            cut_date = (commit_date(ancestor_commit) if ancestor_commit
+                        else datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        try:
+            rule, rule_note = rule_in_force(cut_date)
+        except ToolError as exc:
+            sys.stderr.write("error: %s\n" % exc)
+            return 2
+        rule_days, rule_intra_day = rule_requirements(rule)
+
+        if args.rule_version is not None and args.rule_version != rule.get("version"):
+            sys.stderr.write(
+                "error: the gate rule in force for a cut on %s is v%s, not "
+                "v%s; refusing to judge this release under a rule it does "
+                "not use\n" % (cut_date, rule.get("version"),
+                               args.rule_version))
+            return 2
+
+        # An explicit `--require-days` OVERRIDES the rule.  That is
+        # allowed -- a caller may want a stricter window than the policy
+        # demands -- but it is not the same thing as the policy, and the
+        # release workflow does not pass it: the gate there is the rule.
+        required_days = (args.require_days if args.require_days is not None
+                         else rule_days)
+        if args.require_days is not None:
+            rule_note += (" (overridden by --require-days %d)" % required_days)
+
         summary = summarise(records, required_cases, expect_ref=args.expect_ref,
-                            expect_ancestor_of=ancestor_commit)
+                            expect_ancestor_of=ancestor_commit,
+                            intra_day=rule_intra_day)
         if args.json:
             print(json.dumps({
                 "out_dir": str(out_dir),
@@ -1587,9 +1886,15 @@ def main(argv=None) -> int:
                 "expect_ancestor_of": args.expect_ancestor_of,
                 "expect_ancestor_commit": ancestor_commit,
                 "records": len(records),
+                "rule": rule,
+                "rule_note": rule_note,
+                "cut_date": cut_date,
+                "required_days": required_days,
+                "intra_day": rule_intra_day,
                 "platforms": summary,
             }, indent=2, sort_keys=True))
         else:
+            print("gate rule: %s" % rule_note)
             print_summary(summary, required_cases, expect_ref=args.expect_ref,
                           expect_ancestor_of=ancestor_commit)
             if not summary:
@@ -1605,7 +1910,6 @@ def main(argv=None) -> int:
         # reading them by hand is exactly how a window gets claimed
         # that was never satisfied.
         if args.require:
-            required_days = args.require_days
             unsatisfied = gate_unsatisfied(summary, required_days)
             if unsatisfied:
                 sys.stderr.write(

@@ -187,6 +187,28 @@ gpg --verify nimrtc-1.3.0-linux-x86_64-gcc.tar.xz.asc
 
 Signing key fingerprint: `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`.
 
+> **⚠️ `v1.2.0` only: the `.sha256` sidecars are not `sha256sum -c` compatible.**
+> Three of the four `v1.2.0` sidecars cannot be checked with the command above:
+> the two Linux ones name `build/nimrtc-…tar.xz` (a directory prefix that does
+> not exist once the bundle has been downloaded next to its sidecar), and the
+> Windows one is a bare hex digest with no file name at all, which `sha256sum`
+> rejects with *"no properly formatted SHA256 checksum lines found"*. The macOS
+> one is fine.
+>
+> **The digests themselves are correct** — all four match the bundles GitHub
+> published — so this is a *line format* defect, not a corruption, and it is
+> safe to verify a `v1.2.0` bundle by hand:
+>
+> ```bash
+> sha256sum nimrtc-1.2.0-linux-x86_64-gcc.tar.xz
+> # compare against the digest in the .sha256 file, ignoring the "build/" prefix
+> ```
+>
+> `v1.3.0` shipped the same broken format and had its sidecars replaced in
+> place afterwards; `v1.3.1` fixes the build jobs that produced them, so the
+> sidecars are right at the cut. `tools/check_sha256_sidecars.py` now gates
+> the cut on this format. Prefer `v1.3.1` or newer.
+
 ---
 
 ## Quick Start

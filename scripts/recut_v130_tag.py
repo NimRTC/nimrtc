@@ -85,10 +85,16 @@ def soak_gate(candidate):
     shell: PowerShell and cmd.exe both eat the empty string, and the run
     then silently becomes `--expect-ref` with a missing value.  That
     failure mode looks like "the window is 0/7" and is not one.
+
+    `--require-days` is deliberately NOT passed.  The day count and the
+    intra-day rule are the RULE's business, and the rule is versioned
+    and dated (`GATE_RULE` in `tools/run_soak.py`).  Spelling the number
+    out here would put it back under the release manager's thumb on the
+    day of the cut.  The rule selects itself from the candidate's date.
     """
     cmd = [
         sys.executable, "tools/run_soak.py",
-        "--summary", "--require", "--require-days", "5",
+        "--summary", "--require",
         "--expect-ref", "",
         "--expect-ancestor-of", candidate,
         "--max-window-age-days", "30",
@@ -135,32 +141,77 @@ def sign(candidate, target):
     EDITOR unset" -- and the script would report a failure for a tag
     it had already signed correctly.
 
-    The local tag is only replaced once the new one exists: the script
-    signs a throw-away tag first, and only then points the real tag at
-    the signed tag OBJECT.  Deleting first and signing second would
-    leave the repository with NO local tag at all if the signing
-    failed -- and on a machine where the local tag is the only copy of
-    a signature, that is not a recoverable state.
+    The local tag is only replaced once the new one exists.  Deleting
+    first and signing second would leave the repository with NO local
+    tag at all if the signing failed -- and on a machine where the local
+    tag is the only copy of a signature, that is not a recoverable
+    state.  So the old tag's OBJECT is remembered, the ref is removed
+    to make the name available, the new tag is signed under the
+    candidate's OWN name, and if anything goes wrong the old ref is
+    restored from the remembered object.
 
-    The swap uses `git update-ref`, not `git tag <name> <other-tag>`:
-    the latter resolves the other tag to its COMMIT and creates a new
-    lightweight tag, which throws the signature away.  `update-ref`
-    points the ref at the tag object itself, so the annotation and the
-    signature survive intact.
+    Why the tag is signed under its own name
+    ----------------------------------------
+    An earlier version of this script signed under a throw-away probe
+    name (`<candidate>-staged`) and then pointed the real ref at the
+    resulting object with `git update-ref`.  That preserved the
+    signature, but it also produced a tag whose OBJECT named itself
+    `<candidate>-staged` while the ref said `<candidate>`.  The
+    v1.3.0 release shipped exactly that: `refs/tags/v1.3.0` reached an
+    object that called itself `v1.3.0-staged`, so `git tag -v`,
+    `git describe` and the GitHub release page all reported the staged
+    name.  The signature verified -- it was a valid signature over a
+    valid object -- so nothing complained: the defect was in the
+    object's NAME, and no check was looking at it.
+
+    The probe is therefore gone.  The tag is signed under the name it
+    will be released as, and `tools/verify_tag_signature.py` now
+    refuses a release whose tag object names itself differently from
+    its ref.
     """
-    probe = candidate + "-staged"
-    run(["git", "tag", "-d", probe])
-    rc, out = run(["git", "tag", "-s", "-m", "NimRTC %s" % TAG, probe,
+    # Remember the old tag's object so the ref can be restored if the
+    # signing fails.
+    previous = None
+    existing = run(["git", "rev-parse", "--verify",
+                    "refs/tags/%s" % candidate])
+    if existing[0] == 0 and existing[1].strip():
+        previous = existing[1].strip()
+
+    if previous is not None:
+        # Free the name.  `git tag -s` refuses to overwrite an existing
+        # tag, and `-f` would ask git to create a *new* signed annotated
+        # tag -- which is what we want, but only once the old object is
+        # safely remembered.
+        run(["git", "tag", "-d", candidate])
+
+    rc, out = run(["git", "tag", "-s", "-m", "NimRTC %s" % TAG, candidate,
                    target])
     if rc != 0:
         say(out.strip())
-        run(["git", "tag", "-d", probe])
+        if previous is not None:
+            # Put the old tag back.  Leaving the repository with no
+            # local tag would destroy the only copy of that signature.
+            run(["git", "update-ref", "refs/tags/%s" % candidate, previous])
+            say("restored the previous %s tag object" % candidate)
         return False
-    signed = run(["git", "rev-parse", probe])[1].strip()
-    rc, out = run(["git", "update-ref", "refs/tags/%s" % candidate, signed])
-    run(["git", "tag", "-d", probe])
-    if rc != 0:
-        say(out.strip())
+
+    # The tag now exists under its own name.  Assert that, rather than
+    # trusting it: the object names itself, and that name is what the
+    # world sees.
+    if run(["git", "rev-parse", "--verify",
+            "refs/tags/%s" % candidate])[0] != 0:
+        say("the new tag %s did not create a ref" % candidate)
+        return False
+    internal = run(["git", "cat-file", "tag", candidate])[1]
+    for line in internal.splitlines():
+        if line.startswith("tag "):
+            if line[len("tag "):].strip() != candidate:
+                say("the new tag object names itself %r, not %r"
+                    % (line[len("tag "):].strip(), candidate))
+                return False
+            break
+    else:
+        say("the new tag object carries no name header")
         return False
     return True
 

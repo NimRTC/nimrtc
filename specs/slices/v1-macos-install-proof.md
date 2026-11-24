@@ -44,6 +44,7 @@ N9 做两件事：
 - cmake/NimRTCInstall.cmake
 - tools/check_install_export.py
 - tools/check_install_export_self_test.py
+- tests/acceptance/v1-macos-install-proof/acceptance.test.cjs
 - docs/adr/ADR-034-macos-install-downstream-proof.md
 - docs/plan/v1.4-plan.md
 - CHANGELOG.md
@@ -220,6 +221,25 @@ CI 的证明只在 macOS runner 上跑 —— 开发机（Windows / Linux）上�
 28. `docs/adr/ADR-034-macos-install-downstream-proof.md` 记录决策与理由。
 29. `docs/plan/v1.4-plan.md` 的状态表把 N9 标成 signed（签字后改）。
 30. `CHANGELOG.md` 记录 macOS 的下游证明与本片修掉的导出缺陷。
+
+### 六、验收测试（本片自己的验收文件）
+
+门禁②要求：每一条验收标准对应一条「真正跑起来」的用例，不能是 todo/skip。
+本片**没有 C++ 改动**，所以验收文件走**静态 + 执行既有工具**这条路
+（与 N8 同族的验证手段）：
+
+31. `tests/acceptance/v1-macos-install-proof/acceptance.test.cjs` 存在，且**每条用例都是真断言**（无 `todo` / `skip`）。
+32. 该文件把上面 30 条验收标准逐组落成真实断言：
+    - 一组断言 `ci.yml` 的 `macos-clang` 腿有 `Install + downstream proof` 步骤，且在 `Test` 之后。
+    - 一组断言该步骤装到 `build/_install/macos-arm64`（暂存目录，不是系统路径）。
+    - 一组断言该步骤在**树外**（`build/downstream-proof/`）编译消费者，且 `CMAKE_PREFIX_PATH` **只**指暂存目录。
+    - 一组断言消费者用 `find_package(NimRTC ... REQUIRED)`、链 `nimrtc::engine`、包含 `<nimrtc/engine/engine.hpp>`、**不**自己设 `CMAKE_CXX_STANDARD`。
+    - 一组断言 `release.yml` 的 macOS 腿断言归档里有 `NimRTCConfig.cmake` 与 `nimrtc/engine/engine.hpp`。
+    - 一组**真正执行** `tools/check_install_export.py` 与 `tools/check_install_export_self_test.py`，断言退出码 0。
+    - 一组断言 `ci.yml` / `release.yml` 的 YAML 可解析。
+    - 一组断言改动清单里**没有** `src/` 下的 `.cpp` / `.hpp`（边界）。
+33. 验收文件**不**依赖编译产物（纯 JS + 调 Python 工具），所以它**不需要** build 树。
+
 
 ## 本片不做
 

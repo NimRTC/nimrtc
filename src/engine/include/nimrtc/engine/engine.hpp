@@ -258,6 +258,29 @@ struct NIMRTC_API_STABLE TurnCredentials {
 
     /** TURN/TLS SNI / certificate hostname.  Empty = use `host`. */
     std::string tls_server_name;
+
+    /** TURN/TLS peer-certificate verification switch (v1-turn-tls-trust,
+     *  ADR-037).  Default `true`.
+     *
+     *  `false` = **explicitly** skip verifying the server's certificate.
+     *  Only for test relays / self-signed relays / a trusted network: the
+     *  host that switches it off gives up the "the relay is who it says
+     *  it is" guarantee and can never get it back for that credential set.
+     *  Setting `false` with a non-empty `turn_tls_ca_file` is
+     *  contradictory — the `ca_file` is ignored (verification is off, so
+     *  there is nothing to anchor it to). */
+    bool turn_tls_verify_peer = true;
+
+    /** TURN/TLS trust-anchor file (a PEM path, v1-turn-tls-trust,
+     *  ADR-037).  Empty = load no trust anchors.
+     *
+     *  With `turn_tls_verify_peer = true`, an empty value means "no
+     *  certificate is accepted" — the failure mode is a **rejected
+     *  handshake**, which is different from `verify_peer = false`
+     *  (which does not verify at all).  A host that wants to trust a
+     *  self-signed relay hands it a `ca_file` holding that relay's
+     *  certificate as a trust anchor. */
+    std::string turn_tls_ca_file;
 };
 
 /** The credentials-provider callback type (v1.4 N7, ADR-032).
@@ -5649,6 +5672,34 @@ public:
      *
      *  UNSTABLE: the Stats struct fields may change before v1.0.0. */
     NIMRTC_API_UNSTABLE Stats stats() const noexcept;
+
+    /** The session's TURN/TLS peer-verification fact (v1-turn-tls-trust,
+     *  ADR-037).
+     *
+     *  Makes "did this call verify the relay's identity" a queryable
+     *  fact rather than something only readable in the source.  Values:
+     *
+     *    - `""` — no TURN/TLS credential set is in effect (the applied
+     *      credentials' transport is not `Tls`, or none were applied).
+     *    - `"verified"` — `turn_tls_verify_peer == true` and the trust
+     *      anchor is loadable (a `turn_tls_ca_file` passed the engine's
+     *      anchor check, or none was set).  The engine **will** verify
+     *      the relay's certificate; a certificate that fails is
+     *      rejected.
+     *    - `"unverified"` — `turn_tls_verify_peer == false`: the host
+     *      explicitly chose not to verify the relay's certificate.
+     *    - `"failed"` — `turn_tls_verify_peer == true` but the
+     *      `turn_tls_ca_file` is missing or not a valid PEM trust
+     *      anchor: verification is configured but cannot pass, and the
+     *      engine fired `on_error_` naming the file when the credentials
+     *      were applied.
+     *
+     *  The fact reflects the trust policy of the credentials most
+     *  recently applied through the credentials-provider seam — it does
+     *  not observe the wire itself.  Empty when the host configured a
+     *  static `add_turn_server()` list (that path carries no trust
+     *  policy). */
+    NIMRTC_API_STABLE std::string turn_tls_peer_verification() const noexcept;
 
     /**
      * @brief A named, timestamped reading of the session's statistics.

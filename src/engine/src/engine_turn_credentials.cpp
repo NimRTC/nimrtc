@@ -11,6 +11,10 @@
  */
 #include "engine_turn_credentials.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <string>
+
 namespace nimrtc::engine::detail {
 
 namespace {
@@ -19,10 +23,49 @@ namespace {
 bool same_credentials(const TurnCredentials& a, const TurnCredentials& b) noexcept {
     return a.host == b.host && a.port == b.port && a.username == b.username &&
            a.password == b.password && a.transport == b.transport &&
-           a.tls_server_name == b.tls_server_name;
+           a.tls_server_name == b.tls_server_name &&
+           a.turn_tls_verify_peer == b.turn_tls_verify_peer &&
+           a.turn_tls_ca_file == b.turn_tls_ca_file;
 }
 
+/** The PEM block every trust-anchor bundle must contain. */
+constexpr std::string_view kPemCertificateBlock = "-----BEGIN CERTIFICATE-----";
+
 }  // namespace
+
+TurnTlsCaFileVerdict check_turn_tls_ca_file(std::string_view path) noexcept {
+    if (path.empty()) return TurnTlsCaFileVerdict::kOk;
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(std::filesystem::path{path}, ec);
+    if (ec || !exists) return TurnTlsCaFileVerdict::kMissing;
+    // The block appears in the first kilobytes of any real bundle, so a
+    // bounded read is enough to decide "this is not a PEM trust anchor".
+    std::ifstream in{std::filesystem::path{path}, std::ios::binary};
+    if (!in) return TurnTlsCaFileVerdict::kMissing;
+    std::string head(64 * 1024, '\0');
+    in.read(head.data(), static_cast<std::streamsize>(head.size()));
+    const std::size_t got = static_cast<std::size_t>(in.gcount());
+    head.resize(got);
+    if (head.find(kPemCertificateBlock) == std::string::npos) {
+        return TurnTlsCaFileVerdict::kNotPem;
+    }
+    return TurnTlsCaFileVerdict::kOk;
+}
+
+std::string turn_tls_ca_file_error(std::string_view path,
+                                   TurnTlsCaFileVerdict verdict) {
+    switch (verdict) {
+        case TurnTlsCaFileVerdict::kOk:
+            return {};
+        case TurnTlsCaFileVerdict::kMissing:
+            return "turn_tls_ca_file '" + std::string(path) + "' does not exist";
+        case TurnTlsCaFileVerdict::kNotPem:
+            return "turn_tls_ca_file '" + std::string(path) +
+                   "' is not a valid PEM trust anchor (no '" +
+                   std::string(kPemCertificateBlock) + "' block)";
+    }
+    return "turn_tls_ca_file '" + std::string(path) + "' failed validation";
+}
 
 bool TurnCredentialsState::refresh(std::int64_t now_us,
                                    TurnCredentialsProvider provider,
@@ -83,6 +126,23 @@ void TurnCredentialsState::note_applied() noexcept {
     if (!has_last_) return;
     applied_ = last_;
     has_applied_ = true;
+    // A fresh apply is a fresh trust policy: the previous anchor's verdict
+    // (if any) does not carry over to the new credential set.
+    anchor_failed_ = false;
+}
+
+std::string_view TurnCredentialsState::turn_tls_peer_verification() const noexcept {
+    if (!has_applied_) return {};
+    const TurnCredentials& c = applied_;
+    // The fact is about TURN/TLS only: a UDP/TCP TURN server has no
+    // certificate to verify, so there is nothing to report.
+    if (c.transport != plugins::TurnTransport::Tls) return {};
+    if (!c.turn_tls_verify_peer) return "unverified";
+    return anchor_failed_ ? "failed" : "verified";
+}
+
+void TurnCredentialsState::note_turn_tls_anchor_failed() noexcept {
+    anchor_failed_ = true;
 }
 
 void TurnCredentialsState::reset() noexcept {
@@ -92,6 +152,7 @@ void TurnCredentialsState::reset() noexcept {
     has_applied_ = false;
     last_ = TurnCredentials{};
     applied_ = TurnCredentials{};
+    anchor_failed_ = false;
 }
 
 }  // namespace nimrtc::engine::detail

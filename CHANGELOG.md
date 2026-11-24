@@ -104,6 +104,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `"unavailable"` / `"rejected"`.  Fields only — no new public headers —
   so the ADR-015 baseline stays at 198.
 
+- **TURN/TLS trust policy on the public surface (`slice v1-turn-tls-trust`,
+  ADR-037).**
+  A host can now say how it wants a TURN/TLS relay's certificate treated:
+  `TurnCredentials` gains `turn_tls_verify_peer` (bool, default `true`)
+  and `turn_tls_ca_file` (a PEM trust-anchor path, default empty).  The
+  knobs ride on the credential set — a changed relay carries a changed
+  trust anchor ("换中继就换信任锚") — and `same_credentials()` treats
+  either trust-field change as a credential change, so N7 re-applies
+  instead of silently reusing a stale anchor.  The engine translates them
+  through a new additive 7-argument `plugins::IICETransport`
+  `add_turn_server_with_transport()` overload (the existing 5-argument
+  signature is untouched) into the ICE layer's existing `IceConfig`
+  knobs, so a host can actually run the N5 self-signed relay by handing
+  it a `ca_file` — or explicitly skipping verification.  Failures are no
+  longer silent: a missing / non-PEM `turn_tls_ca_file` fires
+  `set_on_error` with `core::kEngineInvalidParam` naming the file.
+  `NimRTCEngine::turn_tls_peer_verification()` exposes the state as a
+  queryable fact — `""` / `"verified"` / `"unverified"` / `"failed"` —
+  so "verified", "never verified" and "configured but broken" are
+  mutually distinguishable.  One new public method, no new public
+  headers — the ADR-015 baseline stays at 198.
+
 - **Path-change reporting (`slice v1-path-change-report`, N8 / ADR-033).**
   The engine now tells the host *from where to where, and why* a path
   switch happened — no polling, no diffing `selected_pair` strings.

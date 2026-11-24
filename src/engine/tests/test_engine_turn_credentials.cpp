@@ -33,6 +33,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <span>
@@ -55,6 +57,7 @@ namespace {
 
 namespace np = nimrtc::plugins;
 namespace nd = nimrtc::dtls;
+namespace detail = nimrtc::engine::detail;
 
 using nimrtc::core::PluginRegistry;
 using nimrtc::engine::EngineConfig;
@@ -89,13 +92,21 @@ static_assert(std::is_same_v<decltype(TurnCredentials::transport),
 static_assert(std::is_same_v<decltype(TurnCredentials::tls_server_name),
                              std::string>);
 
+// v1-turn-tls-trust (ADR-037): the two trust-policy fields ride on the
+// credential set, so a host's "换中继就换信任锚" is one change to one set.
+static_assert(std::is_same_v<decltype(TurnCredentials::turn_tls_verify_peer),
+                             bool>);
+static_assert(std::is_same_v<decltype(TurnCredentials::turn_tls_ca_file),
+                             std::string>);
+
 TEST(EngineTurnCredentials, PublicConfigDefaults) {
     EngineConfig cfg;
     EXPECT_EQ(cfg.turn_credentials, nullptr);
     EXPECT_EQ(cfg.turn_credentials_ctx, nullptr);
 
     // The struct's defaults: the TURN/UDP 3478 default port and the Udp
-    // transport (spec §设计 一).
+    // transport (spec §设计 一), and the safe TURN/TLS trust defaults
+    // (v1-turn-tls-trust: verify on, no trust anchor loaded).
     TurnCredentials c;
     EXPECT_TRUE(c.host.empty());
     EXPECT_EQ(c.port, 3478);
@@ -103,6 +114,8 @@ TEST(EngineTurnCredentials, PublicConfigDefaults) {
     EXPECT_TRUE(c.password.empty());
     EXPECT_EQ(c.transport, np::TurnTransport::Udp);
     EXPECT_TRUE(c.tls_server_name.empty());
+    EXPECT_TRUE(c.turn_tls_verify_peer);
+    EXPECT_TRUE(c.turn_tls_ca_file.empty());
 }
 
 // ===========================================================================
@@ -253,6 +266,137 @@ TEST(TurnCredentialsState, ChangeDetectionTracksLastApplied) {
     EXPECT_FALSE(tc.credentials_changed());
 }
 
+TEST(TurnCredentialsState, ChangeDetectionIncludesTrustKnobs) {
+    // v1-turn-tls-trust (spec §三 10-12): the two trust-policy fields are
+    // part of "are these the same credentials".  A host that changes only
+    // the trust anchor or only the verify switch changed its trust policy
+    // — the engine must re-apply, or a stale anchor would keep the relay
+    // rejected with no visible reason.
+    ProviderCtl ctl;
+    ctl.creds.host = "relay.example.com";
+    ctl.creds.transport = np::TurnTransport::Tls;
+    ctl.creds.turn_tls_verify_peer = true;
+
+    TurnCredentialsState tc;
+    TurnCredentials out;
+    ASSERT_TRUE(tc.refresh(0, provider_trampoline, &ctl, &out));
+    tc.note_applied();
+    EXPECT_FALSE(tc.credentials_changed());
+
+    // Only the ca_file changed → the credentials changed (判据 10).
+    ctl.creds.turn_tls_ca_file = "anchor.pem";
+    ASSERT_TRUE(tc.refresh(0, provider_trampoline, &ctl, &out));
+    EXPECT_TRUE(tc.credentials_changed())
+        << "a changed ca_file is a changed credential set";
+    tc.note_applied();
+    EXPECT_FALSE(tc.credentials_changed());
+
+    // Only the verify switch changed → the credentials changed (判据 11).
+    ctl.creds.turn_tls_verify_peer = false;
+    ASSERT_TRUE(tc.refresh(0, provider_trampoline, &ctl, &out));
+    EXPECT_TRUE(tc.credentials_changed())
+        << "a changed verify switch is a changed credential set";
+    tc.note_applied();
+    EXPECT_FALSE(tc.credentials_changed());
+
+    // All eight fields identical again → not a change (判据 12).
+    ASSERT_TRUE(tc.refresh(0, provider_trampoline, &ctl, &out));
+    EXPECT_FALSE(tc.credentials_changed());
+}
+
+TEST(TurnCredentialsState, TurnTlsVerificationFactStates) {
+    // v1-turn-tls-trust (spec §五 16-17): the trust policy of the applied
+    // credentials is a queryable fact, and the three states are mutually
+    // distinguishable.
+    TurnCredentialsState tc;
+    EXPECT_EQ(tc.turn_tls_peer_verification(), "");
+
+    // No TURN/TLS (Udp) → nothing to report.
+    ProviderCtl ctl;
+    ctl.creds.host = "relay.example.com";
+    ctl.creds.transport = np::TurnTransport::Udp;
+    ctl.creds.turn_tls_verify_peer = true;
+    TurnCredentials out;
+    ASSERT_TRUE(tc.refresh(0, provider_trampoline, &ctl, &out));
+    tc.note_applied();
+    EXPECT_EQ(tc.turn_tls_peer_verification(), "");
+
+    // verify_peer == false → "unverified" (判据 16).
+    ctl.creds.transport = np::TurnTransport::Tls;
+    ctl.creds.turn_tls_verify_peer = false;
+    ASSERT_TRUE(tc.refresh(0, provider_trampoline, &ctl, &out));
+    tc.note_applied();
+    EXPECT_EQ(tc.turn_tls_peer_verification(), "unverified");
+
+    // verify_peer == true with a loadable anchor → "verified" (判据 17).
+    ctl.creds.turn_tls_verify_peer = true;
+    ctl.creds.turn_tls_ca_file = "anchor.pem";
+    ASSERT_TRUE(tc.refresh(0, provider_trampoline, &ctl, &out));
+    tc.note_applied();
+    EXPECT_EQ(tc.turn_tls_peer_verification(), "verified");
+
+    // The engine recorded the anchor as broken → "failed", distinct from
+    // both "verified" and "unverified" (判据 17).
+    tc.note_turn_tls_anchor_failed();
+    EXPECT_EQ(tc.turn_tls_peer_verification(), "failed");
+
+    // A later apply with a loadable anchor clears the failure (spec §三).
+    ASSERT_TRUE(tc.refresh(0, provider_trampoline, &ctl, &out));
+    tc.note_applied();
+    EXPECT_EQ(tc.turn_tls_peer_verification(), "verified");
+}
+
+TEST(TurnTlsAnchorCheck, VerdictsAndMessages) {
+    // v1-turn-tls-trust (spec §四 13-15): the engine's own anchor check
+    // must tell the host *which file* is broken and *how*.
+    namespace fs = std::filesystem;
+    const fs::path missing =
+        fs::temp_directory_path() / "nimrtc_anchor_missing.pem";
+    std::error_code ec;
+    fs::remove(missing, ec);
+    EXPECT_EQ(detail::check_turn_tls_ca_file(missing.string()),
+              detail::TurnTlsCaFileVerdict::kMissing);
+
+    const fs::path notPem =
+        fs::temp_directory_path() / "nimrtc_anchor_not_pem.txt";
+    {
+        std::ofstream out{notPem, std::ios::binary};
+        out << "this is not a certificate\n";
+    }
+    EXPECT_EQ(detail::check_turn_tls_ca_file(notPem.string()),
+              detail::TurnTlsCaFileVerdict::kNotPem);
+
+    const fs::path pem =
+        fs::temp_directory_path() / "nimrtc_anchor_ok.pem";
+    {
+        std::ofstream out{pem, std::ios::binary};
+        out << "-----BEGIN CERTIFICATE-----\n"
+            << "AAAA\n"
+            << "-----END CERTIFICATE-----\n";
+    }
+    EXPECT_EQ(detail::check_turn_tls_ca_file(pem.string()),
+              detail::TurnTlsCaFileVerdict::kOk);
+    EXPECT_EQ(detail::check_turn_tls_ca_file(""),
+              detail::TurnTlsCaFileVerdict::kOk)
+        << "an empty path is nothing to check";
+
+    // The error names the file and the problem (判据 13/14).
+    const std::string missingMsg =
+        detail::turn_tls_ca_file_error(missing.string(),
+                                       detail::TurnTlsCaFileVerdict::kMissing);
+    EXPECT_NE(missingMsg.find(missing.string()), std::string::npos);
+    EXPECT_NE(missingMsg.find("does not exist"), std::string::npos);
+
+    const std::string notPemMsg =
+        detail::turn_tls_ca_file_error(notPem.string(),
+                                       detail::TurnTlsCaFileVerdict::kNotPem);
+    EXPECT_NE(notPemMsg.find(notPem.string()), std::string::npos);
+    EXPECT_NE(notPemMsg.find("PEM trust anchor"), std::string::npos);
+
+    fs::remove(notPem, ec);
+    fs::remove(pem, ec);
+}
+
 TEST(TurnCredentialsState, ResetClearsEveryObservation) {
     ProviderCtl ctl;
     ctl.creds.host = "relay.example.com";
@@ -285,6 +429,8 @@ public:
         std::string password;
         np::TurnTransport transport = np::TurnTransport::Udp;
         bool with_transport = false;
+        bool verify_peer = true;  // the inherited seam knob, recorded on each call
+        std::string ca_file;
     };
 
     const char* name() const noexcept override { return "test-turn-ice"; }
@@ -346,6 +492,11 @@ public:
         c.password = std::string(password);
         c.transport = transport;
         c.with_transport = true;
+        // v1-turn-tls-trust: the concrete class does not override the 7-arg
+        // default, so the base stored the trust knobs — record them exactly
+        // as the engine configured them.
+        c.verify_peer = turn_tls_verify_peer_;
+        c.ca_file = turn_tls_ca_file_;
         turn_calls_.push_back(std::move(c));
     }
 
@@ -682,6 +833,232 @@ TEST_F(EngineTurnCredentialsLive, ReconnectProviderFailureKeepsOldCredentials) {
     EXPECT_EQ(ctl.calls, 2u);
     EXPECT_EQ(ice->turn_calls().size(), 1u) << "no re-add — the old set is kept";
     EXPECT_EQ(engine.stats().turn_credentials_state, "unavailable");
+    engine.close();
+}
+
+// ===========================================================================
+// v1-turn-tls-trust — the two trust knobs reach the plugin seam exactly as
+// configured, and the verification fact is queryable in all three states.
+// ===========================================================================
+
+TEST_F(EngineTurnCredentialsLive, TrustKnobsReachPluginSeamAndVerificationFact) {
+    ProviderCtl ctl;
+    ctl.creds.host = "relay.example.com";
+    ctl.creds.port = 3478;
+    ctl.creds.username = "user";
+    ctl.creds.password = "pass";
+    ctl.creds.transport = np::TurnTransport::Tls;
+    ctl.creds.turn_tls_verify_peer = false;
+    ctl.creds.turn_tls_ca_file = "relay-anchor.pem";
+
+    EngineConfig cfg = make_config();
+    cfg.turn_credentials = provider_trampoline;
+    cfg.turn_credentials_ctx = &ctl;
+
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    auto* ice = static_cast<RecordingFakeIce*>(kIceFactory->last());
+    ASSERT_NE(ice, nullptr);
+    const auto& calls = ice->turn_calls();
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].transport, np::TurnTransport::Tls);
+    EXPECT_FALSE(calls[0].verify_peer)
+        << "verify_peer=false must reach the plugin seam (判据 8)";
+    EXPECT_EQ(calls[0].ca_file, "relay-anchor.pem")
+        << "ca_file must reach the plugin seam (判据 7)";
+
+    // verify_peer=false ignores the ca_file (spec §设计 一) — a bogus path
+    // must not surface an error, and the fact must say "unverified"
+    // (判据 16).
+    EXPECT_EQ(engine.turn_tls_peer_verification(), "unverified");
+    engine.close();
+}
+
+TEST_F(EngineTurnCredentialsLive, BrokenCaFileSurfacesErrorAndMarksFailed) {
+    ProviderCtl ctl;
+    ctl.creds.host = "relay.example.com";
+    ctl.creds.transport = np::TurnTransport::Tls;
+    ctl.creds.turn_tls_verify_peer = true;
+    // A path that cannot exist: the engine must fail loudly, not silently.
+    const std::string missing =
+        (std::filesystem::temp_directory_path() / "nimrtc_missing_anchor.pem")
+            .string();
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::path{missing}, ec);
+    ctl.creds.turn_tls_ca_file = missing;
+
+    EngineConfig cfg = make_config();
+    cfg.turn_credentials = provider_trampoline;
+    cfg.turn_credentials_ctx = &ctl;
+
+    // The live fixture resolves some video plugins with an empty id, which
+    // fires a spurious `on_error_` during open() (pre-existing engine
+    // behaviour, unrelated to this slice).  Accumulate every callback so the
+    // assertions below look for the ca-file error among them, not for a
+    // clean slate.
+    std::vector<std::pair<std::uint32_t, std::string>> errors;
+    NimRTCEngine engine(cfg);
+    engine.set_on_error([&](std::uint32_t e, std::string_view m) {
+        errors.emplace_back(e, std::string(m));
+    });
+    ASSERT_EQ(engine.open(), 0u);
+
+    auto* ice = static_cast<RecordingFakeIce*>(kIceFactory->last());
+    const auto& calls = ice->turn_calls();
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_TRUE(calls[0].verify_peer);
+    EXPECT_EQ(calls[0].ca_file, missing);
+
+    const bool surfaced = std::any_of(
+        errors.begin(), errors.end(), [&](const auto& p) {
+            return p.first == nimrtc::core::kEngineInvalidParam &&
+                   p.second.find(missing) != std::string::npos &&
+                   p.second.find("does not exist") != std::string::npos;
+        });
+    EXPECT_TRUE(surfaced)
+        << "a broken anchor is a host-facing configuration error (判据 13): "
+        << "expected kEngineInvalidParam naming '" << missing << "'; got "
+        << (errors.empty() ? std::string{"no on_error fired"} : errors.back().second);
+    EXPECT_EQ(engine.turn_tls_peer_verification(), "failed")
+        << "the fact distinguishes 'failed' from 'verified' (判据 17)";
+    engine.close();
+}
+
+TEST_F(EngineTurnCredentialsLive, ValidCaFileMarksVerified) {
+    const auto path =
+        std::filesystem::temp_directory_path() / "nimrtc_test_anchor.pem";
+    {
+        std::ofstream out{path, std::ios::binary};
+        out << "-----BEGIN CERTIFICATE-----\n"
+            << "AAAA\n"
+            << "-----END CERTIFICATE-----\n";
+    }
+
+    ProviderCtl ctl;
+    ctl.creds.host = "relay.example.com";
+    ctl.creds.transport = np::TurnTransport::Tls;
+    ctl.creds.turn_tls_verify_peer = true;
+    ctl.creds.turn_tls_ca_file = path.string();
+
+    EngineConfig cfg = make_config();
+    cfg.turn_credentials = provider_trampoline;
+    cfg.turn_credentials_ctx = &ctl;
+
+    std::vector<std::pair<std::uint32_t, std::string>> errors;
+    NimRTCEngine engine(cfg);
+    engine.set_on_error([&](std::uint32_t e, std::string_view m) {
+        errors.emplace_back(e, std::string(m));
+    });
+    ASSERT_EQ(engine.open(), 0u);
+
+    auto* ice = static_cast<RecordingFakeIce*>(kIceFactory->last());
+    const auto& calls = ice->turn_calls();
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_TRUE(calls[0].verify_peer);
+    EXPECT_EQ(calls[0].ca_file, path.string());
+
+    // Unrelated open() diagnostics may fire (see the sibling test) — the
+    // assertion is that *none* of them names our loadable anchor.
+    const bool mentionsAnchor = std::any_of(
+        errors.begin(), errors.end(),
+        [&](const auto& p) { return p.second.find(path.string()) != std::string::npos; });
+    EXPECT_FALSE(mentionsAnchor)
+        << "a loadable anchor must not fire on_error_ (判据 17)";
+    EXPECT_EQ(engine.turn_tls_peer_verification(), "verified")
+        << "the fact distinguishes 'verified' from 'unverified' (判据 17)";
+    engine.close();
+
+    std::filesystem::remove(path);
+}
+
+TEST_F(EngineTurnCredentialsLive, NotPemCaFileSurfacesErrorAndMarksFailed) {
+    // A present file that is not a PEM trust anchor is a config error too
+    // (判据 14) — distinct from the missing-file case, and the fact says
+    // "failed", not "verified".
+    const auto path =
+        std::filesystem::temp_directory_path() / "nimrtc_not_pem_anchor.txt";
+    {
+        std::ofstream out{path, std::ios::binary};
+        out << "this file holds no certificate\n";
+    }
+
+    ProviderCtl ctl;
+    ctl.creds.host = "relay.example.com";
+    ctl.creds.transport = np::TurnTransport::Tls;
+    ctl.creds.turn_tls_verify_peer = true;
+    ctl.creds.turn_tls_ca_file = path.string();
+
+    EngineConfig cfg = make_config();
+    cfg.turn_credentials = provider_trampoline;
+    cfg.turn_credentials_ctx = &ctl;
+
+    std::vector<std::pair<std::uint32_t, std::string>> errors;
+    NimRTCEngine engine(cfg);
+    engine.set_on_error([&](std::uint32_t e, std::string_view m) {
+        errors.emplace_back(e, std::string(m));
+    });
+    ASSERT_EQ(engine.open(), 0u);
+
+    auto* ice = static_cast<RecordingFakeIce*>(kIceFactory->last());
+    ASSERT_NE(ice, nullptr);
+    const auto& calls = ice->turn_calls();
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_TRUE(calls[0].verify_peer);
+    EXPECT_EQ(calls[0].ca_file, path.string());
+
+    const bool surfaced = std::any_of(
+        errors.begin(), errors.end(), [&](const auto& p) {
+            return p.first == nimrtc::core::kEngineInvalidParam &&
+                   p.second.find(path.string()) != std::string::npos &&
+                   p.second.find("PEM trust anchor") != std::string::npos;
+        });
+    EXPECT_TRUE(surfaced)
+        << "a non-PEM trust anchor is a host-facing configuration error (判据 14): "
+        << "expected kEngineInvalidParam naming '" << path.string() << "'; got "
+        << (errors.empty() ? std::string{"no on_error fired"} : errors.back().second);
+    EXPECT_EQ(engine.turn_tls_peer_verification(), "failed");
+    engine.close();
+
+    std::filesystem::remove(path);
+}
+
+TEST_F(EngineTurnCredentialsLive, NonTlsCredentialsReportEmptyFact) {
+    // A UDP TURN server has no certificate to verify — the fact must be ""
+    // (nothing to report), and the ca_file is meaningless on that path.
+    ProviderCtl ctl;
+    ctl.creds.host = "relay.example.com";
+    ctl.creds.transport = np::TurnTransport::Udp;
+    ctl.creds.turn_tls_verify_peer = true;
+    ctl.creds.turn_tls_ca_file = "ignored.pem";
+
+    EngineConfig cfg = make_config();
+    cfg.turn_credentials = provider_trampoline;
+    cfg.turn_credentials_ctx = &ctl;
+
+    std::vector<std::pair<std::uint32_t, std::string>> errors;
+    NimRTCEngine engine(cfg);
+    engine.set_on_error([&](std::uint32_t e, std::string_view m) {
+        errors.emplace_back(e, std::string(m));
+    });
+    ASSERT_EQ(engine.open(), 0u);
+
+    auto* ice = static_cast<RecordingFakeIce*>(kIceFactory->last());
+    const auto& calls = ice->turn_calls();
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].transport, np::TurnTransport::Udp);
+    EXPECT_EQ(calls[0].ca_file, "ignored.pem")
+        << "the knob still rides on the call, but...";
+
+    // A UDP relay has no certificate to verify — a ca_file is ignored, so
+    // no error may name it, however unrelated open() diagnostics may fire.
+    const bool mentionsAnchor = std::any_of(
+        errors.begin(), errors.end(),
+        [&](const auto& p) { return p.second.find("ignored.pem") != std::string::npos; });
+    EXPECT_FALSE(mentionsAnchor)
+        << "...it is ignored for a UDP relay — no spurious anchor error";
+    EXPECT_EQ(engine.turn_tls_peer_verification(), "")
+        << "...a non-TLS relay reports nothing to verify";
     engine.close();
 }
 

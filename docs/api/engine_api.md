@@ -496,6 +496,8 @@ struct NIMRTC_API_STABLE TurnCredentials {
     std::string password;                                // empty = anonymous
     plugins::TurnTransport transport = plugins::TurnTransport::Udp;
     std::string tls_server_name;                         // TURN/TLS SNI
+    bool turn_tls_verify_peer = true;                    // false = skip cert verification
+    std::string turn_tls_ca_file;                        // PEM trust-anchor bundle path
 };
 
 // A raw function pointer, not std::function — ABI-stable (ADR-015).
@@ -505,6 +507,45 @@ using NIMRTC_API_STABLE TurnCredentialsProvider = bool (*)(void* ctx, TurnCreden
 TurnCredentialsProvider turn_credentials = nullptr;   // null = never pull
 void* turn_credentials_ctx = nullptr;                 // passed back verbatim
 ```
+
+**TURN/TLS trust (v1.4, ADR-037).**  The credential set carries the
+relay's certificate-trust policy, because the set is re-pulled on every
+reconnect and the trust anchor goes with the server it trusts:
+
+- `turn_tls_verify_peer == true` (default) — the engine verifies the
+  relay's certificate against the anchors in `turn_tls_ca_file`.  An
+  **empty** `turn_tls_ca_file` means *no* anchors are loaded, so every
+  certificate is rejected — the safe default.  A host that wants to
+  trust a **self-signed** relay hands the engine a `turn_tls_ca_file`
+  holding that relay's certificate.
+- `turn_tls_verify_peer == false` — **explicitly** skip verification.
+  This is a *paid-for* decision: the host gives up the "the relay is who
+  it says it is" guarantee.  Only for test relays, self-signed relays in
+  a trusted network, or local experiments.  Setting `false` with a
+  non-empty `turn_tls_ca_file` is contradictory — the `ca_file` is
+  ignored (verification is off, so there is nothing to anchor it to).
+
+A `turn_tls_ca_file` that is missing or not a valid PEM bundle makes the
+engine fail **loudly**: it fires `set_on_error` with
+`core::kEngineInvalidParam` naming the file and the problem, and it is
+surfaced as a queryable fact (see below) — not a silent mystery.
+
+**Queryable verification fact.**  `NimRTCEngine::turn_tls_peer_verification()`
+answers "did this call verify the relay's identity":
+
+| Value | Meaning |
+|---|---|
+| `""` | no TURN/TLS credential set is in effect (transport not `Tls`, or none applied) |
+| `"verified"` | `verify_peer == true` and the anchor is loadable — the engine will verify, and a certificate that fails is rejected |
+| `"unverified"` | `verify_peer == false` — the host explicitly chose not to verify |
+| `"failed"` | `verify_peer == true` but the `ca_file` is missing / not a valid PEM — verification is configured but cannot pass |
+
+The three states are mutually distinguishable, so the host can tell
+"verified" from "never verified" from "configured but broken".  The fact
+reflects the trust policy of the credentials most recently applied
+through the provider seam; it does not observe the wire itself (an
+online handshake failure is reported through the N4 stats / call-state
+surface, and leaves the fact as it was).
 
 **Static servers win.**  A host that calls `add_turn_server()` keeps the
 pre-N7 behaviour exactly: the explicit static list is the host's own

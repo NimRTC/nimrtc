@@ -1139,6 +1139,15 @@ void IceTransport::add_turn_server_with_transport(std::string_view host,
     ts.password = std::string(password);
     ts.transport = static_cast<TurnTransport>(transport);
     add_turn_server(ts);
+
+    // v1-turn-tls-trust (ADR-037): the trust policy a host expressed through
+    // the additive 7-argument plugin overload lives in the interface's own
+    // members — the concrete class does not override that overload, so this
+    // existing seam is where the policy is picked up and copied into the
+    // agent config.  `create_agent()` (called by open() *after* this) reads
+    // these two fields when it builds the TURN/TLS client.
+    impl_->config.turn_tls_verify_peer = turn_tls_verify_peer_;
+    impl_->config.turn_tls_ca_file = turn_tls_ca_file_;
 }
 
 bool IceTransport::turn_transport_supported(plugins::TurnTransport transport) const noexcept {

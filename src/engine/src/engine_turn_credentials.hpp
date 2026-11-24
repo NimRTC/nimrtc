@@ -42,6 +42,28 @@
 
 namespace nimrtc::engine::detail {
 
+/** The verdict of the engine's trust-anchor check (v1-turn-tls-trust). */
+enum class TurnTlsCaFileVerdict : std::uint8_t {
+    kOk = 0,       ///< the path is usable (or empty — nothing to check)
+    kMissing = 1,  ///< the file does not exist
+    kNotPem = 2,   ///< the file exists but holds no PEM certificate block
+};
+
+/** Check a `turn_tls_ca_file` path the host supplied (v1-turn-tls-trust).
+ *
+ *  Empty → `kOk` (nothing to check).  A missing file → `kMissing`.  A
+ *  present file that contains no `-----BEGIN CERTIFICATE-----` block →
+ *  `kNotPem` (a trust anchor is a PEM bundle, so it must carry at least
+ *  one such block; wolfSSL does the real parse at open()).  The read is
+ *  bounded — the block appears within the first kilobytes of any real
+ *  bundle, so the check never slurps a huge file. */
+TurnTlsCaFileVerdict check_turn_tls_ca_file(std::string_view path) noexcept;
+
+/** The host-readable error for a failed anchor check: names the file and
+ *  what is wrong with it (spec §四 13-15).  For `kOk` returns "". */
+std::string turn_tls_ca_file_error(std::string_view path,
+                                   TurnTlsCaFileVerdict verdict);
+
 /** The bookkeeping for the turn-credentials provider seam (v1.4 N7).
  *
  *  Owned by `SessionState`; driven by `NimRTCEngine::refresh_turn_credentials()`
@@ -111,6 +133,31 @@ public:
     /** Mark the freshly pulled credentials as applied to the transport. */
     void note_applied() noexcept;
 
+    /** The TURN/TLS peer-verification fact of the credentials last applied
+     *  to the transport (v1-turn-tls-trust, ADR-037): "" / "verified" /
+     *  "unverified" / "failed".
+     *
+     *  "" — no TURN/TLS credential set is applied (the applied
+     *  credentials' transport is not `Tls`, or none were applied).
+     *  "verified" — `turn_tls_verify_peer == true` and the trust anchor
+     *  passed the engine's load check (or none was configured): the
+     *  engine will verify the relay's certificate.
+     *  "unverified" — `turn_tls_verify_peer == false`: the host
+     *  explicitly chose not to verify the relay's certificate.
+     *  "failed" — `turn_tls_verify_peer == true` but the `ca_file` is
+     *  missing or not a valid PEM trust anchor (recorded by
+     *  `note_turn_tls_anchor_failed()`). */
+    std::string_view turn_tls_peer_verification() const noexcept;
+
+    /** Record that the freshly applied credentials' `turn_tls_ca_file`
+     *  failed the engine's anchor check (missing / not a valid PEM).
+     *
+     *  Makes `turn_tls_peer_verification()` report "failed".  The next
+     *  `note_applied()` clears it — a later pull that carries a loadable
+     *  anchor resets the fact (spec §三: a changed credential set is a
+     *  changed trust policy). */
+    void note_turn_tls_anchor_failed() noexcept;
+
     /** Forget every observation.  Called at `open()` — the ICE module's own
      *  process-wide rejection latch clears there too, so the machine starts
      *  each session clean. */
@@ -123,6 +170,7 @@ private:
     bool has_last_ = false;
     TurnCredentials applied_;
     bool has_applied_ = false;
+    bool anchor_failed_ = false;
 };
 
 }  // namespace nimrtc::engine::detail

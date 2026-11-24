@@ -277,3 +277,52 @@ TurnCredentials.turn_tls_verify_peer / .turn_tls_ca_file
 被阻塞 —— 验收测试里的 `blockedReason()` 对缺口 A 的检查
 （`/(turn_tls_verify_peer|turn_tls_ca_file)/` 匹配 `engine.hpp`）应当**不再**命中。
 N6 仍可能因缺口 B 被阻塞，那是另一片的事。
+
+## 实施发现（2026-11-25 合入时记录）
+
+本片按设计落地，实施中确认了四件事，供后续切片参考。
+
+**1. 插件接缝的「默认实现 + 受保护成员」是让既有实现者零改动吃下新旋钮的关键。**
+`plugins::IICETransport` 的既有 5 参数 `add_turn_server_with_transport()` 是
+`virtual` 且有默认实现；按 ADR-015 加法纪律，本片新增 7 参数重载，默认实现把
+两个旋钮存进接口**自己的受保护成员**（`turn_tls_verify_peer_` /
+`turn_tls_ca_file_`），再回落既有 5 参数重载。内置 ICE 传输**不** override 7
+参数形式 —— 它在**既有** 5 参数实现里把继承到的成员搬进 `impl_->config`
+（`ice.cpp:1149-1150`）。这样既有实现者（含测试替身）的 5 参数 override
+**继续赢**，行为不变。测试替身 `RecordingFakeIce` 就是这么吃到旋钮的：它只
+override 5 参数，读取继承成员并记录。
+
+**2. 事实「可查询」的形态是公开方法，不是 `Stats` 字段 —— 因为 stats 投影装配在
+写集之外。** 规格 §五说「放在 `Stats::transport` 里最自然」，但 `stats()` 的
+装配在 `engine_media.cpp`、`append_transport_stats()` / `append_ice_recovery_stats()`
+在 `engine_transport_stats.cpp`，两者都不在本片写集内。实现因此把事实做成独立的
+公开方法 `NimRTCEngine::turn_tls_peer_verification()`（`engine.hpp` 声明 +
+`engine.cpp` 实现，都在写集内）。它不扩 `Stats` 的 ABI，仍是「可查询的事实」，
+三种状态互相可区分。
+
+**3. 引擎侧的信任锚检查是 TURN/TLS-only。** `check_turn_tls_ca_file()` 在
+`verify_peer == true` **且** `transport == Tls` 时才跑。UDP/TCP 中继的 `ca_file`
+无意义，被忽略 —— 与 `verify_peer == false` 时忽略 `ca_file` 一致（规格 §设计 一）。
+若不加 transport 守卫，一个 UDP 中继配上「存在但不合法」的 `ca_file` 会误报错误，
+而事实却是 `""`（无可报告）—— 自相矛盾。加守卫后两者一致：非 TLS 路径的
+`ca_file` 就是被忽略的。
+
+**4. 活引擎测试里 open() 会触发与信任锚无关的既有 `on_error_`。** 测试夹具
+`make_config()` 把 `video_receiver_name` 设为 `""`，引擎在 open() 时以
+`PluginFailureMode::Error` 解析空 id 的视频接收器插件，**必然**发一条
+`kVideoReceiverPluginMissing`（0x1A25，`"engine: '' plugin factory not registered or
+returned null"`）。这是**既有**行为（v1-turn-credentials 的活引擎测试全部静默触发，
+只是没注册 `on_error_` 所以看不见），不在本片写集内。本片测试因此**累积**全部
+`on_error_` 回调，再断言「信任锚错误在不在其中」/「合法锚**不在**其中」—— 不依赖
+干净的回调史。后续切片若在活引擎测试里注册 `set_on_error`，要记得这一点。
+
+**5. 写集边界判据会把「一次创建两个片的规格提交」记到本片名下。** 提交 `910d1c5e`
+（`docs(spec): two slices for the engine gaps N6 found`）同时带
+`Refs-Slice: v1-turn-tls-trust` 与 `Refs-Slice: v1-install-tree-video-deps` 两个
+trailer，一次创建了**两个片**的规格（本片 + 并行片，写集不重叠）。共享判据
+`collectSliceChanges` 的「本片提交差异」腿按 trailer 把该提交的 diff **全数**记到
+本片名下，于是并行片的 `specs/slices/v1-install-tree-video-deps.md` 会**稳定**出现
+在本片的改动清单里 —— 与本片 agent 的越界写无关。本片验收的写集断言因此在
+allow 清单里放行那一个路径，并写明原因。后续切片若由同一个 `docs(spec)` 提交
+创建，会撞到同样的假阳性。
+

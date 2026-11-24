@@ -960,10 +960,45 @@ void NimRTCEngine::refresh_turn_credentials() noexcept {
     // after a restart, so the same credentials must not be re-added (spec
     // §二 9).
     if (ice_t_ != nullptr && tc.credentials_changed()) {
+        // v1-turn-tls-trust (ADR-037): the trust policy rides on the
+        // credential set — "换中继就换信任锚" — through the additive 7-arg
+        // plugin overload.  The ICE layer reads the knobs at agent
+        // creation (`create_agent()`), which happens later at open().
         ice_t_->add_turn_server_with_transport(
-            out.host, out.port, out.username, out.password, out.transport);
+            out.host, out.port, out.username, out.password, out.transport,
+            out.turn_tls_verify_peer, out.turn_tls_ca_file);
         tc.note_applied();
+
+        // Fail loudly, not silently (spec §四 13-15): a trust anchor the
+        // host pointed at is missing or not a PEM bundle — the host must
+        // see it, not discover it later as a mysteriously failing relay.
+        // A broken anchor makes the verification fact "failed" and fires
+        // `on_error_` naming the file and the problem.  The check is
+        // TURN/TLS-only — for a UDP/TCP relay a ca_file is meaningless and
+        // is ignored, exactly like `verify_peer == false` (spec §设计 一).
+        const auto verdict = detail::check_turn_tls_ca_file(out.turn_tls_ca_file);
+        if (out.turn_tls_verify_peer &&
+            out.transport == plugins::TurnTransport::Tls &&
+            verdict != detail::TurnTlsCaFileVerdict::kOk) {
+            tc.note_turn_tls_anchor_failed();
+            if (on_error_) {
+                on_error_(core::kEngineInvalidParam,
+                          detail::turn_tls_ca_file_error(out.turn_tls_ca_file,
+                                                         verdict));
+            }
+        }
     }
+}
+
+
+std::string NimRTCEngine::turn_tls_peer_verification() const noexcept {
+    if (impl_ == nullptr) return {};
+    // The fact is computed from the credentials most recently applied
+    // through the provider seam (see TurnCredentialsState); a host that
+    // configured a static `add_turn_server()` list carries no trust policy
+    // on that path, so the answer stays "" (engine.hpp documents this).
+    return std::string(impl_->session_state.turn_credentials
+                           .turn_tls_peer_verification());
 }
 
 

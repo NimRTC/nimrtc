@@ -436,6 +436,14 @@ async def run_client(args: argparse.Namespace) -> int:
                     extra += ["--backend", args.backend]
                 if args.capture:
                     extra += ["--capture", args.capture]
+                if args.game_source:
+                    extra.append("--game-source")
+                if args.game_fps:
+                    extra += ["--game-fps", str(args.game_fps)]
+                if args.width:
+                    extra += ["--width", str(args.width)]
+                if args.height:
+                    extra += ["--height", str(args.height)]
                 if not args.inject:
                     # Injecting real mouse and keyboard events into the
                     # developer's own desktop is not something a test
@@ -546,6 +554,9 @@ async def run_client(args: argparse.Namespace) -> int:
             remaining = int(message["expires_at"] - time.time())
             print(f"[{args.role}] pairing code: {message['code']} "
                   f"(valid for {remaining} s)")
+            # Remember the deadline so the keep-alive task can renew the
+            # code before it expires (see `_pairing_keepalive`).
+            state["pairing_expires_at"] = float(message["expires_at"])
             await send({"type": "device_register", "code": message["code"]})
         elif mtype == "device_registered":
             state["credential"] = message["credential"]
@@ -616,6 +627,39 @@ async def run_client(args: argparse.Namespace) -> int:
             raw = await conn.recv_text()
             await handle(json.loads(raw))
 
+    # ---- the pairing code's keep-alive ------------------------------------
+    #
+    # A pairing code is short-lived (300 s by default) and the service
+    # never tells the device that its code has expired.  Without this
+    # task a device that sits idle for longer than the TTL is *stranded*:
+    # it holds a dead code, every operator is refused with
+    # `pairing_invalid`, and the device never notices because nothing
+    # told it the code died.
+    #
+    # So the device renews its own code before the deadline.  The renewal
+    # is only safe while **no operator is present**: asking for a new
+    # code re-registers the device, and the service then announces the
+    # new device to the room, which restarts the media plane — that would
+    # tear down a live session.  While an operator is connected the code
+    # is irrelevant anyway (it was already consumed by the pairing), so
+    # the device simply waits.
+    async def pairing_keepalive() -> None:
+        # Renew once the code has less than this many seconds left.
+        renew_margin_s = 60.0
+        while True:
+            await asyncio.sleep(15.0)
+            if args.role != "device" or peer_present:
+                continue
+            expires_at = state.get("pairing_expires_at")
+            if expires_at is None:
+                continue
+            remaining = float(expires_at) - time.time()
+            if remaining > renew_margin_s:
+                continue
+            print(f"[{args.role}] the pairing code expires in {int(remaining)} s "
+                  f"- renewing it")
+            await send({"type": "pairing_request"})
+
     # ---- the signalling flow ---------------------------------------------
 
     if args.role == "device":
@@ -634,6 +678,7 @@ async def run_client(args: argparse.Namespace) -> int:
 
     ws_task = asyncio.ensure_future(pump_ws())
     media_waiter = asyncio.ensure_future(media_exited.wait())
+    keepalive_task = asyncio.ensure_future(pairing_keepalive())
 
     try:
         await asyncio.wait(
@@ -647,6 +692,7 @@ async def run_client(args: argparse.Namespace) -> int:
     finally:
         ws_task.cancel()
         media_waiter.cancel()
+        keepalive_task.cancel()
         if watcher is not None:
             watcher.cancel()
         if stdout_task is not None:
@@ -706,6 +752,19 @@ def main() -> int:
                         help="rd_*: do not open a control channel (media only)")
     parser.add_argument("--no-stun", action="store_true",
                         help="rd_*: do not gather STUN candidates (LAN only)")
+    parser.add_argument("--game-source", action="store_true",
+                        help="rd_device: capture the synthetic whack-a-mole "
+                             "game source instead of the real screen "
+                             "(slice v1-game-source)")
+    parser.add_argument("--game-fps", type=int, default=None,
+                        help="rd_device: the game source's frame rate "
+                             "(default 60)")
+    parser.add_argument("--width", type=int, default=None,
+                        help="rd_device: the capture width (the game source "
+                             "defaults to 1280)")
+    parser.add_argument("--height", type=int, default=None,
+                        help="rd_device: the capture height (the game source "
+                             "defaults to 720)")
     args = parser.parse_args()
     try:
         return asyncio.run(run_client(args))

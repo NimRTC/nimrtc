@@ -55,7 +55,10 @@ function macosJobSection(workflowText) {
 /** 从 job 文本里切出某个 step（`- name: X` 到下一个 step 为止）。 */
 function stepSection(jobText, stepName) {
     const lines = jobText.split(/\r?\n/);
-    const start = lines.findIndex((l) => new RegExp(`- name:\\s*${stepName}\\s*$`).test(l));
+    // 步骤名里的 `+` 是正则量词 —— 必须转义，否则 "Install + downstream proof"
+    // 会被当成 "Install " 后跟一个重复的空格。
+    const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const start = lines.findIndex((l) => new RegExp(`- name:\\s*${escaped}\\s*$`).test(l));
     assert.ok(start >= 0, `macos-clang 腿里必须有 '${stepName}' 这一步`);
     const indent = lines[start].search(/\S/);
     let end = lines.length;

@@ -132,31 +132,42 @@ jobs:
           # a commit is checked for as an object, and a branch is
           # resolved in the mirror and then checked for.  A mirror
           # that does not have it is refused, not substituted.
-          $mirrors = @()
-          foreach ($base in @("D:\MyOpen", "C:\actions-runner\_work")) {
-            if (Test-Path $base) {
-              Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
-                Where-Object { Test-Path (Join-Path $_.FullName ".git") } |
-                ForEach-Object { $mirrors += $_.FullName }
-            }
-          }
+          # The candidates are named, not searched for: a scan is
+          # convenient but it depends on the shape of the machine,
+          # and a job that cannot find its mirror fails in a way that
+          # looks like the network is down.  The list is a starting
+          # point -- each one is *checked* before it is used, so a
+          # candidate that does not exist, or does not have the ref,
+          # is simply passed over.
+          $candidates = @(
+            "D:\MyOpen\NimRTC",
+            "D:\MyOpen\NimRTC-followup",
+            "C:\actions-runner\_work\nimrtc\nimrtc"
+          )
           $copied = $false
-          foreach ($m in $mirrors) {
+          foreach ($m in $candidates) {
+            if (-not (Test-Path (Join-Path $m ".git"))) {
+              Write-Host "mirror $m: not a clone"
+              continue
+            }
             $have = $null
             if ($ref -match '^[0-9a-f]{40}$') {
-              # The braces have to be quoted: PowerShell reads
-              # `$ref^{commit}` as an expression and hands git a
-              # mangled argument.
               git -C $m cat-file -e "$ref" 2>$null
               if ($LASTEXITCODE -eq 0) { $have = $ref }
             } else {
               $have = (git -C $m rev-parse $ref 2>$null)
             }
-            if (-not $have) { continue }
+            if (-not $have) {
+              Write-Host "mirror $m: does not have $ref"
+              continue
+            }
             Write-Host "using the local mirror $m at $have"
             git init
-            git fetch --no-tags $m $have
-            if ($LASTEXITCODE -ne 0) { continue }
+            git fetch --no-tags "$m" "$have"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "mirror $m: the fetch failed"
+              continue
+            }
             git checkout --force FETCH_HEAD
             git remote add origin $url 2>$null
             $copied = $true
@@ -166,6 +177,7 @@ jobs:
             git submodule sync --recursive
             exit 0
           }
+          Write-Host "no local mirror had $ref -- fetching from the network"
 
           # No mirror had it.  Fetch from the network, with a bounded
           # retry around it.  'git init' rather than 'git clone': an

@@ -111,7 +111,13 @@ jobs:
         # The submodule part also fails when a submodule ends up
         # *empty*: a silent failure the build would otherwise surface
         # much later, far from the cause.
-        shell: pwsh
+        #
+        # `shell: powershell` -- Windows PowerShell, which every Windows
+        # runner has.  This job asked for `pwsh` and the runner answered
+        # `pwsh: command not found`: PowerShell 7 is not installed on a
+        # self-hosted Windows machine by default, and the failure is
+        # silent about everything else the job would have proven.
+        shell: powershell
         run: |
           python tools/fetch_submodules.py --fetch-main `
             --ref "${{ inputs.ref || github.sha }}" --retries 5
@@ -127,12 +133,12 @@ jobs:
         # The evidence record carries its own stamp; printing it up front
         # keeps the job log self-contained when something goes wrong
         # *before* the harness runs.
-        shell: pwsh
+        shell: powershell
         run: |
           nvidia-smi --query-gpu=name,driver_version --format=csv
 
       - name: Configure (NVENC + NVDEC on, examples on)
-        shell: pwsh
+        shell: powershell
         run: |
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
             -DNIMRTC_PLUGINS_NVENC=ON `
@@ -141,13 +147,13 @@ jobs:
             -DNIMRTC_BUILD_TESTS=ON
 
       - name: Build hw-e2e + the engine-level hardware test
-        shell: pwsh
+        shell: powershell
         run: |
           cmake --build build --config Release -j --target hw-e2e test_engine_video_hw_loopback test_engine_video_hw_h265
 
       - name: The codec-level end-to-end run (recorded evidence)
         id: hw_e2e
-        shell: pwsh
+        shell: powershell
         run: |
           # The binary was built above, so no `--build` here: the tool
           # would otherwise re-configure `build/` without the module
@@ -165,14 +171,14 @@ jobs:
         # host has no hardware encoder, which `--require-hardware` above
         # has already turned into a failure — so a green ctest here means
         # the engine ran the pinned hardware path end to end.
-        shell: pwsh
+        shell: powershell
         run: |
           ctest --test-dir build -C Release -R "test_engine_video_hw_loopback|test_engine_video_hw_h265" `
             --output-on-failure
 
       - name: Surface the evidence summary
         if: always()
-        shell: pwsh
+        shell: powershell
         run: |
           # Write the summary into the Step Summary so the run page shows
           # the window (driver, ref, verdict) without downloading the

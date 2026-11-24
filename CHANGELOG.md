@@ -353,6 +353,134 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a picture of `SPS | PPS | bare slice` must reach the decoder with a
   start code ahead of **every** NAL unit — the slice included.
 
+### Fixed
+
+- **A `$var:` in a PowerShell workflow step is a parse error, and the
+  step dies before it does anything (2026-11-24).**
+  The hardware job's mirror-fetching step had three log lines of the
+  form:
+
+  ```powershell
+  Write-Host "mirror $m: not a clone"
+  ```
+
+  PowerShell reads `$var:` as a **drive reference** — the `:` is a drive
+  qualifier, not punctuation — so the whole step is a `ParserError`,
+  not a string with a colon in it.  The job fails before it fetches
+  anything, with `InvalidVariableReferenceWithDrive` in the log and no
+  mention of the mistake (run `45366086544`).
+
+  The irony is that the step existed to make the job *survive* a
+  broken network link, and the log line naming the mirror was the bug.
+
+  The lines are now format strings (`-f $m`), which parse.
+
+- **A native command's stderr is a terminating error in a workflow
+  step, and the hardware job died on it (2026-11-24).**
+  Run `45389282581` failed at the *end* of the fetch step, after the
+  local mirror had already answered:
+
+  ```text
+  git : error: remote origin already exists.
+  +   git remote add origin $url 2>$null
+  ```
+
+  Windows PowerShell turns a native command's stderr into **error
+  records**, and the runner runs every step with
+  `$ErrorActionPreference = 'Stop'` — so a command that was expected
+  to be able to complain became a terminating error, and the `2>$null`
+  did not help: the redirection happened, and the step still died.
+
+  The step now relaxes the preference to `Continue` and checks the
+  exit codes itself, which is what it was already doing.  The
+  `origin` remote is *replaced* (`remote set-url`) rather than added,
+  so the command does not complain in the first place.  The two mirror
+  probes (`cat-file -e`, `rev-parse`) took their answer from the exit
+  code with the complaint discarded, for the same reason: a mirror
+  that does not have the commit is a *expected* answer, not a fault.
+
+  The step had failed *after* the mirror fetch worked, so the mirror
+  was never the problem — the difference between a job that runs and
+  one that dies on its own log line was this.
+
+### Added
+
+- **`tools/check_workflow_powershell.py` — a guard against PowerShell
+  syntax errors in workflow steps.**
+  The YAML parses and the script reads as valid text, so a
+  PowerShell-only mistake is invisible until the runner executes it.
+  The guard takes every `run:` block, resolves the shell each one runs
+  under (the step's own `shell:`, else the job's `defaults.run.shell`,
+  else GitHub's default for the runner's OS), and parses the
+  PowerShell ones with the PowerShell parser itself.  The `${{ ... }}`
+  expressions are masked first, because GitHub substitutes them before
+  the shell sees the script and `${{` reads as a hashtable literal to
+  PowerShell.
+
+  A failure names the file, the job, the step and the line.  Wired
+  into CI as the `windows / msvc` job and registered as
+  `test_workflow_powershell`.
+
+- **The hardware job brings its vendored trees up from the local
+  mirror, instead of falling through to the network for trees it is
+  already holding (2026-11-24).**
+  The mirror was bought to keep the job off the network, and it was
+  not doing that: the copy it performed left git knowing nothing about
+  the submodule, so `git submodule status` kept reporting it as not
+  initialised (`-` in front of the commit) and the job went to the
+  network for a tree it had on disk.
+
+  Three defects are fixed in `tools/fetch_submodules.py`:
+
+  - The status sign is the *first character of the line*, so the line
+    must not be stripped before it is read.  `strip()` removes
+    exactly the leading space that says "at the recorded commit", and
+    a submodule that is right is reported as wrong.
+  - The tree is brought up by copying the mirror's **module cache**
+    (`.git/modules/<path>`) and pointing the worktree at it, rather
+    than by copying the working files.  The files alone carry no
+    objects, so the checkout of the recorded commit had nothing to
+    check out.
+  - The copied cache still carries the mirror's relative
+    `core.worktree`, and git refuses to run *any* command in a
+    repository whose worktree is missing — so `git config` cannot fix
+    it, and the setting is removed from the config file instead.
+
+  The copy **hardlinks** the object stores instead of duplicating
+  them and skips the nested submodule caches.  `msquic`'s cache holds
+  1.35 GB of nested caches the build never reads, and copying it
+  filled the runner's disk — a full disk truncates the copy, and a
+  truncated copy is reported as "object file is empty".
+
+  The submodule's *name* in `.gitmodules` — not its path — is
+  registered in the parent's config, so the status line loses its `-`.
+
+  Verified on all fourteen vendored trees: each comes up at the
+  recorded commit, with no network transfer.
+
+- **Two Windows file-handling defects kept the mirror copy from
+  finishing (2026-11-24).**
+  Run `45391469614` failed in the submodule step with
+  `could not copy the module cache` and
+  `could not get a repository handle for submodule`.
+
+  **Git writes its object store read-only**, and on Windows a
+  read-only file cannot be deleted: `shutil.rmtree` raises
+  `PermissionError: [WinError 5]`, gives up on the whole tree, and the
+  removal of the stale cache is abandoned.  The removal now clears the
+  read-only bit and retries.
+
+  **The submodule's `.git` pointer file could not be written.** The
+  runner's workspace holds one that another process has open without
+  write sharing, and opening it for writing fails with
+  `PermissionError: [Errno 13]` — while *deleting* it is allowed
+  (Windows marks it for deletion) and writing a *new* file with the
+  same name is allowed too.  The pointer is therefore *replaced*
+  rather than edited in place.
+
+  Verified on the runner's own workspace: all fourteen vendored trees
+  come up at the recorded commit.
+
 ## [1.3.1] - 2026-11-24
 
 ### Status: Stable

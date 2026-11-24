@@ -77,13 +77,139 @@ jobs:
     # must not pick this job up.  A hosted runner never matches, so the
     # job stays "queued" rather than pretending to pass.
     runs-on: [self-hosted, windows, gpu-nvenc]
-    timeout-minutes: 60
+    # Generous, because the vendored trees are the slow part of this
+    # job and they are fetched over a link that is not always fast: the
+    # largest of them is over 100 MB, and a run that fetched seven of
+    # the fourteen in an hour was cancelled here before it ever
+    # reached the build.  This is an evidence collector on a
+    # self-hosted runner -- it is not a PR gate, and nothing waits on
+    # it -- so a long timeout costs nothing but wall-clock, while a
+    # short one makes the job unrunnable on the machine it is meant
+    # for.
+    timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-          fetch-depth: 0
-          ref: ${{ inputs.ref || github.sha }}
+      - name: Fetch the repository (with retries)
+        # Not `actions/checkout`.  The checkout retries a cut-off
+        # transfer three times, which is not enough for a link that
+        # drops long ones, and its failure is blunt -- 'Failed to
+        # connect to github.com port 443' -- and the job ends there
+        # with nothing built and no evidence recorded.
+        #
+        # So the fetch is done here, with a bounded retry around it.
+        # `git init` rather than `git clone`: an init leaves the
+        # repository *in place* when the transfer is cut off, so the
+        # objects that did arrive stay and the next attempt asks only
+        # for the missing ones.  A clone deletes the whole directory
+        # on failure, and on this link the first attempt routinely dies
+        # with 'early EOF' after ten minutes.
+        #
+        # The fetch is shallow: the evidence record resolves the commit
+        # with `git rev-parse HEAD`, which a shallow fetch answers, and
+        # the full history is a large transfer that this link makes
+        # very slow.
+        #
+        # `shell: powershell` -- Windows PowerShell, which every
+        # Windows runner has.  This job asked for `pwsh` and the
+        # runner answered 'pwsh: command not found': PowerShell 7 is
+        # not installed on a self-hosted Windows machine by default --
+        # it is on the hosted images, which is why every other
+        # workflow in the tree can ask for it.
+        shell: powershell
+        run: |
+          $ref = "${{ inputs.ref || github.sha }}"
+          $url = "https://github.com/${{ github.repository }}.git"
+          cd $env:GITHUB_WORKSPACE
+
+          # A local clone of this repository, on this same machine,
+          # has the commit already -- and the runner and the tree it
+          # builds usually are the same machine.  Copying from it is
+          # the difference between a job that runs and a job that
+          # waits on a link that is not always there: eight attempts
+          # at this repository's own fetch have failed in a row with
+          # 'Failed to connect to github.com port 443'.
+          #
+          # The mirror is only used for a ref it can *prove* it has:
+          # a commit is checked for as an object, and a branch is
+          # resolved in the mirror and then checked for.  A mirror
+          # that does not have it is refused, not substituted.
+          $mirrors = @()
+          foreach ($base in @("D:\MyOpen", "C:\actions-runner\_work")) {
+            if (Test-Path $base) {
+              Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName ".git") } |
+                ForEach-Object { $mirrors += $_.FullName }
+            }
+          }
+          $copied = $false
+          foreach ($m in $mirrors) {
+            $have = $null
+            if ($ref -match '^[0-9a-f]{40}$') {
+              # The braces have to be quoted: PowerShell reads
+              # `$ref^{commit}` as an expression and hands git a
+              # mangled argument.
+              git -C $m cat-file -e "$ref" 2>$null
+              if ($LASTEXITCODE -eq 0) { $have = $ref }
+            } else {
+              $have = (git -C $m rev-parse $ref 2>$null)
+            }
+            if (-not $have) { continue }
+            Write-Host "using the local mirror $m at $have"
+            git init
+            git fetch --no-tags $m $have
+            if ($LASTEXITCODE -ne 0) { continue }
+            git checkout --force FETCH_HEAD
+            git remote add origin $url 2>$null
+            $copied = $true
+            break
+          }
+          if ($copied) {
+            git submodule sync --recursive
+            exit 0
+          }
+
+          # No mirror had it.  Fetch from the network, with a bounded
+          # retry around it.  'git init' rather than 'git clone': an
+          # init leaves the repository *in place* when the transfer is
+          # cut off, so the objects that did arrive stay and the next
+          # attempt asks only for the ones that are missing.  A clone
+          # deletes the whole directory on failure, and on this link
+          # the first attempt routinely dies with 'early EOF' after
+          # ten minutes.
+          git remote remove origin 2>$null
+          git remote add origin $url
+          $attempts = 8
+          for ($i = 1; $i -le $attempts; $i++) {
+            Write-Host "fetch attempt $i/$attempts"
+            git -c http.version=HTTP/1.1 `
+                -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=120 `
+                fetch --depth 1 --no-tags origin $ref
+            if ($LASTEXITCODE -eq 0) {
+              git checkout --force FETCH_HEAD
+              git submodule sync --recursive
+              exit 0
+            }
+            Start-Sleep -Seconds 10
+          }
+          Write-Error "could not fetch $ref in $attempts attempts"
+          exit 1
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+
+      - name: Fetch the vendored submodules (with retries)
+        # One submodule at a time, each with a bounded retry around it.
+        # The step also fails if a submodule ends up *empty*, which is a
+        # silent failure the build would only surface much later.
+        #
+        # The fetch tries the runner's local object cache before the
+        # network: '.git/modules' survives from one job to the next --
+        # the fetch above cleans the worktree, not the object cache --
+        # so on a runner that has been here before, most of the
+        # vendored trees are already on disk.
+        shell: powershell
+        run: |
+          python tools/fetch_submodules.py --retries 5
+        env:
+          PYTHONIOENCODING: utf-8
 
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -94,12 +220,12 @@ jobs:
         # The evidence record carries its own stamp; printing it up front
         # keeps the job log self-contained when something goes wrong
         # *before* the harness runs.
-        shell: pwsh
+        shell: powershell
         run: |
           nvidia-smi --query-gpu=name,driver_version --format=csv
 
       - name: Configure (NVENC + NVDEC on, examples on)
-        shell: pwsh
+        shell: powershell
         run: |
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
             -DNIMRTC_PLUGINS_NVENC=ON `
@@ -108,13 +234,13 @@ jobs:
             -DNIMRTC_BUILD_TESTS=ON
 
       - name: Build hw-e2e + the engine-level hardware test
-        shell: pwsh
+        shell: powershell
         run: |
           cmake --build build --config Release -j --target hw-e2e test_engine_video_hw_loopback test_engine_video_hw_h265
 
       - name: The codec-level end-to-end run (recorded evidence)
         id: hw_e2e
-        shell: pwsh
+        shell: powershell
         run: |
           # The binary was built above, so no `--build` here: the tool
           # would otherwise re-configure `build/` without the module
@@ -132,14 +258,14 @@ jobs:
         # host has no hardware encoder, which `--require-hardware` above
         # has already turned into a failure — so a green ctest here means
         # the engine ran the pinned hardware path end to end.
-        shell: pwsh
+        shell: powershell
         run: |
           ctest --test-dir build -C Release -R "test_engine_video_hw_loopback|test_engine_video_hw_h265" `
             --output-on-failure
 
       - name: Surface the evidence summary
         if: always()
-        shell: pwsh
+        shell: powershell
         run: |
           # Write the summary into the Step Summary so the run page shows
           # the window (driver, ref, verdict) without downloading the

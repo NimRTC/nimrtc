@@ -119,25 +119,76 @@ jobs:
           $ref = "${{ inputs.ref || github.sha }}"
           $url = "https://github.com/${{ github.repository }}.git"
           cd $env:GITHUB_WORKSPACE
-          if (-not (Test-Path .git)) { git init }
+
+          # A local clone of this repository, on this same machine,
+          # has the commit already -- and the runner and the tree it
+          # builds usually are the same machine.  Copying from it is
+          # the difference between a job that runs and a job that
+          # waits on a link that is not always there: eight attempts
+          # at this repository's own fetch have failed in a row with
+          # 'Failed to connect to github.com port 443'.
+          #
+          # The mirror is only used for a ref it can *prove* it has:
+          # a commit is checked for as an object, and a branch is
+          # resolved in the mirror and then checked for.  A mirror
+          # that does not have it is refused, not substituted.
+          $mirrors = @()
+          foreach ($base in @("D:\MyOpen", "C:\actions-runner\_work")) {
+            if (Test-Path $base) {
+              Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName ".git") } |
+                ForEach-Object { $mirrors += $_.FullName }
+            }
+          }
+          $copied = $false
+          foreach ($m in $mirrors) {
+            $have = $null
+            if ($ref -match '^[0-9a-f]{40}$') {
+              git -C $m cat-file -e "$ref^{commit}" 2>$null
+              if ($LASTEXITCODE -eq 0) { $have = $ref }
+            } else {
+              $have = (git -C $m rev-parse $ref 2>$null)
+            }
+            if (-not $have) { continue }
+            Write-Host "using the local mirror $m at $have"
+            git init
+            git fetch --no-tags $m $have
+            if ($LASTEXITCODE -ne 0) { continue }
+            git checkout --force FETCH_HEAD
+            git remote add origin $url 2>$null
+            $copied = $true
+            break
+          }
+          if ($copied) {
+            git submodule sync --recursive
+            exit 0
+          }
+
+          # No mirror had it.  Fetch from the network, with a bounded
+          # retry around it.  'git init' rather than 'git clone': an
+          # init leaves the repository *in place* when the transfer is
+          # cut off, so the objects that did arrive stay and the next
+          # attempt asks only for the ones that are missing.  A clone
+          # deletes the whole directory on failure, and on this link
+          # the first attempt routinely dies with 'early EOF' after
+          # ten minutes.
           git remote remove origin 2>$null
           git remote add origin $url
           $attempts = 8
-          $ok = $false
           for ($i = 1; $i -le $attempts; $i++) {
             Write-Host "fetch attempt $i/$attempts"
             git -c http.version=HTTP/1.1 `
                 -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=120 `
                 fetch --depth 1 --no-tags origin $ref
-            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            if ($LASTEXITCODE -eq 0) {
+              git checkout --force FETCH_HEAD
+              git submodule sync --recursive
+              exit 0
+            }
             Start-Sleep -Seconds 10
           }
-          if (-not $ok) {
-            Write-Error "could not fetch $ref in $attempts attempts"
-            exit 1
-          }
-          git checkout --force FETCH_HEAD
-          git submodule sync --recursive
+          Write-Error "could not fetch $ref in $attempts attempts"
+          exit 1
         env:
           GIT_TERMINAL_PROMPT: "0"
 

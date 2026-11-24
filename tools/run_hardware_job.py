@@ -248,11 +248,24 @@ def publish(records: list[Path], summary_path: Path | None,
             handle.write("```\n")
 
     if outputs_path is not None:
-        # The GitHub output-file format: a heredoc marker, the value,
-        # the marker again.
+        # The GitHub output-file format is:
+        #
+        #     name<<DELIMITER
+        #     <the value>
+        #     DELIMITER
+        #
+        # -- a *name* before the marker, not the marker alone.  A
+        # bare marker is not an output at all, and the runner says so
+        # after the step has already succeeded:
+        #
+        #     ##[error]Unable to process file command 'output'
+        #            successfully.
+        #     ##[error]Invalid format 'EOF_NIMRTC_HARDWARE_EVIDENCE'
+        #
+        # and the step fails.  So the name is there.
         marker = "EOF_NIMRTC_HARDWARE_EVIDENCE"
         with outputs_path.open("w", encoding="utf-8") as handle:
-            handle.write("%s\n%s\n%s\n" % (marker, body, marker))
+            handle.write("evidence<<%s\n%s%s\n" % (marker, body, marker))
 
     return body
 
@@ -470,6 +483,21 @@ def self_test() -> int:
               "the output file must carry its marker")
         check(out_text.count('"verdict":"PASS"') == 2,
               "the output file must carry every record")
+
+        # The output file's format is `name<<MARKER`, the value, and
+        # the marker.  A *bare* marker is not an output at all: the
+        # runner rejects it with
+        #
+        #     ##[error]Invalid format 'EOF_NIMRTC_HARDWARE_EVIDENCE'
+        #
+        # and fails the step -- after the step has already done all
+        # its work.
+        check(out_text.startswith("evidence<<EOF_NIMRTC_HARDWARE_EVIDENCE\n"),
+              "the output file must name its value before the marker")
+        check(out_text.rstrip().endswith("EOF_NIMRTC_HARDWARE_EVIDENCE"),
+              "the output file must close with its marker")
+        check(out_text.count("EOF_NIMRTC_HARDWARE_EVIDENCE") == 2,
+              "the marker must appear exactly twice -- open and close")
 
         # --- a missing record is a failure, not an empty success ----
         empty = root / "empty"

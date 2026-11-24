@@ -98,6 +98,34 @@ jobs:
         shell: pwsh
         run: python tools/check_vendor.py
 
+      # PyYAML is not part of the standard library, and the
+      # PowerShell-step guard below parses the workflow files with it.
+      # The runner image usually has it, but "usually" is not a
+      # dependency contract -- and the guard is worthless if it silently
+      # skips.  Installing it explicitly turns "the runner happened to
+      # have it" into "the guard runs".
+      - name: Install PyYAML
+        shell: pwsh
+        run: python -m pip install --upgrade pyyaml
+
+      # A `run:` block under `shell: pwsh` is PowerShell, and PowerShell
+      # reads `$var:` as a *drive reference* -- the `:` is a drive
+      # qualifier, not punctuation.  So `Write-Host "mirror $m: not a
+      # clone"` is a parser error, not a string with a colon in it: the
+      # step dies before it does anything, and the log says
+      # `InvalidVariableReferenceWithDrive` without naming the mistake.
+      #
+      # It landed in the hardware job's mirror-fetching step on
+      # 2026-11-24 -- the step written to make the job survive a broken
+      # link was the step that failed.  This guard parses every
+      # PowerShell step with the PowerShell parser, so a mistake like
+      # that is found here rather than on the runner.  It needs the
+      # parser, so it runs on this Windows leg; the Linux and macOS legs
+      # report it as skipped.
+      - name: Check that every PowerShell workflow step parses
+        shell: pwsh
+        run: python tools/check_workflow_powershell.py --self-test
+
       - name: API freeze — per-symbol classification
         # Every namespace-scope symbol in a public header must carry a
         # NIMRTC_API_STABLE / NIMRTC_API_UNSTABLE marker (ADR-015

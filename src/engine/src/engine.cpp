@@ -420,9 +420,15 @@ uint32_t NimRTCEngine::open() noexcept {
         }
     }
 
+    // v1.4 D7: every session starts from zero — the call-state machine is
+    // reset, so a re-entrant open() never leaks a previous session's state.
+    impl_->session_state.call_state.reset();
     state_ = State::kOpen;
     if (on_state_change_) on_state_change_("open");
     detail::trace("NimRTCEngine opened (DTLS, SRTP, Opus initialised)");
+    // v1.4 D7: drive the first observation — the fresh machine's first
+    // observation always reports kConnecting (acceptance 7).
+    poll_call_state();
     return 0;
 }
 
@@ -503,7 +509,51 @@ void NimRTCEngine::close() noexcept {
     impl_->session_state.datachannel_transport_cookie.reset();
     state_ = State::kClosed;
     if (on_state_change_) on_state_change_("closed");
+
+    // v1.4 D7: the call is over — report kClosed.  `stop()` / `hangup()` /
+    // `close()` all land here, so the report fires exactly once (the
+    // machine's close() judge reports nothing on a repeat).
+    if (impl_->session_state.call_state.close()) {
+        CallStateReport report;
+        report.state = CallState::kClosed;
+        fire_call_state(std::move(report));
+    }
 }
+
+
+// ---------------------------------------------------------------------------
+// v1.4 D7 — one call's lifecycle (start / stop / hangup)
+// ---------------------------------------------------------------------------
+//
+// `stop()` is `close()` under its lifecycle name: the defined teardown order
+// (QoE → ICE → audio plugins → codecs → video plugins → BWE → TransportSession)
+// already lives in `close()` — D7 does not reorder it, it just names it and
+// makes it testable (spec §四).  `hangup()` additionally carries a reason and
+// notifies the peer *before* closing.
+
+int NimRTCEngine::start(const EngineConfig& config) noexcept {
+    config_ = config;
+    return static_cast<int>(open());
+}
+
+void NimRTCEngine::stop() noexcept {
+    close();
+}
+
+bool NimRTCEngine::hangup(std::string_view reason) noexcept {
+    if (!is_open()) return false;
+    // Best-effort: notify the peer of the hangup reason first, then close in
+    // the defined order (spec §四 — hangup 先通知再关).  The reason is sent
+    // as a control message; a missing / saturated control channel does not
+    // stop the hangup.
+    const auto* bytes =
+        reinterpret_cast<const std::uint8_t*>(reason.data());
+    (void)send_control_message(
+        std::span<const std::uint8_t>(bytes, reason.size()));
+    close();
+    return true;
+}
+
 
 // ---------------------------------------------------------------------------
 // create_data_channel — creates a new IDataChannel via the factory resolved
@@ -969,6 +1019,10 @@ void NimRTCEngine::set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept {
 
 void NimRTCEngine::set_on_peer_restart(EnginePeerRestartCallback cb) noexcept {
     on_peer_restart_ = std::move(cb);
+}
+
+void NimRTCEngine::set_on_call_state(EngineCallStateCallback cb) noexcept {
+    on_call_state_ = std::move(cb);
 }
 
 void NimRTCEngine::reset_ice_recovery_budget() noexcept {

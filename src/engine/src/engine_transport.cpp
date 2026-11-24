@@ -1363,6 +1363,10 @@ int NimRTCEngine::tick() noexcept {
     // backoff -> automatic restart (ADR-031).  It deliberately does not
     // touch the DTLS-rehandshake logic above.
     poll_ice_recovery();
+    // v1.4 D7: the call-state machine reads the same observation point.
+    // It runs *after* `poll_ice_recovery()`, so the N3-recovering gate below
+    // sees the recovery machine's state on the same tick.
+    poll_call_state();
     if (is_ice_connected()) {
         drain_dtls();
         maybe_send_sender_report();
@@ -1900,6 +1904,15 @@ void NimRTCEngine::execute_ice_recovery_restart(std::int64_t now_us) noexcept {
     refresh_turn_credentials();
 
     fire_ice_recovery_report(reason, false, "");
+
+    // v1.4 D7: the engine has entered an N3 recovery episode — the call is
+    // reconnecting.  The report carries the N3 details (restart count /
+    // remaining budget / terminal) read from the machine at fire time.
+    if (impl_->session_state.call_state.enter_reconnecting()) {
+        CallStateReport report;
+        report.state = CallState::kReconnecting;
+        fire_call_state(std::move(report));
+    }
 }
 
 void NimRTCEngine::fire_ice_recovery_report(
@@ -1959,6 +1972,96 @@ void NimRTCEngine::report_ice_recovery_terminal(
         }
     }
     fire_ice_recovery_report(reason, true, terminal_reason);
+
+    // v1.4 D7: N3's terminal is the call's ICE failure — the N4 reason
+    // attached, so the host sees *why* (acceptance 10 / 15).  This fires
+    // after any `kReconnecting` the episode produced: the ordering is the
+    // N3 machine's, not D7's (spec §风险).
+    fail_call_state(CallFailure::kIceFailed, current_ice_failure_reason());
+}
+
+
+// ---------------------------------------------------------------------------
+// v1.4 D7 — the call-state machine's engine-side wiring
+// ---------------------------------------------------------------------------
+//
+// `poll_call_state()` drives the private `CallStateMachine` from the engine's
+// ICE-state observations (the same observation point as the N3 poll, running
+// after it so the recovering gate sees the recovery machine's state on the
+// same tick).  The N3 / N8 details each report carries are attached at
+// `fire_call_state()` time from the owning collaborators, so the machine
+// itself stays pure (no clock / transport — C3).
+
+bool NimRTCEngine::ice_recovery_active() const noexcept {
+    const auto s = impl_->session_state.ice_recovery.state();
+    return s == detail::IceRecovery::State::kGrace ||
+           s == detail::IceRecovery::State::kBackoff;
+}
+
+void NimRTCEngine::poll_call_state() noexcept {
+    if (!ice_t_ || !impl_) return;
+    auto& cs = impl_->session_state.call_state;
+    const plugins::IceState cur = ice_t_->state();
+
+    // While the N3 machine is mid-recovery (grace / backoff), the ICE-down
+    // observations are absorbed into the ongoing reconnecting episode: the
+    // drop is expected and being repaired, so reporting kConnecting /
+    // kFailed here would fight N3's own ordering (spec §风险 / ADR-035 §2).
+    // Only an ICE-up observation (Connected / Completed) ends the episode.
+    if (ice_recovery_active()) {
+        if (cur != plugins::IceState::Connected &&
+            cur != plugins::IceState::Completed) {
+            return;
+        }
+    }
+
+    if (!cs.observe(cur)) return;  // no migration — no report
+    CallStateReport report;
+    report.state = cs.state();
+    report.failure = cs.failure();
+    report.failure_reason = cs.reason();
+    // A kFailed from an ICE `Failed` observation: the machine knows only the
+    // state, the caller knows why — attach the ICE failure (N4 reason).
+    if (report.state == CallState::kFailed) {
+        if (report.failure == CallFailure::kNone) {
+            report.failure = CallFailure::kIceFailed;
+        }
+        if (report.failure_reason.empty()) {
+            report.failure_reason = current_ice_failure_reason();
+        }
+    }
+    fire_call_state(std::move(report));
+}
+
+void NimRTCEngine::fail_call_state(CallFailure failure,
+                                   std::string_view reason) noexcept {
+    auto& cs = impl_->session_state.call_state;
+    if (!cs.fail(failure, reason)) return;  // already failed / closed — no repeat
+    CallStateReport report;
+    report.state = CallState::kFailed;
+    report.failure = failure;
+    report.failure_reason = std::string(reason);
+    fire_call_state(std::move(report));
+}
+
+void NimRTCEngine::fire_call_state(CallStateReport report) noexcept {
+    // Attach the N3 reconnection details (spec §三's sketch).
+    const std::int64_t now_us = detail::steady_now_us();
+    auto& rec = impl_->session_state.ice_recovery;
+    report.restart_count = rec.restarts_used(now_us);
+    report.remaining_budget = rec.remaining_budget(now_us);
+    report.terminal = rec.terminal();
+
+    // Attach the N8 path-change details — the *last* change, because a
+    // call-state migration and a path change do not always coincide: the
+    // report carries the context this migration can actually see (spec §三).
+    if (!impl_->session_state.last_path_change_reason.empty()) {
+        report.path_change_reason = impl_->session_state.last_path_change_reason;
+        report.old_pair = impl_->session_state.path_change.before();
+        report.new_pair = impl_->session_state.last_path_change_new_pair;
+    }
+
+    if (on_call_state_) on_call_state_(report);
 }
 
 
@@ -2163,6 +2266,16 @@ int NimRTCEngine::drain_dtls() noexcept {
             std::string(nimrtc::dtls::DtlsSession::state_name(impl_->security.last_dtls_state)) + " → " +
             std::string(nimrtc::dtls::DtlsSession::state_name(new_state)));
         impl_->security.last_dtls_state = new_state;
+    }
+
+    if (new_state == nimrtc::dtls::DtlsState::Failed) {
+        // v1.4 D7: a definitive DTLS failure ends the call — but not while
+        // N3 is actively recovering (the failed handshake may belong to the
+        // restarted path; the recovery's own terminal is the definitive
+        // failure, ADR-035 §2).
+        if (!ice_recovery_active()) {
+            fail_call_state(CallFailure::kDtlsFailed, "dtls-handshake-failed");
+        }
     }
 
     if (new_state == nimrtc::dtls::DtlsState::Connected) {

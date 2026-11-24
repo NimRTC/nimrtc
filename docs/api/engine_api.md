@@ -24,7 +24,10 @@ nimrtc::engine::NimRTCEngine
 │   ├── open() → Status
 │   ├── pre_open() → Status
 │   ├── close()
-│   └── is_open() → bool
+│   ├── is_open() → bool
+│   ├── start(config) → int           -- v1.4 D7: config + open in one call
+│   ├── stop()                        -- v1.4 D7: close() under its lifecycle name
+│   └── hangup(reason) → bool         -- v1.4 D7: notify peer, then close()
 │
 ├── Callbacks (set once at construction)
 │   ├── set_on_audio_frame(cb)        -- legacy PCM tap
@@ -32,6 +35,7 @@ nimrtc::engine::NimRTCEngine
 │   ├── set_on_video_frame(cb)
 │   ├── set_on_error(cb)
 │   ├── set_on_state_change(cb)
+│   ├── set_on_call_state(cb)         -- v1.4 D7: the whole call's lifecycle
 │   ├── set_on_ice_restart(cb)        -- peer restarted ICE, host re-answers
 │   ├── set_on_ice_recovery(cb)       -- v1.4 N3: auto/manual restart reports
 │   ├── set_on_peer_restart(cb)       -- v1.4 N8: peer restart + path context
@@ -182,6 +186,42 @@ bool is_open() const noexcept;
 True iff the engine is in the `kOpen` state (after a successful
 `open()`, before any `close()`).
 
+### 3.5 `start(config)` — one call's lifecycle (v1.4 D7, ADR-035)
+
+```cpp
+int start(const EngineConfig& config) noexcept;
+```
+
+Wraps the "configure → open" sequence in one call: equivalent to
+assigning `config` and calling `open()`. `open()` itself is unchanged
+for existing hosts. Returns the same status codes as `open()` (0 on
+success).
+
+### 3.6 `stop()` — close under its lifecycle name (v1.4 D7, ADR-035)
+
+```cpp
+void stop() noexcept;
+```
+
+`stop()` **is** `close()`: the defined teardown order — QoE → ICE →
+audio plugins → codecs → video plugins → BWE → `TransportSession`
+(which itself tears down ICE → DTLS → RTP → SCTP in that order) —
+already lives in `close()`; D7 does not reorder it, it just names it
+and makes it testable. After `stop()`, the call-state callback receives
+`kClosed` (exactly once).
+
+### 3.7 `hangup(reason)` — end the call with a reason (v1.4 D7, ADR-035)
+
+```cpp
+bool hangup(std::string_view reason) noexcept;
+```
+
+The difference from `stop()`: `hangup()` **carries a reason** and
+**notifies the peer first** (the reason is sent as a control message),
+then closes in the same defined order. Returns `true` when the hangup
+was performed; `false` when the engine was not open. A missing or
+saturated control channel does not stop the hangup.
+
 ---
 
 ## 4. Callbacks
@@ -198,6 +238,7 @@ methods are written defensively.
 | `on_video_frame` | A decoded H.264 NAL is available on the receive path (pre-render) | `void(const uint8_t* nal, size_t len, bool keyframe)` |
 | `on_error` | Any subsystem error fires (transport, DTLS, audio3A, codec, scheduler) | `void(uint32_t err, std::string_view msg)` |
 | `on_state_change` | Engine state transitions (e.g. ICE → connected) | `void(const char* state)` |
+| `on_call_state` | The whole call's lifecycle (v1.4 D7, ADR-035) — fires on a state **migration**, never the same state twice | `void(const engine::CallStateReport& report)` |
 | `on_ice_restart` | The *peer* restarted ICE (RFC 8445 §9.1.1.1); the host must answer with a fresh offer | `void()` |
 | `on_ice_recovery` | An ICE restart the engine initiated (v1.4 N3, ADR-031) — every success *and* every terminal report | `void(const engine::IceRecoveryReport& report)` |
 | `on_peer_restart` | The *peer* restarted ICE, with the path context (v1.4 N8, ADR-033) — fires **alongside** `on_ice_restart`; carries the old/new pair + reason `"peer-restart"` | `void(const engine::PeerRestartReport& report)` |
@@ -531,6 +572,89 @@ restart is still gathering.  `Stats::last_path_change_reason` /
 `last_path_change_new_pair` (§13.5) keep the **last** change for hosts
 that poll instead of subscribing — the fields are populated even when
 `ice_recovery_policy == "off"`.
+
+### 6.11 The call-state surface (v1.4 D7, ADR-035)
+
+The confluence point for "how is this call doing": **one callback** that
+spans the whole stack, so a host does not assemble the answer from
+`set_on_state_change` + `set_on_error` + polling `Stats`.
+
+```cpp
+void set_on_call_state(EngineCallStateCallback cb) noexcept;
+// EngineCallStateCallback = std::function<void(const CallStateReport&)>
+```
+
+**The migration order** — `connecting` → `connected` →
+(`reconnecting` ↔ `connected`)* → `failed` / `closed`:
+
+```text
+   connecting ──► connected ──► reconnecting ──► ... (N3 recovers)
+       │             │              │
+       │             │              └──► (N3 terminal) ──► failed
+       │             └──► (DTLS / media failure) ───────► failed
+       └──► stop() / hangup() / close() ───────────────► closed
+```
+
+`failed` / `closed` are **absorbing**: once the call has failed or
+ended, no report can move it to another state — a host hangs up and
+starts a new call rather than "recovering" a failed one.
+
+```cpp
+enum class NIMRTC_API_STABLE CallState : std::uint8_t {
+    kConnecting = 0,   // establishing (gathering / connecting)
+    kConnected = 1,    // up
+    kReconnecting = 2, // down, the engine is recovering per the N3 policy
+    kFailed = 3,       // failed (has a failure_reason)
+    kClosed = 4,       // over (stop() / hangup() / destructor)
+};
+
+enum class NIMRTC_API_STABLE CallFailure : std::uint8_t {
+    kNone = 0,
+    kIceFailed = 1,           // ICE layer failed (checks-failed / no-pair)
+    kDtlsFailed = 2,          // DTLS handshake failed
+    kTurnRefused = 3,         // TURN server refused (transport-unsupported)
+    kCredentialsRejected = 4, // credentials rejected (credentials-rejected)
+    kMediaFailed = 5,         // media layer failed (codec / render / capture)
+};
+
+struct NIMRTC_API_STABLE CallStateReport {
+    CallState state = CallState::kConnecting;
+    CallFailure failure = CallFailure::kNone;
+    std::string failure_reason;                  // the N4 vocabulary, verbatim
+    std::optional<IceCandidatePairInfo> old_pair;  // N8: pair before the change
+    std::optional<IceCandidatePairInfo> new_pair;  // N8: pair after the change
+    std::string path_change_reason;
+    std::uint32_t restart_count = 0;             // N3: restarts used this window
+    std::uint32_t remaining_budget = 0;          // N3: restarts left this window
+    bool terminal = false;                       // N3: the recovery is over
+};
+```
+
+**When it fires** — only on a real **migration**, never the same state
+twice (`set_on_state_change` stays the coarse "open"/"closed" signal;
+this is the fine migration flow):
+
+| Migration | Trigger | Details carried |
+|---|---|---|
+| `kConnecting` | `open()` — the very first observation | — |
+| `kConnected` | ICE reaches `Connected` / `Completed` | — |
+| `kReconnecting` | N3 restarts ICE (`execute_ice_recovery_restart`) | `restart_count` / `remaining_budget` / `terminal`, plus the N8 path context |
+| `kFailed` | N3 terminal, DTLS failure, media failure | `failure` (`kIceFailed` / `kDtlsFailed` / `kMediaFailed` …) + `failure_reason` (N4 string) |
+| `kClosed` | `stop()` / `hangup()` / `close()` / destructor | — |
+
+**`failure_reason` is the N4 vocabulary verbatim**, mapped onto the enum
+by one pure function:
+
+| `failure_reason` | `failure` |
+|---|---|
+| `"credentials-rejected"` | `kCredentialsRejected` |
+| `"transport-unsupported"` | `kTurnRefused` |
+| `"checks-failed"` / `"no-pair"` / `"no-candidates"` | `kIceFailed` |
+| `"none"` / `""` | `kNone` (no failure is *not* a failure) |
+
+**`set_on_control_message` lives next to `set_on_call_state`** because
+the two callbacks read as one surface — its signature and semantics are
+unchanged.
 
 ---
 
@@ -2238,6 +2362,7 @@ header; its section note above it is the definition.
         set_on_audio_frame(...)
         set_on_error(...)
         set_on_state_change(...)
+        set_on_call_state(...)          -- v1.4 D7: the call's lifecycle
                 │
                 ▼
    ┌─── pre_open() ───┐    (optional)

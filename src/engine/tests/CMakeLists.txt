@@ -329,3 +329,53 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# v1.4 (v1-call-state-surface, D7): the call-state confluence point.
+# -----------------------------------------------------------------------------
+# The same shape as the tests above: the first half pins the private
+# `detail::CallStateMachine` collaborator (observe translation, the
+# no-repeat judge, enter_reconnecting / fail / close / reset) and the pure
+# `failure_from_reason()` mapping with pure functions; the second half
+# drives a real `NimRTCEngine` with the stateful fake ICE transport and a
+# stateful fake DTLS session (reused from the recovery test's pattern) to
+# prove the wiring end-to-end: open() → kConnecting, ICE up → kConnected,
+# an N3 restart → kReconnecting, the terminal → kFailed + kIceFailed, a
+# DTLS failure → kDtlsFailed, and stop()/hangup() → kClosed, with the N3 /
+# N8 details attached to every report.
+add_executable(test_engine_call_state
+    test_engine_call_state.cpp
+    )
+
+if(WIN32)
+    target_link_libraries(test_engine_call_state PRIVATE ws2_32)
+endif()
+
+target_link_libraries(test_engine_call_state PRIVATE
+    nimrtc::engine
+    nimrtc::core
+    nimrtc::plugins
+    nimrtc::datachannel
+    GTest::gtest_main)
+
+target_include_directories(test_engine_call_state PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src"
+    "${CMAKE_SOURCE_DIR}/src/modules/ice/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include")
+
+if(WIN32)
+    target_compile_definitions(test_engine_call_state PRIVATE _WIN32_WINNT=0x0601)
+endif()
+
+nimrtc_apply_options(test_engine_call_state LENIENT)
+
+nimrtc_copy_msquic_dll(test_engine_call_state)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_call_state
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES TIMEOUT 60
+        DISCOVERY_TIMEOUT 10)
+endif()

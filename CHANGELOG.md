@@ -125,6 +125,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interface change — CI/export-config only — so the ADR-015 baseline stays
   at 198.
 
+- **The call-state surface (`slice v1-call-state-surface`, D7 / ADR-035).**
+  One callback now spans a whole call's lifecycle — `connecting` →
+  `connected` → `reconnecting` → `failed` / `closed` — carrying the N3
+  (reconnection), N4 (failure) and N8 (path-change) details, so a host no
+  longer assembles the answer from `set_on_state_change` + `set_on_error`
+  + polling `Stats`.  New public types `CallState` (five states),
+  `CallFailure` (six kinds: `kIceFailed` / `kDtlsFailed` / `kTurnRefused` /
+  `kCredentialsRejected` / `kMediaFailed`), `CallStateReport` (the failure
+  **string** is the N4 vocabulary verbatim; `failure_from_reason()` maps it
+  onto the enum in one place) and `EngineCallStateCallback`, installed via
+  `set_on_call_state()`.  The callback fires on a real **migration** — the
+  same state is never reported twice; `failed` / `closed` are **absorbing**,
+  so a DTLS failure cannot oscillate the report between `kConnected` and
+  `kFailed`.  Three lifecycle methods wrap the defined teardown order:
+  `start(config)` (configure → `open()`), `stop()` (`close()` under its
+  lifecycle name), and `hangup(reason)` (notifies the peer first, then
+  closes in the same order).  `set_on_control_message` is declared next to
+  `set_on_call_state` — signature and semantics unchanged.  All new symbols
+  are additive, so the ADR-015 baseline stays at 198.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

@@ -2958,6 +2958,33 @@ public:
      *  pending DTLS / SRTP records.  Safe to call multiple times. */
     NIMRTC_API_STABLE void     close() noexcept;
 
+    /** Start one call (v1.4 D7).
+     *
+     *  Wraps the "configure → open" sequence in one call.  Equivalent to
+     *  assigning `config` and calling `open()`; `open()` itself is
+     *  unchanged for existing hosts. */
+    NIMRTC_API_STABLE int start(const EngineConfig& config) noexcept;
+
+    /** End one call (v1.4 D7).
+     *
+     *  Closes in the **defined order**: the transport (ICE) first, then the
+     *  codecs and plugins, then the `TransportSession` (which itself tears
+     *  down ICE → DTLS → RTP → SCTP in that order).  The audio codecs are
+     *  closed after ICE — while the transport is still up the audio
+     *  pipeline must not die first, or in-flight frames would have nowhere
+     *  to go. */
+    NIMRTC_API_STABLE void     stop() noexcept;
+
+    /** Hang up (v1.4 D7).
+     *
+     *  The difference from `stop()`: `hangup()` **carries a reason** and
+     *  **notifies the peer first** (the reason is sent out), then closes in
+     *  the same defined order.
+     *
+     *  @param reason The hangup reason (a string the peer sees).
+     *  @return true when the hangup was performed. */
+    NIMRTC_API_STABLE bool     hangup(std::string_view reason) noexcept;
+
     /** True iff the engine is in the kOpen state. Cheap inline check;
      *  usable from any thread (reads an atomic state_). */
     NIMRTC_API_STABLE bool     is_open() const noexcept { return state_ == State::kOpen; }
@@ -3014,6 +3041,91 @@ public:
      *  "checking", "connected", "completed", "disconnected", "failed",
      *  "closed").  Pass an empty std::function to clear. */
     NIMRTC_API_STABLE void set_on_state_change(EngineStateCallback cb) noexcept { on_state_change_ = std::move(cb); }
+
+    // ---- Call-state surface (v1.4 D7) -------------------------------------
+    //
+    // The confluence point for "how is this call doing": one callback that
+    // spans the whole stack — connecting → connected → reconnecting →
+    // failed / closed — carrying the N3 (reconnection), N4 (failure) and
+    // N8 (path-change) details.  `set_on_control_message` lives next to it
+    // because the two callbacks read as one surface (spec §五) — its
+    // signature and semantics are unchanged.
+
+    /** The call's state (v1.4 D7).
+     *
+     *  This is the **whole-stack** state, not just ICE's — a host asks
+     *  "can this call be used", not "what is the ICE layer doing right
+     *  now".
+     *
+     *  Migration order: `connecting` → `connected` → (`reconnecting` ↔
+     *  `connected`)* → `failed` / `closed`. */
+    enum class NIMRTC_API_STABLE CallState : std::uint8_t {
+        kConnecting = 0,   ///< establishing (gathering / connecting)
+        kConnected = 1,    ///< up
+        kReconnecting = 2, ///< down, the engine is recovering per the N3 policy
+        kFailed = 3,       ///< failed (has a failure_reason)
+        kClosed = 4,       ///< over (stop() / hangup() / destructor)
+    };
+
+    /** The failure's kind (v1.4 D7, plan §5 D7-1).
+     *
+     *  The **enum** is for `switch`ing, the **string** is for logs — the
+     *  two say the same thing: the enum is stable, the string is readable. */
+    enum class NIMRTC_API_STABLE CallFailure : std::uint8_t {
+        kNone = 0,
+        kIceFailed = 1,           ///< ICE layer failed (checks-failed / no-pair)
+        kDtlsFailed = 2,          ///< DTLS handshake failed
+        kTurnRefused = 3,         ///< TURN server refused (transport-unsupported)
+        kCredentialsRejected = 4, ///< credentials rejected (credentials-rejected)
+        kMediaFailed = 5,         ///< media layer failed (codec / render / capture)
+    };
+
+    /** One call-state migration report (v1.4 D7). */
+    struct NIMRTC_API_STABLE CallStateReport {
+        /** The new state. */
+        CallState state = CallState::kConnecting;
+
+        /** The failure's kind (`state == kFailed`; otherwise kNone). */
+        CallFailure failure = CallFailure::kNone;
+
+        /** The failure's **string** (the N4 vocabulary):
+         *  "transport-unsupported" / "credentials-rejected" /
+         *  "no-candidates" / "no-pair" / "checks-failed" / "none". */
+        std::string failure_reason;
+
+        /** The path-change detail (N8's shape): old pair / new pair /
+         *  reason.  Empty when no path change happened. */
+        std::optional<IceCandidatePairInfo> old_pair;
+        std::optional<IceCandidatePairInfo> new_pair;
+        std::string path_change_reason;
+
+        /** The reconnection detail (N3's shape): restarts used / budget
+         *  left / terminal.  0 / 0 / false when no reconnection happened. */
+        std::uint32_t restart_count = 0;
+        std::uint32_t remaining_budget = 0;
+        bool terminal = false;
+    };
+
+    using NIMRTC_API_STABLE EngineCallStateCallback =
+        std::function<void(const CallStateReport&)>;
+
+    /** Install the call-state callback (v1.4 D7).
+     *
+     *  Fires on the engine (tick) thread on a state **migration** — the
+     *  same state is never reported twice, so this is not a per-frame
+     *  event.  Pass an empty std::function to clear. */
+    NIMRTC_API_STABLE void set_on_call_state(EngineCallStateCallback cb) noexcept;
+
+    /** Install the callback that receives inbound control messages.
+     *
+     *  The callback fires on the engine's thread with one **whole**
+     *  message.  The bytes are valid only for the duration of the call.
+     *
+     *  Placed next to `set_on_call_state` because the two callbacks read as
+     *  one surface (v1.4 D7, spec §五) — this declaration's signature and
+     *  semantics are unchanged. */
+    NIMRTC_API_STABLE void set_on_control_message(
+        std::function<void(std::span<const std::uint8_t>)> cb) noexcept;
 
     // ---- DataChannel callbacks (forwarded to every channel create_data_channel() returns) -
     //
@@ -4454,15 +4566,6 @@ public:
         std::uint64_t event_id) noexcept;
 
     /**
-     * @brief Install the callback that receives inbound control messages.
-     *
-     * The callback fires on the engine's thread with one **whole**
-     * message.  The bytes are valid only for the duration of the call.
-     */
-    NIMRTC_API_STABLE void set_on_control_message(
-        std::function<void(std::span<const std::uint8_t>)> cb) noexcept;
-
-    /**
      * @brief The control channel's counters.
      *
      * The counters are what make the control path *observable*: a
@@ -5794,6 +5897,11 @@ private:
     EngineErrorCallback on_error_;
     EngineStateCallback on_state_change_;
 
+    /** Fired on a call-state migration (v1.4 D7).  Set by
+     *  `set_on_call_state()`; called on the tick thread by the engine's
+     *  call-state poll and the N3 / DTLS / media / close trigger points. */
+    EngineCallStateCallback on_call_state_;
+
     /** Fired when the peer restarts ICE (RFC 8445 §9.1.1.1).
      *  Installed on the ICE transport when the transport is created; the
      *  transport calls it when the peer's description carries new ICE
@@ -6112,6 +6220,25 @@ private:
      *  `set_on_ice_recovery` callback. */
     void report_ice_recovery_terminal(std::string_view reason,
                                       std::string_view terminal_reason) noexcept;
+    /** True while the N3 machine is mid-recovery (grace / backoff).
+     *
+     *  During an active recovery the call-state absorbs down observations
+     *  and transient DTLS / media failures — the only outcomes while
+     *  recovering are `kReconnecting` or `kConnected`; the definitive
+     *  failure is the recovery's own terminal (v1.4 D7, ADR-035 §2). */
+    bool ice_recovery_active() const noexcept;
+    /** Drive the call-state machine from the ICE state (v1.4 D7).  Called
+     *  from tick() after `poll_ice_recovery()`; the N3-recovering gate
+     *  above decides which observations reach the machine. */
+    void poll_call_state() noexcept;
+    /** Enter `kFailed` through a `fail()` and fire the report. */
+    void fail_call_state(CallFailure failure, std::string_view reason) noexcept;
+    /** Fire the `set_on_call_state` callback with the N3 / N8 details
+     *  attached (spec §三's sketch). */
+    void fire_call_state(CallStateReport report) noexcept;
+    /** The N4 failure reason for the current transport state
+     *  (the same decision `Stats::transport.ice_failure_reason` projects). */
+    std::string current_ice_failure_reason() const noexcept;
     void init_bwe_scheduler() noexcept;
     void shutdown_bwe_scheduler() noexcept;
     /** Hand the aggregated network-feedback snapshot to the bandwidth

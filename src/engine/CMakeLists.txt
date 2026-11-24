@@ -124,6 +124,12 @@ add_library(nimrtc_engine STATIC
     # restart, manual restart, peer restart) share one judgment instead of
     # each carrying its own.
     src/engine_path_change.cpp
+    # v1.4 (v1-call-state-surface, D7): the call-state machine.  A private
+    # TU — the "translate engine events into one state migration" machine
+    # and the `failure_from_reason()` N4-vocabulary mapping live here, so
+    # the call-state confluence point has ONE visible owner and the enum /
+    # string mapping cannot drift (spec §风险).
+    src/engine_call_state.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and

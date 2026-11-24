@@ -38,6 +38,7 @@
 #include <nimrtc/sdp/session_description.hpp>
 #include <nimrtc/web_transport/web_transport_session_iface.hpp>
 
+#include "engine_call_state.hpp"
 #include "engine_ice_recovery.hpp"
 #include "engine_path_change.hpp"
 #include "engine_turn_credentials.hpp"
@@ -154,6 +155,14 @@ struct SessionState {
     PathChangeTracker path_change;
     std::string last_path_change_reason;
     std::optional<IceCandidatePairInfo> last_path_change_new_pair;
+
+    // ---- Call state -> one lifecycle report (v1.4 D7, additive) ----------
+    // The D7 confluence point: a host sees the whole call lifecycle in one
+    // callback (`set_on_call_state`) instead of assembling it from
+    // `set_on_state_change` / `set_on_error` / `Stats` polling.  The machine
+    // is pure state (no clock / transport); the N3 / N8 details the reports
+    // carry are read from the collaborators above at report time.
+    CallStateMachine call_state;
 
     // ---- DataChannel DTLS-transport cookie (v1.x follow-up) ------------
     //

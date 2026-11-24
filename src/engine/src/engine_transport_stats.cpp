@@ -162,6 +162,29 @@ IceCandidatePairInfo to_engine_pair(const plugins::IceCandidatePair& p) {
     return out;
 }
 
+/** The N4 failure facts, projected from the transport seam's own reports.
+ *
+ *  Shared by `Stats::transport.ice_failure_reason` and the D7 call-state's
+ *  failure reason, so the two surfaces answer "why did ICE fail" with the
+ *  same decision (v1.4 D7 — the mapping is one pure function, spec §风险). */
+detail::TransportStatsProjector::FailureInputs build_failure_inputs(
+    const plugins::IICETransport* ice_t_) {
+    detail::TransportStatsProjector::FailureInputs fi;
+    if (ice_t_ == nullptr) return fi;
+    const auto diag = ice::connectivity_diagnostics_of(*ice_t_);
+    const auto counts =
+        detail::TransportStatsProjector::count_candidates(
+            ice_t_->gathered_local_candidates());
+    fi.gathering_complete = diag.gathering &&
+                            *diag.gathering == ice::GatheringState::Complete;
+    fi.counts = counts;
+    fi.pair_selected = ice_t_->selected_pair().has_value();
+    fi.agent_failed = ice_t_->state() == plugins::IceState::Failed;
+    fi.turn_transport_unsupported = diag.turn_transport_unsupported;
+    fi.turn_credentials_rejected = diag.turn_credentials_rejected;
+    return fi;
+}
+
 }  // namespace
 
 std::optional<IceCandidatePairInfo> NimRTCEngine::current_pair() const noexcept {
@@ -169,6 +192,13 @@ std::optional<IceCandidatePairInfo> NimRTCEngine::current_pair() const noexcept 
     const auto pair = ice_t_->selected_pair();
     if (!pair) return std::nullopt;
     return to_engine_pair(*pair);
+}
+
+std::string NimRTCEngine::current_ice_failure_reason() const noexcept {
+    // The same decision the `Stats` surface projects — shared through
+    // `build_failure_inputs` above, so the two never disagree.
+    return detail::TransportStatsProjector::ice_failure_reason(
+        build_failure_inputs(ice_t_));
 }
 
 void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
@@ -228,14 +258,7 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
 
         // The failure reason is a pure decision over the facts above, in
         // the spec's priority order (first match reports first).
-        detail::TransportStatsProjector::FailureInputs fi;
-        fi.gathering_complete = diag.gathering &&
-                                *diag.gathering == ice::GatheringState::Complete;
-        fi.counts = counts;
-        fi.pair_selected = pair.has_value();
-        fi.agent_failed = state == plugins::IceState::Failed;
-        fi.turn_transport_unsupported = diag.turn_transport_unsupported;
-        fi.turn_credentials_rejected = diag.turn_credentials_rejected;
+        const auto fi = build_failure_inputs(ice_t_);
         out.ice_failure_reason =
             detail::TransportStatsProjector::ice_failure_reason(fi);
     }

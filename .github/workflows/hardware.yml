@@ -201,6 +201,17 @@ jobs:
               continue
             }
             git checkout --force FETCH_HEAD
+            # `git remote add` refuses a remote that is already
+            # there, and the runner's work directory survives from one
+            # job to the next -- so on the second job the fetch step
+            # dies with 'error: remote origin already exists'.
+            #
+            # The `2>$null` does not suppress it: PowerShell reads a
+            # native command's stderr as an *error record*, and a
+            # step with an error record in it fails, whatever the
+            # exit code.  So the remote is removed first, and the
+            # removal's own failure is swallowed the same way.
+            git remote remove origin 2>$null
             git remote add origin $url 2>$null
             $copied = $true
             break
@@ -220,7 +231,7 @@ jobs:
           # the first attempt routinely dies with 'early EOF' after
           # ten minutes.
           git remote remove origin 2>$null
-          git remote add origin $url
+          git remote add origin $url 2>$null
           $attempts = 8
           for ($i = 1; $i -le $attempts; $i++) {
             Write-Host "fetch attempt $i/$attempts"

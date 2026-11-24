@@ -241,8 +241,6 @@ def copy_from_mirror(root: str, path: str, mirror: str) -> bool:
     if want and have and want != have:
         return False
 
-    if os.path.isdir(dest):
-        return True
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     try:
         subprocess.run(
@@ -259,6 +257,14 @@ def copy_from_mirror(root: str, path: str, mirror: str) -> bool:
     except OSError as exc:
         print("  %s: could not copy from the mirror: %s" % (path, exc),
               flush=True)
+        return False
+
+    # The copy has to have brought something.  A destination that
+    # exists but is empty is what a half-finished fetch leaves
+    # behind, and treating it as 'already there' is how a vendored
+    # tree goes missing without anybody noticing.
+    if not os.path.isdir(dest) or not os.listdir(dest):
+        print("  %s: the mirror copy is empty" % path, flush=True)
         return False
     print("  %s: copied from the local mirror" % path, flush=True)
     return True
@@ -317,9 +323,14 @@ def fetch_one(root: str, path: str, retries: int,
     # commit from objects it already has.  `--no-fetch` keeps it from
     # going to the network at all, which is the point: this attempt is
     # *only* about what is already on disk.
+    #
+    # It is bounded, because `--no-fetch` has been seen to hang: with
+    # no fetch and no timeout of its own, git waits on an object that
+    # never arrives.  The budget turns that into a failure the retry
+    # around it can act on.
     rc = run(
         ["git", "submodule", "update", "--init", "--no-fetch", "--", path],
-        cwd=root, timeout=FETCH_TIMEOUT_SECONDS)
+        cwd=root, timeout=120)
     if rc == 0 and is_up_to_date(root, path):
         print("  %s: checked out from the local object cache" % path,
               flush=True)

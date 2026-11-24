@@ -514,6 +514,31 @@ jobs:
       - name: Check that every workflow expression is an expression
         run: python tools/check_workflow_expressions.py --self-test
 
+      # A workflow's `run:` block is not checked by anything.  GitHub
+      # writes it to a `.ps1` file and runs it; if the file does not
+      # parse, the step dies with a `ParserError` and says nothing
+      # about what the step was doing:
+      #
+      #     Write-Host "mirror $m: not a clone"
+      #                        ~~~
+      #     Variable reference is not valid. ':' was not followed by a
+      #     valid variable name character.
+      #
+      # That is a *parse* error, so it kills the whole script before a
+      # single command runs -- and the only way to find out was a
+      # twenty-minute self-hosted run that died at step one.  The
+      # hardware job sat on exactly that: `$m:` reads as a drive
+      # reference to PowerShell.
+      #
+      # So every PowerShell block is parsed locally, on the pull
+      # request, with PowerShell's own parser -- so this check cannot
+      # disagree with the runner about what is valid.
+      - name: Check that every workflow's PowerShell parses
+        run: python tools/check_workflow_powershell.py
+
+      - name: Self-test the PowerShell parser guard
+        run: python tools/check_workflow_powershell.py --self-test
+
       # The plugin catalogue in docs/plugin_author_guide.md section 4 is
       # a promise about the code: every knob it names must exist in
       # EngineConfig, every macro it names must exist in the registry,

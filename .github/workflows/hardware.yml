@@ -167,8 +167,19 @@ jobs:
           )
           $copied = $false
           foreach ($m in $candidates) {
+            # The braces around the variable name are not decoration.
+            # PowerShell reads `$m:` as a *drive* reference -- the
+            # letter after the colon is the drive -- and the whole
+            # script then fails to parse with
+            #
+            #     Variable reference is not valid. ':' was not followed
+            #     by a valid variable name character.
+            #
+            # which is a parse error for the *entire* step, not a
+            # runtime one: the step dies before it runs a single
+            # command, and the failure says nothing about the fetch.
             if (-not (Test-Path (Join-Path $m ".git"))) {
-              Write-Host "mirror $m: not a clone"
+              Write-Host "mirror ${m}: not a clone"
               continue
             }
             $have = $null
@@ -179,14 +190,14 @@ jobs:
               $have = (git -C $m rev-parse $ref 2>$null)
             }
             if (-not $have) {
-              Write-Host "mirror $m: does not have $ref"
+              Write-Host "mirror ${m}: does not have ${ref}"
               continue
             }
-            Write-Host "using the local mirror $m at $have"
+            Write-Host "using the local mirror ${m} at ${have}"
             git init
             git fetch --no-tags "$m" "$have"
             if ($LASTEXITCODE -ne 0) {
-              Write-Host "mirror $m: the fetch failed"
+              Write-Host "mirror ${m}: the fetch failed"
               continue
             }
             git checkout --force FETCH_HEAD

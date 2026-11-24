@@ -297,6 +297,15 @@ caller                                    callee
 | **样例依赖了引擎不该暴露的东西** | 静态检查：`src/engine/` 的公开面够不够用。**不够**是**引擎的缺口**，要**另开一片**（不是让样例绕过接缝纪律）。 |
 | **行数预算被人绕过**（把代码拆到 `headers/` 外的目录） | 工具数的是**样例目录下的全部** `.cpp` / `.hpp`，不是某几个指定文件。豁免列表必须**为空**（或只剩 `README.md`）。 |
 
+### 实施中的发现（2026-11-25）
+
+实现验收腿时确认了两个**引擎侧缺口** —— 正是风险表最后一行的情形（「样例依赖了引擎不该暴露的东西 → 不够是引擎的缺口，要另开一片（不是让样例绕过接缝纪律）」）：
+
+- **TURN/TLS 证书校验不可达**：引擎公开 API 只有 `tls_server_name`，没有 `turn_tls_verify_peer` / `turn_tls_ca_file`；N5 参考中继是 TLS-only 自签证书（ADR-027 Decision 4），ice 默认 `WOLFSSL_VERIFY_PEER` + 空信任库（`turn_tls.cpp:123-134`）→ 必然拒绝。实证：`TurnTls.MissingTrustAnchorDoesNotProduceARelayCandidate`（ctest #461）通过。
+- **安装树缺视频依赖**：暂存 bundle 的 `NimRTCConfig.cmake` 不链 `nimrtc_nvcodec` / `nimrtc_vendor_openh264_*`，也不链 `d3d11`/`dxgi` → 视频宿主（h264 + headless sink）链接 `nimrtc::engine` 报 31 个 LNK2019。实证：本地在安装树上编译样例失败。
+
+已按风险表缓解提出 `ZELTO_QUESTION`（2026-11-25）。在缺口解决前，验收执行腿（判据 24-27）以 `{ skip: blockedReason() }` 条件跳过并点名缺口 —— **阻塞的腿是 SKIPPED，永远不是 PASS**（判据 27 的诚实规则）。
+
 ## 归属
 
 **`version/v3`**。本片不碰 `src/` —— 只写样例、工具与 CI。**不撞** N8 / N9 的区域，但波次 6 依赖前面全部的成果。

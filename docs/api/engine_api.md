@@ -2478,7 +2478,39 @@ See §8.3 — `remote_audio_format()`.
 
 ---
 
-## 17. See also
+## 17. 一个 ≤200 行的宿主长什么样（what a ≤200-line host looks like）
+
+`examples/sdk-sample/sdk-sample.cpp`（153 非注释行）+ `sdk_signalling.hpp`（38 行）
+是两个进程、同一台机器、跑完一通话的完整宿主。它是「应用只贡献信令与产品 UI」
+的最小证明 —— 设备、编解码、BWE、RTX、恢复、渲染、AEC 全在引擎里。
+
+宿主写的（就是那 ≤200 行）：
+
+- **信令客户端**：newline-delimited JSON（offer / answer / candidate），复用
+  `examples/remote-desktop/signalling.py` 的协议方言；
+- **`EngineConfig`**：`connectivity_profile = "auto"`（D6）、
+  `ice_recovery_policy = "auto"`（N3）、`control_channel_name`、`turn_credentials`
+  提供者（N7）、`video_source_name = "memory"`、`video_sink_name = "headless"`、
+  `video_codec_name = "h264"`；
+- **四个钩子**：`set_on_call_state`（D7）、`set_on_control_message`、
+  `set_on_ice_recovery`（N8）、`EngineConfig::turn_credentials`（N7）；
+- **收尾**：`pre_open()` / `open()`、`create_offer()` / `process_remote_sdp()`、
+  `get_ice_transport()` 的候选交换、`send_audio()` / `send_video()` /
+  `send_control_message()`、`tick()`。
+
+宿主**不写**的（也正是行数能压下来的原因）：
+
+- 不写设备 id，不采集、不渲染 —— `memory` 源 + `headless` sink，CI 上无设备时
+  采集/渲染只 SKIPPED 永不 PASS；
+- 不实现连通性策略（D6 profile）与重连策略（N3 引擎侧）—— 归引擎；
+- 不直接 include `nimrtc/ice/` 的任何具体头（L4 接缝纪律）—— 只通过引擎公开面。
+
+行数预算是**每次 CI 重新量**的事实（预算 200，10% 漂移，上限 220；
+`tools/check_sample_line_budget.py`），详见 `docs/adr/ADR-036-sdk-sample-line-budget.md`。
+
+---
+
+## 18. See also
 
 - `engine_config.md` — full field reference for `EngineConfig`.
 - `plugin_author_guide.md` — how to write your own plugin (DTLS,

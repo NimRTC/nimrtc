@@ -180,6 +180,107 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Verified on the runner's own workspace: all fourteen vendored trees
   come up at the recorded commit.
+- **The deployment bundle can no longer ship stale binaries, or binaries
+  from two different build trees.**  Found while chasing a frame-drop
+  regression: the video fix was in the tree, the tests were green, and
+  the operator's bundle still dropped 81% of its frames — because the
+  bundle carried the binaries from *before* the fix, and nothing in the
+  bundle, in the script, or in the output said so.
+
+  Two defects in `scripts/package_rd_deploy.ps1`, both quiet:
+
+  **A missing `msquic.dll` was silently replaced by another tree's.**
+    The DLL has to come from the same build tree as the media binaries:
+    a different configuration links against a different msquic, and the
+    two do not agree on the ABI.  The failure mode on the operator's
+    machine is a crash with nothing in the bundle to explain it.  The
+    fallback search is gone; the bundle is built from one tree or not
+    at all.
+
+  **Nothing compared the binaries against the sources.**  A bundle
+    packaged before a fix landed ships the bug, and the operator sees
+    the old behaviour and concludes the fix did not work.  The script
+    now compares the binaries' timestamps against the newest source
+    file and **warns** when the binaries are older, naming both dates.
+    `-NoStaleCheck` silences it for the legitimate cases (a bisect, a
+    release candidate from a tag).
+
+  The bundle also carries **`BUNDLE-INFO.txt`**: the commit, the
+  branch, the build time and whether it was stale.  A bug report
+  against a bundle can now be answered with "which build did you
+  actually run?" instead of a guess.
+
+  `scripts/test_package_rd_deploy.py` pins all of it (24 checks), and
+  the Windows CI leg runs it — the script under test is a `.ps1`, so
+  that is the leg that can run it.
+
+- **The release gate's rules can no longer be changed on the day of the
+  cut, and a tag can no longer present itself under the wrong name.**
+  Two defects in the release machinery, both found by reviewing the
+  `v1.3.0` cut.
+
+  **The soak rule is now versioned, dated, and has a cooldown.** On
+  2026-11-23 — the same day `v1.3.0` was cut — the gate's window went
+  from seven consecutive green days to five, and the intra-day rule went
+  from "any `FAIL` spoils the day" to "every required case needs at
+  least one `PASS`". Both changes were defensible on their own: the
+  failure that motivated them was a single Chrome-interop timeout on a
+  shared runner, on a commit that had already passed the same case three
+  times that day, whose CI was 13/13 green.
+
+  The problem was not the judgement. It was that the *mechanism* let the
+  party a gate holds back change the criterion that was holding it back,
+  on the same day, with nothing between the two. So the rule now lives
+  in `GATE_RULE` (`tools/run_soak.py`) as a **named, versioned, dated
+  rule**, and a release is judged by the rule in force on the day it is
+  cut. A rule change carries a **cooldown**: it cannot decide a release
+  until the cooldown has elapsed. The release that changes the rule is
+  therefore judged by the rule it replaced — the change cannot be used to
+  release the very thing it was changed for. `docs/plan/soak-runbook.md`
+  §4.3.2 has the full rationale; the release workflow no longer passes
+  `--require-days` at all, because the day count is the rule's business
+  and not the release manager's.
+
+  **A tag object must name itself the way its ref does.** `v1.3.0` is
+  reached through `refs/tags/v1.3.0`, but the tag *object* names itself
+  `v1.3.0-staged` — the re-cut script signed under a throw-away probe
+  name and then pointed the ref at the resulting object with
+  `git update-ref`. The signature verified (it was a valid signature
+  over a valid object), and nothing complained, because nothing looked
+  at the object's *name*. But the internal name is what `git tag -v`,
+  `git describe` and the GitHub release page report, so the tag
+  presented itself to the world as `v1.3.0-staged`.
+  `tools/verify_tag_signature.py` now checks the name, and the check is
+  a *shape* property, so it fires under `--shape-only` too — which means
+  the release workflow's preflight refuses such a tag. The re-cut
+  script signs the tag under the name it will be released as, and
+  restores the previous tag object if signing fails.
+
+- **The hardware-codec claim now has a gate that can fail.** The
+  `hardware` job has failed all 22 times it has run — most at the
+  checkout stage, on the self-hosted runner's link dropping long
+  transfers — and no release gate noticed, because the job is not in the
+  `protect-main-and-releases` ruleset and the release workflow never
+  read its evidence. A release could therefore be cut with the Q7
+  hardware claim resting on nothing at all.
+
+  `scripts/check-release-freeze.sh` gains a `hardware` check that reads
+  the archived evidence in `build/hardware/` and requires it to be a
+  **PASS on the tree being tagged**: a record measured on another
+  commit, or on a dirty tree, is not evidence about the release. Under
+  `--final-tag` a missing record is a **FAIL**, not a skip — the same
+  rule the `api-symbols` check uses for a missing `node`, and for the
+  same reason: at tag-cut time there is no later CI run to catch it.
+  `RELEASING.md` §3.3 step 12 now says how to collect the evidence.
+
+- **The `v1.2.0` sidecars are documented for what they are.** Three of
+  the four `v1.2.0` `.sha256` sidecars cannot be checked with
+  `sha256sum -c`: the two Linux ones name `build/nimrtc-…tar.xz` (a
+  directory prefix that does not exist next to a downloaded bundle), and
+  the Windows one is a bare hex digest with no file name at all. The
+  macOS one is fine, and **all four digests are correct** — this was a
+  line-format defect, not a corruption. `README.md` and `README.zh.md`
+  now say so, and say how to verify a `v1.2.0` bundle by hand.
 
 - **The receiver delivers the Annex-B framing the frame contract
   promises, so the pictures a decoder refuses are decoded again.**

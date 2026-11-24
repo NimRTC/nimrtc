@@ -231,7 +231,7 @@ growing means the dead-man watchdog on the device is being kept quiet.
 
 ### 4.5 The packaged bundle (no build toolchain on the operator's machine)
 
-§4.1 and §4.2 need a Python 3 and, on the device machine, a source
+§4.1 and §4.2 need a Python 3 and, on the device tree, a source
 tree. When the operator's machine must not carry a toolchain, ship the
 **deployment bundle** instead: `build/rd-deploy.zip` (built by
 `scripts/package_rd_deploy.ps1`, refreshed whenever the binaries
@@ -241,6 +241,34 @@ The zip contains `rd_device.exe`, `rd_viewer.exe`, `msquic.dll`, the
 MSVC runtime under `crt/`, the four Python files (`client.py`,
 `wsproto.py`, `signalling.py`, `signalling_core.py`), the two `.bat`
 entry points and a `README.md`.
+
+#### Rebuild the bundle, do not reuse the last one
+
+The bundle carries **binaries**, not source. A bundle that was packaged
+before a fix landed ships the bug, and nothing in the zip says so — the
+operator sees the old behaviour and concludes the fix did not work.
+
+So the packaging script refuses to guess:
+
+- **One tree, or none.** `msquic.dll` has to sit next to the media
+  binaries in the same build tree. A DLL from a *different* tree is a
+  different configuration, and the ABI mismatch shows up on the
+  operator's machine as a crash with nothing to explain it. The script
+  refuses to mix them.
+- **A stale warning.** If a source file is newer than the binaries, the
+  script says so and names both dates. Rebuild, or pass `-BinDir`
+  pointing at a freshly built tree. `-NoStaleCheck` silences it for the
+  legitimate cases (a bisect, a release candidate from a tag).
+- **`BUNDLE-INFO.txt`.** The bundle records the commit, the branch, the
+  build time and whether it was stale. Quote the commit when reporting
+  a bug against a bundle — it answers "which build did you run?"
+  without a round trip.
+
+```powershell
+# Rebuild the tree, then package from *that* tree:
+cmake --build build/aigame --config Release --target rd_device rd_viewer
+scripts\package_rd_deploy.ps1 -BinDir build/aigame/examples/Release
+```
 
 **Device machine** (unzip anywhere, then two terminals):
 

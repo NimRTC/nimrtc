@@ -97,9 +97,56 @@ GIT_TUNING = [
 FETCH_TIMEOUT_SECONDS = 900
 
 
+def same_repository(a: str, b: str) -> bool:
+    """Do two origin URLs name the same repository?
+
+    The same repository has more than one URL: it can be reached over
+    SSH or over HTTPS, and the two spellings are the same repository
+    with the same history.  A comparison that looks at the whole URL
+    therefore rejects the very mirror it is looking for -- the runner
+    works over HTTPS while a developer's checkout is configured for
+    SSH -- and the job falls back to the network without saying why.
+
+    So the comparison is on the repository path: 'owner/name' out of
+    whichever spelling, with the '.git' suffix and any leading
+    scheme and host removed.
+    """
+    def path_of(url: str) -> str:
+        url = url.strip().rstrip("/")
+        if url.endswith(".git"):
+            url = url[:-4]
+        # 'git@github.com:owner/name' -- the host is before the colon
+        # and the path is after it.  This spelling has no scheme.
+        if "@" in url and ":" in url and not url.startswith(
+                ("http://", "https://", "ssh://", "git://")):
+            return url.split(":", 1)[1].strip("/").lower()
+        for prefix in ("https://", "http://", "ssh://", "git://"):
+            if url.startswith(prefix):
+                url = url[len(prefix):]
+                break
+        # What is left is 'host/owner/name'; the path is after the
+        # host.
+        if "/" in url:
+            url = url.split("/", 1)[1]
+        return url.strip("/").lower()
+
+    return bool(path_of(a)) and path_of(a) == path_of(b)
+
+
+def git_config(root: str, key: str) -> str:
+    """One git config value for a repository, or "" if there is none."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "config", "--get", key],
+            capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.decode("utf-8", "replace").strip()
+
+
 def mirror_candidates(root: str) -> list[str]:
     """Local clones of this repository that already have the vendored
-    trees, nearest first.
+    trees.
 
     The runner and the tree it builds are usually the same machine, and
     a working copy elsewhere on that machine has the vendored trees
@@ -108,39 +155,32 @@ def mirror_candidates(root: str) -> list[str]:
     records, the same check the network path makes -- it is just the
     difference between copying 120 MB and downloading it.
 
-    The candidates are found by name, under the same parent directory
-    as the working copy, and only those that are *this* repository
-    (same origin URL) are considered.
+    The candidates are *named*, not searched for.  A scan is
+    convenient, but it depends on the shape of the machine, and a job
+    that cannot find its mirror then fails in a way that looks like
+    the network is down.  Each candidate is checked before it is used,
+    so one that does not exist, or is not a clone of this repository,
+    is simply passed over.
     """
-    parent = os.path.dirname(os.path.abspath(root))
-    if not os.path.isdir(parent):
-        return []
+    root = os.path.abspath(root)
+    parent = os.path.dirname(root)
 
-    try:
-        out = subprocess.run(
-            ["git", "-C", os.path.abspath(root), "config", "--get",
-             "remote.origin.url"],
-            capture_output=True, timeout=60)
-        origin = out.stdout.decode("utf-8", "replace").strip()
-    except (OSError, subprocess.SubprocessError):
-        return []
+    origin = git_config(root, "remote.origin.url")
     if not origin:
         return []
 
-    found: list[str] = []
     entries: list[str] = []
     try:
         entries = sorted(os.listdir(parent))
     except OSError:
         pass
-    # The mirror is often on another drive -- the runner's work
-    # directory and a developer's checkout are not neighbours -- so
-    # the well-known locations are looked at too.
     for extra in (os.environ.get("NIMRTC_MIRROR", ""),
-                  r"D:\MyOpen\NimRTC"):
+                  "D:" + os.sep + "MyOpen" + os.sep + "NimRTC",
+                  "D:" + os.sep + "MyOpen" + os.sep + "NimRTC-followup"):
         if extra:
-            entries.append(os.path.basename(extra.rstrip("\\/")))
+            entries.append(extra)
 
+    found: list[str] = []
     seen: set[str] = set()
     for entry in entries:
         cand = os.path.join(parent, entry)
@@ -149,21 +189,17 @@ def mirror_candidates(root: str) -> list[str]:
         if cand in seen:
             continue
         seen.add(cand)
-        if cand == os.path.abspath(root) or not os.path.isdir(cand):
+        if cand == root or not os.path.isdir(cand):
             continue
-        if not os.path.isdir(os.path.join(cand, ".git")):
+        # '.git' is a directory in an ordinary clone and a *file* in a
+        # linked worktree, and both count as a clone.
+        if not os.path.exists(os.path.join(cand, ".git")):
             continue
-        try:
-            out = subprocess.run(
-                ["git", "-C", cand, "config", "--get", "remote.origin.url"],
-                capture_output=True, timeout=60)
-            cand_origin = out.stdout.decode("utf-8", "replace").strip()
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if cand_origin and cand_origin.rstrip("/").endswith(
-                origin.rstrip("/").split("/")[-1]):
+        cand_origin = git_config(cand, "remote.origin.url")
+        if cand_origin and same_repository(cand_origin, origin):
             found.append(cand)
     return found
+
 
 
 def copy_from_mirror(root: str, path: str, mirror: str) -> bool:

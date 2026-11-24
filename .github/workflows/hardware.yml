@@ -88,48 +88,72 @@ jobs:
     # for.
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v7
-        with:
-          # The submodules are fetched by the next step, not by the
-          # checkout.  `submodules: recursive` clones all fourteen of
-          # them in one pass, and a single cut-off transfer aborts the
-          # whole step -- on a link that drops long transfers, the
-          # vendored trees are exactly the wrong shape for that: the
-          # largest (`wolfssl`) is over 100 MB.  The next step retries.
-          submodules: false
-          # A shallow checkout, deliberately.  `fetch-depth: 0` pulls the
-          # whole history, and the `soak.yml` job that also uses it
-          # needs that: its record names the commit it measured, and a
-          # shallow clone makes that commit impossible to resolve in
-          # the repository's own history later.  This job has no such
-          # requirement -- the evidence record resolves the commit with
-          # `git rev-parse HEAD`, which a shallow clone answers -- and
-          # the full history is a large transfer that a flaky link
-          # makes very slow.
-          fetch-depth: 1
-          ref: ${{ inputs.ref || github.sha }}
-
-      - name: Fetch the tree, with retries
-        # The checkout does both of these transfers without a retry, and
-        # on a link that drops long transfers one cut-off transfer is
-        # enough to fail the job -- the repository's own fetch, and then
-        # the vendored trees (the largest of them, `wolfssl`, is over
-        # 100 MB).  This step does both, one thing at a time, with a
-        # bounded retry around each.
+      - name: Fetch the repository (with retries)
+        # Not `actions/checkout`.  The checkout retries a cut-off
+        # transfer three times, which is not enough for a link that
+        # drops long ones, and its failure is blunt -- 'Failed to
+        # connect to github.com port 443' -- and the job ends there
+        # with nothing built and no evidence recorded.
         #
-        # The submodule part also fails when a submodule ends up
-        # *empty*: a silent failure the build would otherwise surface
-        # much later, far from the cause.
+        # So the fetch is done here, with a bounded retry around it.
+        # `git init` rather than `git clone`: an init leaves the
+        # repository *in place* when the transfer is cut off, so the
+        # objects that did arrive stay and the next attempt asks only
+        # for the missing ones.  A clone deletes the whole directory
+        # on failure, and on this link the first attempt routinely dies
+        # with 'early EOF' after ten minutes.
         #
-        # `shell: powershell` -- Windows PowerShell, which every Windows
-        # runner has.  This job asked for `pwsh` and the runner answered
-        # `pwsh: command not found`: PowerShell 7 is not installed on a
-        # self-hosted Windows machine by default, and the failure is
-        # silent about everything else the job would have proven.
+        # The fetch is shallow: the evidence record resolves the commit
+        # with `git rev-parse HEAD`, which a shallow fetch answers, and
+        # the full history is a large transfer that this link makes
+        # very slow.
+        #
+        # `shell: powershell` -- Windows PowerShell, which every
+        # Windows runner has.  This job asked for `pwsh` and the
+        # runner answered 'pwsh: command not found': PowerShell 7 is
+        # not installed on a self-hosted Windows machine by default --
+        # it is on the hosted images, which is why every other
+        # workflow in the tree can ask for it.
         shell: powershell
         run: |
-          python tools/fetch_submodules.py --fetch-main `
-            --ref "${{ inputs.ref || github.sha }}" --retries 5
+          $ref = "${{ inputs.ref || github.sha }}"
+          $url = "https://github.com/${{ github.repository }}.git"
+          cd $env:GITHUB_WORKSPACE
+          if (-not (Test-Path .git)) { git init }
+          git remote remove origin 2>$null
+          git remote add origin $url
+          $attempts = 8
+          $ok = $false
+          for ($i = 1; $i -le $attempts; $i++) {
+            Write-Host "fetch attempt $i/$attempts"
+            git -c http.version=HTTP/1.1 `
+                -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=120 `
+                fetch --depth 1 --no-tags origin $ref
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Start-Sleep -Seconds 10
+          }
+          if (-not $ok) {
+            Write-Error "could not fetch $ref in $attempts attempts"
+            exit 1
+          }
+          git checkout --force FETCH_HEAD
+          git submodule sync --recursive
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+
+      - name: Fetch the vendored submodules (with retries)
+        # One submodule at a time, each with a bounded retry around it.
+        # The step also fails if a submodule ends up *empty*, which is a
+        # silent failure the build would only surface much later.
+        #
+        # The fetch tries the runner's local object cache before the
+        # network: '.git/modules' survives from one job to the next --
+        # the fetch above cleans the worktree, not the object cache --
+        # so on a runner that has been here before, most of the
+        # vendored trees are already on disk.
+        shell: powershell
+        run: |
+          python tools/fetch_submodules.py --retries 5
         env:
           PYTHONIOENCODING: utf-8
 

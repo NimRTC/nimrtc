@@ -7,7 +7,7 @@
 // the failure this file exists to catch.
 //
 // Regenerate with:
-//     python tools/bump_version.py --set 1.3.1 --pre-release dev
+//     python tools/bump_version.py --set 1.3.1 --pre-release ""
 
 #ifndef NIMRTC_TESTS_API_VERSION_EXPECTATIONS_HPP
 #define NIMRTC_TESTS_API_VERSION_EXPECTATIONS_HPP
@@ -15,7 +15,7 @@
 #define NIMRTC_EXPECTED_API_VERSION_MAJOR 1
 #define NIMRTC_EXPECTED_API_VERSION_MINOR 3
 #define NIMRTC_EXPECTED_API_VERSION_PATCH 1
-#define NIMRTC_EXPECTED_API_VERSION_PRE_RELEASE "dev"
+#define NIMRTC_EXPECTED_API_VERSION_PRE_RELEASE ""
 #define NIMRTC_EXPECTED_API_VERSION_ENCODED 10301
 #define NIMRTC_EXPECTED_API_VERSION_STRING "1.3.1"
 

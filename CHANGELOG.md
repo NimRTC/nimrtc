@@ -7,37 +7,71 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Work that lands after `v1.3.0`.
+> Work that lands after `v1.3.1`.
+
+## [1.3.1] - 2026-11-24
+
+### Status: Stable
+
+> The source version is `1.3.1` (`project(VERSION)` in `CMakeLists.txt`,
+> `NIMRTC_API_VERSION` = 10301, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
+> `v1.3.1` is a **patch release**: one line-format defect in the release
+> pipeline is fixed, and the release page gains the integrity data a
+> consumer needs to check a download.
+
+> There is no public API change.  `NIMRTC_API_VERSION` moves from 10300 to
+> 10301 only because `project(VERSION)` moved; ADR-015's stability policy
+> is unchanged, and a patch bump carries no compatibility promise
+> different from 10300.
+
+> The three things this release changes:
+
+> - **The `.sha256` sidecars are now `sha256sum -c` compatible at the
+>   cut, not patched afterwards.**  The v1.3.0 release shipped three
+>   broken sidecars and had them replaced in place; the build jobs that
+>   produced them are fixed here, so the next cut produces the right line
+>   the first time.
+> - **The release page now carries a digest table.**  The v1.3.0 body
+>   told a reader how to check a GPG signature but never printed the
+>   digests, so a consumer had no in-band value to compare against.  The
+>   published body now lists every bundle with its SHA-256 and its size.
+> - **`SECURITY.md` names the versions it actually supports.**  The
+>   table still said `1.0.x` / `0.9.x`, three minor versions stale.
+
+> **Why a patch release rather than a `v1.2.1`.**  `release/1.2` is a
+> 2026-11-18 snapshot 89 commits behind `main`, and the soak gate needs
+> five consecutive green days **at the tag**.  Every green day since
+> 2026-11-19 was measured on `main`, which is not an ancestor of
+> `release/1.2`, so none of it counts toward a `v1.2.1` cut.  `v1.3.1`
+> inherits the same window that closed `v1.3.0`.
 
 ### Changed
 
-- **The release's soak gate asks for five consecutive green days, and a
-  single failed run no longer condemns the whole day.**
-  Two changes to the window that `release.yml` gates the tag on, both
-  permanent and both made on 2026-11-23:
+- **The release body carries a SHA-256 / size table for every bundle.**
+  The v1.3.0 release body instructed the reader to verify a GPG signature
+  and to run `sha256sum -c`, but it never printed a digest, so the only
+  in-band integrity value was the detached `.sha256` sidecar sitting next
+  to the asset on the same server.  A consumer who wanted to check a
+  mirror or an offline copy had nothing to compare against.
 
-  - **Seven days became five.**  Seven was the v1.1 plan C5 requirement.
-    The window exists to expose a *chronic* failure before a tag is cut,
-    and five consecutive green days on both platforms says that; the
-    extra two days bought nothing that the evidence record did not
-    already say.
-  - **The intra-day rule no longer treats one `FAIL` among passing runs
-    as a failed day.**  A day is normally measured several times — the
-    CI job and the scheduled local task both write the same
-    platform/day — and the old rule ("any `FAIL` in the day spoils it")
-    meant a single Chrome-interop timeout on a shared CI runner erased a
-    day in which the same case had passed three times earlier.  That
-    measured the runner's mood rather than the build's stability.  The
-    rule now is that every required case must have at least one `PASS`
-    for the day; a case whose **every** run failed still ends the
-    streak, and every `FAIL` is still reported with its reason and its
-    captured output.
+  The publish job now appends a table -- one row per bundle, with its
+  SHA-256, its size in bytes and its platform -- built from the bundles it
+  is about to publish.  The table is generated after the "which platforms
+  are present" check, so a partial release lists exactly the bundles that
+  actually shipped.
 
-  The change is what let the v1.3.0 window close: the Linux half was
-  held at 2/7 by a single `subprocess.TimeoutExpired` on 2026-11-20
-  (case D on `b0191e0f`, Chrome interop never reaching a handshake),
-  on a commit that had already passed that case three times the same
-  day and whose CI was 13/13 green.
+  The body-length guard moved with it.  The old check ran *before* the
+  footers were appended, so it could only ever measure the body proper
+  and the footers were never counted -- exactly the part that grows.  The
+  guard now runs in a step of its own, after every footer is in place, so
+  it measures the body GitHub will really receive.  It counts
+  **characters**, not bytes, because GitHub's limit is on characters and
+  the body carries non-ASCII.
+
+- **`SECURITY.md`'s supported-version table matches the releases that
+  exist.**  It listed `1.0.x` and `0.9.x` only.  It now lists `1.3.x`
+  (full support), `1.2.x` (security fixes only), and drops the `0.9.x`
+  LTS-bridge row, whose 90-day window after `1.0.0` elapsed long ago.
 
 ### Fixed
 
@@ -85,10 +119,64 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the README prints is exercised on every cut.  Its `--self-test` pins
   the rules and runs in CI.
 
-  The same defect is present in the published **v1.2.0** sidecars
+  The same defect was present in the published **v1.2.0** sidecars
   (Windows bare hex, both Linux sidecars with the `build/` prefix); the
   v1.2.0 release is not re-published for this, and the fact is recorded
   in that release's section.
+
+- **The release body's length guard could not see the footers it was
+  supposed to protect.**
+  `release.yml` had two body-length checks.  The one that ran counted
+  the body *before* the signing-status and 3A-status footers were
+  appended, so it measured a document that was never published; the
+  footers -- the part most likely to grow -- were counted by nothing.
+  A body that passed both checks could still have exceeded GitHub's
+  125 000-character limit once the footers were in, and the failure
+  mode is GitHub's *silent truncation*: the release page would carry a
+  document that stops mid-sentence with no indication that the rest
+  exists.
+
+  The guard now runs in a step of its own, after every footer has been
+  appended, so it measures the body that is actually posted.  The
+  earlier check is kept, but it now says what it measures ("before the
+  footers") instead of claiming to cover them.
+
+- **The soak evidence fetch could hang a release run on a dead socket.**
+  `tools/fetch_soak_evidence.py` opened its connections with no timeout,
+  so a runner that stalled mid-response left the preflight job waiting
+  until GitHub killed it at the job limit -- the failure surfaced as "the
+  job timed out", with nothing pointing at the fetch.  It now sets a
+  connect and read timeout on every request and retries a bounded number
+  of times, so a stalled socket becomes a reported error rather than a
+  silent hang.
+
+- **The release's soak gate asks for five consecutive green days, and a
+  single failed run no longer condemns the whole day.**
+  Two changes to the window that `release.yml` gates the tag on, both
+  permanent and both made on 2026-11-23:
+
+  - **Seven days became five.**  Seven was the v1.1 plan C5 requirement.
+    The window exists to expose a *chronic* failure before a tag is cut,
+    and five consecutive green days on both platforms says that; the
+    extra two days bought nothing that the evidence record did not
+    already say.
+  - **The intra-day rule no longer treats one `FAIL` among passing runs
+    as a failed day.**  A day is normally measured several times -- the
+    CI job and the scheduled local task both write the same
+    platform/day -- and the old rule ("any `FAIL` in the day spoils it")
+    meant a single Chrome-interop timeout on a shared CI runner erased a
+    day in which the same case had passed three times earlier.  That
+    measured the runner's mood rather than the build's stability.  The
+    rule now is that every required case must have at least one `PASS`
+    for the day; a case whose **every** run failed still ends the
+    streak, and every `FAIL` is still reported with its reason and its
+    captured output.
+
+  The change is what let the v1.3.0 window close: the Linux half was
+  held at 2/7 by a single `subprocess.TimeoutExpired` on 2026-11-20
+  (case D on `b0191e0f`, Chrome interop never reaching a handshake),
+  on a commit that had already passed that case three times the same
+  day and whose CI was 13/13 green.
 
 ## [1.3.0] - 2026-11-20
 

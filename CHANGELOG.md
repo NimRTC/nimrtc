@@ -403,6 +403,50 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was never the problem — the difference between a job that runs and
   one that dies on its own log line was this.
 
+- **The job output file was not in the format the runner reads, and
+  the step failed on a record it had already written (2026-11-24).**
+  The hardware job publishes the evidence record into the job outputs
+  as well as into the step summary, because the API exposes the
+  outputs on the run object and a later process can read the evidence
+  without downloading anything.
+
+  The file was written as a bare marker, the value, and the marker
+  again:
+
+  ```text
+  EOF_NIMRTC_HARDWARE_EVIDENCE
+  {...}
+  EOF_NIMRTC_HARDWARE_EVIDENCE
+  ```
+
+  That is not the format.  The runner reads `GITHUB_OUTPUT` a line at
+  a time: a line carrying `<<` opens a heredoc, a line carrying `=`
+  is `name=value`, and **anything else** is rejected.  A bare marker
+  has neither, so the runner said:
+
+  ```text
+  ##[error]Unable to process file command 'output' successfully.
+  ##[error]Invalid format 'EOF_NIMRTC_HARDWARE_EVIDENCE'
+  ```
+
+  and failed the step — after the hardware test had passed and the
+  evidence record had been written and summarised.  The record was
+  fine; the *publication* was not.
+
+  The file is now a proper heredoc:
+
+  ```text
+  evidence<<EOF_NIMRTC_HARDWARE_EVIDENCE_<hash>
+  {...}
+  EOF_NIMRTC_HARDWARE_EVIDENCE_<hash>
+  ```
+
+  The delimiter carries a hash of the value, so it cannot appear as a
+  line of the record itself and end the heredoc early.  The
+  self-test pins the shape — the `name<<delimiter` prefix, the
+  delimiter alone on its closing line, and the delimiter absent from
+  the value.
+
 ### Added
 
 - **`tools/check_workflow_powershell.py` — a guard against PowerShell

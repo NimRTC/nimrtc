@@ -144,7 +144,10 @@ jobs:
           foreach ($m in $mirrors) {
             $have = $null
             if ($ref -match '^[0-9a-f]{40}$') {
-              git -C $m cat-file -e "$ref^{commit}" 2>$null
+              # The braces have to be quoted: PowerShell reads
+              # `$ref^{commit}` as an expression and hands git a
+              # mangled argument.
+              git -C $m cat-file -e "$ref" 2>$null
               if ($LASTEXITCODE -eq 0) { $have = $ref }
             } else {
               $have = (git -C $m rev-parse $ref 2>$null)

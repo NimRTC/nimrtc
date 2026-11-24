@@ -1399,6 +1399,33 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             decode_end - decode_start).count()));
                 if (decode_rc != plugins::kOk) {
+                    // `kErrNotReady` is not a decoder failure.
+                    //
+                    // Every decoder backend in this tree documents
+                    // `kErrNotReady` as "not an error": NVDEC has not
+                    // seen the parameter sets or the reference frame
+                    // yet, VideoToolbox is waiting for the SPS/PPS, and
+                    // OpenH264 is waiting for a reference picture.  It
+                    // is the *normal* answer for the first frames of a
+                    // stream.
+                    //
+                    // Counting it as a decoder error was wrong twice
+                    // over: it inflated `video_frames_dropped_decoder`
+                    // with frames that were never really lost, and it
+                    // asked the peer for a new IDR on every single
+                    // frame — a PLI storm that the peer answered with
+                    // yet more keyframes, each of which the decoder then
+                    // rejected again because the parameter sets had
+                    // still not arrived.
+                    //
+                    // So `kErrNotReady` is reported as what it is: the
+                    // decoder is not ready *yet*.  The frame is neither
+                    // decoded nor dropped; the jitter buffer's own
+                    // accounting is untouched.
+                    if (decode_rc == plugins::kErrNotReady) {
+                        return;
+                    }
+
                     // The decoder refused the frame.  That is a
                     // decoder-side drop (Phase 4.2 / D2), and it is
                     // counted as such so a host can see a stream that
@@ -1583,6 +1610,16 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
     if (decode_rc != plugins::kOk) {
         surface->release_ref();   // the engine's reference
         surface->release_ref();   // the pool's reference
+        // `kErrNotReady` is not a decoder failure — see the long note
+        // on the CPU path's `decode_rc` check.  It means the decoder is
+        // still waiting for the parameter sets or the reference frame,
+        // which is the *normal* state for the first frames of a
+        // stream.  It is neither a dropped frame nor a reason to ask
+        // the peer for a new IDR (asking would start a PLI storm that
+        // the decoder would reject again for the very same reason).
+        if (decode_rc == plugins::kErrNotReady) {
+            return decode_rc;
+        }
         // Same signal as on the CPU path: the decoder refused the
         // picture, so the peer has to send a new IDR.
         request_keyframe_on_decode_failure();
@@ -3889,6 +3926,43 @@ void NimRTCEngine::send_video_rtp_packet(plugins::BufferView payload,
                                           plugins::Priority prio,
                                           bool count_bytes) noexcept {
     if (impl_ == nullptr) return;
+
+    // ---- The DTLS gate --------------------------------------------------
+    //
+    // The audio path has always refused to send media before the DTLS
+    // handshake completed (`send_audio()` — see the `d_check` gate
+    // there).  The video path did not, and that was a real leak: ICE
+    // completes *before* DTLS, so in the window between the two the
+    // capture pump kept encoding frames and handed them to this
+    // function, which shipped them as **plaintext RTP** (no SRTP key
+    // was installed yet).
+    //
+    // The peer, also pre-DTLS and therefore unkeyed, parsed those
+    // plaintext packets as ordinary RTP, pushed them into the jitter
+    // buffer and asked the decoder to decode frames whose SPS/PPS/IDR
+    // had not arrived yet.  Two things followed from that:
+    //
+    //   1. the peer's sequence-number space was polluted with frames
+    //      it would never be able to render, and
+    //   2. every one of those decode attempts returned `kErrNotReady`
+    //      — which this engine used to mis-count as a *decoder error*,
+    //      i.e. as a dropped frame.
+    //
+    // That is exactly the "2 frames dropped" the remote-desktop run
+    // reported: the two drops were not a network loss, they were the
+    // first two plaintext frames of the session being counted as
+    // decoder failures.
+    //
+    // The gate mirrors the audio path's, and it is deliberately
+    // permissive about a *missing* DTLS session: a stack that has no
+    // DTLS at all (the raw-udp-arq profile, the shell) sends plaintext
+    // media on purpose, and the gate must not silence it.  Only a
+    // DTLS session that exists and has *not* reached `Connected` blocks
+    // the send.
+    auto d_gate = impl_->dtls.lock();
+    if (d_gate && !d_gate->is_connected()) {
+        return;
+    }
 
     // Q5: the transport gate.
     //

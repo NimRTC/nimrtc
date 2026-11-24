@@ -1057,6 +1057,11 @@ function(nimrtc_add_engine_video_feedback_test name source)
         nimrtc::engine
         nimrtc::core
         nimrtc::plugins
+        # The DTLS seam: the video send path refuses to emit a packet
+        # until the DTLS session reaches `Connected`, so a test that
+        # drives the *outbound* half has to inject a DTLS session that
+        # reports the handshake as complete.
+        nimrtc::dtls_seam
         nimrtc::video_source
         nimrtc::video_sink
         nimrtc::video_pipeline
@@ -1069,6 +1074,7 @@ function(nimrtc_add_engine_video_feedback_test name source)
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
         "${CMAKE_SOURCE_DIR}/src/engine/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
         "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
         "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
         "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include")
@@ -1092,6 +1098,62 @@ endfunction()
 if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
 nimrtc_add_engine_video_feedback_test(test_engine_video_feedback
                                        test_engine_video_feedback.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# The video path's DTLS gate.
+#
+# The audio path has always refused to send media before the DTLS handshake
+# completed; the video path did not, so the first frames of every session
+# went out in plaintext and corrupted the peer's sequence space.  This
+# target covers the gate itself — and, just as importantly, the case where
+# the gate must *not* apply (a stack with no DTLS at all, whose media is
+# plaintext by design).
+#
+# The test needs the DTLS seam (it drives a fake `IDtlsSession`), so it
+# links `nimrtc::dtls_seam` on top of the video feedback test's set.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
+add_executable(test_engine_video_dtls_gate test_engine_video_dtls_gate.cpp)
+if(WIN32)
+    target_link_libraries(test_engine_video_dtls_gate PRIVATE ws2_32)
+endif()
+target_link_libraries(test_engine_video_dtls_gate PRIVATE
+    nimrtc::engine
+    nimrtc::core
+    nimrtc::plugins
+    nimrtc::dtls_seam
+    nimrtc::transport
+    nimrtc::video_source
+    nimrtc::video_sink
+    nimrtc::video_pipeline
+    # PAL Slice 2 (v0.10.2): the unified registrar table references
+    # `nimrtc::datachannel::register_default_plugins`, so the symbol
+    # must resolve here too.
+    nimrtc::datachannel
+    GTest::gtest_main)
+target_include_directories(test_engine_video_dtls_gate PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/transport/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/sctp/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include")
+if(WIN32)
+    target_compile_definitions(test_engine_video_dtls_gate PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_engine_video_dtls_gate LENIENT)
+add_test(NAME test_engine_video_dtls_gate
+    COMMAND $<TARGET_FILE:test_engine_video_dtls_gate>)
+set_tests_properties(test_engine_video_dtls_gate PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_dtls_gate
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
+endif()
+nimrtc_copy_wolfssl_certs(test_engine_video_dtls_gate)
 endif()
 
 # ----------------------------------------------------------------------------

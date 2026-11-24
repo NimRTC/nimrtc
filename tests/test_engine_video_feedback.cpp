@@ -39,6 +39,7 @@
 #include <vector>
 
 #include <nimrtc/core/registry.hpp>
+#include <nimrtc/dtls/dtls_session_factory.hpp>
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
@@ -47,6 +48,7 @@
 namespace {
 
 namespace np = nimrtc::plugins;
+namespace nd = nimrtc::dtls;
 using nimrtc::core::PluginRegistry;
 using nimrtc::engine::EngineConfig;
 using nimrtc::engine::NimRTCEngine;
@@ -243,6 +245,70 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// Fake DTLS session — reports the handshake as complete
+// ---------------------------------------------------------------------------
+//
+// The video send path refuses to emit a packet until the DTLS handshake
+// has completed (the same gate the audio path has always had — see
+// `send_video_rtp_packet()` in `engine_media.cpp`).  Without a DTLS
+// session that reports `Connected`, the *outbound* half of these tests
+// would see an empty wire.
+//
+// The fake exports no SRTP keying material, so the RTP and the RTCP
+// travel in cleartext — which is exactly what makes the wire format
+// assertable here.  The SRTCP protection path is covered by the SRTP
+// module's own tests.
+class ConnectedDtlsSession final : public nd::IDtlsSession {
+public:
+    // ---- The seam surface ------------------------------------------------
+    void set_role(nd::Role) noexcept override {}
+    void set_peer_fingerprint(std::span<const std::uint8_t>) noexcept override {}
+    void start() noexcept override {}
+    void pump() noexcept override {}
+    void on_handshake_complete(OnCompleteCb) noexcept override {}
+    np::Status export_srtp_key_material(std::span<std::uint8_t, 60>) noexcept override {
+        return np::kErrNotReady;
+    }
+
+    // ---- The legacy engine-facing surface --------------------------------
+    nimrtc::core::Result<void> open() noexcept override {
+        return nimrtc::core::Result<void>::make_ok();
+    }
+    void set_role(nd::DtlsRole) noexcept override {}
+    void set_peer_fingerprint(std::string, std::vector<std::uint8_t>) noexcept override {}
+    std::size_t feed_inbound(std::span<const std::uint8_t>,
+                             const nd::DtlsAddr&) noexcept override {
+        return 0;
+    }
+    std::vector<nd::DtlsRecord> take_outbound() noexcept override { return {}; }
+    void tick() noexcept override {}
+
+    nd::DtlsState state() const noexcept override { return nd::DtlsState::Connected; }
+    bool is_connected() const noexcept override { return true; }
+    const nd::Fingerprint& local_fingerprint() const noexcept override {
+        return fingerprint_;
+    }
+    std::optional<nd::SrtpKeyingMaterial>
+    srtp_keying_material() const noexcept override {
+        return std::nullopt;
+    }
+
+private:
+    nd::Fingerprint fingerprint_{"sha-256", {}, {}, ""};
+};
+
+class ConnectedDtlsFactory final : public nd::IDtlsSessionFactory {
+public:
+    std::string_view id() const noexcept override { return "connected-dtls"; }
+    std::string_view display_name() const noexcept override {
+        return "Connected DTLS session (test)";
+    }
+    std::unique_ptr<nd::IDtlsSession> create(const nd::DtlsConfig&) const override {
+        return std::make_unique<ConnectedDtlsSession>();
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Fake video codec — counts force_keyframe() calls
 // ---------------------------------------------------------------------------
 
@@ -410,6 +476,100 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// A codec whose decode answers `kErrNotReady`
+// ---------------------------------------------------------------------------
+//
+// `kErrNotReady` is the **documented** answer of every decoder backend in
+// this tree when it has not yet seen the parameter sets or the reference
+// frame (NVDEC, VideoToolbox and OpenH264 all use it for exactly that).
+// It is *not* an error — it is the normal state of the first frames of a
+// stream.
+//
+// The engine used to treat it as a decoder failure, which had two bad
+// consequences (the "2 dropped frames" the remote-desktop run reported):
+//
+//   1. `video_frames_dropped_decoder` counted frames that were never
+//      lost, and
+//   2. every one of those frames asked the peer for a new IDR — a PLI
+//      storm that the peer answered with more keyframes, each of which
+//      the decoder rejected again for the very same reason.
+//
+// This codec is the fixture for the regression test that pins the
+// corrected behaviour.
+class NotReadyVideoCodec final : public np::IVideoCodec {
+public:
+    const char* name() const noexcept override { return "not-ready-codec"; }
+    np::Status open() noexcept override { return np::kOk; }
+    void close() noexcept override {}
+
+    bool can_encode() const noexcept override { return true; }
+    bool can_decode() const noexcept override { return true; }
+    np::VideoCodecKind kind() const noexcept override {
+        return np::VideoCodecKind::kH264;
+    }
+    std::string_view codec_name() const noexcept override { return "not-ready"; }
+
+    np::Status encode(const np::VideoFrame&,
+                      std::uint8_t* output,
+                      std::size_t output_capacity,
+                      np::EncodedVideoFrame& encoded_out) noexcept override {
+        static constexpr std::uint8_t kAnnexBIdr[] = {0x00, 0x00, 0x00, 0x01, 0x65};
+        if (!output || output_capacity < sizeof(kAnnexBIdr)) return np::kErrBufferTooSmall;
+        std::memcpy(output, kAnnexBIdr, sizeof(kAnnexBIdr));
+        encoded_out.payload = nimrtc::core::ByteSpan{output, sizeof(kAnnexBIdr)};
+        encoded_out.codec = np::VideoCodecKind::kH264;
+        encoded_out.is_keyframe = true;
+        encoded_out.nalu_format = np::NaluFormat::kAnnexBStartCode;
+        encoded_out.payload_type = payload_type();
+        return np::kOk;
+    }
+
+    np::Status decode(const np::EncodedVideoFrame&,
+                      np::VideoFrame&,
+                      std::uint8_t* const*) noexcept override {
+        ++decode_calls_;
+        // "The parameter sets have not arrived yet" — the documented,
+        // *non-error* answer of every decoder backend in this tree.
+        return np::kErrNotReady;
+    }
+
+    np::Status force_keyframe() noexcept override { return np::kOk; }
+
+    np::VideoCodecConfig config() const noexcept override { return cfg_; }
+    np::Status update_config(np::VideoCodecConfig cfg) noexcept override {
+        cfg_ = cfg;
+        return np::kOk;
+    }
+    np::VideoCodecStats stats() const noexcept override { return {}; }
+    std::uint8_t payload_type() const noexcept override { return 102; }
+
+    int decode_calls() const noexcept {
+        return decode_calls_.load(std::memory_order_relaxed);
+    }
+
+private:
+    np::VideoCodecConfig cfg_{};
+    std::atomic<int>     decode_calls_{0};
+};
+
+class NotReadyVideoCodecFactory final : public np::IVideoCodecFactory {
+public:
+    std::string_view id() const noexcept override { return "not-ready-codec"; }
+    std::string_view display_name() const noexcept override {
+        return "Not-ready video codec (test)";
+    }
+    np::IVideoCodec* create(np::VideoCodecConfig) const override {
+        auto* c = new NotReadyVideoCodec();
+        last_created() = c;
+        return c;
+    }
+    static NotReadyVideoCodec*& last_created() {
+        static NotReadyVideoCodec* instance = nullptr;
+        return instance;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Fixture
 // ---------------------------------------------------------------------------
 
@@ -423,20 +583,33 @@ protected:
         static FakeIceFactory ice_factory;
         PluginRegistry::instance().register_ice_transport("fake-ice", &ice_factory);
 
+        static ConnectedDtlsFactory dtls_factory;
+        PluginRegistry::instance().register_dtls_session("connected-dtls", &dtls_factory);
+
         static CountingVideoCodecFactory codec_factory;
         PluginRegistry::instance().register_video_codec("counting-codec", &codec_factory);
 
         static DecodingVideoCodecFactory decoding_factory;
         PluginRegistry::instance().register_video_codec("decoding-codec", &decoding_factory);
+
+        static NotReadyVideoCodecFactory not_ready_factory;
+        PluginRegistry::instance().register_video_codec("not-ready-codec", &not_ready_factory);
     }
 
     EngineConfig make_config() {
         EngineConfig cfg{};
         // The fake ICE stands in for the real transport: it reports
         // Connected, captures outbound datagrams and can inject inbound
-        // ones.  The DTLS handshake never completes (there is no peer),
-        // so SRTP is never keyed and the feedback stays in cleartext.
+        // ones.
+        //
+        // The DTLS session reports the handshake as **complete** (there
+        // is no peer, so the handshake cannot really happen) because the
+        // video send path refuses to emit a packet before the DTLS
+        // session reaches `Connected`.  It exports no SRTP keying
+        // material, so SRTP is never keyed and the traffic stays in
+        // cleartext.
         cfg.transport_name = "fake-ice";
+        cfg.dtls_name = "connected-dtls";
         cfg.video_receiver_name = "reference";
         cfg.video_sender_name   = "reference";
         cfg.video_codec_name    = "counting-codec";
@@ -932,6 +1105,60 @@ TEST_F(EngineVideoFeedback, a_loss_raises_the_loss_door) {
               s1.video_feedback_pli_from_loss +
                   s1.video_feedback_pli_from_decode_failure)
         << "every request must be attributed to exactly one door";
+
+    engine.close();
+}
+
+// =====================================================================
+// `kErrNotReady` is not a decoder failure.
+//
+// The remote-desktop run reported "2 frames dropped" at the start of
+// every session.  The frames were not lost: they were the first two
+// frames of the stream, which the decoder answered with `kErrNotReady`
+// ("the parameter sets have not arrived yet").  The engine counted that
+// as a decoder error and asked the peer for a new IDR on each of them.
+//
+// This test pins the corrected behaviour:
+//   1. `kErrNotReady` is not counted as a dropped frame, and
+//   2. `kErrNotReady` does not raise a key-frame request.
+// =====================================================================
+
+TEST_F(EngineVideoFeedback, a_decoder_that_is_not_ready_yet_is_not_a_drop) {
+    EngineConfig cfg = make_config();
+    // The codec's decode() answers `kErrNotReady` — the documented,
+    // non-error answer of every decoder backend in this tree.
+    cfg.video_codec_name = "not-ready-codec";
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    FakeIceTransport* ice = FakeIceFactory::last_created();
+    ASSERT_NE(ice, nullptr);
+    ice->clear_sent();
+
+    const std::uint8_t pt = cfg.video_receiver_tuning.payload_type;
+
+    // Two keyframes — exactly the shape of the "2 dropped frames" the
+    // remote-desktop run reported.
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 100, 90000, pt, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 101, 93000, pt, {0x65, 0x88}));
+    engine.tick();
+    engine.tick();
+
+    const auto s1 = engine.stats();
+
+    EXPECT_EQ(s1.video_frames_dropped_decoder, 0u)
+        << "a decoder that answers `kErrNotReady` is waiting for the "
+           "parameter sets — the frame was never lost and must not be "
+           "counted as a dropped frame";
+
+    EXPECT_EQ(s1.video_feedback_pli_from_decode_failure, 0u)
+        << "`kErrNotReady` must not raise a key-frame request: the peer "
+           "cannot deliver the parameter sets any faster, and asking "
+           "again only starts a PLI storm the decoder rejects again";
+
+    EXPECT_EQ(s1.video_feedback_pli_requests, 0u)
+        << "no key-frame request may leave the engine while the decoder "
+           "is merely waiting for its parameter sets";
 
     engine.close();
 }

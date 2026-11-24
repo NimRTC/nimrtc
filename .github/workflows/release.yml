@@ -265,9 +265,25 @@ jobs:
           #
           # The `--require` gate is what makes this a gate rather than
           # a report: it exits non-zero unless EVERY tracked platform
-          # has a 5-day streak.
+          # has the streak the rule in force demands.
+          #
+          # The rule is NOT spelled out here.  `--require-days` is
+          # deliberately NOT passed: the day count and the intra-day
+          # rule are the RULE's business, and the rule is versioned and
+          # dated (`GATE_RULE` in `tools/run_soak.py`).  Passing a
+          # number here would put it back under the release manager's
+          # thumb on the day of the cut -- which is how the 2026-11-23
+          # release came to be gated by a window shortened on the very
+          # day it was cut.
+          #
+          # `--cut-date` is the tag's own date, so the rule that judges
+          # this release is the one that was in force on the day it was
+          # cut.  A rule change cannot decide a release until its
+          # cooldown has elapsed, so the release that changes the rule
+          # is judged by the rule it replaced.
           python3 tools/run_soak.py \
-            --summary --require --require-days 5 \
+            --summary --require \
+            --cut-date "$(git show -s --format=%cs "$tag")" \
             --expect-ref "" \
             --expect-ancestor-of "$tag" \
             --max-window-age-days "$max_age" \
@@ -312,6 +328,18 @@ jobs:
       # --shape-only selects exactly that reduced check; the full
       # verification would need the tag-signing key and an
       # allowed_signers file, neither of which exists on the runner.
+      #
+      # The shape check also covers a third thing the v1.3.0 release
+      # got wrong: the tag OBJECT's own name.  An annotated tag object
+      # carries the name it was created with, and `git update-ref` can
+      # move a ref onto an object whose name says something else.  The
+      # v1.3.0 tag is reached through `refs/tags/v1.3.0` but the object
+      # names itself `v1.3.0-staged` -- so `git tag -v`, `git describe`
+      # and the GitHub release page all report `v1.3.0-staged`.  The
+      # signature verified, because it was a valid signature over a
+      # valid object; what was wrong was the name the object presents.
+      # That is a SHAPE property, detectable from the object alone, so
+      # it belongs in this check rather than in the cryptographic one.
       - name: Verify the release tag carries a signature
         shell: bash
         run: |
@@ -329,6 +357,7 @@ jobs:
           fi
           python3 tools/verify_tag_signature.py --tag "$tag" --shape-only
           echo "Tag '$tag' is an annotated tag carrying a signature block."
+          echo "Tag '$tag' names itself correctly."
 
       # The README is the front page of a release: its badge says which
       # version is published and its "Latest release" paragraph says what

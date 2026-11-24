@@ -317,6 +317,24 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
     Note that the "Verified" badge does **not** depend on C6 when the SSH
     path is used.
 
+    **The tag object must name itself the way the ref does.** An
+    annotated tag object carries the name it was *created* with, and
+    `git update-ref` can move a ref onto an object whose name says
+    something else — so the ref can say `v1.3.0` while the object says
+    `v1.3.0-staged`. The `v1.3.0` tag is exactly that: it is reached
+    through `refs/tags/v1.3.0`, but the object names itself
+    `v1.3.0-staged`, so `git tag -v`, `git describe` and the GitHub
+    release page all report the staged name. The signature verified —
+    it was a valid signature over a valid object — and nothing
+    complained, because nothing was looking at the object's *name*.
+
+    `tools/verify_tag_signature.py` now checks this, and it is a SHAPE
+    property, so it fires under `--shape-only` too: the release
+    workflow's preflight refuses a tag whose object names itself
+    differently from its ref. Sign the tag **under the name it will be
+    released as**; do not sign under a probe name and move the ref
+    afterwards.
+
     #### Historical tags carry no signature
 
     Every tag released so far is unsigned. `v1.0.0` is a *lightweight*
@@ -328,7 +346,42 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
     are signed; the pre-`v1.1.0` tags cannot be signed retroactively
     without rewriting published history.
 
-12. The push triggers `.github/workflows/release.yml` which:
+12. **Collect the hardware evidence (Q7) before the tag.** The
+    hardware-codec claim is proved by a record, not by a build: the
+    `hardware.yml` workflow runs on the self-hosted GPU runner
+    (`nimrtc-gpu-nvenc`) and writes a record to
+    `build/hardware/<platform>-<date>.jsonl`. That record has to be
+    fetched onto the tree being tagged, and it has to be a **PASS on
+    that tree** — a record measured on another commit, or on a dirty
+    tree, is not evidence about the release.
+
+    ```bash
+    # Run the hardware job on the tree being tagged (the runner needs
+    # the ref; a SHA is the most precise thing to ask for):
+    gh workflow run hardware.yml -f ref=<the-tagged-commit-sha>
+
+    # Then fetch its record down onto the tag cut, and check it:
+    gh api repos/NimRTC/nimrtc/actions/workflows/hardware.yml/runs \
+      --jq '.workflow_runs[] | select(.head_sha=="<the-tagged-commit-sha>")'
+    # ... and place the record at build/hardware/<platform>-<date>.jsonl
+    python tools/run_hardware_e2e.py --summary --expect-green
+    sh scripts/check-release-freeze.sh --only hardware --final-tag
+    ```
+
+    The `hardware` check in the freeze checklist is what the release
+    workflow runs, and under `--final-tag` a missing record is a
+    **FAIL**, not a skip: at tag-cut time there is no later CI run to
+    catch it. The same rule the `api-symbols` check uses for a missing
+    `node`.
+
+    > **The `hardware` job has never completed successfully.** All 22
+    > of its runs so far failed — most at the checkout stage, on the
+    > runner's link dropping long transfers. That is why the check is
+    > here: until the job runs green on the tree being tagged, the
+    > hardware claim is unproven, and the release must say so rather
+    > than quietly ship without it.
+
+13. The push triggers `.github/workflows/release.yml` which:
     - Builds the four-platform release artefacts (`nimrtc-{windows,linux,linux-aarch64,macos}.tar.xz`
       containing headers, CMake config files, and the static `.lib`/`.a`).
     - Signs the artefacts with the release manager's GPG key (see
@@ -379,9 +432,9 @@ gpg --send-keys "$GPG_FPR"
 
 ### 3.4 Post-tag (T+1 day)
 
-13. Merge `release/X.Y` back into `main` (fast-forward) so the version bump
+14. Merge `release/X.Y` back into `main` (fast-forward) so the version bump
     is visible on `main` too. This merge commit is **not** a new release.
-14. Open a PR titled `chore: post-release version bump` that advances
+15. Open a PR titled `chore: post-release version bump` that advances
     the project version to `X.Y.(Z+1)-dev` on `main` so
     `find_package(NimRTC)` cannot accidentally pick up an in-progress build
     as `X.Y.Z`. Make the change with
@@ -401,9 +454,9 @@ gpg --send-keys "$GPG_FPR"
     builds — a report that says nothing about the real cause.
     `python tools/bump_version.py --check` runs on every push and names
     any site that drifted.
-15. Mark the milestone as `100% complete` on GitHub.
-16. Announce:
-    - GitHub Release (auto-created in step 12) — pinned to the repo front page.
+16. Mark the milestone as `100% complete` on GitHub.
+17. Announce:
+    - GitHub Release (auto-created in step 13) — pinned to the repo front page.
     - Project mailing list / Discussions thread for public RCs and stable
       releases only (not for `*-alpha.*` / `*-beta.*` internal tags).
 

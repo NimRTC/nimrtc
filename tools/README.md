@@ -294,7 +294,7 @@ The operating procedure is `docs/plan/soak-runbook.md`.
 
 | Script | Purpose |
 |--------|---------|
-| `run_soak.py` | Runs the acceptance cases and records one machine-readable record per platform per day under `build/soak/`. `--summary` prints the streak it can prove, `--require` turns that summary into a gate (exit 1 unless every platform has 7 consecutive green days), `--self-test` pins the honesty rules. |
+| `run_soak.py` | Runs the acceptance cases and records one machine-readable record per platform per day under `build/soak/`. `--summary` prints the streak it can prove, `--require` turns that summary into a gate (exit 1 unless every platform has the streak the rule in force demands), `--self-test` pins the honesty rules. The gate rule is versioned and dated (`GATE_RULE`), and `--cut-date` selects the rule in force on the cut date — see `docs/plan/soak-runbook.md` §4.3.2. |
 | `fetch_soak_evidence.py` | Pulls the CI-produced records back out of the workflow artifacts into `build/soak/`. Idempotent, and fails when an artifact cannot be read. |
 
 ```

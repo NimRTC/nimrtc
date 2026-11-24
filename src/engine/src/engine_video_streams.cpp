@@ -206,6 +206,23 @@ void NimRTCEngine::wire_stream_sender(detail::VideoStream* s) noexcept {
                   std::uint32_t rtp_ts,
                   std::uint16_t seq,
                   bool marker) {
+            // ---- The DTLS gate -------------------------------------------
+            //
+            // The same gate the default stream's send path has (see
+            // `send_video_rtp_packet()` in `engine_media.cpp`), and for
+            // the same reason: ICE completes before DTLS, so without it
+            // a per-stream sender ships the first frames of the session
+            // as plaintext RTP, which pollutes the peer's sequence space
+            // and makes the peer count frames it never saw as decoder
+            // failures.
+            //
+            // A stack with no DTLS session at all (the raw-udp-arq
+            // profile, the shell) sends plaintext media on purpose, so
+            // only an *existing* DTLS session that has not reached
+            // `Connected` blocks the send.
+            auto d_gate = impl_->dtls.lock();
+            if (d_gate && !d_gate->is_connected()) return;
+
             // Q5: the transport gate.  A per-stream video sender rides
             // the same 5-tuple as the audio and the default stream, so a
             // transport that refuses them refuses this too.

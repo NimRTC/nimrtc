@@ -100,13 +100,21 @@ jobs:
           fetch-depth: 1
           ref: ${{ inputs.ref || github.sha }}
 
-      - name: Fetch the vendored submodules (with retries)
-        # One submodule at a time, each with a bounded retry around it.
-        # The step also fails if a submodule ends up *empty*, which is a
-        # silent failure the build would only surface much later.
+      - name: Fetch the tree, with retries
+        # The checkout does both of these transfers without a retry, and
+        # on a link that drops long transfers one cut-off transfer is
+        # enough to fail the job -- the repository's own fetch, and then
+        # the vendored trees (the largest of them, `wolfssl`, is over
+        # 100 MB).  This step does both, one thing at a time, with a
+        # bounded retry around each.
+        #
+        # The submodule part also fails when a submodule ends up
+        # *empty*: a silent failure the build would otherwise surface
+        # much later, far from the cause.
         shell: pwsh
         run: |
-          python tools/fetch_submodules.py --retries 5
+          python tools/fetch_submodules.py --fetch-main `
+            --ref "${{ inputs.ref || github.sha }}" --retries 5
         env:
           PYTHONIOENCODING: utf-8
 

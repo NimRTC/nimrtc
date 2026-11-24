@@ -9,6 +9,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.3.0`.
 
+- **The ≤200-line SDK sample (`slice v1-sdk-sample`).**
+  `examples/sdk-sample/` is an independent host project: two processes on one
+  machine complete one audio+video+control call through the reference
+  signalling service (`examples/remote-desktop/signalling.py`) and a TLS-only
+  TURN relay, with the host writing only signalling and four hooks
+  (`set_on_call_state` D7, `set_on_control_message`, `set_on_ice_recovery` N8,
+  `EngineConfig::turn_credentials` N7).  The line budget (200 + 10% drift =
+  220 hard limit) is re-measured on every CI run by
+  `tools/check_sample_line_budget.py` (with a pinned self-test) and
+  cross-checked by the acceptance test's own JS counter — a limit that drifts
+  is a claim that drifted (ADR-036).  The sample consumes only the install
+  tree via `find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`.
+
 - **ICE-over-TCP (RFC 6544) — the TCP candidate shape (`slice v2-ice`).**
   NimRTC now gathers host TCP candidates (`tcptype active` / `passive`)
   on top of the UDP-only libjuice ICE layer, and its SDP serialisation

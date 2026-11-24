@@ -226,6 +226,19 @@ jobs:
           & $exe.FullName
           if ($LASTEXITCODE -ne 0) { throw "downstream proof exited $LASTEXITCODE" }
 
+      # v1.4 N6: the SDK sample -- two processes on one host, behind a
+      # simulated NAT that only relays over TLS.  The sample's line
+      # budget is re-measured on every run; a limit that drifts is a
+      # claim that drifted (plan §5 N6).
+      - name: SDK sample -- line budget
+        run: python3 tools/check_sample_line_budget.py
+
+      - name: SDK sample -- self-test
+        run: python3 tools/check_sample_line_budget_self_test.py
+
+      - name: SDK sample -- two-process call behind the TLS relay
+        run: node --test tests/acceptance/v1-sdk-sample/acceptance.test.cjs
+
       - name: Loopback smoke
         shell: cmd
         run: |

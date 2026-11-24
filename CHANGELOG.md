@@ -11,6 +11,32 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A transient `503` from GitHub's artifact store made the soak
+  window read "incomplete", and the whole soak leg red for a reason
+  that had nothing to do with the tree (2026-11-24).**
+  The window is read back from the artifacts of the last 21 days, and
+  the fetch is retried when a connection is reset or a request times
+  out.  A **5xx from the platform** was not retried: it was taken as
+  "the artifact is not there", so one failed download out of 55 made
+  the step exit 2 and the leg red:
+
+  ```text
+  error: soak-linux-x86_64-43860223478: HTTP 503 for
+  https://api.github.com/repos/NimRTC/nimrtc/actions/artifacts/14223975461/zip
+  error: 1 artifact(s) could not be read; the window read is INCOMPLETE
+  fetched 106 record(s) from 55 artifact(s) across 30 run(s)
+  ```
+
+  Fifty-four artifacts had been read.  The blob store answers 503
+  under load, and a window that spans 55 artifacts asks it 55 times,
+  so a 503 is a matter of *when*, not of whether.
+
+  A 5xx (and a 429, the platform's rate limit) is now transient and
+  is retried, with the backoff raised from three attempts over six
+  seconds to five over ~30 seconds.  A **404 is still not** retried:
+  that one says the artifact is gone, and a second attempt will say
+  the same thing.
+
 - **A `$var:` in a PowerShell workflow step is a parse error, and the
   step dies before it does anything (2026-11-24).**
   The hardware job's mirror-fetching step had three log lines of the

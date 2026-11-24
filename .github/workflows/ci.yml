@@ -151,6 +151,16 @@ jobs:
         # needs the actual list, not its cardinality.
         run: python scripts/check_api_manifest.py
 
+      - name: Deployment-bundle packaging self-test
+        # The packaging script has two guards that protect the operator
+        # from a bundle that ships the wrong code: it refuses to mix
+        # build trees (a msquic.dll from another configuration is an
+        # ABI mismatch), and it warns when the binaries are older than
+        # the sources they were built from.  Both are quiet failures
+        # if they are dropped, so they are pinned here.  The script
+        # under test is a .ps1, so this leg is the one that can run it.
+        run: python scripts/test_package_rd_deploy.py
+
       # Fail fast: detect missing tools before wasting minutes on configure.
       - name: Pre-flight tool check
         shell: pwsh

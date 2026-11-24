@@ -122,15 +122,26 @@ struct NIMRTC_API_STABLE ReceiverConfig {
     /** If true, the receiver runs FU-A reassembly itself (recommended). */
     bool                   expect_fu_a   = true;
 
-    /** Declare that the H.264 frame contract is Annex-B (a start code
-     *  ahead of every NAL unit — the shape NVENC, x264 and OpenH264 all
-     *  produce).  The receiver then emits every single NAL unit packet
-     *  in Annex-B framing, synthesising the start code when the sender
-     *  left it out, and (with `h264_validate_nalus`) refuses a stitched
-     *  frame whose bytes could never be a NAL unit instead of silently
-     *  handing it to the decoder.  Default off: a single NAL unit packet
-     *  is forwarded byte for byte (RFC 6184 §5.1 — the bare NAL unit
-     *  reaches the decoder as `NaluFormat::kRaw`). */
+    /** Whether the H.264 frame contract is Annex-B (a start code ahead of
+     *  every NAL unit — the shape NVENC, x264 and OpenH264 all produce).
+     *
+     *  **Retained for source compatibility; no longer consulted.**  The
+     *  receiver now always emits the Annex-B framing, because that is
+     *  what the frame contract promises (`drain_frames()` states
+     *  `NaluFormat::kAnnexBStartCode` unconditionally) and what every
+     *  decoder NimRTC ships parses.  RFC 6184 §5.1 carries *bare* NAL
+     *  units on the wire, so the receiver synthesises the start code
+     *  where the NAL boundary is known — a picture assembled from several
+     *  bare NAL units is otherwise one unparsable blob, and the decoder
+     *  refuses it.
+     *
+     *  A host that needs the raw NAL units instead asks for them with
+     *  `h264_bare_nalus`.  A host that set this flag **off** (the old
+     *  default) and saw its pictures refused now gets them decoded; that
+     *  is the fix, not a silent contract change.
+     *
+     *  @deprecated The framing is unconditional now; use
+     *  `h264_bare_nalus` to ask for the raw NAL units. */
     bool                   h264_annex_b        = false;
 
     /** Drop an H.264 NAL unit whose header byte is not a valid type
@@ -138,6 +149,21 @@ struct NIMRTC_API_STABLE ReceiverConfig {
      *  bitstream.  This catches corruption that a lost packet or a
      *  misplaced start code leaves behind.  Default off. */
     bool                   h264_validate_nalus = false;
+
+    /** Hand the decoder a **bare** NAL unit instead of an Annex-B one.
+     *
+     *  The frame contract is Annex-B, and every decoder NimRTC ships
+     *  (NVDEC, OpenH264) parses the Annex-B framing.  With this flag
+     *  **on** the receiver hands the single-NAL path's payload to the
+     *  jitter buffer byte for byte, and the frame that reaches the
+     *  decoder is the concatenation of bare NAL units — which is *not*
+     *  the Annex-B the frame contract promises, so the decoder has to
+     *  re-frame the picture itself.
+     *
+     *  It exists for a host whose decoder consumes the raw NAL units
+     *  (the `NIMRTC_HW_E2E_NALU_LIST` hardware harness is the in-tree
+     *  user); an ordinary host leaves it off.  Default off. */
+    bool                   h264_bare_nalus     = false;
 };
 
 // ---------------------------------------------------------------------------

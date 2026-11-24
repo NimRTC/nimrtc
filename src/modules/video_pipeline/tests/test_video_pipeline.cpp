@@ -246,14 +246,52 @@ TEST(VideoPipeline, ReceiverH264SingleNal) {
     auto recs = rec.snapshot();
     ASSERT_EQ(recs.size(), 1u);
     EXPECT_EQ(recs[0].frame.codec, video_frame::CodecKind::kH264);
-    // A single NAL unit packet carries exactly one NAL unit; the
-    // receiver hands it on untouched.  The engine's decoder consumes
-    // the bare NAL units (`NaluFormat::kRaw`) when the sender did not
-    // frame them.
-    ASSERT_EQ(recs[0].frame.payload.size(), sizeof(nalu));
-    EXPECT_EQ(std::memcmp(recs[0].frame.payload.data(), nalu, sizeof(nalu)), 0);
+    // RFC 6184 §5.1 carries a *bare* NAL unit in the RTP payload -- the
+    // start code is not on the wire.  The receiver puts it back, because
+    // the frame contract is Annex-B (`NaluFormat::kAnnexBStartCode`) and
+    // every decoder NimRTC ships parses the Annex-B framing.  Without the
+    // start code the decoder cannot find the NAL boundary and refuses
+    // the picture.
+    const auto expected = annex_b(std::vector<std::uint8_t>(nalu, nalu + sizeof(nalu)));
+    ASSERT_EQ(recs[0].frame.payload.size(), expected.size());
+    EXPECT_EQ(std::memcmp(recs[0].frame.payload.data(),
+                          expected.data(), expected.size()), 0);
+    EXPECT_EQ(recs[0].frame.nalu_format,
+              video_frame::NaluFormat::kAnnexBStartCode);
     EXPECT_TRUE(recs[0].frame.is_keyframe);
     EXPECT_EQ(rx.stats().frames_emitted, 1u);
+}
+
+// ===========================================================================
+// 1a. Receiver: the escape hatch -- a host whose decoder consumes the raw
+//      NAL units gets them byte for byte.
+//
+// This is the shape RFC 6184 §5.1 puts on the wire, and it is the shape
+// the frame contract does NOT promise.  It is opt-in because the decoder
+// has to re-frame the picture itself; the default path is the Annex-B one
+// above.
+// ===========================================================================
+
+TEST(VideoPipeline, ReceiverH264BareNalEscapeHatch) {
+    ReceiverConfig rc;
+    rc.codec        = video_frame::CodecKind::kH264;
+    rc.ssrc         = kSsrc;
+    rc.payload_type = kPt;
+    rc.h264_bare_nalus = true;
+
+    VideoReceiver rx(rc);
+    FrameRecorder rec;
+    rx.set_frame_callback(rec.as_callback());
+
+    std::uint8_t nalu[] = {0x65, 0xAA, 0xBB, 0xCC};
+    auto pkt = make_rtp(/*seq=*/100, /*ts=*/1000,
+                        /*marker=*/true, kPt, kSsrc, {nalu, sizeof(nalu)});
+    EXPECT_TRUE(rx.push_rtp(parse_rtp(pkt), /*now_us=*/1000));
+
+    auto recs = rec.snapshot();
+    ASSERT_EQ(recs.size(), 1u);
+    ASSERT_EQ(recs[0].frame.payload.size(), sizeof(nalu));
+    EXPECT_EQ(std::memcmp(recs[0].frame.payload.data(), nalu, sizeof(nalu)), 0);
 }
 
 // ===========================================================================
@@ -443,6 +481,81 @@ TEST(VideoPipeline, ReceiverMultiNalFrameIsAnnexBFramed) {
 }
 
 // ===========================================================================
+// 2b'. Receiver: a P-frame assembled from SEVERAL bare single-NAL packets
+//      is still an Annex-B frame.
+//
+// This is the case that cost the live demo ~81% of its frames.
+//
+// The sender's picture is `SPS | PPS | slice`, and the slice is small
+// enough to fit in one packet -- so the sender emits the parameter sets
+// as a STAP-A (which the receiver unpacks, correctly framing each unit)
+// and the slice as a *single NAL unit packet*, which RFC 6184 §5.1 puts
+// on the wire bare.
+//
+// The jitter buffer only *concatenates* the picture's payloads.  So
+// before the fix the picture reached the decoder as
+//
+//     00 00 00 01 | SPS  00 00 00 01 | PPS  <bare slice>
+//
+// -- the slice with no start code in front of it.  The decoder cannot
+// find that NAL boundary, refuses the picture, and the engine counts it
+// as a decoder drop and asks for a key frame.  Only the IDR frames (whose
+// slice is large enough to be FU-A fragmented, and therefore reassembled
+// *and* framed) ever decoded -- hence the observed ~1-decoded-per-6
+// ratio.
+//
+// The frame the decoder receives must therefore carry a start code ahead
+// of EVERY NAL unit, including the one that arrived bare.
+// ===========================================================================
+
+TEST(VideoPipeline, ReceiverPFrameOfBareSingleNalPacketsIsAnnexBFramed) {
+    ReceiverConfig rc;
+    rc.codec        = video_frame::CodecKind::kH264;
+    rc.ssrc         = kSsrc;
+    rc.payload_type = kPt;
+
+    VideoReceiver rx(rc);
+    FrameRecorder rec;
+    rx.set_frame_callback(rec.as_callback());
+
+    // The parameter sets, aggregated into one STAP-A packet.
+    const std::uint8_t sps[] = {0x67, 0x42, 0x00, 0x1E};
+    const std::uint8_t pps[] = {0x68, 0xCE, 0x38, 0x80};
+    std::uint8_t stap[64];
+    core::ByteSpan nalus[2] = {{sps, sizeof(sps)}, {pps, sizeof(pps)}};
+    const std::size_t stap_n = build_stap_a(nalus, 2, {stap, sizeof(stap)});
+    ASSERT_GT(stap_n, 0u);
+
+    // The P-slice: one bare NAL unit, small enough to fit a single packet.
+    const std::uint8_t slice[] = {0x61, 0xE0, 0x22, 0x33, 0x44};
+
+    auto p0 = make_rtp(100, 5000, false, kPt, kSsrc, {stap, stap_n});
+    auto p1 = make_rtp(101, 5000, true,  kPt, kSsrc, {slice, sizeof(slice)});
+
+    EXPECT_TRUE(rx.push_rtp(parse_rtp(p0), 1000));
+    EXPECT_TRUE(rx.push_rtp(parse_rtp(p1), 1100));
+
+    auto recs = rec.snapshot();
+    ASSERT_EQ(recs.size(), 1u);
+
+    // Every NAL unit carries its own start code -- the slice included.
+    std::vector<std::uint8_t> expected;
+    const std::uint8_t* nals[3] = {sps, pps, slice};
+    const std::size_t   lens[3] = {sizeof(sps), sizeof(pps), sizeof(slice)};
+    for (int i = 0; i < 3; ++i) {
+        expected.insert(expected.end(), kStartCode, kStartCode + sizeof(kStartCode));
+        expected.insert(expected.end(), nals[i], nals[i] + lens[i]);
+    }
+
+    ASSERT_EQ(recs[0].frame.payload.size(), expected.size());
+    EXPECT_EQ(std::memcmp(recs[0].frame.payload.data(),
+                          expected.data(), expected.size()), 0)
+        << "the bare P-slice reached the decoder without a start code";
+    EXPECT_EQ(recs[0].frame.nalu_format,
+              video_frame::NaluFormat::kAnnexBStartCode);
+}
+
+// ===========================================================================
 // 2c. Receiver: STAP-A aggregation -> each unpacked NAL unit is Annex-B
 //     framed.
 // ===========================================================================
@@ -509,13 +622,17 @@ TEST(VideoPipeline, ReceiverH265SingleNalIsAnnexBFramed) {
     auto recs = rec.snapshot();
     ASSERT_EQ(recs.size(), 1u);
 
+    // RFC 7798 §4.3.1 carries a bare NAL unit in the RTP payload too, and
+    // the re-framing must cover *both* header bytes -- so the receiver
+    // puts the start code back, exactly like the H.264 path.
     const std::vector<std::uint8_t> nalu_vec(nalu, nalu + sizeof(nalu));
-    // A single NAL unit packet is passed on untouched (see
-    // ReceiverH264SingleNal): the two header bytes travel with it.
-    ASSERT_EQ(recs[0].frame.payload.size(), nalu_vec.size());
+    const auto expected = annex_b(nalu_vec);
+    ASSERT_EQ(recs[0].frame.payload.size(), expected.size());
     EXPECT_EQ(std::memcmp(recs[0].frame.payload.data(),
-                          nalu_vec.data(), nalu_vec.size()), 0);
+                          expected.data(), expected.size()), 0);
     EXPECT_EQ(recs[0].frame.codec, video_frame::CodecKind::kH265);
+    EXPECT_EQ(recs[0].frame.nalu_format,
+              video_frame::NaluFormat::kAnnexBStartCode);
 }
 
 // ===========================================================================
@@ -1006,11 +1123,13 @@ TEST(VideoPipeline, EndToEndSingleNal) {
     auto recs = rec.snapshot();
     ASSERT_EQ(recs.size(), 1u);
     EXPECT_EQ(recs[0].frame.codec, video_frame::CodecKind::kH264);
-    // The sender strips the start code (RTP carries bare NAL units); the
-    // receiver hands the bare NAL unit on untouched.
-    ASSERT_EQ(recs[0].frame.payload.size(), nalu.size());
+    // The sender strips the start code (RFC 6184 §5.1 carries bare NAL
+    // units in the RTP payload); the receiver puts it back, because the
+    // frame contract is Annex-B.
+    const auto expected = annex_b(nalu);
+    ASSERT_EQ(recs[0].frame.payload.size(), expected.size());
     EXPECT_EQ(std::memcmp(recs[0].frame.payload.data(),
-                          nalu.data(), nalu.size()), 0);
+                          expected.data(), expected.size()), 0);
     EXPECT_TRUE(recs[0].frame.is_keyframe);
 }
 

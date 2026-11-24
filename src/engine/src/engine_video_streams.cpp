@@ -458,6 +458,8 @@ bool NimRTCEngine::add_video_stream(std::string_view stream_id,
             cfg.emit_nacks = config_.video_receiver_tuning.emit_nacks;
             cfg.adaptive_playout =
                 config_.video_receiver_tuning.adaptive_playout;
+            cfg.h264_bare_nalus =
+                config_.video_receiver_tuning.h264_bare_nalus;
 
             plugins::IVideoReceiver* receiver = receiver_factory->create(cfg);
             if (receiver != nullptr && receiver->open() == plugins::kOk) {

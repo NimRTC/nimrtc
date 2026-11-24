@@ -88,7 +88,16 @@ jobs:
           # vendored trees are exactly the wrong shape for that: the
           # largest (`wolfssl`) is over 100 MB.  The next step retries.
           submodules: false
-          fetch-depth: 0
+          # A shallow checkout, deliberately.  `fetch-depth: 0` pulls the
+          # whole history, and the `soak.yml` job that also uses it
+          # needs that: its record names the commit it measured, and a
+          # shallow clone makes that commit impossible to resolve in
+          # the repository's own history later.  This job has no such
+          # requirement -- the evidence record resolves the commit with
+          # `git rev-parse HEAD`, which a shallow clone answers -- and
+          # the full history is a large transfer that a flaky link
+          # makes very slow.
+          fetch-depth: 1
           ref: ${{ inputs.ref || github.sha }}
 
       - name: Fetch the vendored submodules (with retries)

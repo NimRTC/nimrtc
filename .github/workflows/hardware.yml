@@ -38,6 +38,27 @@ name: hardware
 # hosted runner it would skip, and a green check that means "nothing
 # ran" is worse than no check at all.
 #
+# **This job uses no GitHub actions at all.**  Not "no actions for now" --
+# a standing rule, because the runner's action download is the one
+# failure this job cannot reach from the workflow file.  The runner
+# downloads a job's actions *before any step runs*, with its own
+# timeout and its own retry count, and neither is configurable from
+# the workflow.  On this runner that download failed, and the job
+# produced nothing at all:
+#
+#   ##[warning]Failed to download action
+#   'https://codeload.github.com/actions/upload-artifact/zip/...'.
+#   Error: The request was canceled due to the configured
+#   HttpClient.Timeout of 100 seconds elapsing.
+#   ##[error]Failed to download archive ... after 3 attempts.
+#
+# Every step after it was skipped, because the actions are fetched up
+# front.  So the rule is: **a `uses:` in this file is a dependency the
+# runner may fail to satisfy before the job starts, and this job must
+# not have any.**  The two actions it used to have are replaced --
+# `actions/checkout` by the job's own fetch, `ilammy/msvc-dev-cmd` and
+# `actions/upload-artifact` by `tools/run_hardware_job.py`.
+#
 # **There is deliberately no `pull_request` trigger.**  A PR trigger
 # would put a job that needs a runner the repository does not have
 # onto every hardware-touching PR, and the job would sit *queued*
@@ -223,11 +244,6 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
-      - name: Set up MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
       - name: Stamp the machine (driver + GPU)
         # The evidence record carries its own stamp; printing it up front
         # keeps the job log self-contained when something goes wrong
@@ -236,62 +252,52 @@ jobs:
         run: |
           nvidia-smi --query-gpu=name,driver_version --format=csv
 
-      - name: Configure (NVENC + NVDEC on, examples on)
+      - name: Build, run and record the evidence
+        # One step, and no `uses:`.
+        #
+        # Not `ilammy/msvc-dev-cmd` and not `actions/upload-artifact`:
+        # the runner downloads a job's actions *before any step runs*,
+        # in a step called "Prepare all required actions", and that
+        # download's timeout and retry count are the runner's, not the
+        # workflow's -- there is no setting in the workflow file that
+        # reaches them.  On this runner the download of
+        # `actions/upload-artifact` timed out at 100 s and then failed
+        # to resolve `codeload.github.com`, and the job ended there:
+        #
+        #   ##[error]Failed to download archive
+        #   'https://codeload.github.com/actions/upload-artifact/zip/...'
+        #   after 3 attempts.
+        #
+        # Every step after it -- the build, the harness, the record --
+        # was skipped, because the actions are fetched up front.  The
+        # run produced nothing at all, and the failure said nothing
+        # about the GPU, the codecs or the tests the job exists to
+        # prove.
+        #
+        # So this job uses no actions at all.  That is the only fix
+        # that reaches the failure: there is nothing to download up
+        # front, so there is nothing that can fail there.
+        #
+        # `tools/run_hardware_job.py` does what the two actions did:
+        # it runs `vcvars64.bat` and imports the environment it sets
+        # (which is what `msvc-dev-cmd` does), and it publishes the
+        # evidence record.  It has to be one step, because the MSVC
+        # environment has to survive into the build -- a step boundary
+        # would drop it, which is why the action existed in the first
+        # place.
+        #
+        # The record is published two ways, because there is no REST
+        # endpoint that *creates* an artifact (the API can list, get
+        # and delete them, but not create): into the step summary,
+        # which is rendered on the run page and archived with the run,
+        # and into the job outputs, which the API exposes on the run.
         shell: powershell
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-            -DNIMRTC_PLUGINS_NVENC=ON `
-            -DNIMRTC_PLUGINS_NVDEC=ON `
-            -DNIMRTC_BUILD_EXAMPLES=ON `
-            -DNIMRTC_BUILD_TESTS=ON
-
-      - name: Build hw-e2e + the engine-level hardware test
-        shell: powershell
-        run: |
-          cmake --build build --config Release -j --target hw-e2e test_engine_video_hw_loopback test_engine_video_hw_h265
-
-      - name: The codec-level end-to-end run (recorded evidence)
-        id: hw_e2e
-        shell: powershell
-        run: |
-          # The binary was built above, so no `--build` here: the tool
-          # would otherwise re-configure `build/` without the module
-          # options this job set, and under a different configuration.
-          # `--require-hardware`: a runner that lost its GPU must fail
-          # here, not skip — this job exists to prove the GPU path ran.
-          python tools/run_hardware_e2e.py --require-hardware `
-            --binary build/examples/Release/hw-e2e.exe `
-            --config Release
+          python tools/run_hardware_job.py `
+            --work $env:GITHUB_WORKSPACE `
+            --out-dir build/hardware `
+            --summary-file $env:GITHUB_STEP_SUMMARY `
+            --output-file $env:GITHUB_OUTPUT `
+            --expect-green
         env:
           PYTHONIOENCODING: utf-8
-
-      - name: The engine-level hardware test
-        # ctest's exit code is the verdict: the test skips only when the
-        # host has no hardware encoder, which `--require-hardware` above
-        # has already turned into a failure — so a green ctest here means
-        # the engine ran the pinned hardware path end to end.
-        shell: powershell
-        run: |
-          ctest --test-dir build -C Release -R "test_engine_video_hw_loopback|test_engine_video_hw_h265" `
-            --output-on-failure
-
-      - name: Surface the evidence summary
-        if: always()
-        shell: powershell
-        run: |
-          # Write the summary into the Step Summary so the run page shows
-          # the window (driver, ref, verdict) without downloading the
-          # artifact.  `--days 0` keeps the window to *today*, i.e. this
-          # run's record: a stale record from an earlier job must not be
-          # what the page shows.
-          python tools/run_hardware_e2e.py --summary --days 0 |
-            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-
-      - name: Upload the evidence record
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: hardware-evidence-${{ github.run_id }}
-          path: build/hardware/*.jsonl
-          retention-days: 365
-          if-no-files-found: error

@@ -72,8 +72,62 @@ GIT_TUNING = [
 ]
 
 
+def is_up_to_date(root: str, path: str) -> bool:
+    """Is this submodule already checked out at the commit the tree wants?
+
+    `git submodule update --init` is a no-op for a submodule that is
+    already right, so the check only saves the *stat* -- but it also
+    answers the question the update answers, and on a runner that has
+    been here before it saves the transfer too.
+    """
+    rc = run(["git", "submodule", "status", "--", path], cwd=root)
+    if rc != 0:
+        return False
+    # `git submodule status` prefixes the commit with a sign: a leading
+    # '-' means the submodule is not initialised, '+' means it is at a
+    # different commit than the tree records, and ' ' means it is at the
+    # recorded commit.
+    out = subprocess.run(
+        ["git", "submodule", "status", "--", path], cwd=root,
+        capture_output=True)
+    text = out.stdout.decode("utf-8", "replace").strip()
+    if not text:
+        return False
+    return text.startswith(" ")
+
+
 def fetch_one(root: str, path: str, retries: int) -> bool:
-    """Fetch one submodule, retrying a cut-off transfer."""
+    """Fetch one submodule, retrying a cut-off transfer.
+
+    The order of attempts matters here.  The runner's `.git/modules`
+    directory survives from one job to the next -- `actions/checkout`
+    cleans the *worktree*, not the object cache -- so on a runner that
+    has been here before, the objects for most of the vendored trees
+    are already on disk.  Asking git to fetch them again is pure
+    latency on a link that is not fast, and on this one it is the
+    difference between a job that finishes and a job that times out.
+
+    So the local attempt comes first, without `--depth`: it lets git
+    use the objects it already has and go to the network only for the
+    ones it is missing.  The shallow fetch is the fallback, for the
+    submodule whose objects are not in the cache yet.
+    """
+    if is_up_to_date(root, path):
+        print("  %s: already at the recorded commit" % path, flush=True)
+        return True
+
+    # The local-first attempt: no `--depth`, so git can assemble the
+    # commit from objects it already has.  `--no-fetch` keeps it from
+    # going to the network at all, which is the point: this attempt is
+    # *only* about what is already on disk.
+    rc = run(
+        ["git", "submodule", "update", "--init", "--no-fetch", "--", path],
+        cwd=root)
+    if rc == 0 and is_up_to_date(root, path):
+        print("  %s: checked out from the local object cache" % path,
+              flush=True)
+        return True
+
     for attempt in range(1, retries + 1):
         # `git submodule update --init` is idempotent: a submodule that is
         # already at the right commit is a no-op, so a retry after a

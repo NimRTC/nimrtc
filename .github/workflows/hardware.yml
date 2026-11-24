@@ -77,7 +77,16 @@ jobs:
     # must not pick this job up.  A hosted runner never matches, so the
     # job stays "queued" rather than pretending to pass.
     runs-on: [self-hosted, windows, gpu-nvenc]
-    timeout-minutes: 60
+    # Generous, because the vendored trees are the slow part of this
+    # job and they are fetched over a link that is not always fast: the
+    # largest of them is over 100 MB, and a run that fetched seven of
+    # the fourteen in an hour was cancelled here before it ever
+    # reached the build.  This is an evidence collector on a
+    # self-hosted runner -- it is not a PR gate, and nothing waits on
+    # it -- so a long timeout costs nothing but wall-clock, while a
+    # short one makes the job unrunnable on the machine it is meant
+    # for.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
         with:

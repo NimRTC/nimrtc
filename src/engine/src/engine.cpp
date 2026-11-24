@@ -308,6 +308,12 @@ uint32_t NimRTCEngine::open() noexcept {
     // is in the transport's config when the agent is built and gathering
     // begins (spec §二 4).
     impl_->session_state.turn_credentials.reset();
+    // v1.4 N8: each session's path-change ledger starts from zero — and the
+    // flat `Stats` projection with it, so a fresh open() does not report a
+    // change that happened in a previous session.
+    impl_->session_state.path_change.reset();
+    impl_->session_state.last_path_change_reason.clear();
+    impl_->session_state.last_path_change_new_pair.reset();
     refresh_turn_credentials();
 
     core::log::Logger::instance().debug("op8 calling ice_t_->open()");
@@ -428,6 +434,8 @@ void NimRTCEngine::close() noexcept {
     // reservoir is not worth keeping.
     impl_->qoe.close();
     if (ice_t_) ice_t_->close();
+    // v1.4 N8: the session is over — drop the path-change ledger with it.
+    impl_->session_state.path_change.reset();
     if (audio3a_plugin_) audio3a_plugin_->close();
     if (codec_plugin_) codec_plugin_->close();
     shutdown_video_plugins();
@@ -924,6 +932,10 @@ bool NimRTCEngine::restart_ice() noexcept {
     // touching the transport.
     const std::int64_t now_us = detail::steady_now_us();
     auto& rec = impl_->session_state.ice_recovery;
+    // v1.4 N8: record the pair before the restart so the report can say
+    // "from where to where" (also when the restart is blocked — the
+    // terminal report still carries the last pair, spec §七).
+    impl_->session_state.path_change.note_before(current_pair());
     if (!rec.note_restart_attempted(now_us, "manual-blocked")) {
         report_ice_recovery_terminal("manual", "manual-blocked");
         return false;
@@ -953,6 +965,10 @@ void NimRTCEngine::set_on_ice_restart(plugins::OnIceRestart cb) noexcept {
 
 void NimRTCEngine::set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept {
     on_ice_recovery_ = std::move(cb);
+}
+
+void NimRTCEngine::set_on_peer_restart(EnginePeerRestartCallback cb) noexcept {
+    on_peer_restart_ = std::move(cb);
 }
 
 void NimRTCEngine::reset_ice_recovery_budget() noexcept {

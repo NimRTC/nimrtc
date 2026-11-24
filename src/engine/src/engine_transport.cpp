@@ -516,6 +516,23 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
         // those, so we forward the event.
         ice_t_->set_on_ice_restart([this] {
             if (on_ice_restart_) on_ice_restart_();
+
+            // v1.4 N8: alongside the unchanged `set_on_ice_restart`, report
+            // the path context.  A peer restart changes the *credentials*,
+            // not the local path, so the old and new pairs are both the
+            // current selection — empty `new_pair` means "not selected yet",
+            // and the host reads that as "the local path has not changed,
+            // the negotiation to answer is the peer's" (spec §五 三).
+            if (on_peer_restart_) {
+                const auto now_pair = current_pair();
+                PeerRestartReport report;
+                report.old_pair = now_pair;
+                report.new_pair = now_pair;
+                report.reason = "peer-restart";
+                impl_->session_state.last_path_change_reason = report.reason;
+                impl_->session_state.last_path_change_new_pair = now_pair;
+                on_peer_restart_(report);
+            }
         });
 
         // Rule 2 warning: raw-udp-arq media has no DTLS.
@@ -1850,6 +1867,9 @@ void NimRTCEngine::poll_ice_recovery() noexcept {
 void NimRTCEngine::execute_ice_recovery_restart(std::int64_t now_us) noexcept {
     auto& rec = impl_->session_state.ice_recovery;
     const std::string reason(rec.pending_reason());
+    // v1.4 N8: record the pair the session is on **before** the restart, so
+    // the report after it can say "from where to where".
+    impl_->session_state.path_change.note_before(current_pair());
     if (!rec.note_restart_attempted(now_us, "budget-exhausted")) {
         report_ice_recovery_terminal(reason, "budget-exhausted");
         return;
@@ -1893,6 +1913,29 @@ void NimRTCEngine::fire_ice_recovery_report(
     report.remaining_budget = rec.remaining_budget(now_us);
     report.terminal = terminal;
     report.terminal_reason = std::string(terminal_reason);
+
+    // v1.4 N8: carry the path context.  `old_pair` is the pair the caller
+    // recorded before the restart (empty = none was selected yet); `new_pair`
+    // is the current selection (empty = the new pair is still gathering).
+    // The reason is refined from the two pairs: a relay-bit flip reports
+    // "relay-fallback" whatever the restart's trigger; anything else keeps
+    // the trigger's reason ("local-address-changed" / "ice-failed" /
+    // "manual"), so the N3 vocabulary is unchanged (spec §二).
+    const auto& before = impl_->session_state.path_change.before();
+    const auto now_pair = current_pair();
+    report.old_pair = before;
+    report.new_pair = now_pair;
+    const auto classified =
+        detail::PathChangeTracker::classify(before, now_pair);
+    if (classified == "relay-fallback") {
+        report.reason = std::string(classified);
+    }
+
+    // The flat `Stats` projection: a host that only polls `stats()` can
+    // still tell "the path changed since I last looked".
+    impl_->session_state.last_path_change_reason = report.reason;
+    impl_->session_state.last_path_change_new_pair = now_pair;
+
     if (on_ice_recovery_) on_ice_recovery_(report);
 }
 

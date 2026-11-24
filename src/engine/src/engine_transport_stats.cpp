@@ -164,6 +164,13 @@ IceCandidatePairInfo to_engine_pair(const plugins::IceCandidatePair& p) {
 
 }  // namespace
 
+std::optional<IceCandidatePairInfo> NimRTCEngine::current_pair() const noexcept {
+    if (ice_t_ == nullptr) return std::nullopt;
+    const auto pair = ice_t_->selected_pair();
+    if (!pair) return std::nullopt;
+    return to_engine_pair(*pair);
+}
+
 void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
     // ---- ICE (RFC 8445) --------------------------------------------------
     //
@@ -348,6 +355,13 @@ void NimRTCEngine::append_ice_recovery_stats(Stats& out) const noexcept {
     append_turn_credentials_stats(out);
 
     const auto& sst = impl_->session_state;
+
+    // v1.4 N8: the last path change rides the same flat-stats hook — it is
+    // a policy fact, so it is published whether or not the reconnection
+    // machine is driven.
+    out.last_path_change_reason = sst.last_path_change_reason;
+    out.last_path_change_new_pair = sst.last_path_change_new_pair;
+
     if (sst.ice_recovery_policy != detail::IceRecoveryPolicy::kAuto) {
         out.ice_recovery_state = "disabled";
         out.ice_recovery_restarts = 0;

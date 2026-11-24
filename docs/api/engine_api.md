@@ -34,6 +34,7 @@ nimrtc::engine::NimRTCEngine
 │   ├── set_on_state_change(cb)
 │   ├── set_on_ice_restart(cb)        -- peer restarted ICE, host re-answers
 │   ├── set_on_ice_recovery(cb)       -- v1.4 N3: auto/manual restart reports
+│   ├── set_on_peer_restart(cb)       -- v1.4 N8: peer restart + path context
 │   ├── set_on_data_message(cb)
 │   ├── set_on_data_message_ex(cb)    -- v1.2.0: adds the channel identity
 │   └── set_on_data_state(cb)
@@ -51,6 +52,7 @@ nimrtc::engine::NimRTCEngine
 │   ├── ice_restart_count() → uint32
 │   ├── set_on_ice_restart(cb)           -- peer restarted ICE
 │   ├── set_on_ice_recovery(cb)          -- v1.4 N3: restart reports
+│   ├── set_on_peer_restart(cb)          -- v1.4 N8: peer restart, with pairs
 │   └── reset_ice_recovery_budget()      -- v1.4 N3: top up the restart budget
 │
 ├── DTLS / SRTP inspection
@@ -198,6 +200,7 @@ methods are written defensively.
 | `on_state_change` | Engine state transitions (e.g. ICE → connected) | `void(const char* state)` |
 | `on_ice_restart` | The *peer* restarted ICE (RFC 8445 §9.1.1.1); the host must answer with a fresh offer | `void()` |
 | `on_ice_recovery` | An ICE restart the engine initiated (v1.4 N3, ADR-031) — every success *and* every terminal report | `void(const engine::IceRecoveryReport& report)` |
+| `on_peer_restart` | The *peer* restarted ICE, with the path context (v1.4 N8, ADR-033) — fires **alongside** `on_ice_restart`; carries the old/new pair + reason `"peer-restart"` | `void(const engine::PeerRestartReport& report)` |
 | `on_data_message` | A DataChannel message arrives | `plugins::DataMessageCallback` |
 | `on_data_state` | A DataChannel state transition (open / closed / error) | `plugins::DataChannelStateCallback` |
 | `on_dtmf` | A completed DTMF key press arrives (RFC 4733; only when `EngineConfig::dtmf_enabled` is true) | `void(const plugins::DtmfEvent& event)` |
@@ -381,6 +384,12 @@ Install the callback fired when the *peer* restarts ICE: the peer's
 fresh ufrag / pwd arrive on the wire, and the host must answer with a
 fresh offer (`create_offer()` picks the new credentials up).
 
+This callback keeps its original no-payload shape (`void()`).  The
+path context of a peer restart is delivered through the **sibling**
+callback `set_on_peer_restart()` (§6.10, v1.4 N8) — which fires
+**alongside** this one, so a host already relying on
+`set_on_ice_restart` is unaffected.
+
 ### 6.8 The ICE recovery policy (v1.4 N3, ADR-031)
 
 `EngineConfig::ice_recovery_policy` selects who restarts ICE when the
@@ -401,11 +410,15 @@ is written, and `set_on_ice_recovery` receives a terminal
 
 ```cpp
 struct NIMRTC_API_STABLE IceRecoveryReport {
-    std::string reason;               // "local-address-changed" / "manual"
+    std::string reason;               // "local-address-changed" / "manual" / "relay-fallback"
     std::uint32_t restart_count = 0;       // restarts used in this window
     std::uint32_t remaining_budget = 0;    // restarts left in this window
     bool terminal = false;
     std::string terminal_reason;      // "budget-exhausted" / "manual-blocked"
+
+    // ---- Path-change pair context (v1.4 N8, ADR-033) ----
+    std::optional<IceCandidatePairInfo> old_pair;  // pair before the switch; empty = none yet
+    std::optional<IceCandidatePairInfo> new_pair;  // pair after the switch; empty = still gathering
 };
 
 void set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept;  // void(const IceRecoveryReport&)
@@ -416,6 +429,11 @@ void reset_ice_recovery_budget() noexcept;
 the terminal latch.  It does **not** reset the sliding window's start,
 so an exhausted window does not instantly re-restart once the budget
 returns.
+
+**`old_pair` / `new_pair`** (v1.4 N8): the report now also carries
+*which* path the session was on before the restart and *which* one it
+is on after it.  `new_pair` empty means the restart is still gathering
+— the host sees "not selected yet", not a placeholder.
 
 ### 6.9 The TURN-credentials provider seam (v1.4 N7, ADR-032)
 
@@ -472,6 +490,47 @@ non-empty `out->host` to hand one set over.
 When the ICE transport reports a rejected credential, the failure-reason
 projection reports `"credentials-rejected"` (v1.4 N4 vocabulary) instead
 of a generic `"checks-failed"`.
+
+### 6.10 Path-change reporting (v1.4 N8, ADR-033)
+
+Three report points carry the **path context** — *from where to where,
+and why*.  A path change is **not** a failure: none of these feeds the
+`ice_failure_reason` vocabulary (§13.5).
+
+```cpp
+void set_on_peer_restart(EnginePeerRestartCallback cb) noexcept;
+// EnginePeerRestartCallback = std::function<void(const PeerRestartReport&)>
+```
+
+| Callback / method | Fires | Reason | Pair context |
+|---|---|---|---|
+| `set_on_ice_recovery` (§6.8) | local restart the engine ran (N3), or manual `restart_ice()` | `"local-address-changed"` / `"manual"` — refined to `"relay-fallback"` when the pair flipped direct ↔ relay | `IceRecoveryReport::old_pair` = pre-restart pair, `new_pair` = current pair |
+| `set_on_peer_restart` | the *peer* restarted ICE — fires **alongside** `set_on_ice_restart` | `"peer-restart"` | `PeerRestartReport::old_pair` / `new_pair` — a peer restart changes *their* credentials, not the local path, so both are typically the current pair |
+
+```cpp
+struct NIMRTC_API_STABLE PeerRestartReport {
+    std::optional<IceCandidatePairInfo> old_pair;  // empty = none selected yet
+    std::optional<IceCandidatePairInfo> new_pair;  // empty = still gathering
+    std::string reason;                            // "peer-restart"
+};
+```
+
+**The reason vocabulary is closed** — a host can `switch` on it:
+
+| reason | when |
+|---|---|
+| `"local-address-changed"` | local address changed (an ICE drop triggered the N3 reconnection) |
+| `"peer-restart"` | the peer changed credentials (`set_on_ice_restart` fired) |
+| `"relay-fallback"` | the pair switched direct → relay (or relay → direct) |
+| `"manual"` | the host called `restart_ice()` |
+| `"ice-failed"` | the ICE agent failed explicitly (N3) |
+
+`old_pair` / `new_pair` empty has meaning: empty `old_pair` = no pair
+was ever selected (the first connection); empty `new_pair` = the
+restart is still gathering.  `Stats::last_path_change_reason` /
+`last_path_change_new_pair` (§13.5) keep the **last** change for hosts
+that poll instead of subscribing — the fields are populated even when
+`ice_recovery_policy == "off"`.
 
 ---
 
@@ -1639,6 +1698,8 @@ struct Stats {
 | `ice_recovery_restarts` | The restarts the *recovery policy* consumed in the current sliding 10-minute window (0 when disabled).  Distinct from `ice_restart_count` — the ICE agent's lifetime count. |
 | `ice_recovery_terminal_reason` | `"budget-exhausted"` / `"manual-blocked"` once the machine is terminal; empty otherwise (including when disabled). |
 | `turn_credentials_state` | The TURN-credentials provider pull (v1.4 N7, ADR-032): `""` (no provider configured) / `"idle"` / `"ok"` / `"unavailable"` / `"rejected"`.  A flat `Stats` field (like the `ice_recovery_*` trio above), reported here next to the policy surface. |
+| `last_path_change_reason` | The reason of the **last** path change (v1.4 N8, ADR-033): `"local-address-changed"` / `"peer-restart"` / `"relay-fallback"` / `"manual"` — empty = never changed.  The same closed vocabulary as `IceRecoveryReport::reason`; populated even when `ice_recovery_policy == "off"`. |
+| `last_path_change_new_pair` | The pair the session was on after the last path change (v1.4 N8, ADR-033): empty = none selected yet.  A flat `Stats` field like `last_path_change_reason`, reported here next to the pair surface. |
 | `selected_pair` | The candidate pair the agent nominated, or empty.  Empty until the connectivity checks settle on a path, which is *after* the agent reaches Connected. |
 | `relayed` | True when the selected pair goes through a TURN relay.  *Derived* from the pair's candidate types, published separately because it is the one bit a host actually branches on. |
 | `rtt_ms` | The round-trip time in milliseconds, **instantaneous** (the latest measurement, not a running total).  0 until a Receiver Report with a usable LSR / DLSR pair has arrived. |

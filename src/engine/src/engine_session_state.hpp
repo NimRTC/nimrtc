@@ -39,6 +39,7 @@
 #include <nimrtc/web_transport/web_transport_session_iface.hpp>
 
 #include "engine_ice_recovery.hpp"
+#include "engine_path_change.hpp"
 #include "engine_turn_credentials.hpp"
 
 namespace nimrtc::engine::detail {
@@ -142,6 +143,17 @@ struct SessionState {
     // so the provider is never consulted for that engine.
     TurnCredentialsState turn_credentials;
     bool has_static_turn_server = false;
+
+    // ---- Path change -> report (v1.4 N8, additive) -----------------------
+    // The ledger and the flat `Stats` projection for "the last time the
+    // path changed".  `path_change` holds the pair the engine was on
+    // **before** the current restart (recorded at each report point, reset
+    // only at open()/close()); `last_path_change_*` is the flat-Stats
+    // projection of the last reported change, so a host that only polls
+    // `stats()` can still tell "the path changed since I last looked".
+    PathChangeTracker path_change;
+    std::string last_path_change_reason;
+    std::optional<IceCandidatePairInfo> last_path_change_new_pair;
 
     // ---- DataChannel DTLS-transport cookie (v1.x follow-up) ------------
     //

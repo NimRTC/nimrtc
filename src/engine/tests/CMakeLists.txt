@@ -280,3 +280,52 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# v1.4 (v1-path-change-report, N8): the path-change ledger and the three
+# report points.
+# -----------------------------------------------------------------------------
+# The same shape as the two tests above: the first half pins the private
+# `detail::PathChangeTracker` collaborator (classify / same_path /
+# note_before-before-reset) with pure functions; the second half drives a
+# real `NimRTCEngine` with the stateful fake ICE transport (reused from the
+# recovery test's pattern) to prove the wiring end-to-end: an N3 restart
+# reports old/new pairs, a manual restart reports reason "manual", a peer
+# restart fires `set_on_peer_restart` with reason "peer-restart" while the
+# old `set_on_ice_restart` still fires.
+add_executable(test_engine_path_change
+    test_engine_path_change.cpp
+    )
+
+if(WIN32)
+    target_link_libraries(test_engine_path_change PRIVATE ws2_32)
+endif()
+
+target_link_libraries(test_engine_path_change PRIVATE
+    nimrtc::engine
+    nimrtc::core
+    nimrtc::plugins
+    nimrtc::datachannel
+    GTest::gtest_main)
+
+target_include_directories(test_engine_path_change PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src"
+    "${CMAKE_SOURCE_DIR}/src/modules/ice/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include")
+
+if(WIN32)
+    target_compile_definitions(test_engine_path_change PRIVATE _WIN32_WINNT=0x0601)
+endif()
+
+nimrtc_apply_options(test_engine_path_change LENIENT)
+
+nimrtc_copy_msquic_dll(test_engine_path_change)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_path_change
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES TIMEOUT 60
+        DISCOVERY_TIMEOUT 10)
+endif()

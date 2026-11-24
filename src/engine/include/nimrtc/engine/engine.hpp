@@ -3715,8 +3715,8 @@ public:
 
     /** The result of a local ICE restart (v1.4 N3).
      *
-     *  This is the N3 landing point; N8 will *add* `old_pair` / `new_pair`
-     *  fields (an addition — the existing fields' semantics do not change).
+     *  `old_pair` / `new_pair` are the N8 addition — the existing fields'
+     *  semantics do not change.
      *
      *  `reason` says why the restart happened: "local-address-changed"
      *  (an ICE drop), "ice-failed" (the agent failed explicitly) or
@@ -3735,6 +3735,33 @@ public:
         /** Terminal reason (empty when not terminal): "budget-exhausted" /
          *  "restart-failed" / "manual-blocked". */
         std::string terminal_reason;
+
+        // ---- Path-change pair context (v1.4 N8) ---------------------------
+        // The N8 addition: the report now carries *which* path the session
+        // was on before the restart and *which* one it is on after it, so a
+        // host does not have to diff `Stats::transport.selected_pair`
+        // strings to learn "from where to where".
+
+        /** The pair in use **before** the switch.  Empty = no pair was
+         *  selected yet (the first connection). */
+        std::optional<IceCandidatePairInfo> old_pair;
+
+        /** The pair in use **after** the switch.  Empty = the new pair has
+         *  not been selected yet (the restart is still gathering). */
+        std::optional<IceCandidatePairInfo> new_pair;
+    };
+
+    /** The peer-restart path context (v1.4 N8). */
+    struct NIMRTC_API_STABLE PeerRestartReport {
+        /** The pair in use before the peer restart (empty = none was
+         *  selected yet). */
+        std::optional<IceCandidatePairInfo> old_pair;
+        /** The pair in use after the peer restart (empty = not selected
+         *  yet). */
+        std::optional<IceCandidatePairInfo> new_pair;
+        /** "peer-restart" (the only value this slice emits; the closed
+         *  vocabulary leaves room for more). */
+        std::string reason;
     };
 
     /** Fired after a local ICE restart (v1.4 N3).
@@ -3754,6 +3781,24 @@ public:
      *  `restart_ice()` fires it too (reason "manual"), and the terminal
      *  state is reported through it as well. */
     NIMRTC_API_STABLE void set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept;
+
+    /** The peer-restart callback type (v1.4 N8). */
+    using NIMRTC_API_STABLE EnginePeerRestartCallback =
+        std::function<void(const PeerRestartReport&)>;
+
+    /** Install the callback fired when the *peer* restarts ICE (v1.4 N8).
+     *
+     *  `set_on_ice_restart()` keeps its original meaning (the peer's SDP
+     *  changed — the host must answer with new credentials); this callback
+     *  fires alongside it and additionally carries the path context: the
+     *  pair the session was on before the peer's restart and the pair it is
+     *  on after it.  A peer restart changes the *credentials*, not the local
+     *  path, so the two are typically the same pair — empty `new_pair`
+     *  means "not selected yet".
+     *
+     *  Runs on the same thread rule as `set_on_ice_restart`.  Pass a null
+     *  callback to clear. */
+    NIMRTC_API_STABLE void set_on_peer_restart(EnginePeerRestartCallback cb) noexcept;
 
     /** Reset the reconnection budget (v1.4 N3).
      *
@@ -5476,6 +5521,26 @@ public:
          *  "rejected" — the transport reported a 401/403 on the applied
          *  credentials.  Sticky for the engine's lifetime. */
         std::string turn_credentials_state;
+
+        // ---- Last path change (v1.4 N8) -----------------------------------
+        //
+        // Lives on the flat `Stats` next to the reconnection-policy fields
+        // for the same reason they do: it answers "did the path change
+        // since I last looked" **from the stats alone**, without the host
+        // having subscribed to a callback.  Like `ice_recovery_*` and
+        // `turn_credentials_state`, it is a *policy* fact (a path change
+        // happened once), not a transport-plane measurement.
+
+        /** Reason of the last path change (v1.4 N8).  Empty = no path
+         *  change has happened yet.  Same closed vocabulary as
+         *  `IceRecoveryReport::reason`: "local-address-changed" /
+         *  "peer-restart" / "relay-fallback" / "manual" / "ice-failed". */
+        std::string last_path_change_reason;
+
+        /** The pair the session is on after the last path change (v1.4 N8).
+         *  Empty = no path change yet, or the new pair was not selected at
+         *  the time. */
+        std::optional<IceCandidatePairInfo> last_path_change_new_pair;
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -5739,6 +5804,11 @@ private:
      *  `set_on_ice_recovery()`; called on the tick thread by the
      *  ICE-recovery poll and by `restart_ice()`. */
     EngineIceRecoveryCallback on_ice_recovery_;
+
+    /** Fired when the *peer* restarts ICE (v1.4 N8).  Set by
+     *  `set_on_peer_restart()`; invoked alongside `on_ice_restart_` from
+     *  the transport's peer-restart callback, with the path context. */
+    EnginePeerRestartCallback on_peer_restart_;
 
     // ---- DTMF (v1.2.0, session capability plan D1 / D2) ----------------
     //
@@ -6029,6 +6099,11 @@ private:
      *  `ice_t_->restart()` directly (not the public `restart_ice()`, which
      *  would recurse into the same bookkeeping), and report the outcome. */
     void execute_ice_recovery_restart(std::int64_t now_us) noexcept;
+    /** The session's currently selected candidate pair, projected onto the
+     *  public `IceCandidatePairInfo` shape (v1.4 N8).  Empty when no pair
+     *  is selected yet — the same projection `Stats::transport.selected_pair`
+     *  uses. */
+    std::optional<IceCandidatePairInfo> current_pair() const noexcept;
     /** Fire the `set_on_ice_recovery` callback with a filled report. */
     void fire_ice_recovery_report(std::string_view reason, bool terminal,
                                   std::string_view terminal_reason) noexcept;

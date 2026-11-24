@@ -118,6 +118,12 @@ add_library(nimrtc_engine STATIC
     # rejection latch, change detection) is engine-internal knowledge that
     # must not leak into the public engine header (Layout Invariant 4).
     src/engine_turn_credentials.cpp
+    # v1.4 (v1-path-change-report, N8): the path-change ledger.  A private
+    # TU — the "which pair was the previous one" bookkeeping and the pure
+    # reason classification live here, so the three report points (N3
+    # restart, manual restart, peer restart) share one judgment instead of
+    # each carrying its own.
+    src/engine_path_change.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and

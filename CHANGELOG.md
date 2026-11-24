@@ -91,6 +91,23 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `"unavailable"` / `"rejected"`.  Fields only — no new public headers —
   so the ADR-015 baseline stays at 198.
 
+- **Path-change reporting (`slice v1-path-change-report`, N8 / ADR-033).**
+  The engine now tells the host *from where to where, and why* a path
+  switch happened — no polling, no diffing `selected_pair` strings.
+  `IceRecoveryReport` gains `old_pair` / `new_pair`
+  (`std::optional<IceCandidatePairInfo>`, empty = none selected yet /
+  still gathering) and a new `set_on_peer_restart(EnginePeerRestartCallback)`
+  fires **alongside** the unchanged `set_on_ice_restart` with a
+  `PeerRestartReport` when the *peer* restarts ICE.  The reason is a
+  closed vocabulary: `"local-address-changed"` / `"peer-restart"` /
+  `"relay-fallback"` (the pair flipped direct ↔ relay) / `"manual"` /
+  `"ice-failed"`.  Flat `Stats` gains `last_path_change_reason` and
+  `last_path_change_new_pair` (populated even when
+  `ice_recovery_policy == "off"`).  **Note:** the `Stats` struct is passed
+  by value and grows by two fields — hosts must recompile (allowed within
+  the v1.3 → v1.4 MINOR bump per ADR-015 Decision 4).  No new public
+  headers — the ADR-015 baseline stays at 198.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

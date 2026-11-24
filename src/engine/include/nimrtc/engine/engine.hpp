@@ -689,6 +689,17 @@ struct NIMRTC_API_STABLE EngineConfig {
          *  (the target delay then follows the interarrival jitter
          *  estimate instead of being fixed). */
         bool          adaptive_playout    = false;
+        /** Hand the decoder a **bare** NAL unit instead of an Annex-B one.
+         *
+         *  The frame contract is Annex-B and every decoder NimRTC ships
+         *  parses it, so the receiver synthesises the start code that
+         *  RFC 6184 §5.1 leaves off the wire.  Turning this **on** hands
+         *  the decoder the concatenation of bare NAL units instead, which
+         *  the decoder has to re-frame itself.
+         *
+         *  It exists for a host whose decoder consumes the raw NAL units;
+         *  an ordinary host leaves it off.  Default off. */
+        bool          h264_bare_nalus     = false;
     } video_receiver_tuning;
 
     // ---- The receive-side feedback bound (v1.3 plan Q4 / video plan T2) --

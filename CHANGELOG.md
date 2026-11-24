@@ -181,6 +181,41 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Verified on the runner's own workspace: all fourteen vendored trees
   come up at the recorded commit.
 
+- **The receiver delivers the Annex-B framing the frame contract
+  promises, so the pictures a decoder refuses are decoded again.**
+  The live remote-desktop demo dropped ~81% of its frames
+  (`frames=652 decoded=124 dropped=528`) while the network was fine.
+  The cause was in the video pipeline's receiver, not in the network:
+  RFC 6184 §5.1 puts a **bare** NAL unit in the RTP payload (the start
+  code is not on the wire), and the receiver forwarded the single-NAL
+  path's payload byte for byte — so a picture assembled from bare NAL
+  units reached the decoder as one unparsable blob.  The decoder could
+  not find the NAL boundary, refused the picture, the engine counted it
+  as a decoder drop, and a PLI went out — which is why the *only* frames
+  that decoded were the IDRs (their slice is large enough to be FU-A
+  fragmented, and a reassembled FU-A unit was framed).
+  The jitter buffer only *concatenates* a picture's payloads, so the
+  receiver is the only place that can put the start code back — and it
+  now does, for H.264 **and** H.265, on every single-NAL packet.  A
+  payload that already carries a start code is forwarded as-is, so the
+  framing is never doubled.
+
+  `ReceiverConfig::h264_annex_b` is **no longer consulted**: the
+  framing is unconditional now, because it is what
+  `NaluFormat::kAnnexBStartCode` (which `drain_frames()` states
+  unconditionally) promises and what every decoder NimRTC ships
+  (NVDEC, OpenH264) parses.  The field is retained for source
+  compatibility.  A host that needs the raw NAL units asks for them
+  with the new `h264_bare_nalus` (mirrored on
+  `plugins::VideoReceiverConfig` and
+  `EngineConfig::VideoReceiverTuning`); the `NIMRTC_HW_E2E_NALU_LIST`
+  hardware harness is the in-tree user.
+
+  The regression is asserted in
+  `VideoPipeline.ReceiverPFrameOfBareSingleNalPacketsIsAnnexBFramed`:
+  a picture of `SPS | PPS | bare slice` must reach the decoder with a
+  start code ahead of **every** NAL unit — the slice included.
+
 ## [1.3.1] - 2026-11-24
 
 ### Status: Stable

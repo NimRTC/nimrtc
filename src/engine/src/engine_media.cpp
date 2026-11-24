@@ -1045,6 +1045,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             config_.video_receiver_tuning.initial_jitter_buffer_ms;
         cfg.emit_nacks  = config_.video_receiver_tuning.emit_nacks;
         cfg.adaptive_playout = config_.video_receiver_tuning.adaptive_playout;
+        cfg.h264_bare_nalus = config_.video_receiver_tuning.h264_bare_nalus;
         (void)pal::make_plugin<&pal::resolve_video_receiver>(
             config_.video_receiver_name,
             video_receiver_,

@@ -39,6 +39,7 @@
 #include <nimrtc/web_transport/web_transport_session_iface.hpp>
 
 #include "engine_ice_recovery.hpp"
+#include "engine_turn_credentials.hpp"
 
 namespace nimrtc::engine::detail {
 
@@ -132,6 +133,15 @@ struct SessionState {
     IceRecoveryPolicy ice_recovery_policy = IceRecoveryPolicy::kAuto;
     plugins::IceState ice_recovery_last_state = plugins::IceState::Disconnected;
     bool ice_recovery_terminal_reported = false;
+
+    // ---- TURN credentials -> provider seam (v1.4 N7, ADR-032) ----------
+    // The bookkeeping for the host's `EngineConfig::turn_credentials`
+    // provider: what the last pull produced and how the transport answered
+    // it.  `has_static_turn_server` records that the host called
+    // `add_turn_server()` — a static server list wins over the provider,
+    // so the provider is never consulted for that engine.
+    TurnCredentialsState turn_credentials;
+    bool has_static_turn_server = false;
 
     // ---- DataChannel DTLS-transport cookie (v1.x follow-up) ------------
     //

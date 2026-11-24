@@ -1870,6 +1870,15 @@ void NimRTCEngine::execute_ice_recovery_restart(std::int64_t now_us) noexcept {
         std::string("engine[ice-recovery]: ICE restarted after ") + reason +
         " (restarts this window: " +
         std::to_string(rec.restarts_used(now_us)) + ")");
+
+    // v1.4 N7 (ADR-032): the rebuilt ICE agent re-reads the transport's
+    // TURN config, and the old credentials may have expired while the
+    // session was down — so the engine re-consults the host's provider
+    // and re-applies only when the pulled set differs from the last one
+    // (spec §二 8 / §二 9).  Static servers and a null provider make this
+    // a no-op (spec §二 7).
+    refresh_turn_credentials();
+
     fire_ice_recovery_report(reason, false, "");
 }
 

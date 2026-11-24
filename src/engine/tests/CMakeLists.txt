@@ -233,3 +233,50 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# v1.4 (v1-turn-credentials, N7): the TURN-credentials provider seam.
+# -----------------------------------------------------------------------------
+# The same shape as `test_engine_ice_recovery` above: the first half pins the
+# private `detail::TurnCredentialsState` collaborator with a virtual clock
+# (every machine entry point takes `now_us` explicitly, so no test sleeps);
+# the second half drives a real `NimRTCEngine` with the stateful fake ICE
+# transport (reused from the recovery test's pattern) to prove the wiring
+# end-to-end: open() consults the provider once, a static server wins, a
+# reconnect re-consults.
+add_executable(test_engine_turn_credentials
+    test_engine_turn_credentials.cpp
+    )
+
+if(WIN32)
+    target_link_libraries(test_engine_turn_credentials PRIVATE ws2_32)
+endif()
+
+target_link_libraries(test_engine_turn_credentials PRIVATE
+    nimrtc::engine
+    nimrtc::core
+    nimrtc::plugins
+    nimrtc::datachannel
+    GTest::gtest_main)
+
+target_include_directories(test_engine_turn_credentials PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src"
+    "${CMAKE_SOURCE_DIR}/src/modules/ice/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include")
+
+if(WIN32)
+    target_compile_definitions(test_engine_turn_credentials PRIVATE _WIN32_WINNT=0x0601)
+endif()
+
+nimrtc_apply_options(test_engine_turn_credentials LENIENT)
+
+nimrtc_copy_msquic_dll(test_engine_turn_credentials)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_turn_credentials
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES TIMEOUT 60
+        DISCOVERY_TIMEOUT 10)
+endif()

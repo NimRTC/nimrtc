@@ -72,6 +72,25 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and one new error code only — no new public headers — so the ADR-015
   baseline stays at 198.
 
+- **TURN credentials as a provider seam (`slice v1-turn-credentials`,
+  N7 / ADR-032).**
+  `EngineConfig::turn_credentials` hands the engine a
+  `TurnCredentialsProvider` callback (a raw function pointer, not
+  `std::function` — ABI-stable per ADR-015) plus a `turn_credentials_ctx`
+  handle.  The engine *pulls* a fresh `TurnCredentials` set (host / port
+  / username / password / `plugins::TurnTransport` / `tls_server_name`)
+  at the two moments a TURN server is (re)configured: before candidate
+  gathering (`open()`), and after every N3 reconnection restart — real
+  credentials carry a TTL, so the engine must ask again.  A static
+  `add_turn_server()` list **wins** over the callback (explicit host
+  configuration is never overridden); a null provider or a failed pull
+  keeps the session going direct.  A transport-reported 401/403 now
+  surfaces as `"credentials-rejected"` in the failure-reason projection
+  (instead of a generic `"checks-failed"`), and the new flat
+  `Stats::turn_credentials_state` reports `""` / `"idle"` / `"ok"` /
+  `"unavailable"` / `"rejected"`.  Fields only — no new public headers —
+  so the ADR-015 baseline stays at 198.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

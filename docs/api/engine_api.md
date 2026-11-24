@@ -330,6 +330,11 @@ would be hidden by every existing `add_turn_server()` declaration in a
 derived class, which breaks out-of-tree plugins that implement the
 interface.
 
+The engine's TURN-credentials provider seam (v1.4 N7, §6.9) never
+overrides an explicit static list: once `add_turn_server()` has been
+called, the provider is not consulted — a **static** server list
+**wins** over the callback.
+
 ### 6.5 `restart_ice()`
 
 ```cpp
@@ -411,6 +416,62 @@ void reset_ice_recovery_budget() noexcept;
 the terminal latch.  It does **not** reset the sliding window's start,
 so an exhausted window does not instantly re-restart once the budget
 returns.
+
+### 6.9 The TURN-credentials provider seam (v1.4 N7, ADR-032)
+
+Real TURN credentials carry a TTL (`username:timestamp` + HMAC), so the
+engine cannot hold one set and be done.  `EngineConfig::turn_credentials`
+hands the engine a provider callback; the engine *pulls* a fresh set at
+the two moments a TURN server is (re)configured:
+
+1. **before candidate gathering** (`open()`) — when no static TURN
+   server was added;
+2. **after every N3 reconnection restart** — the old set may have
+   expired while the session was down.
+
+```cpp
+struct NIMRTC_API_STABLE TurnCredentials {
+    std::string host;                                    // TURN server address
+    std::uint16_t port = 3478;                           // 0 = TURN/UDP default
+    std::string username;                                // empty = anonymous
+    std::string password;                                // empty = anonymous
+    plugins::TurnTransport transport = plugins::TurnTransport::Udp;
+    std::string tls_server_name;                         // TURN/TLS SNI
+};
+
+// A raw function pointer, not std::function — ABI-stable (ADR-015).
+using NIMRTC_API_STABLE TurnCredentialsProvider = bool (*)(void* ctx, TurnCredentials* out) noexcept;
+
+// in EngineConfig:
+TurnCredentialsProvider turn_credentials = nullptr;   // null = never pull
+void* turn_credentials_ctx = nullptr;                 // passed back verbatim
+```
+
+**Static servers win.**  A host that calls `add_turn_server()` keeps the
+pre-N7 behaviour exactly: the explicit static list is the host's own
+configuration, the provider is **never consulted**, and the callback may
+stay null.  The seam is pure addition.
+
+**Callback contract.**  The provider runs on the engine's tick thread —
+the same thread `set_on_ice_recovery` fires on.  It must not block and
+must not re-enter the engine.  Return `false` to say "no credentials
+right now" (the engine continues without TURN, reporting
+`turn_credentials_state == "unavailable"`); return `true` with a
+non-empty `out->host` to hand one set over.
+
+**Observability.**  `Stats::turn_credentials_state` reports the pull:
+
+| Value | Meaning |
+|---|---|
+| `""` | no provider configured (the static `add_turn_server()` path is in use) |
+| `"idle"` | a provider is configured but no set was pulled yet |
+| `"ok"` | the last pull produced a credential set |
+| `"unavailable"` | the last pull failed (provider `false` / empty `host`) |
+| `"rejected"` | the transport reported a 401/403 on the applied set (sticky for the engine's lifetime) |
+
+When the ICE transport reports a rejected credential, the failure-reason
+projection reports `"credentials-rejected"` (v1.4 N4 vocabulary) instead
+of a generic `"checks-failed"`.
 
 ---
 
@@ -1577,6 +1638,7 @@ struct Stats {
 | `ice_recovery_state` | The engine's reconnection-policy state (v1.4 N3, ADR-031): `"idle"` / `"grace"` / `"backoff"` / `"terminal"` — or `"disabled"` when `EngineConfig::ice_recovery_policy` is not `"auto"`. |
 | `ice_recovery_restarts` | The restarts the *recovery policy* consumed in the current sliding 10-minute window (0 when disabled).  Distinct from `ice_restart_count` — the ICE agent's lifetime count. |
 | `ice_recovery_terminal_reason` | `"budget-exhausted"` / `"manual-blocked"` once the machine is terminal; empty otherwise (including when disabled). |
+| `turn_credentials_state` | The TURN-credentials provider pull (v1.4 N7, ADR-032): `""` (no provider configured) / `"idle"` / `"ok"` / `"unavailable"` / `"rejected"`.  A flat `Stats` field (like the `ice_recovery_*` trio above), reported here next to the policy surface. |
 | `selected_pair` | The candidate pair the agent nominated, or empty.  Empty until the connectivity checks settle on a path, which is *after* the agent reaches Connected. |
 | `relayed` | True when the selected pair goes through a TURN relay.  *Derived* from the pair's candidate types, published separately because it is the one bit a host actually branches on. |
 | `rtt_ms` | The round-trip time in milliseconds, **instantaneous** (the latest measurement, not a running total).  0 until a Receiver Report with a usable LSR / DLSR pair has arrived. |

@@ -231,6 +231,54 @@ struct NIMRTC_API_STABLE AudioCodecConfig {
     std::string   fmtp;
 };
 
+/** One TURN credential set, as the host's provider hands it to the engine.
+ *
+ *  This is the engine's own shape — deliberately **not** `nimrtc::ice::TurnServer`:
+ *  the engine's public header must not include the ICE module's concrete
+ *  headers (Layout Invariant 4 / ADR-025), so the seam the slice adds lives
+ *  here, and `src/engine/src` translates it to the plugin seam when it
+ *  applies the credentials.
+ */
+struct NIMRTC_API_STABLE TurnCredentials {
+    /** TURN server address (hostname or IP). */
+    std::string host;
+
+    /** TURN server port.  0 = the default (TURN/UDP 3478). */
+    std::uint16_t port = 3478;
+
+    /** Username.  Empty = anonymous allocation (RFC 5766 allows it). */
+    std::string username;
+
+    /** Password.  Empty = anonymous allocation. */
+    std::string password;
+
+    /** The transport the server is reached over.  Default `Udp` (every
+     *  TURN server supports it). */
+    plugins::TurnTransport transport = plugins::TurnTransport::Udp;
+
+    /** TURN/TLS SNI / certificate hostname.  Empty = use `host`. */
+    std::string tls_server_name;
+};
+
+/** The credentials-provider callback type (v1.4 N7, ADR-032).
+ *
+ *  The engine calls it when it **needs** credentials — before candidate
+ *  gathering (`open()`) and after every N3 reconnection restart.  Return
+ *  `false` to say "no credentials right now" (the engine continues without
+ *  TURN); return `true` with a non-empty `out->host` to hand one set over.
+ *
+ *  A raw function pointer (not `std::function`), because this public
+ *  header must stay ABI-stable across releases (ADR-015): the ABI of
+ *  `std::function` is not part of the stability promise.  This matches the
+ *  shape of the engine's other callback seams.
+ *
+ *  **Threading**: the callback runs on the engine's tick thread — the same
+ *  thread set_on_ice_recovery fires on.  It must not block, and must not
+ *  re-enter the engine.
+ */
+using NIMRTC_API_STABLE TurnCredentialsProvider = bool (*)(void* ctx,
+                                                           TurnCredentials* out) noexcept;
+
 struct NIMRTC_API_STABLE EngineConfig {
     // ---- Plugin selection (ADR-001: look up by string ID in PluginRegistry) ----
 
@@ -530,6 +578,25 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  key must not arm the engine to restart ICE at a moment the host did
      *  not expect. */
     std::string ice_recovery_policy = "auto";
+
+    /** TURN credentials provider (v1.4 N7, ADR-032).
+     *
+     *  When set, the engine **pulls** a credential set from this callback
+     *  at the two moments a TURN server is (re)configured: before
+     *  candidate gathering (`open()`) and after every N3 reconnection
+     *  restart — because the issued credentials carry a TTL and may have
+     *  expired while the session was down.
+     *
+     *  The pull only happens when the host added **no static** TURN server
+     *  with `add_turn_server()`: an explicit server list wins over the
+     *  provider (the provider is not consulted).  A pull that yields
+     *  nothing leaves the session running without TURN.
+     *
+     *  Empty = the engine does not pull credentials (today's static
+     *  `add_turn_server()` path is unchanged).  `turn_credentials_ctx` is
+     *  passed back to the callback verbatim. */
+    TurnCredentialsProvider turn_credentials = nullptr;
+    void* turn_credentials_ctx = nullptr;
 
     /** Local UDP port range for ICE. 0 = OS picks.
      *
@@ -5384,6 +5451,31 @@ public:
         /** Terminal reason (v1.4 N3) — empty when not terminal:
          *  "budget-exhausted" / "restart-failed" / "manual-blocked". */
         std::string ice_recovery_terminal_reason;
+
+        // ---- TURN credentials (v1.4 N7, ADR-032) ---------------------------
+        //
+        // Lives on the flat `Stats` next to the reconnection-policy fields
+        // for the same reason they do: it answers "what is the credentials
+        // seam doing right now" **from the stats alone**.  The value is ""
+        // when no provider is configured — the host uses the static
+        // `add_turn_server()` path and there is nothing to report.
+
+        /** The turn-credentials state (v1.4 N7): "" / "idle" / "ok" /
+         *  "unavailable" / "rejected".
+         *
+         *  "" — no provider configured (the static `add_turn_server()`
+         *  path is in use).
+         *
+         *  "idle" — a provider is configured but no credentials were
+         *  pulled yet.
+         *
+         *  "ok" / "unavailable" — the last pull produced / failed to
+         *  produce a credential set (a failed pull never configures TURN;
+         *  the session keeps going direct).
+         *
+         *  "rejected" — the transport reported a 401/403 on the applied
+         *  credentials.  Sticky for the engine's lifetime. */
+        std::string turn_credentials_state;
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -6214,6 +6306,31 @@ private:
      *  driven at all, so the surface says "disabled" rather than
      *  pretending to track an idle machine (spec §六 25). */
     void append_ice_recovery_stats(Stats& out) const noexcept;
+
+    /** Fill the turn-credentials fields of the **flat** `Stats`
+     *  (v1.4 N7, ADR-032).
+     *
+     *  Projects `Stats::turn_credentials_state` from the
+     *  `TurnCredentialsState` collaborator, and folds the ICE module's
+     *  rejection latch into it (a 401/403 the transport observed is what
+     *  makes the value "rejected").  Called from
+     *  `append_ice_recovery_stats()` — the flat-stats hook the media TU
+     *  already invokes, so the value is published regardless of the
+     *  reconnection-policy switch. */
+    void append_turn_credentials_stats(Stats& out) const noexcept;
+
+    /** Pull a credential set from the host's provider and apply it to the
+     *  ICE transport (v1.4 N7, ADR-032).
+     *
+     *  The engine consults the provider at the two moments a TURN server
+     *  is (re)configured: before candidate gathering (`open()`) and after
+     *  an N3 reconnection restart.  No-op when no provider is configured
+     *  or when the host added static TURN servers (`add_turn_server()`
+     *  wins — the provider is not consulted).  A pull that yields nothing
+     *  changes nothing: the session keeps going without TURN.  A pull that
+     *  yields credentials which differ from the last-applied ones is
+     *  applied through `add_turn_server_with_transport()`. */
+    void refresh_turn_credentials() noexcept;
     /** Close and release every extra stream's plugins. */
     void shutdown_extra_video_streams() noexcept;
 

@@ -298,6 +298,18 @@ uint32_t NimRTCEngine::open() noexcept {
             "open(): ice_t_ is null (make_transport_instance returned null media_stack)");
         return core::kEngineInternal;
     }
+    // ---- TURN credentials (v1.4 N7, ADR-032) ----------------------------
+    //
+    // Before candidate gathering starts, the engine resets the credentials
+    // bookkeeping (a re-open starts each session clean — the ICE module's
+    // own rejection latch clears here too) and pulls a credential set from
+    // the host's provider when one is configured and no static TURN server
+    // was added.  The pull runs before `ice_t_->open()` so the TURN server
+    // is in the transport's config when the agent is built and gathering
+    // begins (spec §二 4).
+    impl_->session_state.turn_credentials.reset();
+    refresh_turn_credentials();
+
     core::log::Logger::instance().debug("op8 calling ice_t_->open()");
     const auto ice_open_rc = ice_t_->open();
     if (ice_open_rc != plugins::kOk) {
@@ -840,6 +852,10 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
             "add_turn_server: ICE transport not yet created — call pre_open() first");
         return -1;
     }
+    // v1.4 N7: an explicit server list wins over the credentials provider
+    // (ADR-032 §3) — the provider is never consulted once a static server
+    // has been added.
+    impl_->session_state.has_static_turn_server = true;
     ice_t_->add_turn_server(host, port, username, password);
     return 0;
 }
@@ -853,8 +869,43 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
             "add_turn_server: ICE transport not yet created — call pre_open() first");
         return -1;
     }
+    impl_->session_state.has_static_turn_server = true;
     ice_t_->add_turn_server_with_transport(host, port, username, password, transport);
     return 0;
+}
+
+
+// ---------------------------------------------------------------------------
+// TURN credentials — the provider seam (v1.4 N7, ADR-032)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::refresh_turn_credentials() noexcept {
+    if (impl_ == nullptr) return;
+    // No provider configured: the host uses the static `add_turn_server()`
+    // path and the engine does nothing (spec §四 14 / §四 15).
+    if (config_.turn_credentials == nullptr) return;
+    // Static TURN servers win over the provider: an explicit list is the
+    // host's own configuration and is never overridden (spec §二 7).
+    if (impl_->session_state.has_static_turn_server) return;
+
+    TurnCredentials out;
+    auto& tc = impl_->session_state.turn_credentials;
+    const std::int64_t now_us = detail::steady_now_us();
+    if (!tc.refresh(now_us, config_.turn_credentials,
+                    config_.turn_credentials_ctx, &out)) {
+        // Pull failed (provider false / empty host): the engine configures
+        // no TURN and keeps going direct (spec §二 5 / §二 10).
+        return;
+    }
+    // Apply only when the pulled credentials differ from the last-applied
+    // ones — the ICE module re-reads its config when the agent is rebuilt
+    // after a restart, so the same credentials must not be re-added (spec
+    // §二 9).
+    if (ice_t_ != nullptr && tc.credentials_changed()) {
+        ice_t_->add_turn_server_with_transport(
+            out.host, out.port, out.username, out.password, out.transport);
+        tc.note_applied();
+    }
 }
 
 

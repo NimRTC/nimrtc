@@ -113,6 +113,11 @@ add_library(nimrtc_engine STATIC
     # restart budget, terminal state) is engine-internal knowledge driven
     # by the tick thread through `plugins::IceState` / `IICETransport`.
     src/engine_ice_recovery.cpp
+    # v1.4 (v1-turn-credentials, N7): the TURN-credentials provider seam.
+    # A private TU — the pull bookkeeping (consecutive failures, the
+    # rejection latch, change detection) is engine-internal knowledge that
+    # must not leak into the public engine header (Layout Invariant 4).
+    src/engine_turn_credentials.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and

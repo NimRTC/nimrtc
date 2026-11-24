@@ -342,6 +342,11 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
 void NimRTCEngine::append_ice_recovery_stats(Stats& out) const noexcept {
     if (impl_ == nullptr) return;
 
+    // v1.4 N7: the turn-credentials field rides on the same flat-stats hook
+    // (the media TU invokes only this method), so it is published whether
+    // or not the reconnection machine is driven.
+    append_turn_credentials_stats(out);
+
     const auto& sst = impl_->session_state;
     if (sst.ice_recovery_policy != detail::IceRecoveryPolicy::kAuto) {
         out.ice_recovery_state = "disabled";
@@ -368,6 +373,48 @@ void NimRTCEngine::append_ice_recovery_stats(Stats& out) const noexcept {
     }
     out.ice_recovery_restarts = rec.restarts_used(now_us);
     out.ice_recovery_terminal_reason = std::string(rec.terminal_reason());
+}
+
+// ---------------------------------------------------------------------------
+// TURN credentials (v1.4 N7, ADR-032)
+// ---------------------------------------------------------------------------
+
+/**
+ * Project the turn-credentials seam onto the flat `Stats`.
+ *
+ * The one field answers "what is the credentials provider doing right now"
+ * **from the stats alone** — a session whose TURN credentials were refused
+ * says "rejected" without the host having to read the ICE module's logs
+ * (the only other observer of the 401/403, ADR-032 §4).
+ *
+ * The "" value means "no provider configured": the host uses the static
+ * `add_turn_server()` path and there is nothing to report.  The rejection
+ * observation is folded into the collaborator every projection while the
+ * ICE module's latch is set; the latch itself clears when the transport
+ * restarts / re-opens, but the collaborator's "rejected" is sticky (the
+ * spec's 被拒闩锁).
+ */
+void NimRTCEngine::append_turn_credentials_stats(Stats& out) const noexcept {
+    if (impl_ == nullptr) return;
+
+    // Fold the ICE module's rejection latch (process-wide, set by the
+    // module's log hook on a 401/403) into the collaborator.  A foreign
+    // IICETransport reports nothing here (the downcast in
+    // `connectivity_diagnostics_of` returns defaults), so "rejected" is
+    // pinned by the collaborator unit tests instead of by a live engine.
+    if (ice_t_ != nullptr) {
+        const auto diag = ice::connectivity_diagnostics_of(*ice_t_);
+        if (diag.turn_credentials_rejected) {
+            impl_->session_state.turn_credentials.note_rejected();
+        }
+    }
+
+    if (config_.turn_credentials == nullptr) {
+        out.turn_credentials_state = "";
+        return;
+    }
+    out.turn_credentials_state =
+        std::string(impl_->session_state.turn_credentials.state_string());
 }
 
 }  // namespace nimrtc::engine

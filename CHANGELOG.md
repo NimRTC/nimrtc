@@ -108,6 +108,23 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the v1.3 → v1.4 MINOR bump per ADR-015 Decision 4).  No new public
   headers — the ADR-015 baseline stays at 198.
 
+- **macOS install + downstream proof (`slice v1-macos-install-proof`,
+  N9 / ADR-034).**
+  The `macos-clang` CI leg now installs the bundle into a staging dir
+  (`build/_install/macos-arm64`) and builds a minimal
+  `find_package(NimRTC 1.0 REQUIRED)` consumer against it **out-of-tree** —
+  including `<nimrtc/engine/engine.hpp>` and linking `nimrtc::engine`, with
+  no pinned `CMAKE_CXX_STANDARD` — the same proof Windows and Linux already
+  ran on every push, so macOS's export path (the `NimRTCConfig.cmake`
+  template, the `CMAKE_INSTALL_*` paths, the `nimrtc::engine` imported
+  target) is no longer unverified.  A new static check
+  (`tools/check_install_export.py`, with a self-test) runs on all three legs
+  and catches a config-template placeholder that would reach the installed
+  file as an empty string; the release workflow's macOS leg now asserts the
+  archive carries `NimRTCConfig.cmake` and the engine public header.  No C++
+  interface change — CI/export-config only — so the ADR-015 baseline stays
+  at 198.
+
 ## [1.3.0] - 2026-11-20
 
 ### Status: Stable

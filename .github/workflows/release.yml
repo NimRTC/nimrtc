@@ -830,6 +830,20 @@ jobs:
           # BSD-3-Clause / Apache-2.0 obligations travel with the binary.
           python3 tools/collect_licenses.py --staging "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-macos-arm64-clang.tar.xz" .
+          # N9 (slice v1-macos-install-proof): the bundle must carry the
+          # export contract -- the package config a host find_package()'s
+          # and the engine public header a host includes.  The CI
+          # downstream proof already proves the staging tree compiles, and
+          # the bundle is a lossless archive of that tree (`tar -C ... .`),
+          # so listing the members is enough -- no re-extract + rebuild.
+          if ! tar -tf "build/nimrtc-${version}-macos-arm64-clang.tar.xz" | grep -q "NimRTCConfig.cmake"; then
+            echo "::error::macOS bundle is missing NimRTCConfig.cmake"
+            exit 1
+          fi
+          if ! tar -tf "build/nimrtc-${version}-macos-arm64-clang.tar.xz" | grep -q "nimrtc/engine/engine.hpp"; then
+            echo "::error::macOS bundle is missing nimrtc/engine/engine.hpp"
+            exit 1
+          fi
           # Sanity guard: a correct bundle is a few MB.  A bundle that grew
           # to hundreds of MB means the wrong directory was archived (that
           # is exactly what happened to the v1.0.1 Windows asset) — fail

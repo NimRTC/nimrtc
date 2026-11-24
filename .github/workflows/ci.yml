@@ -123,6 +123,15 @@ jobs:
         # needs the actual list, not its cardinality.
         run: python scripts/check_api_manifest.py
 
+      # The installed package config is hand-written
+      # (cmake/NimRTCConfig.cmake.in), and a placeholder that reaches the
+      # installed file as an empty string only breaks find_package() after
+      # the merge.  Pure static check (no build), run on every leg; the
+      # self-test pins that a dropped placeholder is reported and a normal
+      # template is not.
+      - name: Install export check (NimRTCConfig.cmake.in)
+        run: python tools/check_install_export.py
+
       # Fail fast: detect missing tools before wasting minutes on configure.
       - name: Pre-flight tool check
         shell: pwsh
@@ -790,6 +799,15 @@ jobs:
         # needs the actual list, not its cardinality.
         run: python3 scripts/check_api_manifest.py
 
+      # The installed package config is hand-written
+      # (cmake/NimRTCConfig.cmake.in), and a placeholder that reaches the
+      # installed file as an empty string only breaks find_package() after
+      # the merge.  Pure static check (no build), run on every leg; the
+      # self-test pins that a dropped placeholder is reported and a normal
+      # template is not.
+      - name: Install export check (NimRTCConfig.cmake.in)
+        run: python3 tools/check_install_export.py
+
       # Ubuntu 22.04 ships CMake 3.22.3; CMakePresets.json uses preset
       # schema v6 which requires CMake ≥ 3.25. Pin a recent cmake via pip.
       - name: Install ninja + Python + X11/PipeWire/EGL dev packages (CMake via pip)
@@ -1430,6 +1448,15 @@ jobs:
         # needs the actual list, not its cardinality.
         run: python3 scripts/check_api_manifest.py
 
+      # The installed package config is hand-written
+      # (cmake/NimRTCConfig.cmake.in), and a placeholder that reaches the
+      # installed file as an empty string only breaks find_package() after
+      # the merge.  Pure static check (no build), run on every leg; the
+      # self-test pins that a dropped placeholder is reported and a normal
+      # template is not.
+      - name: Install export check (NimRTCConfig.cmake.in)
+        run: python3 tools/check_install_export.py
+
       - name: Unused-const gate self-test
         # The gate below only reports what its scanner recognizes.  The
         # self-test pins that behavior: an unused internal-linkage
@@ -1498,6 +1525,52 @@ jobs:
 
       - name: Test
         run: ctest --preset tests.macos --output-on-failure -j 2
+
+      # Track D downstream proof (macOS / Apple Clang): install into a
+      # staging dir and build a minimal find_package(NimRTC) consumer
+      # against it.  Without this leg the macOS export path has **no**
+      # automated evidence: Windows (MSVC) and Linux prove theirs on
+      # every push, and macOS only ever built in-tree.  A macOS-only
+      # export defect (a wrong CMAKE_INSTALL_* path, a config template
+      # that assumes GNU, a target that forgets its INTERFACE_* props)
+      # would ship green until a host tried to consume the SDK on a
+      # Mac — the one platform where v1.4.0's own claims (D2's Metal
+      # renderer, D3's default table, D4's AVFoundation camera) live.
+      #
+      # The consumer includes the engine public header (not just
+      # <nimrtc/core/api_version.hpp> like the Linux leg): including it is
+      # the real host shape and exposes "a third-party header the engine
+      # header depends on was never installed".  It pins no
+      # CMAKE_CXX_STANDARD (the package config has to declare the standard,
+      # the same reason the Windows leg's comment gives) and no
+      # CMAKE_OSX_ARCHITECTURES (the runner and the build machine are both
+      # arm64; universal binaries are the release side's job).
+      - name: Install + downstream proof
+        shell: bash
+        run: |
+          cmake --install build --prefix build/_install/macos-arm64
+          found="$(find build/_install/macos-arm64 -name NimRTCConfig.cmake -print -quit)"
+          test -n "$found" && test -f "$found"
+          mkdir -p build/downstream-proof
+          cat > build/downstream-proof/main.cpp <<'EOF'
+          #include <nimrtc/engine/engine.hpp>
+          #include <cstdio>
+          int main() {
+            std::printf("nimrtc %s\n", NIMRTC_API_VERSION_STRING);
+            return 0;
+          }
+          EOF
+          cat > build/downstream-proof/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.20)
+          project(nimrtc_downstream_proof LANGUAGES CXX)
+          find_package(NimRTC 1.0 REQUIRED)
+          add_executable(downstream_proof main.cpp)
+          target_link_libraries(downstream_proof PRIVATE nimrtc::engine)
+          EOF
+          cmake -S build/downstream-proof -B build/downstream-proof/build \
+            -DCMAKE_PREFIX_PATH="$PWD/build/_install/macos-arm64"
+          cmake --build build/downstream-proof/build
+          ./build/downstream-proof/build/downstream_proof
 
       - name: Upload build directory on failure
         if: failure()

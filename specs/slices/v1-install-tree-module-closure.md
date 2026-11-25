@@ -288,3 +288,54 @@ PUBLIC 链接 `nimrtc::core` 的传递依赖里有它们。所以本片只**补�
 N6 的执行腿在 ADR-037 / ADR-038 闭合后第一次真的跑起来，暴露本片的缺口。实证：`node --test tests/acceptance/v1-sdk-sample/acceptance.test.cjs` 在 `build/_install` 存在（且带 openh264）时报 14 个未解析外部符号，其中 9 个是模块 registrar、5 个是 `pacing::TokenBucket`。
 
 同时发现 `pacing` 的特殊性：`nimrtc_sched` 链 `nimrtc::pacing`，而 `pacing` **只在** `_nimrtc_install_shorts` 里、**不在** `_nimrtc_module_shorts` 里 —— 静态链接链因此少了它。ADR-038 补 `nvcodec` 时两份清单各加一行，是**症状**治疗；本片是对齐闭包，并加工具守着。
+### 发现二：闭包不止是模块 archive —— 系统库也在闭包里（2026-11-25）
+
+本片把 `video_capture` 补进闭包后，下游宿主立刻撞上 **12 个 LNK2019**（全部来自 `nimrtc_video_capture.lib(mf_camera.obj)`）：`MFStartup` / `MFShutdown` / `MFCreateAttributes` / `MFCreateMediaType` / `MFCreateSourceReaderFromMediaSource` / `MFEnumDeviceSources`，以及 6 个 GUID 常量 `MFVideoFormat_NV12` / `MF_MT_MAJOR_TYPE` / `MF_MT_SUBTYPE` / `MF_MT_FRAME_SIZE` / `MF_MT_FRAME_RATE` / `MFMediaType_Video`。
+
+根因与 ADR-038 的 `d3d11`/`dxgi` **同形**，只是更深一层：闭包模块自己 PRIVATE 链的 **Windows 系统库**在安装后也丢了。源侧 `src/modules/video_capture/CMakeLists.txt` 的 WIN32 分支链的是
+
+```
+d3d11 dxgi windowsapp mf mfplat mfreadwrite mfuuid
+```
+
+而安装树 config（`cmake/NimRTCConfig.cmake.in` 的 WIN32 分支）只接回了 `d3d11 dxgi` —— Media Foundation 那一组漏了。同理 `audio_device`（闭包模块，engine PRIVATE）PRIVATE 链的 `ole32`（WASAPI 的 `IMMDeviceEnumerator` / `IAudioClient`）也没接回。
+
+**结论**：链接闭包不只是「哪些 `nimrtc_*` archive」，还是「这些 archive 引用了哪些系统库」。安装树必须把**闭包模块自己的 PRIVATE 系统库**也接回最终链接行，否则「装出来的 bundle 一定链得上」这句承诺是假的。
+
+**本片的处理**：在 config 的 WIN32 分支补上 `windowsapp mf mfplat mfreadwrite mfuuid ole32`。既有项（`ws2_32 bcrypt iphlpapi winmm crypt32 d3d11 dxgi`）一个没动 —— 符合 ADR-039 §3「既有链不动」，也保住了 ADR-038 的验收断言。
+
+**留给后续**：本片的工具只判**模块 archive** 的闭包覆盖，不判**系统库**。系统库这一层的漂移目前仍靠下游宿主撞 LNK2019 才发现 —— 与「两份清单漂移」是同一类问题、同一类治法（机器守着）。值得另开一片把「闭包模块的 PRIVATE 系统库」也算进工具的判定范围。
+
+### 发现三：验收宿主的构建树不能放在 worktree 里（Windows 路径长度，2026-11-25）
+
+下游宿主的 configure 一开始直接失败在 CMake 的编译器自检上：
+
+```
+CMake Error at .../CMakeTestCXXCompiler.cmake:73 (message):
+  正在创建目录"cmTC_d560c.dir\Debug\cmTC_d560c.tlog"…
+  ...Microsoft.CppCommon.targets(781,5): error MSB6003:
+    指定的任务无法执行文件"CL.exe"，也不能运行。
+    System.IO.DirectoryNotFoundException
+```
+
+**不是** MSVC 环境没初始化（`vcvars64.bat` 装好之后 `where cl` 能找到 `cl.exe`），**是路径长度**：zelto 的 worktree 路径本身 ~110 字符（`.zelto/version-worktrees/v3/.zelto/worktrees/<slice-id>/`），再叠加 CMake 的 `CMakeFiles\CMakeScratch\TryCompile-xxxxxx\cmTC_xxxxxx.dir\Debug\` 后缀，MSBuild 建 tlog 目录时撞上上限。**实证**：同一份工程放 `C:\Temp\zhost` configure 干净通过，放 worktree 内的深路径失败。
+
+**处理**：宿主的**源码目录**留在 worktree 里（可追溯），**构建树**放短临时目录。已安装的 bundle 仍在 worktree 内 —— 它是**只读**依赖，不参与 MSBuild 的相对输出路径计算，不受影响。
+
+### 发现四：安装树里的运行时 DLL 必须进 PATH（2026-11-25）
+
+链接通过后宿主仍起不来，退出码 `0xC0000135`（`STATUS_DLL_NOT_FOUND`），输出为空。查 exe 的导入表：`msquic.dll` —— MsQuic 是**动态库**，安装树把它装在 `bin/msquic.dll`（`lib/msquic.lib` 只有 1.9 KB，是导入桩）。宿主运行时若没有 bundle 的 `bin/` 在 PATH 上，就找不到它。
+
+**处理**：跑宿主时把 bundle 的 `bin/` 加进 PATH（**不**把 DLL 拷到宿主旁边 —— 那会让宿主「碰巧」能跑，却掩盖「bundle 自带运行时」这个事实）。判据 10 要证明的正是「宿主只链 bundle 里的东西」，运行时 DLL 也该来自 bundle。
+
+### 发现五：临时构建目录不能是固定路径（2026-11-25）
+
+第一次用固定路径 `%TEMP%/nimrtc-closure-host/` 时，门禁跑到一半报：
+
+```
+Error: EBUSY: resource busy or locked, open 'C:\...\Temp\nimrtc-closure-host\src\main.cpp'
+```
+
+**不是**「这一轮的代码有问题」，是**上一轮**残留的句柄（msbuild / cl.exe 还挂着）把这一轮的文件写入卡住了。报错完全指不到真正的原因。
+
+**处理**：临时目录名带 **pid + 时间戳**（每次运行一个全新目录），并在断言**通过后**删掉它。断言**失败时不删** —— 那样失败现场（CMakeCache / vcxproj / 链接日志）还在目录里，可以直接翻。

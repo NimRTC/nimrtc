@@ -29,9 +29,18 @@
 >
 > **The `v1.3.0` release** — the one that closes the `v1.3` plan: **Track Q** (Q1, Q2, Q3, Q4, Q5, Q6, Q7) is complete. The release's headline is that the engine now **degrades gracefully under a hostile network** — the axis `v1.2.0` explicitly did not claim: a mid-stream parameter-set change is *proven* to decode on its own (Q1/Q1b, H.264 software and H.265 NVDEC), the audio jitter buffer's memory is **bounded** and the bound is **reported** (Q2), retransmissions travel on their own RFC 4588 stream (Q3), the receiver's RTCP feedback is **bounded** and its two doors are **countable** (Q4), the soak can now **impair the network** *and* drive the engine across a simulated NAT with the 24 h window archived and its netem parameters (Q5), the picture is aligned to the sound (Q6, the video half of R3 — the audio half shipped in `v1.2.0`), and the hardware codec path is exercised end-to-end by a re-runnable job on a self-hosted GPU runner (Q7). `NIMRTC_API_VERSION` = 10300, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC data exchange (DC-1) via the Chrome WebTransport JS API (`new WebTransport(url)`, not `RTCPeerConnection.createDataChannel()`) over QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; the `"sctp"` backend was retired from the public selectors in v1.2.0 (it was an in-process loopback socket that could never reach a peer). See [CHANGELOG.md](CHANGELOG.md) `## [1.3.0]` and [docs/plan/v1.3-plan.md](docs/plan/v1.3-plan.md).
 >
-> **Current `main` (post-v1.3.1, unreleased):** the trunk carries the **v1.4** track
-> (the real TURN / TLS transport, the native `coturn` CI leg and the H.265 parameter-set
-> assertion's software half) — see [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md).
+> **Current `main` (post-v1.3.1, unreleased):** the trunk is the **`v1.4.0` cycle**
+> (`NIMRTC_API_VERSION` = 10400, `NIMRTC_API_VERSION_PRE_RELEASE` = `"dev"`) and carries the
+> **v1.4** track — see [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md).
+>
+> **There is no `v1.3.2`.**  The work that landed after `v1.3.1` changed the public
+> surface: `plugins::VideoReceiverConfig` lost `h264_annex_b` (deprecated, now a no-op —
+> the receiver re-frames single-NAL packets in Annex-B unconditionally) and gained
+> `h264_bare_nalus`, and `EngineConfig::VideoReceiverTuning` gained the same key.  That is
+> breaking under [RELEASING.md](RELEASING.md) §1.1, so it belongs on the `1.4.0` line.
+> The next release is **`v1.4.0`**, and it ships when the plan's M3 is reached
+> (Track N + Track D).
+>
 > The **v1.3.x bundles** do contain NimRTC's own headers, static library and
 > `NimRTCConfig.cmake`, so `find_package(NimRTC)` works from a downloaded bundle. See
 > [Current progress](#current-progress-v131-published--main-ahead) and

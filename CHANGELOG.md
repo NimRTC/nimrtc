@@ -7,7 +7,17 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Work that lands after `v1.3.1`.
+> Work that lands after `v1.3.1`.  The next release is **`v1.4.0`**
+> (`docs/plan/v1.4-plan.md`, Track N + Track D), so this section is the
+> `v1.4.0` release notes in progress — the tree carries `1.4.0-dev`.
+>
+> **There is no `v1.3.2`.**  The work that landed after `v1.3.1` changed
+> the public surface — `plugins::VideoReceiverConfig` lost
+> `h264_annex_b` (deprecated, no-op) and gained `h264_bare_nalus`, and
+> `EngineConfig::VideoReceiverTuning` gained the same key — so it is
+> breaking under `RELEASING.md` §1.1 and belongs on the `1.4.0` line.
+> Shipping it as `1.3.2` would promise a compatibility the tree no
+> longer has.
 
 ### Fixed
 

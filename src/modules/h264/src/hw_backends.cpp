@@ -493,7 +493,12 @@ plugins::VideoDecoderBackend make_dxva_decoder_backend() {
     be.priority       = 320;
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
-    be.zero_copy_supported = true;
+    // The decoder produces NV12 in *system memory*, so the pixels are
+    // copied out of the MFT's buffer.  Claiming a zero-copy path here
+    // would make the engine wire the GPU output path and then get
+    // "unsupported" from `decode_zero_copy()` on every frame — the
+    // picture would never appear.
+    be.zero_copy_supported = false;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return dxva_h264_available();
     };

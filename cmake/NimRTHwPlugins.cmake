@@ -103,9 +103,10 @@ function(_nimrtc_locate_dxva)
     # `NIMRTC_PLUGINS_DXVA_ON` definition still on the compile line, so
     # the *real* implementation was built even though the option was OFF.
     #
-    # That is not a cosmetic problem: the DXVA decoder does not compile
-    # against the current codec seam (it targets a pre-split interface),
-    # so the build broke with the option visibly OFF.
+    # That is not a cosmetic problem: the DXVA decoder has to compile
+    # against the current codec seam (the split `IVideoDecoder` one), so
+    # a build that quietly compiled the *stale* implementation would
+    # break with the option visibly OFF.
     unset(NIMRTC_HW_HAVE_DXVA CACHE)
     if(WIN32 AND NIMRTC_PLUGINS_DXVA)
         # d3d11.h lives in the Windows 8+ SDK; always present on Windows
@@ -250,10 +251,20 @@ function(nimrtc_link_dxva target)
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src")
         target_sources(${target} PRIVATE
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src/dxva_decoder.cpp")
-        # d3d11.lib is in the default MSVC desktop link list, but we add it
-        # explicitly so /NODEFAULTLIB builds still link.
+        # The decoder is built on the Media Foundation H.264 MFT, so it
+        # needs mfplat (MFStartup / MFCreateMediaType) and mfreadwrite
+        # (the transform interface) — plus d3d11 for the D3D manager
+        # that turns the MFT into a DXVA decode.
+        #
+        # `mfuuid` carries the Media Foundation GUIDs (`MF_MT_SUBTYPE`,
+        # `MFVideoFormat_NV12`, `CLSID_MSH264DecoderMFT`, …).  Those
+        # are *referenced*, not defined, by the decoder translation
+        # unit, so the import library has to be on the link line.
+        #
+        # None of these three are in the default MSVC desktop link line,
+        # so they have to be named explicitly.
         if(MSVC)
-            target_link_libraries(${target} PRIVATE d3d11)
+            target_link_libraries(${target} PRIVATE d3d11 mfplat mfreadwrite mfuuid)
         endif()
     endif()
 endfunction()

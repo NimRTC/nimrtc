@@ -853,6 +853,26 @@ struct NIMRTC_API_STABLE EngineConfig {
      *                `kVideoSinkOpenFailed`). */
     std::string video_sink_name   = "auto";
 
+    /** Let the renderer put the decoded picture on the screen.
+     *
+     *  A presentation sink needs an output surface.  When the host
+     *  supplies none, the renderer *can* build one itself (a Win32
+     *  window, an `NSWindow`, a Wayland surface) — but that window is
+     *  visible, and a window the caller never asked for is a surprise.
+     *
+     *  False (the default) means: no host window and no renderer-built
+     *  one, so the sink runs offscreen — the presentation clock still
+     *  ticks and the frames are still counted, but nothing appears on
+     *  the desktop.  This is what a unit test, a benchmark, and a
+     *  headless CI leg want.
+     *
+     *  True means: the renderer creates its own output window and the
+     *  picture reaches the screen.  A viewer application sets this.
+     *
+     *  The flag is ignored when the host supplies its own window: the
+     *  host's window always wins. */
+    bool video_sink_viewport = false;
+
     /** IVideoBitrateController plugin id (remote-desktop plan D1).
      *
      *  The video rate controller owns the resolution / frame-rate /

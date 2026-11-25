@@ -349,6 +349,11 @@ std::string video_receiver_name   = "reference";
 std::string video_sender_name     = "reference";
 std::string video_codec_name      = "h264";      // "" = no video codec
 std::string video_capture_name    = "";          // "" = capture disabled
+
+// Present the decoded picture in a real window.  Off by default: with the
+// viewport off the renderer works offscreen and never opens a window of
+// its own, so a test suite does not flash windows on the desktop.
+bool video_sink_viewport          = false;
 ```
 
 To select HW backends:

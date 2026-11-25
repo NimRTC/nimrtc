@@ -48,6 +48,8 @@ Write an ADR when a decision:
 | [ADR-027](ADR-027-turn-over-tls-libjuice-seam.md) | TURN over TLS — a narrow TLS seam in the vendored libjuice, and no plaintext fallback | v1.4 (N1) |
 | [ADR-028](ADR-028-ice-over-tcp-nimrtc-side.md) | ICE-over-TCP — a NimRTC-side TCP candidate layer, and libjuice stays UDP-only | v1.4 (N2) |
 | [ADR-029](ADR-029-engine-driven-audio-device-layer.md) | 引擎驱动音频设备层 — 音频设备的注册表槽位与引擎侧设备泵 | v1.4 (D1) |
+| [ADR-030](ADR-030-engine-driven-video-renderer.md) | 引擎驱动视频渲染器 — `video_sink_name = "auto"` 的平台解析与降级 | v1.4 (D2) |
+| [ADR-039](ADR-039-viewport-window-opt-in.md) | 渲染器自建窗口是显式 opt-in（修订 ADR-030 决策三） | v1.4 (D2) |
 
 ### Reserved numbers
 

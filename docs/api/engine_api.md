@@ -1332,12 +1332,13 @@ By default the engine **runs the renderer**: `EngineConfig::video_sink_name`
 resolves a video sink plugin, the same pluggable surface the host used to
 fill by hand.  The host keeps the ownership rules from the old days — no
 D3D11 / Metal / EGL code, and usually no window code either (the platform
-renderers create their own window when `plugins::VideoSinkConfig::native_window`
-is null, see below).
+renderers *can* create their own window, but only when the host asks for
+one — see "Window ownership" below).
 
 | Config field | Meaning |
 |---|---|
 | `video_sink_name` | Which sink the engine installs.  `"auto"` (the default) resolves the platform renderer and **degrades instead of failing**; `""` is today's behaviour verbatim (headless); `"none"` installs no sink at all; `"headless"` is the explicit spelling; any other value is an explicit backend id — a promise. |
+| `video_sink_viewport` | Whether the decoded picture is meant to reach the screen.  **False (the default)** means the renderer runs offscreen; **true** means the renderer builds its own output window and presents into it.  See "Window ownership" below. |
 
 **The value table.**
 
@@ -1349,13 +1350,29 @@ is null, see below).
 | `"headless"` | The explicit spelling of `""`. |
 | `"<id>"` | An explicit backend id.  Explicit ids are **promises**: an unknown id fails `open()` with `kVideoSinkPluginMissing`, an id whose `open()` fails is a hard error (`kVideoSinkOpenFailed`) — the exact opposite of `"auto"`, never a silent degrade. |
 
-**Window ownership.**  With `"auto"` on a desktop build the engine opens
-the platform renderer; when the host did not hand over a `native_window`
-the renderer creates its own top-level window — `CreateWindowExW` /
-`ShowWindow(SW_SHOWNOACTIVATE)` on Windows, an `NSWindow` backed by a
-`CAMetalLayer` on macOS.  The EGL renderer already self-created its
-Wayland surface / X11 window.  A host that wants no window keeps using
-`offscreen` or `"none"`.
+**Window ownership.**  A presentation sink needs an output surface.  The
+host's window always wins: when `plugins::VideoSinkConfig::native_window`
+is set, the renderer presents into it and never creates anything.
+
+When the host supplies no window, the renderer *can* build one — a
+`CreateWindowExW` / `ShowWindow(SW_SHOWNOACTIVATE)` window on Windows
+(carrying `WS_EX_TOOLWINDOW`, so it stays out of the taskbar and the
+Alt-Tab list), an `NSWindow` backed by a `CAMetalLayer` on macOS, a
+Wayland surface / X11 window for EGL.  **That is opt-in**: the renderer
+creates its own window only when
+`EngineConfig::video_sink_viewport` (or the seam's
+`plugins::VideoSinkConfig::create_viewport_window`) says so.  The default
+is **off**, and the reason is not cosmetic — a renderer that opens a
+visible window on its own initiative flashes it on the developer's
+desktop, and a test suite that runs hundreds of cases does that hundreds
+of times.  With the viewport off the sink runs offscreen: the
+presentation clock still ticks and the frames are still counted, but
+nothing appears on the screen.
+
+A host that wants the picture on the screen sets `video_sink_viewport =
+true`; `examples/remote-desktop/rd_viewer.cpp` does exactly that whenever
+its sink is a real renderer rather than `"headless"`.  A host that wants
+no window at all keeps using `offscreen` or `"none"`.
 
 **Inspection.**  `video_sink()` returns the installed
 `plugins::IVideoSink*` (null only for `"none"` or an uninstallable

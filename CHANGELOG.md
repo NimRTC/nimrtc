@@ -9,6 +9,27 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.3.0`.
 
+- **The renderer no longer flashes windows on your desktop (ADR-039, amends
+  ADR-030).**  With the default `EngineConfig` the engine resolves the
+  platform renderer, and the D3D11 / Metal renderers *built their own output
+  window* when the host supplied none — so every single engine unit test
+  popped a blank white window onto the screen, and a full `ctest` run did it
+  hundreds of times.  Window creation is now **opt-in**:
+  `EngineConfig::video_sink_viewport` (and the seam's
+  `plugins::VideoSinkConfig::create_viewport_window`) default to `false`, so
+  the renderer works offscreen — the presentation clock still ticks and the
+  frames are still counted, but nothing appears.  Hosts that *want* the
+  picture on the screen set the flag; `examples/remote-desktop/rd_viewer.cpp`
+  does exactly that for its real-renderer sinks.  Windows self-created
+  windows also carry `WS_EX_TOOLWINDOW` now, so they stay out of the taskbar
+  and the Alt-Tab list.
+  The same investigation turned up a second, independent bug: the D3D11 swap
+  chain description used `DXGI_SWAP_CHAIN_DESC{}`, whose `BufferCount` member
+  has no default and was therefore **0** — DXGI rejects the whole chain
+  (`0x887a0001`).  The self-window path had *never* actually presented a
+  frame; it opened a blank window and failed.  With `BufferCount = 1` the
+  swap chain is created and the viewport really does show the picture.
+
 - **The install tree now links a video host (`slice v1-install-tree-video-deps`,
   ADR-038).**  The staged bundle (installed by `cmake --install` and consumed
   via `find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`) used to drop

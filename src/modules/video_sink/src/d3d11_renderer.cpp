@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/modules/video_sink/src/d3d11_renderer.cpp
  * @brief The Windows D3D11 / DXGI presentation sink.
  *
@@ -6,10 +6,10 @@
  *
  * ## The structure of this file
  *
- *   - `Presenter` — the private state of the sink: the D3D11 device, the
+ *   - `Presenter` 鈥?the private state of the sink: the D3D11 device, the
  *     swap chain (or the offscreen target), the presenter thread, the
  *     single-slot latest-wins mailbox and the presentation clock.
- *   - `D3D11Renderer` — the `plugins::IVideoSink` face.
+ *   - `D3D11Renderer` 鈥?the `plugins::IVideoSink` face.
  *
  * ## Why the presenter owns a thread
  *
@@ -23,7 +23,7 @@
  * The back-pressure policy for a renderer is *latest-wins* (plan E8):
  * the newest picture is the one worth showing, and a stale one is worth
  * nothing.  A single slot with a replace-on-full policy gives exactly
- * that, and — more importantly — it makes the memory bound *structural*:
+ * that, and 鈥?more importantly 鈥?it makes the memory bound *structural*:
  * the mailbox holds at most one frame, whatever the producer does.  A
  * bounded queue of depth N would also be bounded, but N frames of a 4K
  * surface is a lot of memory; one frame is not.
@@ -32,7 +32,7 @@
  *
  * The presenter owns a deadline.  After each present it advances the
  * deadline by one frame interval (1 / target_fps) and sleeps until then
- * with `std::condition_variable::wait_until` — a *timed wait*, not a
+ * with `std::condition_variable::wait_until` 鈥?a *timed wait*, not a
  * spin.  When no frame is pending, the wait is indefinite (the mailbox's
  * own condition variable is signalled on a new frame), so an idle
  * renderer costs nothing at all.
@@ -54,7 +54,7 @@
 // The CPU path converts a decoded I420 picture into the present target's
 // BGRA format, so it needs the shared conversion helpers.  (The include
 // arrives transitively through the plugin seam, but the dependency is
-// stated explicitly here — the renderer calls the helpers directly.)
+// stated explicitly here 鈥?the renderer calls the helpers directly.)
 #include <nimrtc/video_frame/frame.hpp>
 
 #if defined(_WIN32)
@@ -100,11 +100,11 @@ struct D3D11Renderer::Impl {
     ///  The configuration is written by `set_config()` (which the engine
     ///  calls from its own thread when the viewer resizes the window)
     ///  and read by `config()`.  The presenter thread does *not* read
-    ///  it — the presentation cadence is captured when the presenter
-    ///  starts — so the lock only ever guards the config itself.
+    ///  it 鈥?the presentation cadence is captured when the presenter
+    ///  starts 鈥?so the lock only ever guards the config itself.
     mutable std::mutex cfg_mutex_;
 
-    // ---- Counters (atomic — `stats()` may be read from any thread) ----
+    // ---- Counters (atomic 鈥?`stats()` may be read from any thread) ----
     std::atomic<std::uint64_t> frames_rendered_{0};
     std::atomic<std::uint64_t> frames_dropped_{0};
     std::atomic<std::uint64_t> frames_dropped_present_{0};
@@ -187,8 +187,7 @@ struct D3D11Renderer::Impl {
     std::uint32_t upload_h_ = 0;
 
     /** The viewport window the renderer created for itself when the host
-     *  supplied no `native_window` (v1-video-render-engine D2).  Owned —
-     *  destroyed in `destroy_d3d_objects()`; null when the host window
+     *  supplied no `native_window` (v1-video-render-engine D2).  Owned 鈥?     *  destroyed in `destroy_d3d_objects()`; null when the host window
      *  is used instead. */
     HWND self_hwnd_ = nullptr;
 #endif
@@ -223,7 +222,12 @@ struct D3D11Renderer::Impl {
 
     /** Create the renderer's own viewport window (used when the host
      *  supplied no `native_window`).  Returns false when no window can
-     *  be created — the caller then falls back to the offscreen target.
+     *  be created 鈥?the caller then falls back to the offscreen target.
+     *
+     *  Returns false *without* creating anything unless
+     *  `cfg_.create_viewport_window` is set: a renderer that pops up a
+     *  visible window on its own initiative is a surprise, and a test
+     *  run that flashes a window on the developer's desktop is worse.
      */
     bool create_self_window();
 
@@ -292,7 +296,7 @@ void D3D11Renderer::Impl::stop_presenter() {
 
 void D3D11Renderer::Impl::present_loop() {
     // The presentation clock: a deadline that advances by one frame
-    // interval per presented frame.  The wait is a *timed* wait — the
+    // interval per presented frame.  The wait is a *timed* wait 鈥?the
     // thread sleeps until the deadline, it does not spin.
     const auto interval = std::chrono::nanoseconds{
         1'000'000'000LL / static_cast<long long>(target_fps())};
@@ -319,7 +323,7 @@ void D3D11Renderer::Impl::present_loop() {
             // the presenter eventually shows is the *newest* one) until
             // the deadline arrives.
             //
-            // The wait is a *timed* wait — the thread is parked in the
+            // The wait is a *timed* wait 鈥?the thread is parked in the
             // kernel, it does not burn a core.
             cv_.wait_until(lock, next_deadline, [this] { return stop_; });
             if (stop_) return;
@@ -342,7 +346,7 @@ void D3D11Renderer::Impl::present_loop() {
         //
         // When the render clock decided the picture was *ahead* of the
         // sound, it asked for the frame to be held back until the sound
-        // catches up.  `present_at_us` is the instant the hold ends — a
+        // catches up.  `present_at_us` is the instant the hold ends 鈥?a
         // *local monotonic* deadline, so it is comparable with
         // `Clock::now()` right here.
         //
@@ -382,7 +386,7 @@ void D3D11Renderer::Impl::present_loop() {
 
         // Advance the presentation clock.  If the present took longer
         // than the interval (a slow GPU, a vsync wait), the deadline is
-        // reset to *now* rather than accumulating a debt — a renderer
+        // reset to *now* rather than accumulating a debt 鈥?a renderer
         // that falls behind must not try to "catch up" by presenting a
         // burst of frames.
         const auto after = Clock::now();
@@ -448,7 +452,7 @@ bool D3D11Renderer::Impl::create_d3d_objects() {
     // it did not (and the sink is not forced offscreen) the renderer
     // builds its own viewport window, mirroring the EGL renderer's
     // self-created surface (v1-video-render-engine D2 / ADR-030 decision
-    // three — the engine never touches the window system).  When even
+    // three 鈥?the engine never touches the window system).  When even
     // that fails (no display device, a headless CI session) the renderer
     // falls through to the offscreen target below, exactly as before:
     // the presentation clock and the drop accounting still work, which
@@ -478,6 +482,10 @@ bool D3D11Renderer::Impl::create_d3d_objects() {
         desc.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         desc.BufferDesc.RefreshRate.Numerator   = 0;
         desc.BufferDesc.RefreshRate.Denominator = 1;
+        // A swap chain needs at least one back buffer; the zero that
+        // `DXGI_SWAP_CHAIN_DESC{}` leaves behind is not a valid count,
+        // and DXGI rejects the whole chain for it.
+        desc.BufferCount = 1;
         desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         desc.OutputWindow = hwnd;
         desc.SampleDesc.Count = 1;
@@ -486,7 +494,7 @@ bool D3D11Renderer::Impl::create_d3d_objects() {
         desc.Flags = 0;
 
         // `D3D11CreateDeviceAndSwapChain` takes the *device* as an output
-        // parameter, so the device created above is released first — the
+        // parameter, so the device created above is released first 鈥?the
         // swap-chain factory creates its own device (and its own context),
         // and handing it an already-populated pointer would leak the
         // first one.
@@ -571,6 +579,15 @@ bool D3D11Renderer::Impl::resize_offscreen(std::uint32_t width,
 }
 
 bool D3D11Renderer::Impl::create_self_window() {
+    // The viewport window is *opt-in*.  A renderer that pops up a visible
+    // window on its own initiative is a surprise, and a test run that
+    // flashes a window on the developer's desktop 鈥?once per test case,
+    // for as long as the suite runs 鈥?is the worst version of that
+    // surprise.  The caller has to ask for it.
+    if (!cfg_.create_viewport_window) {
+        return false;
+    }
+
     // The window class is registered once per process; a duplicate
     // registration is the normal second-caller case, not an error.
     constexpr const wchar_t* kClassName = L"NimRTCD3D11Viewport";
@@ -590,13 +607,17 @@ bool D3D11Renderer::Impl::create_self_window() {
 
     const int w = static_cast<int>(cfg_.width  > 0 ? cfg_.width  : 1280);
     const int h = static_cast<int>(cfg_.height > 0 ? cfg_.height : 720);
+    // WS_EX_TOOLWINDOW keeps the viewport out of the taskbar and out of
+    // the Alt-Tab list: it is the renderer's own scratch surface, not
+    // something the user is meant to interact with.
     self_hwnd_ = ::CreateWindowExW(
-        0, kClassName, L"NimRTC", WS_OVERLAPPEDWINDOW,
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"NimRTC",
+        WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, w, h,
         nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
     if (self_hwnd_ == nullptr) {
         NIMRTC_LOG_ERROR("d3d11 renderer: CreateWindowExW failed (err="
-                         << ::GetLastError() << ") — falling back to "
+                         << ::GetLastError() << ") 鈥?falling back to "
                          "offscreen");
         return false;
     }
@@ -624,7 +645,7 @@ void D3D11Renderer::Impl::destroy_d3d_objects() {
 
 bool D3D11Renderer::Impl::do_present() {
     if (swap_chain_) {
-        // `Present(0)` — the NON-BLOCKING flag.  The present call never
+        // `Present(0)` 鈥?the NON-BLOCKING flag.  The present call never
         // waits for the vertical blank; the *presentation clock* in the
         // presenter thread is what paces the frames.  (A blocking
         // `Present(1)` would serialise the renderer against the display
@@ -656,7 +677,7 @@ bool D3D11Renderer::Impl::present_bgra(const std::uint8_t* pixels,
     //
     // In the offscreen mode the target is a plain texture whose size we
     // control, so it follows the frame.  With a swap chain the target
-    // is the back buffer, whose size is fixed by the window — the copy
+    // is the back buffer, whose size is fixed by the window 鈥?the copy
     // is then clipped to the intersection.
     if (offscreen_ &&
         (offscreen_w_ != width || offscreen_h_ != height)) {
@@ -760,7 +781,7 @@ bool D3D11Renderer::Impl::present_texture(ID3D11Texture2D* texture,
     context_->ClearRenderTargetView(target_rtv, clear_color);
 
     // The device-side copy: the source texture goes straight into the
-    // present target.  No host copy happens on this path — that is the
+    // present target.  No host copy happens on this path 鈥?that is the
     // whole point of the GPU delivery route (plan E1 / E5).
     //
     // `CopyResource` requires the two textures to agree on format and
@@ -810,7 +831,7 @@ plugins::Status D3D11Renderer::open() noexcept {
     return plugins::kOk;
 #else
     // The seam still exists on a non-Windows build so a configuration
-    // that names it resolves — but the renderer reports honestly that it
+    // that names it resolves 鈥?but the renderer reports honestly that it
     // cannot run here rather than pretending to present.
     NIMRTC_LOG_ERROR("d3d11 renderer: this build has no D3D11 support");
     return plugins::kErrUnsupported;
@@ -836,7 +857,7 @@ plugins::Status D3D11Renderer::render(
 
     // The source frame's format.  A packed BGRA frame is uploaded
     // as-is; an I420 / NV12 frame is converted to BGRA first (the
-    // present target's format) — that is the sink's one format
+    // present target's format) 鈥?that is the sink's one format
     // conversion.
     const bool source_is_bgra =
         frame.format == plugins::VideoPixelFormat::kBGRA ||
@@ -849,7 +870,7 @@ plugins::Status D3D11Renderer::render(
         : static_cast<std::int32_t>(frame.width * 4u);
 
     if (!source_is_bgra) {
-        // I420 → BGRA through the shared helper.
+        // I420 鈫?BGRA through the shared helper.
         const auto layout = video_frame::compute_layout(
             plugins::VideoPixelFormat::kBGRA, frame.width, frame.height);
         bgra.resize(layout.buffer_size);
@@ -941,7 +962,7 @@ plugins::Status D3D11Renderer::render(
     // present target with a device-to-device copy, and this module carries
     // no format-converting shader.  If the surface has a CPU mirror, that
     // mirror *is* the picture: present it through the CPU path.  If it has
-    // none, there is nothing to present — say so (`kErrUnsupported`), so
+    // none, there is nothing to present 鈥?say so (`kErrUnsupported`), so
     // the engine's render-path rule decodes to host pixels next time, and
     // count the fallback instead of pretending the frame was shown.
     if (surface.format() != plugins::VideoPixelFormat::kBGRA) {

@@ -95,6 +95,12 @@ video_sink_backend_reason: std::string   // 降级原因（空 = 未降级）
 
 ### 3.3 决策三：窗口由**渲染器自己**建，引擎不碰窗口系统
 
+> **⚠ 本节已被 [ADR-039](ADR-039-viewport-window-opt-in.md) 修订。**
+> 自建窗口**默认关闭**，需宿主显式 opt-in（`EngineConfig::video_sink_viewport`
+> / `plugins::VideoSinkConfig::create_viewport_window`，默认 `false`）。
+> 原因：默认构造的 `EngineConfig` 会让整套单元测试在开发桌面上连续弹白窗口。
+> 本节以下描述的「三平台的具体形态」仍是**开关打开后**的行为。
+
 **决定：Windows 的 D3D11 与 macOS 的 Metal 渲染器补上「没有 `native_window` 就自己建一个」的路径**，与 Linux 的 EGL 已有行为对齐。引擎**不**创建窗口，也**不**持有任何窗口句柄。
 
 **为什么归渲染器而不是归引擎：**

@@ -219,7 +219,10 @@ struct MetalRenderer::Impl {
     /** Create the renderer's own `NSWindow` + `CAMetalLayer` (used when
      *  the host supplied no `native_window`).  Returns false when no
      *  window can be created — the caller then falls back to the
-     *  offscreen target. */
+     *  offscreen target.
+     *
+     *  Returns false *without* creating anything unless
+     *  `cfg_.create_viewport_window` is set: the viewport is opt-in. */
     bool create_self_window();
 
     /** Release every Metal / AVFoundation object. */
@@ -386,6 +389,14 @@ void MetalRenderer::Impl::destroy_metal_objects() {
 }
 
 bool MetalRenderer::Impl::create_self_window() {
+    // The viewport window is *opt-in* — a renderer that pops up a visible
+    // window on its own initiative is a surprise, and a test run that
+    // flashes a window on the developer's desktop is the worst version of
+    // that surprise.  The caller has to ask for it.
+    if (!cfg_.create_viewport_window) {
+        return false;
+    }
+
     @autoreleasepool {
         const CGFloat w = cfg_.width  > 0 ? cfg_.width  : 1280.0;
         const CGFloat h = cfg_.height > 0 ? cfg_.height : 720.0;

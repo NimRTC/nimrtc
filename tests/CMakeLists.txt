@@ -3888,3 +3888,41 @@ if(NIMRTC_BUILD_TESTS)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# The v1.4 plan's verification table, executed.
+#
+# The plan's §10 is a table of claims about the tree, each a `rg` a
+# person is meant to run by hand.  Hand-run tables drift: the tree moves,
+# the plan does not, and the next reader follows a table that describes
+# a tree that no longer exists -- which is exactly what happened to
+# §10 between 2026-11-19 and 2026-11-24 (three items landed and the
+# table still said they had not).
+#
+# So the table is run, and a claim that no longer holds is *reported*.
+# The test asserts the report's own machinery (that a search for a
+# symbol that does not exist comes back empty, that a search for one
+# that does comes back non-empty, and that the report can say 'stale').
+#
+# It does not fail the build when a claim goes stale: a plan that has
+# moved on is a documentation task, not a code defect, and a build that
+# goes red for it teaches people to ignore the build.  The report is
+# the signal; §0a is where the correction goes.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_v14_plan_status
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_v14_plan_status.py"
+                         --self-test)
+        set_tests_properties(test_v14_plan_status PROPERTIES
+            TIMEOUT 120
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the v1.4-plan status "
+            "checker (tools/check_v14_plan_status.py).  CI runs it as a "
+            "dedicated step.")
+    endif()
+endif()
+

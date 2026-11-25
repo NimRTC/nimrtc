@@ -8,7 +8,8 @@
 //
 // 每条验收标准对应一条真实断言（`test`），无 todo / skip：
 //   1. 已提交干净树 / 未提交工作区两种状态下四个套件都通过（跑四条验收命令，退出码 0）
-//   2. 判据的三源并集把「提交历史 ∪ 工作区差异 ∪ 未跟踪文件」都算进本片改动
+//   2. 判据的三源并集把「提交历史 ∪ 工作区差异 ∪ 未跟踪文件」都算进本片改动；
+//      提交历史只算**签收边界之内**的提交（ADR-076，v6-writeset-slice-boundary）
 //   3. 越界检测不削弱：并集里出现写集外路径时判「越界」失败
 //   4. 四个套件的写集边界用例共用同一份判据实现（静态检查 require + 调用点）
 //   5. 判据确定性：同一仓库状态连跑两次结果一致
@@ -99,6 +100,7 @@ test('真实仓库：四片产物在树上且改动全部落在写集内（标�
 
 // ---------------------------------------------------------------------------
 // 验收标准 2（机制）：三源并集把提交历史 ∪ 工作区差异 ∪ 未跟踪文件都算进来
+// （签收边界内的提交；边界之后的事务性提交被过滤，ADR-076）
 // ---------------------------------------------------------------------------
 test('判据三源并集：提交历史 ∪ 工作区差异 ∪ 未跟踪文件（标准 2 机制）', (t) => {
     const dir = makeTempRepo(t);
@@ -119,18 +121,31 @@ test('判据三源并集：提交历史 ∪ 工作区差异 ∪ 未跟踪文件�
     run(dir, 'git', ['add', '-A']);
     run(dir, 'git', ['commit', '-qm', 'follow-up\n\nRefs-Slice: v1-fake']);
 
+    // 本片合并提交（签收边界 —— 边界（含）及其祖先才算本片的工作）。
+    fs.writeFileSync(path.join(dir, 'merge.txt'), 'merged');
+    run(dir, 'git', ['add', '-A']);
+    run(dir, 'git', ['commit', '-qm', 'Merge slice v1-fake']);
+    const mergeHash = run(dir, 'git', ['rev-parse', 'HEAD']);
+
+    // 签收边界之后的事务性提交（误带 Refs-Slice trailer 的 docs(plan): ... 提交）
+    // —— 不是本片的工作，必须被边界过滤。
+    fs.writeFileSync(path.join(dir, 'plan.txt'), 'plan');
+    run(dir, 'git', ['add', '-A']);
+    run(dir, 'git', ['commit', '-qm', 'docs(plan): v1-fake is signed\n\nRefs-Slice: v1-fake']);
+
     // 工作区未提交改动 + 未跟踪文件。
     fs.writeFileSync(path.join(dir, 'mod.txt'), 'changed');
     fs.writeFileSync(path.join(dir, 'new-untracked.txt'), 'untracked');
 
     const r = ws.collectSliceChanges({ root: dir, sliceId: 'v1-fake' });
     assert.equal(r.base, baseHash, '基点应为 feat(<id>): slice approved 提交的父提交');
-    assert.equal(r.sliceCommits.length, 2, '标题惯例与 trailer 两种 marker 都该识别');
+    assert.equal(r.boundary, mergeHash, '边界应为 Merge slice v1-fake 提交（阶梯 1）');
+    assert.equal(r.sliceCommits.length, 2, '标题惯例与 trailer 两种 marker 都该识别（边界内）');
     assert.deepEqual(r.committed, ['mod.txt', 'trailer.txt'], '提交历史来源应包含两片提交的差异');
     assert.deepEqual(r.workingTree, ['mod.txt'], '工作区差异来源应包含未提交改动');
     assert.deepEqual(r.untracked, ['new-untracked.txt'], '未跟踪文件来源应包含新建文件');
     assert.deepEqual(r.changed, ['mod.txt', 'new-untracked.txt', 'trailer.txt'],
-        '三源并集应覆盖提交历史 ∪ 工作区差异 ∪ 未跟踪文件');
+        '三源并集应覆盖提交历史 ∪ 工作区差异 ∪ 未跟踪文件；签收之后的事务性提交被过滤');
 
     // 未提交状态下（工作区 + 未跟踪也在并集里）判写集：写集内改动通过。
     const dirty = ws.evaluateChanged({
@@ -148,7 +163,7 @@ test('判据三源并集：提交历史 ∪ 工作区差异 ∪ 未跟踪文件�
     assert.deepEqual(clean.workingTree, [], '干净树上工作区差异应为空');
     assert.deepEqual(clean.untracked, [], '干净树上未跟踪文件应为空');
     assert.deepEqual(clean.changed, ['mod.txt', 'trailer.txt'],
-        '干净树状态下提交历史来源必须非空（D-68 的核心修复）');
+        '干净树状态下提交历史来源必须非空（D-68 的核心修复）；事务性提交被边界过滤');
     const cleanCheck = ws.evaluateChanged({
         changed: clean.changed,
         allow: ['mod.txt', 'trailer.txt'],
@@ -159,37 +174,86 @@ test('判据三源并集：提交历史 ∪ 工作区差异 ∪ 未跟踪文件�
 });
 
 // ---------------------------------------------------------------------------
-// 验收标准 3：越界检测不削弱
+// 验收标准 3：越界检测不削弱（签收之前的越界仍被拦；签收之后的不是本片的越界）
 // ---------------------------------------------------------------------------
-test('越界检测不削弱：并集里出现写集外路径时判「越界」（标准 3）', (t) => {
+test('越界检测不削弱：签收之前的越界改动仍判越界；签收之后的被边界过滤（标准 3/13-15）', (t) => {
     const dir = makeTempRepo(t);
 
     fs.writeFileSync(path.join(dir, 'base.txt'), 'base');
     run(dir, 'git', ['add', '-A']);
     run(dir, 'git', ['commit', '-qm', 'base commit']);
 
-    // 本片提交：写集内文件。
+    // 本片提交：写集内文件（签收提交）。
     fs.mkdirSync(path.join(dir, 'examples', 'demo-agent-realtime'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'examples/demo-agent-realtime/ai_decision.hpp'), 'ok');
     run(dir, 'git', ['add', '-A']);
     run(dir, 'git', ['commit', '-qm', 'feat(v2-fake): slice approved']);
 
-    // 本片提交：写集外文件（模拟越界改动混进本片提交历史）。
+    // 本片提交：写集外文件（模拟**签收之前**的越界改动混进本片提交历史）。
     fs.mkdirSync(path.join(dir, 'src', 'engine'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'src/engine/engine_impl.hpp'), 'oops');
     run(dir, 'git', ['add', '-A']);
     run(dir, 'git', ['commit', '-qm', 'oops\n\nRefs-Slice: v2-fake']);
 
+    // 本片合并提交（签收边界）：边界之内的提交都算本片，越界必须被拦。
+    run(dir, 'git', ['commit', '--allow-empty', '-qm', 'Merge slice v2-fake']);
+
+    // 签收边界**之后**的越界提交（误带 Refs-Slice trailer）：不是本片的越界，
+    // 必须被边界过滤（标准 14）。
+    fs.writeFileSync(path.join(dir, 'src/engine/engine_impl.hpp'), 'oops-after');
+    run(dir, 'git', ['add', '-A']);
+    run(dir, 'git', ['commit', '-qm', 'oops-after\n\nRefs-Slice: v2-fake']);
+
     const r = ws.collectSliceChanges({ root: dir, sliceId: 'v2-fake' });
+    assert.equal(r.sliceCommits.length, 2,
+        '边界内的两片提交（approved + oops）都算本片；边界后的 oops-after 被过滤');
     const verdict = ws.evaluateChanged({
         changed: r.changed,
         allow: ['examples/demo-agent-realtime'],
         required: ['examples/demo-agent-realtime/ai_decision.hpp'],
     });
-    assert.equal(verdict.ok, false, '写集外路径出现时必须判失败');
+    assert.equal(verdict.ok, false, '签收之前写集外路径出现时必须判失败（越界强度不变）');
     assert.deepEqual(verdict.violations, ['src/engine/engine_impl.hpp'],
-        '越界路径必须被如实列出');
+        '签收之前的越界路径必须被如实列出（oops-after 被过滤，不算本片）');
     assert.deepEqual(verdict.missing, [], '写集内必要产物仍在时应视为不缺');
+});
+
+// ---------------------------------------------------------------------------
+// 验收标准 1（补）：签收边界 —— 合并提交 > 签收提交 > 最早的 feat，没有 → null
+// ---------------------------------------------------------------------------
+test('签收边界：合并提交 > 签收提交 > 最早的 feat；三步都没有 → null 退回当前行为（ADR-076）', (t) => {
+    const dir = makeTempRepo(t);
+
+    // 阶梯 3：没有合并、没有签收提交 → 最早的 feat(<id>): ... 提交。
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a');
+    run(dir, 'git', ['add', '-A']);
+    run(dir, 'git', ['commit', '-qm', 'feat(v3-fake): first slice work']);
+    const firstFeat = run(dir, 'git', ['rev-parse', 'HEAD']);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'b');
+    run(dir, 'git', ['add', '-A']);
+    run(dir, 'git', ['commit', '-qm', 'feat(v3-fake): more slice work']);
+    assert.equal(ws.sliceBoundaryCommit(dir, 'v3-fake'), firstFeat,
+        '阶梯 3 应取最早的 feat(<id>): ... 提交（边界包含全部工作，不切在途中）');
+
+    // 阶梯 2：有签收提交 → 取签收提交（压过阶梯 3）。
+    fs.writeFileSync(path.join(dir, 'c.txt'), 'c');
+    run(dir, 'git', ['add', '-A']);
+    run(dir, 'git', ['commit', '-qm', 'feat(v3-fake): slice approved']);
+    const approved = run(dir, 'git', ['rev-parse', 'HEAD']);
+    assert.equal(ws.sliceBoundaryCommit(dir, 'v3-fake'), approved,
+        '阶梯 2 应取 feat(<id>): slice approved 提交');
+
+    // 阶梯 1：有合并提交 → 取合并提交（压过阶梯 2）。
+    run(dir, 'git', ['commit', '--allow-empty', '-qm', 'Merge slice v3-fake']);
+    const merge = run(dir, 'git', ['rev-parse', 'HEAD']);
+    assert.equal(ws.sliceBoundaryCommit(dir, 'v3-fake'), merge,
+        '阶梯 1 应取 Merge slice <id> 提交');
+
+    // 没有边界 → null，不抛异常；collectSliceChanges 退回当前行为（不过滤，不判红）。
+    assert.equal(ws.sliceBoundaryCommit(dir, 'v9-does-not-exist'), null,
+        '找不到边界必须返回 null，不抛异常');
+    const r = ws.collectSliceChanges({ root: dir, sliceId: 'v9-does-not-exist' });
+    assert.deepEqual(r.changed, [], '未知切片的改动清单为空（不判红）');
 });
 
 // ---------------------------------------------------------------------------

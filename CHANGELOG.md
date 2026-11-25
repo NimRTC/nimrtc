@@ -9,6 +9,31 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.3.0`.
 
+
+- **The shared write-set criterion now knows where a slice's work *ends*
+  (`slice v6-writeset-slice-boundary`, ADR-076).**  The boundary criterion
+  (`tests/acceptance/v5-writeset-acceptance/writeset-boundary.cjs`) decided
+  "this commit is the slice's work" from two things — the title
+  `feat(<id>): slice approved`, or a `Refs-Slice: <id>` trailer — and looked
+  at **neither** whether the commit happened *before* or *after* the slice was
+  signed.  So a **transactional** commit made after signing (this project's
+  habit is `docs(plan): X is signed`) that happened to carry a stray
+  `Refs-Slice:` trailer had its files counted as the slice's `changed` set —
+  and those files are usually *not* in the slice's write set, so the criterion
+  reported a **false** out-of-write-set violation.  N6's acceptance suite hit
+  exactly this (`docs/plan/v1.4-plan.md`, which N6 never touched); a scan of
+  the whole acceptance suite found **six** already-signed slices misjudged the
+  same way (`v1-sdk-sample` / `v1-ice-recovery` / `v1-path-change-report` /
+  `v1-turn-credentials` / `v1-video-render-engine` / `v1-turn-tls-trust`).
+  The rule is now "has the trailer **and** lies within the slice's signing
+  boundary", where the boundary is the slice's `Merge slice <id>` or
+  `feat(<id>): slice approved` commit (and all of its ancestors), found via a
+  deterministic fallback ladder (merge commit → sign-off commit → the
+  earliest `feat(<id>): ...` commit) so slices without a merge or sign-off
+  commit still get a boundary.  A **non-existent** slice id yields **no**
+  boundary at all, and the criterion then fails loudly instead of quietly
+  accepting everything.  Filtering only removes post-signing commits — it
+  does **not** weaken the judgement about commits inside the boundary.
 - **The renderer no longer flashes windows on your desktop (ADR-039, amends
   ADR-030).**  With the default `EngineConfig` the engine resolves the
   platform renderer, and the D3D11 / Metal renderers *built their own output

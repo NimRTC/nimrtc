@@ -126,6 +126,28 @@ jobs:
         shell: pwsh
         run: python tools/check_workflow_powershell.py --self-test
 
+      # The v1.4 plan's verification table (§10) is a list of claims
+      # about the tree, each a search a person is meant to run by hand.
+      # Hand-run tables drift: three items landed between the plan's
+      # survey (2026-11-19) and 2026-11-24 -- the real TURN/TLS
+      # client, the reference TURN deployment, and the engine running
+      # the renderer -- and the table still said none of them existed.
+      # The next reader would have gone and built them again.
+      #
+      # So the table is *executed*, and a claim that no longer holds is
+      # reported.  This step prints the report; it does not fail the
+      # build on a stale claim, because a plan that has moved on is a
+      # documentation task, and a build that goes red for it teaches
+      # people to ignore the build.  The self-test pins the checker's
+      # own machinery, so the checker cannot silently pass everything.
+      - name: Report the v1.4 plan's claims against the tree
+        shell: pwsh
+        run: python tools/check_v14_plan_status.py --self-test
+        # The report itself: every claim, with the stale ones marked.
+      - name: Report the v1.4 plan's status
+        shell: pwsh
+        run: python tools/check_v14_plan_status.py
+
       - name: API freeze — per-symbol classification
         # Every namespace-scope symbol in a public header must carry a
         # NIMRTC_API_STABLE / NIMRTC_API_UNSTABLE marker (ADR-015

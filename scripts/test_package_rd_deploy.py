@@ -80,6 +80,14 @@ def make_tree(root: Path, *, with_msquic: bool = True,
             os.utime(path, (binary_mtime, binary_mtime))
     if with_msquic:
         (bin_dir / "msquic.dll").write_bytes(b"MZ fake dll")
+    # The DTLS certificate, which CMake stages next to the executables.
+    # The bundle has to carry it: the operator's machine has no source
+    # tree for the absolute fallback to find, and without it the
+    # handshake fails with "wolfSSL_CTX setup failed".
+    cert_dir = bin_dir / "certs"
+    cert_dir.mkdir(parents=True, exist_ok=True)
+    for pem in ("server-ecc.pem", "ecc-key.pem"):
+        (cert_dir / pem).write_bytes(b"-----BEGIN CERTIFICATE-----\n")
     return bin_dir
 
 

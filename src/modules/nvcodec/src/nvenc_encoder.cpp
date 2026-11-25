@@ -117,6 +117,14 @@ struct NvEncLib {
     NV_ENCODE_API_FUNCTION_LIST       fn  = {};
     NVENCSTATUS                     init_status = NV_ENC_SUCCESS;
 
+    /** The largest NvEncodeAPI version the driver supports (0 = unknown).
+     *
+     *  Queried once at load time with `NvEncodeAPIGetMaxSupportedVersion`.
+     *  A driver older than the SDK we compile against rejects the session
+     *  open with `NV_ENC_ERR_INVALID_VERSION`, and without this number the
+     *  log cannot tell the user *which* side is out of date. */
+    std::uint32_t                   driver_max_version = 0;
+
     static NvEncLib& instance() {
         static NvEncLib inst;
         return inst;
@@ -127,13 +135,30 @@ struct NvEncLib {
         return loaded() && fn.nvEncOpenEncodeSessionEx != nullptr;
     }
 
+    /** The version word to put in `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS`.
+     *
+     *  The *compiled-in* version (`NVENCAPI_VERSION`).  The struct layouts
+     *  and the version words must come from the same header set, so this
+     *  cannot be downgraded to match an older driver — see the file
+     *  header for why a mismatched word corrupts the heap.  A driver that
+     *  cannot speak this ABI is reported honestly instead. */
+    std::uint32_t session_api_version() const noexcept { return NVENCAPI_VERSION; }
+
+    /** A human-readable rendering of the driver's max supported version. */
+    std::string driver_version_text() const {
+        if (driver_max_version == 0) return "unknown";
+        const unsigned major = (driver_max_version >> 4) & 0xFF;
+        const unsigned minor = driver_max_version & 0x0F;
+        return std::to_string(major) + "." + std::to_string(minor);
+    }
+
     NVENCSTATUS try_open_session(ID3D11Device* dev, void** session) noexcept {
         if (!have_session_api()) return NV_ENC_ERR_NO_ENCODE_DEVICE;
         NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS params{};
         params.version    = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
         params.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
         params.device     = dev;
-        params.apiVersion = NVENCAPI_VERSION;
+        params.apiVersion = session_api_version();
         return fn.nvEncOpenEncodeSessionEx(&params, session);
     }
 
@@ -161,6 +186,19 @@ private:
             dll = nullptr;
             return;
         }
+
+        // Ask the driver which API version it speaks.  This is what turns
+        // a bare "INVALID_VERSION" into an actionable message: the driver
+        // that answers "12.0" cannot accept the 13.1 struct ABI this
+        // build was compiled against.
+        {
+            auto getMaxVersion = reinterpret_cast<decltype(&NvEncodeAPIGetMaxSupportedVersion)>(
+                GetProcAddress(dll, "NvEncodeAPIGetMaxSupportedVersion"));
+            if (getMaxVersion) {
+                std::uint32_t v = 0;
+                if (getMaxVersion(&v) == NV_ENC_SUCCESS) driver_max_version = v;
+            }
+        }
         if (!fn.nvEncOpenEncodeSessionEx || !fn.nvEncInitializeEncoder ||
             !fn.nvEncEncodePicture     || !fn.nvEncLockBitstream   ||
             !fn.nvEncUnlockBitstream   || !fn.nvEncDestroyEncoder) {
@@ -178,7 +216,9 @@ private:
         // `NvEncEncoder::supports_zero_copy_encode()`).
         NIMRTC_LOG_INFO("nvenc: DLL loaded, NvEncodeAPICreateInstance OK, "
                         "function table populated (SDK " << NVENCAPI_MAJOR_VERSION
-                        << "." << NVENCAPI_MINOR_VERSION << ")");
+                        << "." << NVENCAPI_MINOR_VERSION
+                        << ", driver supports up to " << driver_version_text()
+                        << ")");
     }
 };
 
@@ -1468,10 +1508,14 @@ private:
         if (s != NV_ENC_SUCCESS) {
             if (s == NV_ENC_ERR_INVALID_VERSION) {
                 NIMRTC_LOG_ERROR("nvenc: nvEncOpenEncodeSessionEx returned "
-                                "NV_ENC_ERR_INVALID_VERSION (15) — the driver "
-                                "does not accept the SDK "
+                                "NV_ENC_ERR_INVALID_VERSION (15) — this build "
+                                "speaks the NVENCAPI "
                                 << NVENCAPI_MAJOR_VERSION << "."
-                                << NVENCAPI_MINOR_VERSION << " ABI");
+                                << NVENCAPI_MINOR_VERSION << " ABI, but the "
+                                "installed driver supports at most "
+                                << lib.driver_version_text()
+                                << "; update the NVIDIA driver, or run with "
+                                "--backend software");
             } else {
                 NIMRTC_LOG_ERROR("nvenc: nvEncOpenEncodeSessionEx failed (status="
                                 << unsigned(s) << ")");
@@ -1706,18 +1750,20 @@ ProbeResult probe_nvenc(NvCodec codec,
 
     void* sess = nullptr;
     NVENCSTATUS s = lib.try_open_session(d3d11().dev, &sess);
-    if (s != NV_ENC_SUCCESS) {
-        if (s == NV_ENC_ERR_INVALID_VERSION) {
-            NIMRTC_LOG_WARN("nvenc: nvEncOpenEncodeSessionEx = INVALID_VERSION "
-                            "(the driver does not accept the SDK "
-                            << NVENCAPI_MAJOR_VERSION << "."
-                            << NVENCAPI_MINOR_VERSION << " ABI)");
-        } else {
-            NIMRTC_LOG_WARN("nvenc: nvEncOpenEncodeSessionEx failed (status="
-                            << unsigned(s) << ")");
+        if (s != NV_ENC_SUCCESS) {
+            if (s == NV_ENC_ERR_INVALID_VERSION) {
+                NIMRTC_LOG_WARN("nvenc: nvEncOpenEncodeSessionEx = INVALID_VERSION "
+                                "(this build speaks the NVENCAPI "
+                                << NVENCAPI_MAJOR_VERSION << "."
+                                << NVENCAPI_MINOR_VERSION << " ABI, but the "
+                                "installed driver supports at most "
+                                << lib.driver_version_text() << ")");
+            } else {
+                NIMRTC_LOG_WARN("nvenc: nvEncOpenEncodeSessionEx failed (status="
+                                << unsigned(s) << ")");
+            }
+            return ProbeResult::NoGpuSession;
         }
-        return ProbeResult::NoGpuSession;
-    }
 
     // The session is open — now ask the driver whether it can actually
     // encode this codec family.

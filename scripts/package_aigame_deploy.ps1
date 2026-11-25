@@ -238,10 +238,56 @@ foreach ($exe in 'demo-agent-realtime.exe', 'demo-agent-teammate.exe') {
 }
 Log "the AI decision binaries come from $AgentBinDir"
 
+# ---- the DTLS certificate ----------------------------------------------
+#
+# `rd_viewer.exe` and `rd_device.exe` need a DTLS certificate to open
+# the handshake, and the certificate is looked up **relative to the
+# working directory** first: `certs/server-ecc.pem` next to the
+# executable.
+#
+# Without this copy the bundle reaches the operator and fails at the
+# last step with:
+#
+#   [error] wolfSSL: failed to load cert from certs/server-ecc.pem
+#   [error] engine: dtls_->open() failed: wolfSSL_CTX setup failed
+#
+# which is the worst kind of failure: the signalling worked, the
+# pairing worked, the ICE candidates gathered, and then the session
+# died at the handshake.  The operator has no way to guess that a
+# *file* is missing.
+#
+# The absolute fallback (`NIMRTC_WOLFSSL_CERT_DIR`) points into the
+# *build machine's* source tree, so it does not exist on the operator's
+# machine at all.  The relative `certs/` copy is the only thing that
+# travels.
+#
+# The certs are staged next to the executables by CMake's copy rule, so
+# they live in the same directory as the media binaries.  The existence
+# is checked **before** the output directory is wiped, so a failed run
+# does not destroy a good bundle.
+$certSrc = Join-Path $BinDir 'certs'
+foreach ($pem in 'server-ecc.pem', 'ecc-key.pem') {
+    $src = Join-Path $certSrc $pem
+    if (-not (Test-Path $src)) {
+        throw ("Missing $src`n" +
+               "The DTLS certificate is part of this bundle: without it the " +
+               "handshake fails on the operator's machine with " +
+               "'wolfSSL_CTX setup failed'.  Build the tree first (CMake " +
+               "stages the certs next to the executables).")
+    }
+}
+
 # ---- assemble -----------------------------------------------------------
 if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
 New-Item -ItemType Directory -Path $OutDir | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $OutDir 'crt') | Out-Null
+
+$certDst = Join-Path $OutDir 'certs'
+New-Item -ItemType Directory -Path $certDst | Out-Null
+foreach ($pem in 'server-ecc.pem', 'ecc-key.pem') {
+    Copy-Item (Join-Path $certSrc $pem) $certDst -Force
+}
+Log "the DTLS certificate comes from $certSrc"
 
 foreach ($exe in 'rd_device.exe', 'rd_viewer.exe') {
     $src = Join-Path $BinDir $exe

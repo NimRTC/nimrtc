@@ -215,6 +215,20 @@ foreach ($exe in 'rd_device.exe', 'rd_viewer.exe') {
     Copy-Item $src $OutDir -Force
 }
 
+# The NVIDIA diagnostic — see the AI-game script for why the bundle
+# carries it: the media binaries report *that* the hardware backend
+# refused to open, but not *which adapter* the driver picked.
+$nvDiag = Join-Path $root 'build/aigame/examples/Release/nv_diagnose.exe'
+if (-not (Test-Path $nvDiag)) {
+    $nvDiag = Join-Path $root 'build/nv_diagnose.exe'
+}
+if (Test-Path $nvDiag) {
+    Copy-Item $nvDiag $OutDir -Force
+    Log "the NVIDIA diagnostic comes from $nvDiag"
+} else {
+    Log 'WARNING: nv_diagnose.exe is missing - the bundle has no NVIDIA diagnostic'
+}
+
 Copy-Item $msquic $OutDir -Force
 
 foreach ($py in 'client.py', 'wsproto.py', 'signalling.py', 'signalling_core.py') {

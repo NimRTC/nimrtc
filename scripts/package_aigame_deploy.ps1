@@ -295,6 +295,28 @@ foreach ($exe in 'rd_device.exe', 'rd_viewer.exe') {
     Copy-Item $src $OutDir -Force
 }
 
+# The NVIDIA diagnostic.
+#
+# The media binaries cannot answer "why did the hardware backend refuse
+# to open" on their own: the NVENC probe reports a status code and the
+# NVDEC probe reports a boolean, and neither says *which adapter* the
+# driver picked or what the capability query actually answered.  On a
+# machine whose default D3D11 adapter is not the NVIDIA one, that is
+# exactly the question the operator needs answered.
+#
+# So the bundle carries the standalone diagnostic, and the operator can
+# run it without the media binaries and without a session.
+$nvDiag = Join-Path $root 'build/aigame/examples/Release/nv_diagnose.exe'
+if (-not (Test-Path $nvDiag)) {
+    $nvDiag = Join-Path $root 'build/nv_diagnose.exe'
+}
+if (Test-Path $nvDiag) {
+    Copy-Item $nvDiag $OutDir -Force
+    Log "the NVIDIA diagnostic comes from $nvDiag"
+} else {
+    Log 'WARNING: nv_diagnose.exe is missing - the bundle has no NVIDIA diagnostic'
+}
+
 foreach ($exe in 'demo-agent-realtime.exe', 'demo-agent-teammate.exe') {
     Copy-Item (Join-Path $AgentBinDir $exe) $OutDir -Force
 }

@@ -1057,6 +1057,11 @@ function(nimrtc_add_engine_video_feedback_test name source)
         nimrtc::engine
         nimrtc::core
         nimrtc::plugins
+        # The DTLS seam: the video send path refuses to emit a packet
+        # until the DTLS session reaches `Connected`, so a test that
+        # drives the *outbound* half has to inject a DTLS session that
+        # reports the handshake as complete.
+        nimrtc::dtls_seam
         nimrtc::video_source
         nimrtc::video_sink
         nimrtc::video_pipeline
@@ -1069,6 +1074,7 @@ function(nimrtc_add_engine_video_feedback_test name source)
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
         "${CMAKE_SOURCE_DIR}/src/engine/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
         "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
         "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
         "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include")
@@ -1092,6 +1098,62 @@ endfunction()
 if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
 nimrtc_add_engine_video_feedback_test(test_engine_video_feedback
                                        test_engine_video_feedback.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# The video path's DTLS gate.
+#
+# The audio path has always refused to send media before the DTLS handshake
+# completed; the video path did not, so the first frames of every session
+# went out in plaintext and corrupted the peer's sequence space.  This
+# target covers the gate itself — and, just as importantly, the case where
+# the gate must *not* apply (a stack with no DTLS at all, whose media is
+# plaintext by design).
+#
+# The test needs the DTLS seam (it drives a fake `IDtlsSession`), so it
+# links `nimrtc::dtls_seam` on top of the video feedback test's set.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
+add_executable(test_engine_video_dtls_gate test_engine_video_dtls_gate.cpp)
+if(WIN32)
+    target_link_libraries(test_engine_video_dtls_gate PRIVATE ws2_32)
+endif()
+target_link_libraries(test_engine_video_dtls_gate PRIVATE
+    nimrtc::engine
+    nimrtc::core
+    nimrtc::plugins
+    nimrtc::dtls_seam
+    nimrtc::transport
+    nimrtc::video_source
+    nimrtc::video_sink
+    nimrtc::video_pipeline
+    # PAL Slice 2 (v0.10.2): the unified registrar table references
+    # `nimrtc::datachannel::register_default_plugins`, so the symbol
+    # must resolve here too.
+    nimrtc::datachannel
+    GTest::gtest_main)
+target_include_directories(test_engine_video_dtls_gate PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/transport/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/sctp/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include")
+if(WIN32)
+    target_compile_definitions(test_engine_video_dtls_gate PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_engine_video_dtls_gate LENIENT)
+add_test(NAME test_engine_video_dtls_gate
+    COMMAND $<TARGET_FILE:test_engine_video_dtls_gate>)
+set_tests_properties(test_engine_video_dtls_gate PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_dtls_gate
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
+endif()
+nimrtc_copy_wolfssl_certs(test_engine_video_dtls_gate)
 endif()
 
 # ----------------------------------------------------------------------------
@@ -1754,6 +1816,87 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
         DISCOVERY_MODE PRE_TEST)
   endif()
   nimrtc_copy_wolfssl_certs(test_engine_video_hw_loopback)
+endif()
+
+# ----------------------------------------------------------------------------
+# The engine-level *H.265 parameter-set switch* test (v1.3 plan Q1b).
+#
+# The codec-level half of Q1b lives in
+# `src/modules/nvcodec/tests/test_hevc_pts.cpp` — one NVDEC instance
+# decodes the picture that follows an NVENC re-init at a new geometry.
+# This is the *engine-level* half: two `NimRTCEngine`s drive a full
+# H.265 hardware loopback (NVENC → RTP → jitter buffer → NVDEC → sink)
+# across a mid-stream resolution change, and the test asserts that the
+# switch decoded on its own — no PLI round-trip.
+#
+# The test is gated on the hardware leg (the Q7 `gpu-nvenc` runner): it
+# skips with an honest reason on a host with no NVENC / NVDEC pair for
+# HEVC, because there is no software H.265 decoder in the tree to fall
+# back to.  The dedicated evidence run is `.github/workflows/hardware.yml`.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_FRAME AND NIMRTC_MODULE_H265 AND NIMRTC_MODULE_NVCODEC)
+  add_executable(test_engine_video_hw_h265 test_engine_video_hw_h265.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_hw_h265 PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_hw_h265 PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_hw_h265 PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_hw_h265 PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_frame
+      nimrtc::h265
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_hw_h265 PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h265/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_hw_h265 PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_hw_h265 PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_hw_h265 LENIENT)
+  add_test(NAME test_engine_video_hw_h265
+      COMMAND $<TARGET_FILE:test_engine_video_hw_h265>)
+  set_tests_properties(test_engine_video_hw_h265 PROPERTIES TIMEOUT 90)
+  # The target links `nimrtc::web_transport` (the engine's registrar table
+  # references its factory), so it needs msquic.dll beside it on Windows.
+  # PRE_TEST discovery keeps the gtest probe from running before the
+  # POST_BUILD copy — otherwise it dies with STATUS_DLL_NOT_FOUND.
+  nimrtc_copy_msquic_dll(test_engine_video_hw_h265)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_hw_h265
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 60
+        DISCOVERY_MODE PRE_TEST)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_video_hw_h265)
 endif()
 
 # Phase 3 / C3 — the GPU zero-copy video send path.  The test needs the
@@ -2755,6 +2898,40 @@ nimrtc_add_engine_test(test_engine_audio_loopback test_engine_audio_loopback.cpp
 nimrtc_add_engine_test(test_engine_audio_send test_engine_audio_send.cpp)
 
 # ---------------------------------------------------------------------------
+# The Q5 finding's second defect: the engine kept sending into a dead
+# transport.
+#
+# The 24 h impaired soak found that the ICE consent freshness expired,
+# libjuice moved the agent to `failed`, and the engine went on offering
+# media at full rate anyway -- 26 627 refused sends ("Send while ICE is
+# not connected") in the remaining 21 minutes of the run.  The engine
+# noticed the state change and had no path from "the call is dead" to
+# "stop the media source".
+#
+# The test drives the ICE state through a fake transport and asserts
+# that the media stops when the transport dies, resumes when it comes
+# back, and that the startup phase (before the first successful
+# connectivity check) is not mistaken for an outage.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_ice_send_gate test_engine_ice_send_gate.cpp)
+
+# ---------------------------------------------------------------------------
+# The engine's DTLS handshake trace must be a *trace*, not a per-tick line.
+#
+# The 2026-11-20 Q5 impaired soak printed "DTLS reached Connected" 169 983
+# times in 22½ minutes — 15 % of every log line, projecting to ~2.6 GB for
+# one 24 h window.  The guard was on the DTLS *state* rather than on the
+# *transition*, and `state() == Connected` holds on every tick for the whole
+# life of the connection.
+#
+# The test pins both halves of the fix: the line is emitted once per
+# handshake, while the SRTP install is still retried on every tick (the
+# RFC 5764 §4.2 material is only readable once Finished has been
+# processed, so the install must be eventual, not lucky).
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_dtls_log_rate test_engine_dtls_log_rate.cpp)
+
+# ---------------------------------------------------------------------------
 # The audio send path's allocation budget (remediation Phase 3 §3.5).
 #
 # The plan asks for "音频路径 per-packet 堆分配次数 = 0".  The metric is
@@ -3671,6 +3848,80 @@ if(NIMRTC_BUILD_TESTS)
         message(STATUS
             "Python3 interpreter not found — skipping the workflow-expression "
             "guard (tools/check_workflow_expressions.py).  CI runs it as a "
+            "dedicated step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The PowerShell-step guard.
+#
+# A `run:` block under `shell: pwsh` is PowerShell, and PowerShell reads
+# `$var:` as a *drive reference* -- the `:` is a drive qualifier, not
+# punctuation.  So `Write-Host "mirror $m: not a clone"` is a parser
+# error, not a string with a colon in it, and the step dies before it
+# does anything with `InvalidVariableReferenceWithDrive` in the log and
+# no mention of the mistake.  It landed in the hardware job's
+# mirror-fetching step on 2026-11-24: the step written to make the job
+# survive a broken link was the step that failed.
+#
+# The guard parses every PowerShell step with the PowerShell parser.  It
+# needs that parser, so it only does anything on Windows; elsewhere it
+# reports that it was skipped.  The `${{ ... }}` expressions are masked
+# first -- GitHub substitutes them before the shell sees the script, and
+# `${{` reads as a hashtable literal to PowerShell.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_workflow_powershell
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_workflow_powershell.py"
+                         --self-test)
+        set_tests_properties(test_workflow_powershell PROPERTIES
+            TIMEOUT 120
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the workflow-PowerShell "
+            "guard (tools/check_workflow_powershell.py).  CI runs it as a "
+            "dedicated step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The v1.4 plan's verification table, executed.
+#
+# The plan's §10 is a table of claims about the tree, each a `rg` a
+# person is meant to run by hand.  Hand-run tables drift: the tree moves,
+# the plan does not, and the next reader follows a table that describes
+# a tree that no longer exists -- which is exactly what happened to
+# §10 between 2026-11-19 and 2026-11-24 (three items landed and the
+# table still said they had not).
+#
+# So the table is run, and a claim that no longer holds is *reported*.
+# The test asserts the report's own machinery (that a search for a
+# symbol that does not exist comes back empty, that a search for one
+# that does comes back non-empty, and that the report can say 'stale').
+#
+# It does not fail the build when a claim goes stale: a plan that has
+# moved on is a documentation task, not a code defect, and a build that
+# goes red for it teaches people to ignore the build.  The report is
+# the signal; §0a is where the correction goes.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_v14_plan_status
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_v14_plan_status.py"
+                         --self-test)
+        set_tests_properties(test_v14_plan_status PROPERTIES
+            TIMEOUT 120
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the v1.4-plan status "
+            "checker (tools/check_v14_plan_status.py).  CI runs it as a "
             "dedicated step.")
     endif()
 endif()

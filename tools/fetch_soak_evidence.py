@@ -80,9 +80,63 @@ DEFAULT_DAYS = 30
 # (`linux-x86_64`), so the run id is split off from the right.
 ARTIFACT_PREFIX = "soak-"
 
+# Every network call in this tool carries a timeout.  `urlopen` without
+# one blocks on the socket until the OS gives up, which on Windows is
+# minutes to hours -- and the release gate runs this tool unattended.
+#
+# Observed on 2026-11-23: the v1.3.0 re-cut's evidence fetch sat for 25
+# minutes on a single blob-store download with 5 s of CPU and no child
+# process, and the gate could only proceed when a human killed it.  The
+# fetch was not slow -- it was stalled, and nothing in the code could
+# tell the difference.
+#
+# The timeouts are deliberately different for the two kinds of call:
+# the API endpoints answer in a second or two, while an artifact is a
+# ZIP of a day's acceptance logs and can legitimately take longer.
+API_TIMEOUT = 30.0
+ARTIFACT_TIMEOUT = 120.0
+
 
 class FetchError(Exception):
     """A recoverable problem while talking to GitHub."""
+
+
+def is_transient(message: str) -> bool:
+    """Whether a failure is worth another attempt.
+
+    Four conditions are transient:
+
+    * a connection that could not be established or was reset
+      mid-transfer,
+    * a request that timed out,
+    * an HTTP 5xx from the platform (502, 503, 504 -- the blob store
+      under load, a gateway restarting), and
+    * an HTTP 429, the platform's rate limit.
+
+    None of them says anything about whether the artifact exists; a
+    second attempt is the right answer to all of them.
+
+    The 5xx case was measured on 2026-11-24: the soak workflow's
+    "Fold the window's artifacts" step failed twice in one afternoon
+    with
+
+        error: soak-linux-x86_64-43860223478: HTTP 503 for
+        https://api.github.com/repos/NimRTC/nimrtc/actions/artifacts/.../zip
+
+    -- a transient platform hiccup on ONE artifact out of 55, which
+    made the step exit 2 and made the whole soak leg red for a reason
+    that had nothing to do with the tree.  The window was 106 records
+    from 55 artifacts; 54 of them had been read.
+
+    A 404 is *not* transient: the artifact is gone, and a second
+    attempt will say the same thing.
+    """
+    if "cannot reach" in message or "timed out" in message:
+        return True
+    for code in ("429", "500", "502", "503", "504"):
+        if f"HTTP {code}" in message:
+            return True
+    return False
 
 
 def _probe_repo(token: str) -> bool:
@@ -104,7 +158,7 @@ def _probe_repo(token: str) -> bool:
         },
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
             return resp.status == 200
     except Exception:
         return False
@@ -156,14 +210,22 @@ def api_get(path: str, token: str, raw: bool = False):
         },
     )
     opener = urllib.request.build_opener(_redirect_no_auth(None))
+    timeout = ARTIFACT_TIMEOUT if raw else API_TIMEOUT
     try:
-        with opener.open(req) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             payload = resp.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:400]
         raise FetchError(f"HTTP {exc.code} for {url}\n{detail}") from None
     except urllib.error.URLError as exc:
         raise FetchError(f"cannot reach {url}: {exc.reason}") from None
+    except TimeoutError as exc:
+        # A socket that never answers.  Without this branch the timeout
+        # surfaces as a bare `TimeoutError` out of `main()`, which reads
+        # like a crash; here it is the same recoverable condition as a
+        # reset connection, and the caller's retry loop sees it.
+        raise FetchError(f"the request to {url} timed out after "
+                         f"{timeout:g} s") from exc
     if raw:
         return payload
     return json.loads(payload.decode("utf-8"))
@@ -195,22 +257,38 @@ def list_artifacts(token: str, run_id: int) -> list:
 
 
 def download_artifact(token: str, artifact: dict) -> bytes:
-    """Download one artifact archive, retrying a dropped connection.
+    """Download one artifact archive, retrying a transient failure.
 
     The download is a redirect to a blob store, and that store resets
     the connection often enough to matter over a window of dozens of
     artifacts.  A reset is a transport hiccup, not a missing
-    artifact, so it is worth a second try; an HTTP error is not.
+    artifact, so it is worth a second try.
+
+    A timeout is the same kind of condition as a reset -- the
+    connection stalled rather than answered wrongly -- so it is
+    retried too.  Before the timeout existed, a stalled download was
+    not retried and not reported either: it blocked forever.
+
+    A 5xx from the platform is the third kind.  The blob store under
+    load answers 503, and a window that spans 55 artifacts asks it
+    55 times, so a 503 is a matter of *when*, not of whether: the
+    artifact is there and the next attempt gets it.
+
+    The backoff is exponential and the attempt count is five.  Three
+    attempts with a 2/4-second backoff was not enough for a 503 that
+    lasted a few seconds; five attempts over ~30 seconds covers the
+    platform's own retry guidance.
     """
     last = None
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             return api_get(artifact["archive_download_url"], token, raw=True)
         except FetchError as exc:
             last = exc
-            if "cannot reach" not in str(exc):
+            if not is_transient(str(exc)):
                 raise
-            time.sleep(2 * (attempt + 1))
+            if attempt < 4:
+                time.sleep(2 ** (attempt + 1))
     raise last
 
 
@@ -356,6 +434,33 @@ def _self_test() -> int:
             os.environ.pop("GITHUB_TOKEN", None)
         else:
             os.environ["GITHUB_TOKEN"] = saved
+
+    # A stalled connection is a transient failure, not a broken one, and
+    # a request that times out must be retried rather than blocking
+    # forever.  Before the timeout existed, a stalled blob-store
+    # download hung the release gate with no output and no way to tell
+    # it from slow progress.
+    check(is_transient("cannot reach https://api.github.com: timed out"),
+          "a reset connection is transient")
+    check(is_transient("the request to https://example.invalid timed out "
+                       "after 120 s"),
+          "a timed-out request is transient")
+    check(not is_transient("HTTP 404 for https://api.github.com/x"),
+          "a missing artifact is not transient")
+
+    # A platform hiccup is transient.  The soak leg failed on 2026-11-24
+    # with one 503 out of 55 artifacts, and the whole window read was
+    # declared incomplete because of it.
+    for code in ("429", "500", "502", "503", "504"):
+        check(is_transient("HTTP %s for https://api.github.com/x" % code),
+              "HTTP %s is transient" % code)
+    check(not is_transient("HTTP 403 for https://api.github.com/x"),
+          "HTTP 403 is not transient")
+    check(not is_transient("HTTP 410 for https://api.github.com/x"),
+          "HTTP 410 is not transient")
+
+    check(API_TIMEOUT > 0 and ARTIFACT_TIMEOUT >= API_TIMEOUT,
+          "both timeouts are set, and the artifact timeout is the longer one")
 
     print("self-test: %d failure(s)" % len(failures))
     for message in failures:

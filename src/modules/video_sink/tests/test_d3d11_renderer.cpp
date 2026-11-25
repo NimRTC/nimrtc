@@ -42,6 +42,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -143,6 +144,106 @@ TEST(D3D11RendererRegistration, IsRegistered) {
     ASSERT_NE(f, nullptr);
     EXPECT_EQ(f->id(), "d3d11");
 }
+
+// ---------------------------------------------------------------------------
+// The viewport window is opt-in
+// ---------------------------------------------------------------------------
+
+#if defined(_WIN32)
+// The renderer creates a `NimRTCD3D11Viewport` window when the host gave
+// it no `native_window` and asked for a viewport.  A window that nobody
+// asked for is a surprise — and a test suite that flashes one window per
+// test case on the developer's desktop is the worst version of that
+// surprise.  These two tests are the regression guard for exactly that:
+// the default configuration must not put a window on the screen, and the
+// opt-in must put one there.
+namespace {
+
+/** The number of visible `NimRTCD3D11Viewport` windows *this process*
+ *  owns right now.
+ *
+ *  The count is scoped to the owning process on purpose: the window class
+ *  is registered per process, so two processes never share a viewport,
+ *  and a count taken across the whole desktop would be at the mercy of
+ *  whatever else the machine happens to be running. */
+int visible_viewport_windows() {
+    struct Counter {
+        int count = 0;
+
+        static BOOL CALLBACK visit(HWND hwnd, LPARAM param) {
+            auto* self = reinterpret_cast<Counter*>(param);
+            if (!::IsWindowVisible(hwnd)) return TRUE;
+            DWORD owner = 0;
+            ::GetWindowThreadProcessId(hwnd, &owner);
+            if (owner != ::GetCurrentProcessId()) return TRUE;
+            wchar_t cls[64]{};
+            const int n = ::GetClassNameW(hwnd, cls, 64);
+            if (n > 0 && std::wstring(cls, static_cast<std::size_t>(n)) ==
+                             L"NimRTCD3D11Viewport") {
+                self->count++;
+            }
+            return TRUE;
+        }
+    };
+    Counter counter;
+    ::EnumWindows(&Counter::visit, reinterpret_cast<LPARAM>(&counter));
+    return counter.count;
+}
+
+}  // namespace
+
+TEST(D3D11Renderer, DoesNotCreateAViewportWindowByDefault) {
+    const int before = visible_viewport_windows();
+
+    np::VideoSinkConfig cfg{};
+    // Neither a host window nor a request for one: the renderer must
+    // fall back to its offscreen target instead of opening a window.
+    cfg.native_window = nullptr;
+    cfg.offscreen     = false;
+    cfg.create_viewport_window = false;
+    cfg.width  = 64;
+    cfg.height = 64;
+
+    nimrtc::video_sink::D3D11Renderer renderer(cfg);
+    const np::Status rc = renderer.open();
+    if (rc == np::kErrHardwareError || rc == np::kErrUnsupported) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+    ASSERT_EQ(rc, np::kOk);
+
+    EXPECT_EQ(visible_viewport_windows(), before)
+        << "the renderer opened a viewport window nobody asked for";
+
+    renderer.close();
+    EXPECT_EQ(visible_viewport_windows(), before)
+        << "close() left a viewport window behind";
+}
+
+TEST(D3D11Renderer, CreatesTheViewportWindowWhenAsked) {
+    np::VideoSinkConfig cfg{};
+    cfg.native_window = nullptr;
+    cfg.offscreen     = false;
+    cfg.create_viewport_window = true;
+    cfg.width  = 64;
+    cfg.height = 64;
+
+    const int before = visible_viewport_windows();
+
+    nimrtc::video_sink::D3D11Renderer renderer(cfg);
+    const np::Status rc = renderer.open();
+    if (rc == np::kErrHardwareError || rc == np::kErrUnsupported) {
+        GTEST_SKIP() << "no Direct3D 11 device on this machine";
+    }
+    ASSERT_EQ(rc, np::kOk);
+
+    EXPECT_GT(visible_viewport_windows(), before)
+        << "create_viewport_window=true did not open a viewport window";
+
+    renderer.close();
+    EXPECT_EQ(visible_viewport_windows(), before)
+        << "close() left a viewport window behind";
+}
+#endif  // _WIN32
 
 // ---------------------------------------------------------------------------
 // The presentation clock

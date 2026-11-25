@@ -55,9 +55,13 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include <nimrtc/dtls/dtls_types.hpp>
+#include <nimrtc/ice/ice.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
 
 namespace nimrtc::engine::detail {
@@ -97,6 +101,54 @@ struct TransportStatsProjector {
      *  second table here that could drift out of step with the
      *  module's. */
     static std::string dtls_state_name(nimrtc::dtls::DtlsState state);
+
+    // ---- Connectivity diagnostics (v1.4 plan Track N / N4) ----------------
+
+    /** The gathering phase, lower-cased: "new", "gathering" or
+     *  "complete".
+     *
+     *  The gathering phase is independent of the ICE agent's state (an
+     *  agent can be Connected while gathering is still running), so the
+     *  two state machines are spelled separately on the surface. */
+    static const char* ice_gathering_state_name(ice::GatheringState state) noexcept;
+
+    /** The TURN transport the relayed path uses, lower-cased: "udp",
+     *  "tcp" or "tls". */
+    static const char* turn_transport_name(ice::TurnTransport transport) noexcept;
+
+    /** The per-type counts of the gathered local candidates. */
+    struct CandidateCounts {
+        std::uint32_t host = 0;
+        std::uint32_t srflx = 0;
+        std::uint32_t relay = 0;
+    };
+
+    /** Count the local candidates by type.
+     *
+     *  Every line is parsed with the ICE module's own candidate grammar;
+     *  an unparseable line is skipped rather than counted (a candidate
+     *  the module emitted but its own parser cannot name is not counted
+     *  as any type).  A TCP host candidate counts as a host candidate. */
+    static CandidateCounts count_candidates(
+        const std::vector<std::string>& lines) noexcept;
+
+    /** The facts the failure-reason vocabulary is decided on. */
+    struct FailureInputs {
+        bool gathering_complete = false;
+        CandidateCounts counts;
+        bool pair_selected = false;
+        bool agent_failed = false;
+        bool turn_transport_unsupported = false;
+        bool turn_credentials_rejected = false;
+    };
+
+    /** The closed failure-reason vocabulary, in the spec's priority order
+     *  (first match reports first): "transport-unsupported" >
+     *  "credentials-rejected" > "no-candidates" > "no-pair" >
+     *  "checks-failed" > "none".  "none" means no failure has been
+     *  established — a healthy session is never assigned a fabricated
+     *  reason. */
+    static std::string ice_failure_reason(const FailureInputs& in) noexcept;
 };
 
 }  // namespace nimrtc::engine::detail

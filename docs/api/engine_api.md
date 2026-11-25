@@ -24,7 +24,10 @@ nimrtc::engine::NimRTCEngine
 │   ├── open() → Status
 │   ├── pre_open() → Status
 │   ├── close()
-│   └── is_open() → bool
+│   ├── is_open() → bool
+│   ├── start(config) → int           -- v1.4 D7: config + open in one call
+│   ├── stop()                        -- v1.4 D7: close() under its lifecycle name
+│   └── hangup(reason) → bool         -- v1.4 D7: notify peer, then close()
 │
 ├── Callbacks (set once at construction)
 │   ├── set_on_audio_frame(cb)        -- legacy PCM tap
@@ -32,6 +35,10 @@ nimrtc::engine::NimRTCEngine
 │   ├── set_on_video_frame(cb)
 │   ├── set_on_error(cb)
 │   ├── set_on_state_change(cb)
+│   ├── set_on_call_state(cb)         -- v1.4 D7: the whole call's lifecycle
+│   ├── set_on_ice_restart(cb)        -- peer restarted ICE, host re-answers
+│   ├── set_on_ice_recovery(cb)       -- v1.4 N3: auto/manual restart reports
+│   ├── set_on_peer_restart(cb)       -- v1.4 N8: peer restart + path context
 │   ├── set_on_data_message(cb)
 │   ├── set_on_data_message_ex(cb)    -- v1.2.0: adds the channel identity
 │   └── set_on_data_state(cb)
@@ -44,7 +51,13 @@ nimrtc::engine::NimRTCEngine
 │   ├── ice_state_string() → cstring
 │   ├── local_ufrag() / local_password()
 │   ├── add_turn_server(...)
-│   └── set_remote_ice(string) → bool
+│   ├── set_remote_ice(string) → bool
+│   ├── restart_ice() → bool             -- v1.4 N3: budgeted manual restart
+│   ├── ice_restart_count() → uint32
+│   ├── set_on_ice_restart(cb)           -- peer restarted ICE
+│   ├── set_on_ice_recovery(cb)          -- v1.4 N3: restart reports
+│   ├── set_on_peer_restart(cb)          -- v1.4 N8: peer restart, with pairs
+│   └── reset_ice_recovery_budget()      -- v1.4 N3: top up the restart budget
 │
 ├── DTLS / SRTP inspection
 │   ├── dtls_state() → DtlsState
@@ -56,7 +69,9 @@ nimrtc::engine::NimRTCEngine
 │
 ├── Audio I/O
 │   ├── send_audio(const float* pcm, size_t n) → Status
-│   └── remote_audio_format(AudioFormat* out) → bool
+│   ├── remote_audio_format(AudioFormat* out) → bool
+│   ├── audio_source() / audio_sink()   -- opened devices (v1.4, D1)
+│   └── Stats: audio_device_pumped_frames / audio_device_pump_errors
 │
 ├── DTMF (RFC 4733, optional — off by default)
 │   ├── send_dtmf(event_code, duration_ms) → bool
@@ -171,6 +186,42 @@ bool is_open() const noexcept;
 True iff the engine is in the `kOpen` state (after a successful
 `open()`, before any `close()`).
 
+### 3.5 `start(config)` — one call's lifecycle (v1.4 D7, ADR-035)
+
+```cpp
+int start(const EngineConfig& config) noexcept;
+```
+
+Wraps the "configure → open" sequence in one call: equivalent to
+assigning `config` and calling `open()`. `open()` itself is unchanged
+for existing hosts. Returns the same status codes as `open()` (0 on
+success).
+
+### 3.6 `stop()` — close under its lifecycle name (v1.4 D7, ADR-035)
+
+```cpp
+void stop() noexcept;
+```
+
+`stop()` **is** `close()`: the defined teardown order — QoE → ICE →
+audio plugins → codecs → video plugins → BWE → `TransportSession`
+(which itself tears down ICE → DTLS → RTP → SCTP in that order) —
+already lives in `close()`; D7 does not reorder it, it just names it
+and makes it testable. After `stop()`, the call-state callback receives
+`kClosed` (exactly once).
+
+### 3.7 `hangup(reason)` — end the call with a reason (v1.4 D7, ADR-035)
+
+```cpp
+bool hangup(std::string_view reason) noexcept;
+```
+
+The difference from `stop()`: `hangup()` **carries a reason** and
+**notifies the peer first** (the reason is sent as a control message),
+then closes in the same defined order. Returns `true` when the hangup
+was performed; `false` when the engine was not open. A missing or
+saturated control channel does not stop the hangup.
+
 ---
 
 ## 4. Callbacks
@@ -187,6 +238,10 @@ methods are written defensively.
 | `on_video_frame` | A decoded H.264 NAL is available on the receive path (pre-render) | `void(const uint8_t* nal, size_t len, bool keyframe)` |
 | `on_error` | Any subsystem error fires (transport, DTLS, audio3A, codec, scheduler) | `void(uint32_t err, std::string_view msg)` |
 | `on_state_change` | Engine state transitions (e.g. ICE → connected) | `void(const char* state)` |
+| `on_call_state` | The whole call's lifecycle (v1.4 D7, ADR-035) — fires on a state **migration**, never the same state twice | `void(const engine::CallStateReport& report)` |
+| `on_ice_restart` | The *peer* restarted ICE (RFC 8445 §9.1.1.1); the host must answer with a fresh offer | `void()` |
+| `on_ice_recovery` | An ICE restart the engine initiated (v1.4 N3, ADR-031) — every success *and* every terminal report | `void(const engine::IceRecoveryReport& report)` |
+| `on_peer_restart` | The *peer* restarted ICE, with the path context (v1.4 N8, ADR-033) — fires **alongside** `on_ice_restart`; carries the old/new pair + reason `"peer-restart"` | `void(const engine::PeerRestartReport& report)` |
 | `on_data_message` | A DataChannel message arrives | `plugins::DataMessageCallback` |
 | `on_data_state` | A DataChannel state transition (open / closed / error) | `plugins::DataChannelStateCallback` |
 | `on_dtmf` | A completed DTMF key press arrives (RFC 4733; only when `EngineConfig::dtmf_enabled` is true) | `void(const plugins::DtmfEvent& event)` |
@@ -318,6 +373,329 @@ overload of `add_turn_server()`: a second virtual with the same name
 would be hidden by every existing `add_turn_server()` declaration in a
 derived class, which breaks out-of-tree plugins that implement the
 interface.
+
+The engine's TURN-credentials provider seam (v1.4 N7, §6.9) never
+overrides an explicit static list: once `add_turn_server()` has been
+called, the provider is not consulted — a **static** server list
+**wins** over the callback.
+
+### 6.5 `restart_ice()`
+
+```cpp
+bool restart_ice() noexcept;
+```
+
+Force a local ICE restart (RFC 8445 §9.1.1.1): fresh ufrag / pwd,
+fresh candidate gathering.  The host that calls `restart_ice()` still
+owns the two-step contract — the engine does **not** re-negotiate for
+the host:
+
+```cpp
+engine.restart_ice();
+// then put the new ICE credentials in front of the peer:
+engine.send_to_peer(engine.create_offer());
+```
+
+The engine's part is **budgeted** (v1.4 N3, ADR-031): every restart —
+automatic or this manual one — draws from the same sliding 10-minute
+budget of 5 restarts.  Returns `false` (and fires
+`kIceRecoveryExhausted` once per terminal episode, §6.8) when the
+budget is exhausted, before the transport is touched.  Returns `false`
+too when the engine has no ICE transport yet (before `pre_open()`).
+
+### 6.6 `ice_restart_count()`
+
+```cpp
+std::uint32_t ice_restart_count() const noexcept;
+```
+
+The ICE restarts performed so far on the live transport (RFC 8445
+§9.1.1.1); 0 means the session never restarted.  This is the **ICE
+agent's** lifetime count.  The engine's *recovery-policy* consumption
+is a separate number, projected as `Stats::ice_recovery_restarts`
+(§13.5) and scoped to the sliding window.
+
+### 6.7 `set_on_ice_restart()`
+
+```cpp
+void set_on_ice_restart(plugins::OnIceRestart cb) noexcept;  // void()
+```
+
+Install the callback fired when the *peer* restarts ICE: the peer's
+fresh ufrag / pwd arrive on the wire, and the host must answer with a
+fresh offer (`create_offer()` picks the new credentials up).
+
+This callback keeps its original no-payload shape (`void()`).  The
+path context of a peer restart is delivered through the **sibling**
+callback `set_on_peer_restart()` (§6.10, v1.4 N8) — which fires
+**alongside** this one, so a host already relying on
+`set_on_ice_restart` is unaffected.
+
+### 6.8 The ICE recovery policy (v1.4 N3, ADR-031)
+
+`EngineConfig::ice_recovery_policy` selects who restarts ICE when the
+network flaps:
+
+| Value | Meaning |
+|---|---|
+| `"auto"` (default) | The engine runs the reconnection policy: after a session that *has* connected, a `Disconnected` observation enters a 5-second grace window; when the grace lapses, the engine restarts ICE on a 1 / 2 / 4 / 8 / 8 s backoff, capped at **5 restarts per sliding 10-minute window**. |
+| `"off"` | The engine never restarts ICE on its own (`TransportStats::ice_recovery_state` reports `"disabled"`). |
+| anything else | Resolves to `"off"` — a misspelled policy must not silently run a policy the host did not ask for (deliberately the opposite of `connectivity_profile`'s `"auto"` fallback). |
+
+Automatic and manual restarts draw from the same budget.  When it is
+exhausted the machine reaches **terminal** and reports once:
+`on_error_` receives `kIceRecoveryExhausted` (0x1F01), a warn log line
+is written, and `set_on_ice_recovery` receives a terminal
+`IceRecoveryReport` (the callback fires on *every* terminal report;
+`on_error_` and the log line fire once per episode).
+
+```cpp
+struct NIMRTC_API_STABLE IceRecoveryReport {
+    std::string reason;               // "local-address-changed" / "manual" / "relay-fallback"
+    std::uint32_t restart_count = 0;       // restarts used in this window
+    std::uint32_t remaining_budget = 0;    // restarts left in this window
+    bool terminal = false;
+    std::string terminal_reason;      // "budget-exhausted" / "manual-blocked"
+
+    // ---- Path-change pair context (v1.4 N8, ADR-033) ----
+    std::optional<IceCandidatePairInfo> old_pair;  // pair before the switch; empty = none yet
+    std::optional<IceCandidatePairInfo> new_pair;  // pair after the switch; empty = still gathering
+};
+
+void set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept;  // void(const IceRecoveryReport&)
+void reset_ice_recovery_budget() noexcept;
+```
+
+`reset_ice_recovery_budget()` tops the budget back up to 5 and clears
+the terminal latch.  It does **not** reset the sliding window's start,
+so an exhausted window does not instantly re-restart once the budget
+returns.
+
+**`old_pair` / `new_pair`** (v1.4 N8): the report now also carries
+*which* path the session was on before the restart and *which* one it
+is on after it.  `new_pair` empty means the restart is still gathering
+— the host sees "not selected yet", not a placeholder.
+
+### 6.9 The TURN-credentials provider seam (v1.4 N7, ADR-032)
+
+Real TURN credentials carry a TTL (`username:timestamp` + HMAC), so the
+engine cannot hold one set and be done.  `EngineConfig::turn_credentials`
+hands the engine a provider callback; the engine *pulls* a fresh set at
+the two moments a TURN server is (re)configured:
+
+1. **before candidate gathering** (`open()`) — when no static TURN
+   server was added;
+2. **after every N3 reconnection restart** — the old set may have
+   expired while the session was down.
+
+```cpp
+struct NIMRTC_API_STABLE TurnCredentials {
+    std::string host;                                    // TURN server address
+    std::uint16_t port = 3478;                           // 0 = TURN/UDP default
+    std::string username;                                // empty = anonymous
+    std::string password;                                // empty = anonymous
+    plugins::TurnTransport transport = plugins::TurnTransport::Udp;
+    std::string tls_server_name;                         // TURN/TLS SNI
+    bool turn_tls_verify_peer = true;                    // false = skip cert verification
+    std::string turn_tls_ca_file;                        // PEM trust-anchor bundle path
+};
+
+// A raw function pointer, not std::function — ABI-stable (ADR-015).
+using NIMRTC_API_STABLE TurnCredentialsProvider = bool (*)(void* ctx, TurnCredentials* out) noexcept;
+
+// in EngineConfig:
+TurnCredentialsProvider turn_credentials = nullptr;   // null = never pull
+void* turn_credentials_ctx = nullptr;                 // passed back verbatim
+```
+
+**TURN/TLS trust (v1.4, ADR-037).**  The credential set carries the
+relay's certificate-trust policy, because the set is re-pulled on every
+reconnect and the trust anchor goes with the server it trusts:
+
+- `turn_tls_verify_peer == true` (default) — the engine verifies the
+  relay's certificate against the anchors in `turn_tls_ca_file`.  An
+  **empty** `turn_tls_ca_file` means *no* anchors are loaded, so every
+  certificate is rejected — the safe default.  A host that wants to
+  trust a **self-signed** relay hands the engine a `turn_tls_ca_file`
+  holding that relay's certificate.
+- `turn_tls_verify_peer == false` — **explicitly** skip verification.
+  This is a *paid-for* decision: the host gives up the "the relay is who
+  it says it is" guarantee.  Only for test relays, self-signed relays in
+  a trusted network, or local experiments.  Setting `false` with a
+  non-empty `turn_tls_ca_file` is contradictory — the `ca_file` is
+  ignored (verification is off, so there is nothing to anchor it to).
+
+A `turn_tls_ca_file` that is missing or not a valid PEM bundle makes the
+engine fail **loudly**: it fires `set_on_error` with
+`core::kEngineInvalidParam` naming the file and the problem, and it is
+surfaced as a queryable fact (see below) — not a silent mystery.
+
+**Queryable verification fact.**  `NimRTCEngine::turn_tls_peer_verification()`
+answers "did this call verify the relay's identity":
+
+| Value | Meaning |
+|---|---|
+| `""` | no TURN/TLS credential set is in effect (transport not `Tls`, or none applied) |
+| `"verified"` | `verify_peer == true` and the anchor is loadable — the engine will verify, and a certificate that fails is rejected |
+| `"unverified"` | `verify_peer == false` — the host explicitly chose not to verify |
+| `"failed"` | `verify_peer == true` but the `ca_file` is missing / not a valid PEM — verification is configured but cannot pass |
+
+The three states are mutually distinguishable, so the host can tell
+"verified" from "never verified" from "configured but broken".  The fact
+reflects the trust policy of the credentials most recently applied
+through the provider seam; it does not observe the wire itself (an
+online handshake failure is reported through the N4 stats / call-state
+surface, and leaves the fact as it was).
+
+**Static servers win.**  A host that calls `add_turn_server()` keeps the
+pre-N7 behaviour exactly: the explicit static list is the host's own
+configuration, the provider is **never consulted**, and the callback may
+stay null.  The seam is pure addition.
+
+**Callback contract.**  The provider runs on the engine's tick thread —
+the same thread `set_on_ice_recovery` fires on.  It must not block and
+must not re-enter the engine.  Return `false` to say "no credentials
+right now" (the engine continues without TURN, reporting
+`turn_credentials_state == "unavailable"`); return `true` with a
+non-empty `out->host` to hand one set over.
+
+**Observability.**  `Stats::turn_credentials_state` reports the pull:
+
+| Value | Meaning |
+|---|---|
+| `""` | no provider configured (the static `add_turn_server()` path is in use) |
+| `"idle"` | a provider is configured but no set was pulled yet |
+| `"ok"` | the last pull produced a credential set |
+| `"unavailable"` | the last pull failed (provider `false` / empty `host`) |
+| `"rejected"` | the transport reported a 401/403 on the applied set (sticky for the engine's lifetime) |
+
+When the ICE transport reports a rejected credential, the failure-reason
+projection reports `"credentials-rejected"` (v1.4 N4 vocabulary) instead
+of a generic `"checks-failed"`.
+
+### 6.10 Path-change reporting (v1.4 N8, ADR-033)
+
+Three report points carry the **path context** — *from where to where,
+and why*.  A path change is **not** a failure: none of these feeds the
+`ice_failure_reason` vocabulary (§13.5).
+
+```cpp
+void set_on_peer_restart(EnginePeerRestartCallback cb) noexcept;
+// EnginePeerRestartCallback = std::function<void(const PeerRestartReport&)>
+```
+
+| Callback / method | Fires | Reason | Pair context |
+|---|---|---|---|
+| `set_on_ice_recovery` (§6.8) | local restart the engine ran (N3), or manual `restart_ice()` | `"local-address-changed"` / `"manual"` — refined to `"relay-fallback"` when the pair flipped direct ↔ relay | `IceRecoveryReport::old_pair` = pre-restart pair, `new_pair` = current pair |
+| `set_on_peer_restart` | the *peer* restarted ICE — fires **alongside** `set_on_ice_restart` | `"peer-restart"` | `PeerRestartReport::old_pair` / `new_pair` — a peer restart changes *their* credentials, not the local path, so both are typically the current pair |
+
+```cpp
+struct NIMRTC_API_STABLE PeerRestartReport {
+    std::optional<IceCandidatePairInfo> old_pair;  // empty = none selected yet
+    std::optional<IceCandidatePairInfo> new_pair;  // empty = still gathering
+    std::string reason;                            // "peer-restart"
+};
+```
+
+**The reason vocabulary is closed** — a host can `switch` on it:
+
+| reason | when |
+|---|---|
+| `"local-address-changed"` | local address changed (an ICE drop triggered the N3 reconnection) |
+| `"peer-restart"` | the peer changed credentials (`set_on_ice_restart` fired) |
+| `"relay-fallback"` | the pair switched direct → relay (or relay → direct) |
+| `"manual"` | the host called `restart_ice()` |
+| `"ice-failed"` | the ICE agent failed explicitly (N3) |
+
+`old_pair` / `new_pair` empty has meaning: empty `old_pair` = no pair
+was ever selected (the first connection); empty `new_pair` = the
+restart is still gathering.  `Stats::last_path_change_reason` /
+`last_path_change_new_pair` (§13.5) keep the **last** change for hosts
+that poll instead of subscribing — the fields are populated even when
+`ice_recovery_policy == "off"`.
+
+### 6.11 The call-state surface (v1.4 D7, ADR-035)
+
+The confluence point for "how is this call doing": **one callback** that
+spans the whole stack, so a host does not assemble the answer from
+`set_on_state_change` + `set_on_error` + polling `Stats`.
+
+```cpp
+void set_on_call_state(EngineCallStateCallback cb) noexcept;
+// EngineCallStateCallback = std::function<void(const CallStateReport&)>
+```
+
+**The migration order** — `connecting` → `connected` →
+(`reconnecting` ↔ `connected`)* → `failed` / `closed`:
+
+```text
+   connecting ──► connected ──► reconnecting ──► ... (N3 recovers)
+       │             │              │
+       │             │              └──► (N3 terminal) ──► failed
+       │             └──► (DTLS / media failure) ───────► failed
+       └──► stop() / hangup() / close() ───────────────► closed
+```
+
+`failed` / `closed` are **absorbing**: once the call has failed or
+ended, no report can move it to another state — a host hangs up and
+starts a new call rather than "recovering" a failed one.
+
+```cpp
+enum class NIMRTC_API_STABLE CallState : std::uint8_t {
+    kConnecting = 0,   // establishing (gathering / connecting)
+    kConnected = 1,    // up
+    kReconnecting = 2, // down, the engine is recovering per the N3 policy
+    kFailed = 3,       // failed (has a failure_reason)
+    kClosed = 4,       // over (stop() / hangup() / destructor)
+};
+
+enum class NIMRTC_API_STABLE CallFailure : std::uint8_t {
+    kNone = 0,
+    kIceFailed = 1,           // ICE layer failed (checks-failed / no-pair)
+    kDtlsFailed = 2,          // DTLS handshake failed
+    kTurnRefused = 3,         // TURN server refused (transport-unsupported)
+    kCredentialsRejected = 4, // credentials rejected (credentials-rejected)
+    kMediaFailed = 5,         // media layer failed (codec / render / capture)
+};
+
+struct NIMRTC_API_STABLE CallStateReport {
+    CallState state = CallState::kConnecting;
+    CallFailure failure = CallFailure::kNone;
+    std::string failure_reason;                  // the N4 vocabulary, verbatim
+    std::optional<IceCandidatePairInfo> old_pair;  // N8: pair before the change
+    std::optional<IceCandidatePairInfo> new_pair;  // N8: pair after the change
+    std::string path_change_reason;
+    std::uint32_t restart_count = 0;             // N3: restarts used this window
+    std::uint32_t remaining_budget = 0;          // N3: restarts left this window
+    bool terminal = false;                       // N3: the recovery is over
+};
+```
+
+**When it fires** — only on a real **migration**, never the same state
+twice (`set_on_state_change` stays the coarse "open"/"closed" signal;
+this is the fine migration flow):
+
+| Migration | Trigger | Details carried |
+|---|---|---|
+| `kConnecting` | `open()` — the very first observation | — |
+| `kConnected` | ICE reaches `Connected` / `Completed` | — |
+| `kReconnecting` | N3 restarts ICE (`execute_ice_recovery_restart`) | `restart_count` / `remaining_budget` / `terminal`, plus the N8 path context |
+| `kFailed` | N3 terminal, DTLS failure, media failure | `failure` (`kIceFailed` / `kDtlsFailed` / `kMediaFailed` …) + `failure_reason` (N4 string) |
+| `kClosed` | `stop()` / `hangup()` / `close()` / destructor | — |
+
+**`failure_reason` is the N4 vocabulary verbatim**, mapped onto the enum
+by one pure function:
+
+| `failure_reason` | `failure` |
+|---|---|
+| `"credentials-rejected"` | `kCredentialsRejected` |
+| `"transport-unsupported"` | `kTurnRefused` |
+| `"checks-failed"` / `"no-pair"` / `"no-candidates"` | `kIceFailed` |
+| `"none"` / `""` | `kNone` (no failure is *not* a failure) |
+
+**`set_on_control_message` lives next to `set_on_call_state`** because
+the two callbacks read as one surface — its signature and semantics are
+unchanged.
 
 ---
 
@@ -452,7 +830,61 @@ missing receive pipeline is a hard error (`kAudioDecoderMissing` /
 disables the audio track; the inbound packets are then counted and
 dropped, never decoded.
 
-### 8.5 DTMF (RFC 4733)
+### 8.5 The engine-driven audio device layer (v1.4 / plan D1)
+
+By default the engine is a **transport for PCM**: the host pushes
+microphone samples with `send_audio()` and reads decoded playback
+samples through `set_on_audio_frame_info()`.  With
+`EngineConfig::audio_source_name` / `EngineConfig::audio_sink_name`,
+the engine itself opens the capture and playback devices, so a host
+that has a mic and a loudspeaker needs no PCM plumbing at all.
+
+| Config field | Meaning |
+|---|---|
+| `audio_source_name` | The capture (microphone) backend id.  Empty or `"none"` (the default) — the host feeds PCM itself, exactly today's behavior. |
+| `audio_sink_name` | The playback (loudspeaker) backend id.  Empty or `"none"` — the host plays PCM itself. |
+| `audio_source_config` | `plugins::AudioSourceConfig` handed to the source plugin's `open()`. |
+| `audio_sink_config` | `plugins::AudioSinkConfig` handed to the sink plugin's `open()`. |
+
+**The `"auto"` rule.**  An empty value is *no device*; `"auto"` resolves
+through the same availability table `video_capture_name = "auto"` uses
+(§9.4), with the audio candidate order `"portaudio"`, then
+`"synthetic"`.  When nothing is registered — a CI machine with no sound
+card — the engine **warns and degrades**: `open()` still succeeds and
+`audio_source()` / `audio_sink()` stay null.  A machine with no
+microphone is a normal machine, not an error.
+
+**An explicit id is a promise.**  A non-empty, non-`"auto"` id that
+cannot be resolved or opened is a hard error: `open()` fails with
+`kEngineInternal`, exactly like the video side's non-empty
+`video_capture_name`.
+
+**The capture pump.**  With a source opened, `tick()` pulls one frame
+from the device's bounded queue and runs it through the **same**
+outbound chain as `send_audio()` — 3A → codec → RTP → SRTP → transport —
+so the automatic and the manual paths cannot drift apart.  The engine
+only polls; it never installs the source's frame-delivery callback, so
+the 3A / codec seams are touched from exactly one thread (RD-6).  The
+proof that the path works is `Stats::audio_device_pumped_frames`
+moving with no `send_audio()` call.  A frame the outbound chain rejects
+increments `Stats::audio_device_pump_errors`.
+
+**The playback path.**  With a sink opened, the decoded inbound PCM is
+written to the device, and the host PCM callbacks
+(`set_on_audio_frame_info()`) are suppressed — the sink is now the
+renderer, and firing the host callback too would double-drive the 3A.
+The 3A's render-delivered counter uses the device's own
+`played_samples()` delta so the AEC feedback tracks what actually left
+the loudspeaker.
+
+**Inspection.**  `audio_source()` and `audio_sink()` return the opened
+`plugins::IAudioSource*` / `plugins::IAudioSink*` (null when no device
+is in use).  `Stats` reports the *negotiated* ids
+(`audio_source_device_id` / `audio_sink_device_id`) and the resolved
+backend ids (`audio_source_backend` / `audio_sink_backend`) — empty
+strings when no device is in use.
+
+### 8.6 DTMF (RFC 4733)
 
 DTMF is an **optional, in-band** capability: the digits travel as
 `telephone-event` payloads on the audio m-line, not as a separate
@@ -526,7 +958,7 @@ pipeline).
 
 ---
 
-### 8.6 RTCP Extended Reports (RFC 3611)
+### 8.7 RTCP Extended Reports (RFC 3611)
 
 The **Extended Report** (XR, RTCP payload type 207) is an optional
 QoE / network-statistics channel.  NimRTC both *receives and decodes*
@@ -601,7 +1033,7 @@ broken report.  `Stats::xr_report_blocks` counts the XR sub-packets
 that were routed to the consumer — a peer that sends extended reports
 and a counter stuck at zero means the routing is not wired.
 
-#### 8.6.1 The outbound side
+#### 8.7.1 The outbound side
 
 Setting `EngineConfig::rtcp_xr_enabled = true` makes the engine emit
 one XR report per RTCP interval (one second), carrying:
@@ -647,7 +1079,7 @@ attribute but send me no XR blocks".
 
 ---
 
-### 8.7 TMMBR / TMMBN (RFC 5104)
+### 8.8 TMMBR / TMMBN (RFC 5104)
 
 The **Temporary Maximum Media Bit Rate** request is the receiver's
 statement of the highest rate it can accept; the **TMMBN** is the
@@ -731,7 +1163,7 @@ overrides `tmmbr_enabled`.
 
 ---
 
-### 8.8 The RTCP support matrix
+### 8.9 The RTCP support matrix
 
 What the engine understands on the RTCP plane, so a host does not have
 to guess.  "Send" means the engine *emits* the message; "Receive"
@@ -751,11 +1183,11 @@ means it *parses* it.
 | PSFB | 206 | FMT 1 — PLI | receive (video keyframe request) |
 | PSFB | 206 | FMT 2 — SLI | receive (video keyframe request) |
 | PSFB | 206 | FMT 15 — REMB | receive (bandwidth collector) |
-| XR | 207 | BT 4 / 5 / 6 | **receive + send** (see §8.6) |
+| XR | 207 | BT 4 / 5 / 6 | **receive + send** (see §8.7) |
 
 The XR block types NimRTC does *not* parse (Loss RLE BT=1, Duplicate
 RLE BT=2, Packet Receipt Times BT=3, VoIP Metrics BT=7) are skipped
-by their length field, never an error — see §8.6.
+by their length field, never an error — see §8.7.
 
 The codec-control-message family (RFC 5104) is **partially**
 implemented: `tmmbr` is supported, `fir` / `tstr` / `tstn` / `vbcm`
@@ -868,6 +1300,88 @@ The two doors are counted separately because they call for completely
 different fixes: a rising `..._from_loss` means the network is lossy,
 a rising `..._from_decode_failure` means the bitstream is undecodable.
 
+### 9.4 The default device policy (v1-device-policy D3)
+
+```cpp
+static DevicePolicyInfo default_device_policy() noexcept;
+```
+
+Read-only query for the current platform's default capture-backend ids —
+the table `EngineConfig::video_capture_name = "auto"` resolves through.
+`DevicePolicyInfo` is a value type carrying four `std::string`s:
+
+| Field | Meaning |
+|---|---|
+| `screen_capture_backend` | default screen-capture backend plugin id |
+| `camera_capture_backend` | default camera backend plugin id |
+| `audio_capture_backend` | **reserved** (empty until D1 — the engine has no audio-device layer yet) |
+| `audio_playback_backend` | **reserved** (empty until D1) |
+
+The screen / camera values are `"windows-wgc"` / `"camera-mediafoundation"`
+on Windows, `"macos-screencapturekit"` / `"camera-avfoundation"` on
+macOS, `"linux-x11"` / `"camera-v4l2"` on Linux and
+`"synthetic"` / `"synthetic-camera"` elsewhere.  A host that names a
+device explicitly never consults this — the explicit id always wins.  A
+policy backend that this build does not register is **not** an error:
+`"auto"` degrades to "no capture device" (warn) instead of firing
+`kVideoCapturePluginMissing`.
+
+### 9.5 The engine-driven video renderer (v1.4 / plan D2)
+
+By default the engine **runs the renderer**: `EngineConfig::video_sink_name`
+resolves a video sink plugin, the same pluggable surface the host used to
+fill by hand.  The host keeps the ownership rules from the old days — no
+D3D11 / Metal / EGL code, and usually no window code either (the platform
+renderers *can* create their own window, but only when the host asks for
+one — see "Window ownership" below).
+
+| Config field | Meaning |
+|---|---|
+| `video_sink_name` | Which sink the engine installs.  `"auto"` (the default) resolves the platform renderer and **degrades instead of failing**; `""` is today's behaviour verbatim (headless); `"none"` installs no sink at all; `"headless"` is the explicit spelling; any other value is an explicit backend id — a promise. |
+| `video_sink_viewport` | Whether the decoded picture is meant to reach the screen.  **False (the default)** means the renderer runs offscreen; **true** means the renderer builds its own output window and presents into it.  See "Window ownership" below. |
+
+**The value table.**
+
+| value | behaviour |
+|---|---|
+| `""` | The headless sink — today's behaviour, **verbatim**.  `video_sink()` is non-null, `video_sink_backend == "headless"`. |
+| `"auto"` | The new default.  Resolves the per-platform preference table (Windows `d3d11`, macOS `metal`, Linux `egl`, fallback `headless`).  **`open()` never fails under `"auto"`**: if the platform renderer cannot be used the engine warns and degrades to `"headless"`, and `Stats::video_sink_backend_reason` says why (`no-platform-backend` on a non-desktop build, `backend-not-registered` when the build registers no such backend, `backend-open-failed` when the renderer refused to open — a machine with no display is a normal machine, not an error). |
+| `"none"` | An explicit opt-out: **no sink instance** is created.  `video_sink()` is null and `video_sink_backend` is empty. |
+| `"headless"` | The explicit spelling of `""`. |
+| `"<id>"` | An explicit backend id.  Explicit ids are **promises**: an unknown id fails `open()` with `kVideoSinkPluginMissing`, an id whose `open()` fails is a hard error (`kVideoSinkOpenFailed`) — the exact opposite of `"auto"`, never a silent degrade. |
+
+**Window ownership.**  A presentation sink needs an output surface.  The
+host's window always wins: when `plugins::VideoSinkConfig::native_window`
+is set, the renderer presents into it and never creates anything.
+
+When the host supplies no window, the renderer *can* build one — a
+`CreateWindowExW` / `ShowWindow(SW_SHOWNOACTIVATE)` window on Windows
+(carrying `WS_EX_TOOLWINDOW`, so it stays out of the taskbar and the
+Alt-Tab list), an `NSWindow` backed by a `CAMetalLayer` on macOS, a
+Wayland surface / X11 window for EGL.  **That is opt-in**: the renderer
+creates its own window only when
+`EngineConfig::video_sink_viewport` (or the seam's
+`plugins::VideoSinkConfig::create_viewport_window`) says so.  The default
+is **off**, and the reason is not cosmetic — a renderer that opens a
+visible window on its own initiative flashes it on the developer's
+desktop, and a test suite that runs hundreds of cases does that hundreds
+of times.  With the viewport off the sink runs offscreen: the
+presentation clock still ticks and the frames are still counted, but
+nothing appears on the screen.
+
+A host that wants the picture on the screen sets `video_sink_viewport =
+true`; `examples/remote-desktop/rd_viewer.cpp` does exactly that whenever
+its sink is a real renderer rather than `"headless"`.  A host that wants
+no window at all keeps using `offscreen` or `"none"`.
+
+**Inspection.**  `video_sink()` returns the installed
+`plugins::IVideoSink*` (null only for `"none"` or an uninstallable
+fallback).  `Stats` reports which backend actually runs:
+`Stats::video_sink_backend` is the installed sink's id
+(`"headless"`, the platform id, or the explicit id) and
+`Stats::video_sink_backend_reason` is the degrade reason (empty when the
+session did **not** degrade).
+
 ---
 
 ## 10. DataChannel control plane
@@ -968,6 +1482,7 @@ Pointers can be `nullptr` if the configured id was not registered
 |---|---|---|
 | `transport()` / `ice_transport()` | `plugins::ITransport*` / `IICETransport*` | Direct ICE inspection / extra candidate listening. |
 | `audio3a()` | `IAudio3A*` | Setting up pre/post-3A PCM taps for ASR. See `examples/demo-agent-gateway`. |
+| `audio_source()` / `audio_sink()` | `IAudioSource*` / `IAudioSink*` | The capture / playback devices the engine opened (v1.4 / plan D1), or `nullptr` when no device is in use. |
 | `codec_plugin()` | `ICodec*` | Codec-specific statistics / introspection. |
 | `video_source()` / `video_sink()` | `IVideoSource*` / `IVideoSink*` | Running your own capture / render loops outside the engine frame cadence. |
 | `video_receiver()` / `video_sender()` | `IVideoReceiver*` / `IVideoSender*` | RTP-level instrumentation (NACK, FU-A). |
@@ -1361,6 +1876,12 @@ struct Stats {
 |---|---|
 | `ice_state` | The agent's state: `"disconnected"`, `"gathering"`, `"connecting"`, `"connected"`, `"completed"` or `"failed"`.  Empty before the engine has a transport.  The same vocabulary as `ice_state_string()`. |
 | `ice_restart_count` | The ICE restarts performed so far (RFC 8445 §9.1.1.1).  0 means the session never restarted. |
+| `ice_recovery_state` | The engine's reconnection-policy state (v1.4 N3, ADR-031): `"idle"` / `"grace"` / `"backoff"` / `"terminal"` — or `"disabled"` when `EngineConfig::ice_recovery_policy` is not `"auto"`. |
+| `ice_recovery_restarts` | The restarts the *recovery policy* consumed in the current sliding 10-minute window (0 when disabled).  Distinct from `ice_restart_count` — the ICE agent's lifetime count. |
+| `ice_recovery_terminal_reason` | `"budget-exhausted"` / `"manual-blocked"` once the machine is terminal; empty otherwise (including when disabled). |
+| `turn_credentials_state` | The TURN-credentials provider pull (v1.4 N7, ADR-032): `""` (no provider configured) / `"idle"` / `"ok"` / `"unavailable"` / `"rejected"`.  A flat `Stats` field (like the `ice_recovery_*` trio above), reported here next to the policy surface. |
+| `last_path_change_reason` | The reason of the **last** path change (v1.4 N8, ADR-033): `"local-address-changed"` / `"peer-restart"` / `"relay-fallback"` / `"manual"` — empty = never changed.  The same closed vocabulary as `IceRecoveryReport::reason`; populated even when `ice_recovery_policy == "off"`. |
+| `last_path_change_new_pair` | The pair the session was on after the last path change (v1.4 N8, ADR-033): empty = none selected yet.  A flat `Stats` field like `last_path_change_reason`, reported here next to the pair surface. |
 | `selected_pair` | The candidate pair the agent nominated, or empty.  Empty until the connectivity checks settle on a path, which is *after* the agent reaches Connected. |
 | `relayed` | True when the selected pair goes through a TURN relay.  *Derived* from the pair's candidate types, published separately because it is the one bit a host actually branches on. |
 | `rtt_ms` | The round-trip time in milliseconds, **instantaneous** (the latest measurement, not a running total).  0 until a Receiver Report with a usable LSR / DLSR pair has arrived. |
@@ -1875,7 +2396,161 @@ header; its section note above it is the definition.
 | 151 | `video_stage_total_p95_us` | `std::uint64_t` | The summed p95 of the four outbound stages, in microseconds. |
 | 152 | `qoe` | `plugins::QoeSnapshot` | The quality-of-experience metrics (plan J3 / J6). The freeze count, the end-to-end latency percentiles, the viewer's frame rate, the sharpness proxy and the input-to-photon latency. The metrics are measured whenever a QoE collector is resolved -- which, by default, is the built-in `"rd-qoe"` (see `EngineConfig::qoe_collector_name`). A host that turns the metrics off says so with `EngineConfig::qoe_collector_enabled` (or with an empty name). Without a collector this snapshot carries the **frame counters** -- the presented and dropped frame counts, which the engine keeps anyway -- and zeroes for the metrics, which is the honest answer to "what was the latency percentile?" when it was not measured. |
 | 153 | `remote_desktop` | `RemoteDesktopStats` | The remote-desktop pipeline breakdown (v1.2 plan **S7**). The QoE block above answers "how did the session *feel*"; this block answers "**where did the time go**". It is a remote-desktop-shaped view of the per-stage instrumentation (`video_stage_*`): the capture / encode / decode means in milliseconds, the frame rates they imply, and the count of frames that were captured but never encoded (the gap between two stages is a frame that was dropped in between). The shape follows the pipeline: `capture`, `encode` and `decode`, each with its own rate, cost and count — so a host compares the halves ("the capture ran at 30 fps and the encoder only at 24") instead of guessing which prefix carries which half. Every value here is **derived** from a measurement that already exists — nothing is timed a second time. The definitions are in `RemoteDesktopStats` above. |
-**153 fields.**
+| 154 | `video_capture_device_changes` | `std::uint64_t` | Device-list changes (v1-device-policy D4): each "removed" or "added" event counts once, cumulative since open(). Distinct from `video_capture_restarts` — the physical world changed this many times, the engine reopened the device that many times. |
+| 155 | `audio_source_device_id` | `std::string` | The *negotiated* capture device id (what the source plugin reports after `open()`), or empty when no source device is in use (v1.4 / plan D1). |
+| 156 | `audio_source_backend` | `std::string` | The resolved capture backend factory id, or empty when no source device is in use. |
+| 157 | `audio_sink_device_id` | `std::string` | The *negotiated* playback device id, or empty when no sink device is in use. |
+| 158 | `audio_sink_backend` | `std::string` | The resolved playback backend factory id, or empty when no sink device is in use. |
+| 159 | `video_sink_backend` | `std::string` | The id of the sink that is actually installed (v1.4 / plan D2): the platform id when `"auto"` resolved, `"headless"` when it degraded (or was asked for explicitly), the explicit id, or empty when `"none"` / no sink. |
+| 160 | `video_sink_backend_reason` | `std::string` | Why `"auto"` did not use the platform renderer (`no-platform-backend`, `backend-not-registered`, `backend-open-failed`), or **empty** when the session did not degrade. |
+| 159 | `audio_device_pumped_frames` | `std::uint64_t` | Frames the audio capture pump pulled from the source device and ran through the outbound chain (v1.4 / plan D1). Moving is the proof that the automatic path works: no `send_audio()` call from the host. |
+| 160 | `audio_device_pump_errors` | `std::uint64_t` | Audio pump failures: a non-`kOk`/`kErrNotReady` device read, or an outbound chain rejection. |
+**160 fields.**
+| 12 | `video_rtx_packets_sent` | `std::uint64_t` | Retransmission packets we put on the wire (RFC 4588). |
+| 13 | `video_rtx_packets_received` | `std::uint64_t` | Retransmission packets we received and unwrapped (RFC 4588). |
+| 14 | `video_feedback_rx_pli` | `std::uint64_t` | PLI (picture-loss indication) the peer sent us. |
+| 15 | `video_feedback_rx_fir` | `std::uint64_t` | FIR (full intra request) the peer sent us. |
+| 16 | `video_feedback_rx_nack` | `std::uint64_t` | NACK (retransmission request) the peer sent us. |
+| 17 | `video_feedback_rx_remb` | `std::uint64_t` | REMB (receiver bandwidth estimate) the peer sent us. |
+| 18 | `video_feedback_rx_transport_cc` | `std::uint64_t` | transport-cc (RFC 8888) reports the peer sent us. |
+| 19 | `video_feedback_tx_pli` | `std::uint64_t` | PLI we sent the peer. |
+| 20 | `video_feedback_tx_nack` | `std::uint64_t` | NACK we sent the peer. |
+| 21 | `video_feedback_pli_requests` | `std::uint64_t` | Key-frame requests the receiver raised (the demand). |
+| 22 | `video_feedback_pli_allowed` | `std::uint64_t` | Key-frame requests the rate limit let through. |
+| 23 | `video_feedback_pli_suppressed` | `std::uint64_t` | Key-frame requests the rate limit dropped. |
+| 24 | `video_feedback_pli_from_loss` | `std::uint64_t` | Key-frame requests raised by the loss door (a frame the jitter buffer could not assemble). |
+| 25 | `video_feedback_pli_from_decode_failure` | `std::uint64_t` | Key-frame requests raised by the decode-failure door (the decoder refused a frame that assembled perfectly). |
+| 26 | `video_feedback_nack_seqs_dropped` | `std::uint64_t` | NACK sequence numbers the per-report cap discarded. |
+| 27 | `video_feedback_reports_expired` | `std::uint64_t` | Pending feedback reports dropped for being too old to send. |
+| 28 | `video_keyframes_limiter_requests` | `std::uint64_t` | offered |
+| 29 | `video_keyframes_granted` | `std::uint64_t` | granted |
+| 30 | `video_keyframes_deferred` | `std::uint64_t` | held back |
+| 31 | `video_keyframes_rejected` | `std::uint64_t` | budget spent |
+| 32 | `video_keyframes_forced` | `std::uint64_t` | bypassed |
+| 33 | `video_incremental_frames_seen` | `std::uint64_t` | -- |
+| 34 | `video_incremental_unchanged` | `std::uint64_t` | -- |
+| 35 | `video_incremental_encoded` | `std::uint64_t` | -- |
+| 36 | `video_incremental_full` | `std::uint64_t` | -- |
+| 37 | `video_incremental_fallbacks` | `std::uint64_t` | -- |
+| 38 | `video_incremental_skipped` | `std::uint64_t` | -- |
+| 39 | `video_region_refreshes_sent` | `std::uint64_t` | -- |
+| 40 | `video_zero_copy_frames` | `std::uint64_t` | Frames that took the GPU path (no CPU staging). |
+| 41 | `video_zero_copy_fallbacks` | `std::uint64_t` | Frames that carried a GPU handle but fell back to the CPU. |
+| 42 | `video_rx_gpu_frames` | `std::uint64_t` | -- |
+| 43 | `video_rx_cpu_frames` | `std::uint64_t` | -- |
+| 44 | `video_zero_copy_rejected` | `std::uint64_t` | A frame that carried a GPU surface the encoder could not consume at all, and that had no CPU pixels to fall back to. The frame was dropped -- this counter makes that visible. |
+| 45 | `video_capture_frames` | `std::uint64_t` | frames pulled from the device |
+| 46 | `video_capture_frames_pumped` | `std::uint64_t` | frames handed to the encoder |
+| 47 | `video_capture_dropped` | `std::uint64_t` | queue-overflow drops |
+| 48 | `video_capture_device_errors` | `std::uint64_t` | device-lost / read errors |
+| 49 | `video_capture_restarts` | `std::uint64_t` | times the device was reopened |
+| 50 | `video_capture_format_changes` | `std::uint64_t` | negotiated format changed |
+| 51 | `video_capture_bytes_copied` | `std::uint64_t` | CPU<->GPU bytes (0 = zero-copy) |
+| 52 | `video_codec_backend_id` | `std::string` | e.g. "nvenc", "h264" |
+| 53 | `video_codec_hardware` | `bool` | a hardware encoder |
+| 54 | `video_codec_zero_copy` | `bool` | the last frame skipped the CPU |
+| 55 | `video_codec_bitrate_bps` | `std::uint32_t` | the bitrate it was asked for |
+| 56 | `video_codec_actual_bps` | `std::uint32_t` | the bitrate it produced |
+| 57 | `video_codec_encode_latency_us` | `std::uint32_t` | average encode latency |
+| 58 | `video_codec_frames_encoded` | `std::uint64_t` | -- |
+| 59 | `video_codec_bytes_encoded` | `std::uint64_t` | -- |
+| 60 | `video_codec_encode_errors` | `std::uint64_t` | -- |
+| 61 | `video_codec_zero_copy_frames` | `std::uint64_t` | frames that skipped the CPU |
+| 62 | `video_codec_staged_frames` | `std::uint64_t` | frames staged through the CPU |
+| 63 | `video_freeze_count` | `std::uint64_t` | Number of freezes detected (a gap > `freeze_threshold_ms` between two rendered frames). |
+| 64 | `video_freeze_total_ms` | `std::uint64_t` | Total frozen time in milliseconds (sum of the freeze gaps). |
+| 65 | `video_last_freeze_ms` | `std::uint64_t` | Duration of the most recent freeze in milliseconds. |
+| 66 | `video_keyframe_interval_avg_ms` | `double` | Running mean of the inter-keyframe distance, in milliseconds (EMA). Zero when fewer than two keyframes were seen. |
+| 67 | `video_qp_sum` | `std::uint64_t` | Sum of the per-frame QP samples (0 = best quality). These are the *outbound* samples — the QP the encoder chose for the frames we sent. The average QP is `video_qp_sum / video_qp_count`. |
+| 68 | `video_qp_count` | `std::uint64_t` | Number of per-frame QP samples (i.e. frames with a known QP). Zero means the codec does not report a QP — not that the quality was perfect. |
+| 69 | `video_frames_dropped_jb` | `std::uint64_t` | Frames dropped at the jitter buffer (never assembled). |
+| 70 | `video_frames_dropped_decoder` | `std::uint64_t` | Frames dropped by the decoder (corrupt / undecodable). |
+| 71 | `video_frames_dropped_dependency` | `std::uint64_t` | Frames dropped because a reference frame was lost. This is a subset of `video_frames_dropped_decoder`. |
+| 72 | `video_current_bitrate_bps` | `std::uint32_t` | The current inbound video bitrate, in bits per second (EMA over a one-second window). |
+| 73 | `video_avg_bitrate_bps` | `std::uint32_t` | The session-average inbound video bitrate, in bits per second. |
+| 74 | `video_bytes_received` | `std::uint64_t` | Bytes of encoded video received since open(). |
+| 75 | `video_frames_decoded` | `std::uint64_t` | Frames successfully decoded by the codec. |
+| 76 | `video_frames_rendered` | `std::uint64_t` | Frames handed to the video sink (rendered). |
+| 77 | `video_tx_frames_encoded` | `std::uint64_t` | -- |
+| 78 | `video_tx_bytes_encoded` | `std::uint64_t` | -- |
+| 79 | `video_tx_frames_dropped_dependency` | `std::uint64_t` | Dependency losses the *peer* reported about our stream. A PLI / FIR the peer sends is the peer saying "a reference frame of yours never arrived, so I cannot decode what follows". This is our *transmit* side losing a reference frame — the counterpart of the inbound `video_frames_dropped_dependency`. It is counted here rather than as an inbound drop because the two describe opposite directions: the inbound counter says "we could not decode what the peer sent", this one says "the peer could not decode what we sent". |
+| 80 | `audio_frames_sent` | `std::uint64_t` | RTP packets emitted |
+| 81 | `audio_bytes_sent` | `std::uint64_t` | RTP bytes (hdr+payload) |
+| 82 | `audio_encode_errors` | `std::uint64_t` | frames that failed to encode |
+| 83 | `audio_samples_in` | `std::uint64_t` | PCM samples handed to send_audio() |
+| 84 | `audio_samples_pending` | `std::uint64_t` | samples still in the accumulator |
+| 85 | `audio_packets_sent` | `std::uint64_t` | RTP packets emitted |
+| 86 | `audio_frames_received` | `std::uint64_t` | decoded frames delivered |
+| 87 | `audio_samples_received` | `std::uint64_t` | samples per channel delivered |
+| 88 | `audio_concealed_frames` | `std::uint64_t` | PLC frames delivered |
+| 89 | `audio_fec_recovered_frames` | `std::uint64_t` | frames rebuilt from in-band FEC |
+| 90 | `audio_packets_lost` | `std::uint64_t` | inbound packets inferred lost |
+| 91 | `audio_decode_errors` | `std::uint64_t` | decoder errors |
+| 92 | `audio_packets_dropped` | `std::uint64_t` | The packets the receive jitter buffer dropped to stay inside its memory bound (v1.3 plan Q2 / video plan R4). A non-zero value says "the receiver could not keep up with the sender"; it is not an error count. It is the buffer's own counter, republished unchanged. packets the jitter buffer dropped to stay bounded |
+| 93 | `audio_jitter_ms` | `std::uint32_t` | current interarrival jitter |
+| 94 | `audio_playout_delay_ms` | `std::uint32_t` | current playout delay |
+| 95 | `audio_encoder_bitrate_bps` | `std::uint32_t` | -- |
+| 96 | `ice_send_blocked_events` | `std::uint32_t` | How many times the engine has stopped sending because the transport died. The Q5 soak found the failure mode this counts: the ICE consent freshness expired, libjuice moved the agent to `failed`, and the engine kept offering media at full rate anyway — 26 627 refused sends in the remaining 21 minutes of a 24 h run. The value is a count of **outages**, not of packets: one outage that lasts an hour is one, and a link that flaps is several. The engine reports each one once, rather than once per packet. |
+| 97 | `net_feedback_blocks` | `std::uint64_t` | RTCP blocks routed to the collector |
+| 98 | `bwe_feedback_samples` | `std::uint64_t` | samples handed to IBwe::on_feedback() |
+| 99 | `bandwidth_estimate_bps` | `std::uint32_t` | current BWE target, in bit/s |
+| 100 | `dtmf_packets_sent` | `std::uint64_t` | outbound event packets |
+| 101 | `dtmf_packets_received` | `std::uint64_t` | inbound event packets decoded |
+| 102 | `dtmf_packets_malformed` | `std::uint64_t` | inbound packets that failed to decode |
+| 103 | `dtmf_events_delivered` | `std::uint64_t` | completed events reported to the host |
+| 104 | `dtmf_payload_type` | `std::uint8_t` | the negotiated telephone-event PT |
+| 105 | `xr_report_blocks` | `std::uint64_t` | XR blocks routed to the consumer |
+| 106 | `video_capture_device_frames_captured` | `std::uint64_t` | -- |
+| 107 | `video_capture_device_frames_dropped` | `std::uint64_t` | -- |
+| 108 | `video_capture_device_error_count` | `std::uint64_t` | -- |
+| 109 | `video_capture_device_restarts` | `std::uint64_t` | -- |
+| 110 | `video_capture_device_format_changes` | `std::uint64_t` | -- |
+| 111 | `video_capture_device_bytes_copied` | `std::uint64_t` | -- |
+| 112 | `video_capture_device_frames_zero_copy` | `std::uint64_t` | -- |
+| 113 | `video_capture_device_frames_cpu_staged` | `std::uint64_t` | -- |
+| 114 | `video_capture_pumped_frames` | `std::uint64_t` | -- |
+| 115 | `video_capture_pump_errors` | `std::uint64_t` | -- |
+| 116 | `video_capture_pumped_metadata` | `std::uint64_t` | -- |
+| 117 | `video_capture_gpu_frames` | `std::uint64_t` | -- |
+| 118 | `video_capture_gpu_errors` | `std::uint64_t` | -- |
+| 119 | `video_capture_gpu_wired` | `bool` | -- |
+| 120 | `video_format_conversions` | `std::uint64_t` | -- |
+| 121 | `video_format_copies` | `std::uint64_t` | The frames that were copied without a colour conversion. |
+| 122 | `video_format_zero_copy` | `std::uint64_t` | The frames that reached the encoder as a native GPU surface (so no format work happened at all). |
+| 123 | `video_format_canonical` | `std::string` | The canonical format the encoder is fed (e.g. "i420"). |
+| 124 | `video_format_source` | `std::string` | The format the capture device most recently delivered (e.g. "bgra"). A host compares it with the canonical format to see whether a conversion is happening. |
+| 125 | `video_codec_backend` | `std::string` | The codec backend's id ("nvenc", "openh264", "stub_h264", ...). "unknown" when the codec does not name its backend. |
+| 126 | `video_codec_hardware_accelerated` | `bool` | True iff the codec runs on a hardware accelerator. |
+| 127 | `video_codec_backend_preference` | `std::string` | The backend class the host asked for (plan B2). "auto" / "hardware" / "software" — the value of `EngineConfig::video_codec_backend`. Read this together with `video_codec_backend`: a host that asked for "hardware" and got "openh264_h264" has a problem the engine would otherwise hide, and this field makes the mismatch visible without parsing a log. |
+| 128 | `video_codec_frames_zero_copy` | `std::uint64_t` | Frames the codec encoded through the GPU zero-copy path. |
+| 129 | `video_codec_frames_staged` | `std::uint64_t` | Frames the codec encoded through the CPU staging path. |
+| 130 | `video_codec_keyframes` | `std::uint64_t` | Keyframes (IDR) the codec produced. |
+| 131 | `video_codec_bytes_copied` | `std::uint64_t` | Bytes the codec copied CPU↔GPU (0 on a pure hardware path). |
+| 132 | `video_codec_encode_latency_avg_us` | `std::uint64_t` | The mean encode latency, in microseconds. |
+| 133 | `video_codec_encode_latency_max_us` | `std::uint64_t` | The largest single encode duration, in microseconds. |
+| 134 | `video_tx_bitrate_bps` | `std::uint32_t` | The current outbound video bitrate, in bits per second. Derived from the encoded byte count over the last second. |
+| 135 | `video_sink_frames_rendered` | `std::uint64_t` | -- |
+| 136 | `video_sink_frames_dropped` | `std::uint64_t` | -- |
+| 137 | `video_sink_frames_dropped_present` | `std::uint64_t` | -- |
+| 138 | `video_sink_frames_presented` | `std::uint64_t` | -- |
+| 139 | `video_sink_render_errors` | `std::uint64_t` | -- |
+| 140 | `video_sink_present_fps` | `std::uint32_t` | -- |
+| 141 | `video_sync` | `VideoSyncStats` | -- |
+| 142 | `video_streams` | `std::vector<VideoStreamStats>` | -- |
+| 143 | `inbound_rtp_streams` | `std::vector<InboundRtpStats>` | -- |
+| 144 | `audio_streams` | `std::vector<AudioStreamStats>` | -- |
+| 145 | `transport` | `TransportStats` | The ICE / DTLS / SRTP path the session runs over. |
+| 146 | `data_channels` | `std::vector<DataChannelStats>` | ---- The per-channel data-channel entries (v1.2 plan Track S / S6) One entry per **data channel the host opened** with `create_data_channel()`, each with its own identity (the engine-assigned id and the label) and its own counters. The list is empty when the host never opened a channel, so a host that does not use the data plane sees no change in its telemetry. It is a list rather than a single struct so that the *shape* survives the arrival of a second channel — the alternative is to redraw the whole surface then, and every caller with it. |
+| 147 | `video_stage_capture` | `StageTiming` | The time spent popping the frame from the capture device. |
+| 148 | `video_stage_convert` | `StageTiming` | The time spent converting the picture (colour / format / scale). |
+| 149 | `video_stage_encode` | `StageTiming` | The time spent inside the codec's encode call. |
+| 150 | `video_stage_packetize` | `StageTiming` | The time spent packetizing (RTP header, STAP-A / FU-A, SRTP). |
+| 151 | `video_stage_decode` | `StageTiming` | The time spent inside the codec's decode call. |
+| 152 | `video_stage_render` | `StageTiming` | The time spent in the sink's render call. |
+| 153 | `video_stage_total_us` | `std::uint64_t` | The summed cost of the outbound path, in microseconds. This is the number §B.6's budget is written against: the capture → convert → encode → packetize chain. It is the sum of the four stage means above, so a host can compare it with the budget directly: ``` const auto s = engine.stats(); const auto frame_cost_us = s.video_stage_capture.mean_us + s.video_stage_convert.mean_us + s.video_stage_encode.mean_us + s.video_stage_packetize.mean_us; ``` The p95 variant (`video_stage_total_p95_us`) sums the p95s instead — an upper bound on the *typical* worst frame, which is the number to compare with the frame interval (33 333 µs at 30 fps). |
+**156 fields.**
+| 155 | `qoe` | `plugins::QoeSnapshot` | The quality-of-experience metrics (plan J3 / J6). The freeze count, the end-to-end latency percentiles, the viewer's frame rate, the sharpness proxy and the input-to-photon latency. The metrics are measured whenever a QoE collector is resolved -- which, by default, is the built-in `"rd-qoe"` (see `EngineConfig::qoe_collector_name`). A host that turns the metrics off says so with `EngineConfig::qoe_collector_enabled` (or with an empty name). Without a collector this snapshot carries the **frame counters** -- the presented and dropped frame counts, which the engine keeps anyway -- and zeroes for the metrics, which is the honest answer to "what was the latency percentile?" when it was not measured. |
+| 156 | `remote_desktop` | `RemoteDesktopStats` | The remote-desktop pipeline breakdown (v1.2 plan **S7**). The QoE block above answers "how did the session *feel*"; this block answers "**where did the time go**". It is a remote-desktop-shaped view of the per-stage instrumentation (`video_stage_*`): the capture / encode / decode means in milliseconds, the frame rates they imply, and the count of frames that were captured but never encoded (the gap between two stages is a frame that was dropped in between). The shape follows the pipeline: `capture`, `encode` and `decode`, each with its own rate, cost and count — so a host compares the halves ("the capture ran at 30 fps and the encoder only at 24") instead of guessing which prefix carries which half. Every value here is **derived** from a measurement that already exists — nothing is timed a second time. The definitions are in `RemoteDesktopStats` above. |
 
 ---
 ## 14. Lifecycle diagram
@@ -1890,6 +2565,7 @@ header; its section note above it is the definition.
         set_on_audio_frame(...)
         set_on_error(...)
         set_on_state_change(...)
+        set_on_call_state(...)          -- v1.4 D7: the call's lifecycle
                 │
                 ▼
    ┌─── pre_open() ───┐    (optional)
@@ -2005,7 +2681,118 @@ See §8.3 — `remote_audio_format()`.
 
 ---
 
-## 17. See also
+## 17. 一个 ≤200 行的宿主长什么样（what a ≤200-line host looks like）
+
+`examples/sdk-sample/sdk-sample.cpp`（153 非注释行）+ `sdk_signalling.hpp`（38 行）
+是两个进程、同一台机器、跑完一通话的完整宿主。它是「应用只贡献信令与产品 UI」
+的最小证明 —— 设备、编解码、BWE、RTX、恢复、渲染、AEC 全在引擎里。
+
+宿主写的（就是那 ≤200 行）：
+
+- **信令客户端**：newline-delimited JSON（offer / answer / candidate），复用
+  `examples/remote-desktop/signalling.py` 的协议方言；
+- **`EngineConfig`**：`connectivity_profile = "auto"`（D6）、
+  `ice_recovery_policy = "auto"`（N3）、`control_channel_name`、`turn_credentials`
+  提供者（N7）、`video_source_name = "memory"`、`video_sink_name = "headless"`、
+  `video_codec_name = "h264"`；
+- **四个钩子**：`set_on_call_state`（D7）、`set_on_control_message`、
+  `set_on_ice_recovery`（N8）、`EngineConfig::turn_credentials`（N7）；
+- **收尾**：`pre_open()` / `open()`、`create_offer()` / `process_remote_sdp()`、
+  `get_ice_transport()` 的候选交换、`send_audio()` / `send_video()` /
+  `send_control_message()`、`tick()`。
+
+宿主**不写**的（也正是行数能压下来的原因）：
+
+- 不写设备 id，不采集、不渲染 —— `memory` 源 + `headless` sink，CI 上无设备时
+  采集/渲染只 SKIPPED 永不 PASS；
+- 不实现连通性策略（D6 profile）与重连策略（N3 引擎侧）—— 归引擎；
+- 不直接 include `nimrtc/ice/` 的任何具体头（L4 接缝纪律）—— 只通过引擎公开面。
+
+行数预算是**每次 CI 重新量**的事实（预算 200，10% 漂移，上限 220；
+`tools/check_sample_line_budget.py`），详见 `docs/adr/ADR-036-sdk-sample-line-budget.md`。
+
+---
+
+## 18. 安装树里的视频依赖（what the install tree provides for video, v1.4 / ADR-038）
+
+安装出来的 SDK bundle（`find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`）
+现在提供**完整的视频链**，一个 h264 + headless sink 的宿主可以直接链通
+（0 个 LNK2019；ADR-038）。bundle 在 `<prefix>/lib/` 里装了什么：
+
+- **`nimrtc_nvcodec`** —— 共享的 NVIDIA / VideoToolbox 编解码适配器 archive，
+  公开头（`<nimrtc/nvcodec/nv_backends.hpp>`、`nv_codec_kind.hpp`）随 bundle
+  安装。`nimrtc_h264` 用 PUBLIC 链它，所以平铺链上它排在 `h264` 之后。
+- **三个 OpenH264 archive** —— `nimrtc_vendor_openh264_encoder.lib` /
+  `_decoder.lib` / `_common.lib`，顺序由 `<prefix>/lib/openh264_link_order.txt`
+  清单写明（encoder / decoder / common），config 按清单读，不靠
+  `find_library()` 的返回顺序。
+- **Windows 系统库 `d3d11` / `dxgi`** —— D3D11 视频 sink 与 NVENC 路径需要，
+  随 `ws2_32 bcrypt iphlpapi winmm crypt32` 一起补在链尾。
+
+宿主怎么用：`EngineConfig` 里 `video_source_name = "memory"` +
+`video_sink_name = "headless"` + `video_codec_name = "h264"`（§17），或者
+直接注册插件 / 探针：
+
+```cpp
+#include <nimrtc/h264/codec_plugin.hpp>
+#include <nimrtc/h264/hw_backends.hpp>
+#include <nimrtc/nvcodec/nv_backends.hpp>
+#include <nimrtc/video_sink/video_sink.hpp>
+
+nimrtc::h264::register_default_plugins();
+const bool nvenc_ok =
+    nimrtc::nvcodec::nvenc_codec_available(nimrtc::nvcodec::NvCodec::kH264);
+auto sink = nimrtc::video_sink::create_headless_sink(sink_cfg);
+```
+
+NVIDIA 的驱动 import lib（`nvidia-encode` / `nvidia-video`）**不需要**：
+NVENC / NVDEC 用 `LoadLibrary` + `GetProcAddress` 动态加载驱动，没有链接期
+引用（ADR-038 决策四）。
+
+---
+
+## 19. 安装树的模块闭包（what the install tree's link closure is, v1.4 / ADR-039）
+
+「链接闭包」= 下游宿主链 `nimrtc::engine` 时，**必须**出现在同一条链接行上的
+全部 `nimrtc_*` 静态 archive。它由三个来源的不动点算出：引擎自己的 PRIVATE
+`nimrtc::X` 链接、每个模块自己的 `nimrtc::X` 链接、以及递归展开到不动点
+（排除 `core` / `plugins` / `vendor` —— 那三个不是 module archive）。
+
+装出来的 bundle 里，`lib/` 装了什么由 `cmake/NimRTCInstall.cmake` 的
+`_nimrtc_install_shorts` 决定，config 链了什么由
+`cmake/NimRTCConfig.cmake.in` 的 `_nimrtc_module_shorts` 决定 —— 两份清单
+必须**都**覆盖闭包，缺一个下游宿主就撞 LNK2019 / LNK2001。本仓库树上的
+闭包是 42 个模块。
+
+```text
+tools/check_install_tree_module_closure.py   # 只读仓库树即可判定，不需要构建
+```
+
+它读仓库树、算闭包、比对两份清单，缺口**点名模块 + 点名清单**。同一棵树跑
+两次输出一致（判定确定，不触网、不调模型、不依赖随机与时间）。
+
+闭包里有两个容易漏的成员，它们不是「多一个 archive」那么简单：
+
+- **`pacing`** —— `nimrtc_sched` PRIVATE 链 `nimrtc::pacing`，而
+  `pacing::TokenBucket` 的方法（`set_config` / `available` / `try_consume` /
+  `refund` / `reset`）是**宿主自己**会调的。所以它必须在链上，且在 `sched`
+  **之后**（GNU 静态链接器从左往右扫）。
+- **闭包模块自己的 PRIVATE 系统库** —— 装好的 archive 保留了目标代码，但
+  **丢掉了链接属性**。所以 config 在 Windows 上除了 `ws2_32 bcrypt iphlpapi
+  winmm crypt32 d3d11 dxgi`，还要补 Media Foundation 那一组
+  （`windowsapp mf mfplat mfreadwrite mfuuid`，`video_capture` 需要）与
+  `ole32`（`audio_device` 的 WASAPI 需要）—— 少了它们，下游宿主链上
+  `video_capture` 就是 12 个 LNK2019（`MFStartup` / `MFCreateMediaType` /
+  `MFVideoFormat_NV12` …）。
+
+  运行时还有一件：安装树把 MsQuic 装在 `<prefix>/bin/msquic.dll`（它是动态
+  库，`lib/msquic.lib` 只是导入桩）。宿主跑起来时那个 `bin/` 得在 `PATH`
+  上，否则进程以 `0xC0000135`（`STATUS_DLL_NOT_FOUND`）起不来 —— 那是
+  「找不到 DLL」，不是「链接失败」。
+
+---
+
+## 20. See also
 
 - `engine_config.md` — full field reference for `EngineConfig`.
 - `plugin_author_guide.md` — how to write your own plugin (DTLS,

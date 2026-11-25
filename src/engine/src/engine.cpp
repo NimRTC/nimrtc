@@ -25,6 +25,7 @@
 // R1 (v1.1): core TU of the five-way engine.cpp split.
 // Behaviour unchanged; see engine_impl.hpp.
 #include "engine_impl.hpp"
+#include "engine_device_policy.hpp"
 
 #include <mutex>
 
@@ -297,6 +298,24 @@ uint32_t NimRTCEngine::open() noexcept {
             "open(): ice_t_ is null (make_transport_instance returned null media_stack)");
         return core::kEngineInternal;
     }
+    // ---- TURN credentials (v1.4 N7, ADR-032) ----------------------------
+    //
+    // Before candidate gathering starts, the engine resets the credentials
+    // bookkeeping (a re-open starts each session clean — the ICE module's
+    // own rejection latch clears here too) and pulls a credential set from
+    // the host's provider when one is configured and no static TURN server
+    // was added.  The pull runs before `ice_t_->open()` so the TURN server
+    // is in the transport's config when the agent is built and gathering
+    // begins (spec §二 4).
+    impl_->session_state.turn_credentials.reset();
+    // v1.4 N8: each session's path-change ledger starts from zero — and the
+    // flat `Stats` projection with it, so a fresh open() does not report a
+    // change that happened in a previous session.
+    impl_->session_state.path_change.reset();
+    impl_->session_state.last_path_change_reason.clear();
+    impl_->session_state.last_path_change_new_pair.reset();
+    refresh_turn_credentials();
+
     core::log::Logger::instance().debug("op8 calling ice_t_->open()");
     const auto ice_open_rc = ice_t_->open();
     if (ice_open_rc != plugins::kOk) {
@@ -323,6 +342,16 @@ uint32_t NimRTCEngine::open() noexcept {
     // plugins stay down and `open()` fails.
     if (const uint32_t video_rc = init_video_plugins(); video_rc != plugins::kOk) {
         return video_rc;
+    }
+
+    // ---- Audio devices (remote-desktop plan D1) --------------------------
+    //
+    // The audio capture / playback devices are opened after the video
+    // plugins.  An "auto" device that cannot open degrades to "no device"
+    // with a warn and does not fail the session; an explicit id that
+    // cannot open is a hard error, exactly like the video side (spec §五).
+    if (const uint32_t audio_rc = init_audio_devices(); audio_rc != 0) {
+        return audio_rc;
     }
 
     // ---- Session base state (v1.2.0, session capability plan N1) --------
@@ -391,9 +420,15 @@ uint32_t NimRTCEngine::open() noexcept {
         }
     }
 
+    // v1.4 D7: every session starts from zero — the call-state machine is
+    // reset, so a re-entrant open() never leaks a previous session's state.
+    impl_->session_state.call_state.reset();
     state_ = State::kOpen;
     if (on_state_change_) on_state_change_("open");
     detail::trace("NimRTCEngine opened (DTLS, SRTP, Opus initialised)");
+    // v1.4 D7: drive the first observation — the fresh machine's first
+    // observation always reports kConnecting (acceptance 7).
+    poll_call_state();
     return 0;
 }
 
@@ -405,6 +440,8 @@ void NimRTCEngine::close() noexcept {
     // reservoir is not worth keeping.
     impl_->qoe.close();
     if (ice_t_) ice_t_->close();
+    // v1.4 N8: the session is over — drop the path-change ledger with it.
+    impl_->session_state.path_change.reset();
     if (audio3a_plugin_) audio3a_plugin_->close();
     if (codec_plugin_) codec_plugin_->close();
     shutdown_video_plugins();
@@ -435,6 +472,9 @@ void NimRTCEngine::close() noexcept {
         audio_receiver_->close();
         audio_receiver_.reset();
     }
+    // Remote-desktop plan D1: the audio devices are closed with the
+    // session, after the plugins that consume their PCM.
+    close_audio_devices();
     audio3a_plugin_.reset();
     impl_->audio3a_concrete.reset();
     codec_plugin_.reset();
@@ -469,7 +509,51 @@ void NimRTCEngine::close() noexcept {
     impl_->session_state.datachannel_transport_cookie.reset();
     state_ = State::kClosed;
     if (on_state_change_) on_state_change_("closed");
+
+    // v1.4 D7: the call is over — report kClosed.  `stop()` / `hangup()` /
+    // `close()` all land here, so the report fires exactly once (the
+    // machine's close() judge reports nothing on a repeat).
+    if (impl_->session_state.call_state.close()) {
+        CallStateReport report;
+        report.state = CallState::kClosed;
+        fire_call_state(std::move(report));
+    }
 }
+
+
+// ---------------------------------------------------------------------------
+// v1.4 D7 — one call's lifecycle (start / stop / hangup)
+// ---------------------------------------------------------------------------
+//
+// `stop()` is `close()` under its lifecycle name: the defined teardown order
+// (QoE → ICE → audio plugins → codecs → video plugins → BWE → TransportSession)
+// already lives in `close()` — D7 does not reorder it, it just names it and
+// makes it testable (spec §四).  `hangup()` additionally carries a reason and
+// notifies the peer *before* closing.
+
+int NimRTCEngine::start(const EngineConfig& config) noexcept {
+    config_ = config;
+    return static_cast<int>(open());
+}
+
+void NimRTCEngine::stop() noexcept {
+    close();
+}
+
+bool NimRTCEngine::hangup(std::string_view reason) noexcept {
+    if (!is_open()) return false;
+    // Best-effort: notify the peer of the hangup reason first, then close in
+    // the defined order (spec §四 — hangup 先通知再关).  The reason is sent
+    // as a control message; a missing / saturated control channel does not
+    // stop the hangup.
+    const auto* bytes =
+        reinterpret_cast<const std::uint8_t*>(reason.data());
+    (void)send_control_message(
+        std::span<const std::uint8_t>(bytes, reason.size()));
+    close();
+    return true;
+}
+
 
 // ---------------------------------------------------------------------------
 // create_data_channel — creates a new IDataChannel via the factory resolved
@@ -826,6 +910,10 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
             "add_turn_server: ICE transport not yet created — call pre_open() first");
         return -1;
     }
+    // v1.4 N7: an explicit server list wins over the credentials provider
+    // (ADR-032 §3) — the provider is never consulted once a static server
+    // has been added.
+    impl_->session_state.has_static_turn_server = true;
     ice_t_->add_turn_server(host, port, username, password);
     return 0;
 }
@@ -839,8 +927,78 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
             "add_turn_server: ICE transport not yet created — call pre_open() first");
         return -1;
     }
+    impl_->session_state.has_static_turn_server = true;
     ice_t_->add_turn_server_with_transport(host, port, username, password, transport);
     return 0;
+}
+
+
+// ---------------------------------------------------------------------------
+// TURN credentials — the provider seam (v1.4 N7, ADR-032)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::refresh_turn_credentials() noexcept {
+    if (impl_ == nullptr) return;
+    // No provider configured: the host uses the static `add_turn_server()`
+    // path and the engine does nothing (spec §四 14 / §四 15).
+    if (config_.turn_credentials == nullptr) return;
+    // Static TURN servers win over the provider: an explicit list is the
+    // host's own configuration and is never overridden (spec §二 7).
+    if (impl_->session_state.has_static_turn_server) return;
+
+    TurnCredentials out;
+    auto& tc = impl_->session_state.turn_credentials;
+    const std::int64_t now_us = detail::steady_now_us();
+    if (!tc.refresh(now_us, config_.turn_credentials,
+                    config_.turn_credentials_ctx, &out)) {
+        // Pull failed (provider false / empty host): the engine configures
+        // no TURN and keeps going direct (spec §二 5 / §二 10).
+        return;
+    }
+    // Apply only when the pulled credentials differ from the last-applied
+    // ones — the ICE module re-reads its config when the agent is rebuilt
+    // after a restart, so the same credentials must not be re-added (spec
+    // §二 9).
+    if (ice_t_ != nullptr && tc.credentials_changed()) {
+        // v1-turn-tls-trust (ADR-037): the trust policy rides on the
+        // credential set — "换中继就换信任锚" — through the additive 7-arg
+        // plugin overload.  The ICE layer reads the knobs at agent
+        // creation (`create_agent()`), which happens later at open().
+        ice_t_->add_turn_server_with_transport(
+            out.host, out.port, out.username, out.password, out.transport,
+            out.turn_tls_verify_peer, out.turn_tls_ca_file);
+        tc.note_applied();
+
+        // Fail loudly, not silently (spec §四 13-15): a trust anchor the
+        // host pointed at is missing or not a PEM bundle — the host must
+        // see it, not discover it later as a mysteriously failing relay.
+        // A broken anchor makes the verification fact "failed" and fires
+        // `on_error_` naming the file and the problem.  The check is
+        // TURN/TLS-only — for a UDP/TCP relay a ca_file is meaningless and
+        // is ignored, exactly like `verify_peer == false` (spec §设计 一).
+        const auto verdict = detail::check_turn_tls_ca_file(out.turn_tls_ca_file);
+        if (out.turn_tls_verify_peer &&
+            out.transport == plugins::TurnTransport::Tls &&
+            verdict != detail::TurnTlsCaFileVerdict::kOk) {
+            tc.note_turn_tls_anchor_failed();
+            if (on_error_) {
+                on_error_(core::kEngineInvalidParam,
+                          detail::turn_tls_ca_file_error(out.turn_tls_ca_file,
+                                                         verdict));
+            }
+        }
+    }
+}
+
+
+std::string NimRTCEngine::turn_tls_peer_verification() const noexcept {
+    if (impl_ == nullptr) return {};
+    // The fact is computed from the credentials most recently applied
+    // through the provider seam (see TurnCredentialsState); a host that
+    // configured a static `add_turn_server()` list carries no trust policy
+    // on that path, so the answer stays "" (engine.hpp documents this).
+    return std::string(impl_->session_state.turn_credentials
+                           .turn_tls_peer_verification());
 }
 
 
@@ -854,8 +1012,23 @@ bool NimRTCEngine::restart_ice() noexcept {
             "restart_ice: ICE transport not yet created — call pre_open() first");
         return false;
     }
+    // v1.4 N3: the manual restart shares the engine's reconnection budget
+    // (ADR-031 §2.3).  A blocked manual restart returns false without
+    // touching the transport.
+    const std::int64_t now_us = detail::steady_now_us();
+    auto& rec = impl_->session_state.ice_recovery;
+    // v1.4 N8: record the pair before the restart so the report can say
+    // "from where to where" (also when the restart is blocked — the
+    // terminal report still carries the last pair, spec §七).
+    impl_->session_state.path_change.note_before(current_pair());
+    if (!rec.note_restart_attempted(now_us, "manual-blocked")) {
+        report_ice_recovery_terminal("manual", "manual-blocked");
+        return false;
+    }
     const auto rc = ice_t_->restart();
     if (rc != plugins::kOk) {
+        // The attempt already consumed its budget slot (spec §方案 语义 3).
+        rec.note_restart_failed(now_us);
         core::log::Logger::instance().error(
             std::string{"restart_ice: ICE restart failed, status="} +
             plugins::status_string(rc));
@@ -863,6 +1036,7 @@ bool NimRTCEngine::restart_ice() noexcept {
     }
     core::log::Logger::instance().info(
         "restart_ice: ICE restart done, new local ufrag=" + ice_t_->local_ufrag());
+    fire_ice_recovery_report("manual", false, "");
     return true;
 }
 
@@ -874,6 +1048,28 @@ void NimRTCEngine::set_on_ice_restart(plugins::OnIceRestart cb) noexcept {
     on_ice_restart_ = std::move(cb);
 }
 
+void NimRTCEngine::set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept {
+    on_ice_recovery_ = std::move(cb);
+}
+
+void NimRTCEngine::set_on_peer_restart(EnginePeerRestartCallback cb) noexcept {
+    on_peer_restart_ = std::move(cb);
+}
+
+void NimRTCEngine::set_on_call_state(EngineCallStateCallback cb) noexcept {
+    on_call_state_ = std::move(cb);
+}
+
+void NimRTCEngine::reset_ice_recovery_budget() noexcept {
+    if (impl_ != nullptr) {
+        // Clears the count and the terminal flag only — the sliding
+        // window's origin is deliberately kept (ADR-031 §2.3), so the
+        // host's "retry" stays bounded by the same 5-per-10-minutes rule.
+        impl_->session_state.ice_recovery.reset_budget();
+        impl_->session_state.ice_recovery_terminal_reported = false;
+    }
+}
+
 
 void NimRTCEngine::default_on_error(uint32_t err, std::string_view msg) noexcept {
     core::log::Logger::instance().error(
@@ -882,6 +1078,14 @@ void NimRTCEngine::default_on_error(uint32_t err, std::string_view msg) noexcept
             std::snprintf(hex, sizeof(hex), "%04X", static_cast<unsigned>(err));
             return std::string(hex) + ": " + std::string(msg);
         })());
+}
+
+DevicePolicyInfo NimRTCEngine::default_device_policy() noexcept {
+    const detail::DevicePolicy p = detail::default_device_policy();
+    return {.screen_capture_backend = p.screen_capture_backend,
+            .camera_capture_backend = p.camera_capture_backend,
+            .audio_capture_backend = p.audio_capture_backend,
+            .audio_playback_backend = p.audio_playback_backend};
 }
 
 

@@ -325,6 +325,12 @@ plugins::VideoSinkConfig NimRTCEngine::resolve_sink_config() const noexcept {
     plugins::VideoSinkConfig cfg;
     if (impl_ == nullptr) return cfg;
 
+    // The viewport is opt-in, and the engine's own default is off: a
+    // renderer that builds a visible output window is a decision the
+    // host has to make (ADR-030 decision three, amended — the renderer
+    // still builds the window, but only when asked to).
+    cfg.create_viewport_window = config_.video_sink_viewport;
+
     if (!impl_->render.presentation_configured) return cfg;
 
     cfg.width      = impl_->render.presentation_width;

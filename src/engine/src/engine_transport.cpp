@@ -6,6 +6,7 @@
  * behaviour unchanged. Shares engine_impl.hpp.
  */
 #include "engine_impl.hpp"
+#include "engine_connectivity_profile.hpp"
 
 namespace nimrtc::engine {
 
@@ -515,6 +516,23 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
         // those, so we forward the event.
         ice_t_->set_on_ice_restart([this] {
             if (on_ice_restart_) on_ice_restart_();
+
+            // v1.4 N8: alongside the unchanged `set_on_ice_restart`, report
+            // the path context.  A peer restart changes the *credentials*,
+            // not the local path, so the old and new pairs are both the
+            // current selection — empty `new_pair` means "not selected yet",
+            // and the host reads that as "the local path has not changed,
+            // the negotiation to answer is the peer's" (spec §五 三).
+            if (on_peer_restart_) {
+                const auto now_pair = current_pair();
+                PeerRestartReport report;
+                report.old_pair = now_pair;
+                report.new_pair = now_pair;
+                report.reason = "peer-restart";
+                impl_->session_state.last_path_change_reason = report.reason;
+                impl_->session_state.last_path_change_new_pair = now_pair;
+                on_peer_restart_(report);
+            }
         });
 
         // Rule 2 warning: raw-udp-arq media has no DTLS.
@@ -599,7 +617,26 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
     // set_bind_address / set_stun_server / set_local_port_range are safe
     // on null-instance ICE returns from RawUdpArqStack (they are no-ops).
     ice_t_->set_bind_address(config_.local_bind_address);
-    ice_t_->set_stun_server(config_.stun_server_host, config_.stun_server_port);
+
+    // The connectivity profile (D6) fills the keys the host left unset:
+    // with `stun: true` (every built-in profile) and no explicit STUN
+    // server, the engine configures its built-in default.  An explicit
+    // host STUN server always wins — the profile carries policy
+    // defaults, not seam values.
+    const auto stun = detail::resolve_stun_server(config_.connectivity_profile,
+                                                  config_.stun_server_host,
+                                                  config_.stun_server_port);
+    if (!stun.host.empty()) {
+        ice_t_->set_stun_server(stun.host, stun.port);
+    }
+
+    // The ICE-recovery policy (v1.4 N3, ADR-031 §2.2): "auto" arms the
+    // engine's automatic restart machine; "off" (and unknown names — a
+    // mistyped key must disarm, not arm) leave reconnection to the host.
+    // Resolved here so poll_ice_recovery() can gate on it.
+    impl_->session_state.ice_recovery_policy =
+        detail::resolve_ice_recovery_policy(config_.ice_recovery_policy);
+
     ice_t_->set_local_port_range(config_.local_port_range_begin,
                                   config_.local_port_range_end);
     // TURN servers are added via NimRTCEngine::add_turn_server() *before*
@@ -1008,6 +1045,18 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
 int NimRTCEngine::tick() noexcept {
     if (!is_open()) return 0;
 
+    // ---- Q5: the transport gate, before anything produces media -------
+    //
+    // This runs first so that every send path in this tick sees an
+    // up-to-date view of the transport.  If the ICE agent has given up
+    // (consent expired, or the link dropped after having been up), the
+    // gate closes and the media paths below stop producing packets for
+    // a transport that cannot carry them.  See
+    // `update_ice_send_gate()` for why this is a stop rather than a
+    // retry -- RFC 7675 §5.1 requires the sender to cease transmission
+    // once consent is lost.
+    update_ice_send_gate();
+
     // ---- WebTransport session state poll (v0.15.0 product route) --------
     // ` wt_session` is created lazily by create_data_channel(); poll it
     // here and surface kConnected/kFailed transitions via on_data_state_.
@@ -1216,6 +1265,19 @@ int NimRTCEngine::tick() noexcept {
     // common case, because the capture cadence is slower than the tick.
     pump_video_capture();
 
+    // ---- Pump the audio source device into the outbound path (plan D1) --
+    //
+    // The audio counterpart of the video pump above: one frame is popped
+    // from the audio source device's bounded queue and run through the
+    // same outbound chain the host drives with `send_audio()`.  It runs
+    // here, on the tick thread, so the 3A and the codec are only ever
+    // touched from one thread (RD-6) — the device fills its queue from
+    // its own thread, and the engine only polls it.
+    //
+    // `pump_audio_capture()` is a no-op when there is no audio source
+    // device or when the queue is empty.
+    pump_audio_capture();
+
     // ---- Re-offer the held key-frame request (plan B14) -----------------
     //
     // The key-frame storm limiter *defers* a request that arrives too
@@ -1233,10 +1295,23 @@ int NimRTCEngine::tick() noexcept {
     // The scheduler holds outbound packets (audio / video / control) and
     // dispatches them in priority order.  drain_with() invokes our callback
     // for each packet; we send it through ICE.
-    if (scheduler_) {
+    //
+    // Q5: the gate.  When the transport is dead (ICE failed, or dropped
+    // after having been up), the packets in the scheduler cannot go
+    // anywhere -- libjuice refuses every one of them with "Send while
+    // ICE is not connected".  Draining them anyway is what produced
+    // 26 627 refusals in the 24 h soak.  The drain is therefore skipped
+    // entirely, and the callback keeps its own guard as a belt-and-braces
+    // for the packets that were already queued when the link died.
+    if (scheduler_ && !impl_->session_state.ice_send_blocked.load(
+                           std::memory_order_acquire)) {
         scheduler_->drain_with(64, [this](plugins::Priority,
                                           core::ByteSpan data) noexcept -> bool {
             if (!ice_t_) return false;
+            // Same gate, one level down: a packet that was queued before
+            // the outage must not be pushed into a dead transport.
+            if (impl_->session_state.ice_send_blocked.load(
+                    std::memory_order_acquire)) return false;
             plugins::BufferView bv{data.data(), data.size()};
             ice_t_->send(bv, {});
             return true;
@@ -1308,6 +1383,15 @@ int NimRTCEngine::tick() noexcept {
     // v1.1 Dtls2: poll ICE flap before draining so a NAT-rebinding
     // disconnected->connected (2nd) transition triggers rehandshake().
     poll_ice_flap_for_rehandshake();
+    // v1.4 N3: the engine-driven reconnection policy runs as an *independent*
+    // state machine on the same observation point — ICE down -> grace ->
+    // backoff -> automatic restart (ADR-031).  It deliberately does not
+    // touch the DTLS-rehandshake logic above.
+    poll_ice_recovery();
+    // v1.4 D7: the call-state machine reads the same observation point.
+    // It runs *after* `poll_ice_recovery()`, so the N3-recovering gate below
+    // sees the recovery machine's state on the same tick.
+    poll_call_state();
     if (is_ice_connected()) {
         drain_dtls();
         maybe_send_sender_report();
@@ -1750,6 +1834,343 @@ void NimRTCEngine::poll_ice_flap_for_rehandshake() noexcept {
 }
 
 
+// ---------------------------------------------------------------------------
+// v1.4 N3 — the engine-driven reconnection policy (ADR-031)
+// ---------------------------------------------------------------------------
+//
+// `poll_ice_recovery()` drives the private `IceRecovery` machine from the
+// engine's own ICE-state observations (the same observation point as the
+// DTLS-rehandshake poll above, but a *separate* state machine — neither
+// changes the other's logic).  When the machine comes due, the engine
+// restarts ICE itself by calling `plugins::IICETransport::restart()`
+// directly — NOT the public `restart_ice()`, which would recurse into the
+// same budget bookkeeping.
+
+void NimRTCEngine::poll_ice_recovery() noexcept {
+    if (!ice_t_ || !impl_) return;
+    if (impl_->session_state.ice_recovery_policy !=
+        detail::IceRecoveryPolicy::kAuto) {
+        return;
+    }
+    const std::int64_t now_us = detail::steady_now_us();
+    auto& rec = impl_->session_state.ice_recovery;
+    auto& last = impl_->session_state.ice_recovery_last_state;
+
+    const plugins::IceState cur = ice_t_->state();
+    const plugins::IceState prev = last;
+    last = cur;
+
+    // Feed the machine on transitions only.  The gate mirrors
+    // poll_ice_flap_for_rehandshake(): a session that never connected is
+    // "the session never got up", not "the network changed", and must not
+    // trigger a restart storm (spec §七 — the second gate beyond grace).
+    if (cur != prev) {
+        const bool cur_up = (cur == plugins::IceState::Connected ||
+                             cur == plugins::IceState::Completed);
+        if (cur_up) {
+            rec.note_up(now_us);
+        } else if (impl_->session_state.ice_connected_once) {
+            if (cur == plugins::IceState::Failed) {
+                // Explicit failure is not a blip: skip the grace window.
+                rec.note_failed(now_us);
+            } else if (cur == plugins::IceState::Disconnected) {
+                rec.note_disconnected(now_us);
+            }
+        }
+    }
+
+    // The grace window and the backoff run on the wall of time, so they
+    // are checked every tick, not only on transitions.
+    if (rec.state() == detail::IceRecovery::State::kGrace &&
+        rec.grace_expired(now_us)) {
+        rec.note_grace_expired(now_us);
+    }
+    // While a restart is in flight (Gathering / Connecting) another one
+    // must not start even if the backoff lapsed.
+    if (rec.due(now_us) && cur != plugins::IceState::Gathering &&
+        cur != plugins::IceState::Connecting) {
+        execute_ice_recovery_restart(now_us);
+    }
+}
+
+void NimRTCEngine::execute_ice_recovery_restart(std::int64_t now_us) noexcept {
+    auto& rec = impl_->session_state.ice_recovery;
+    const std::string reason(rec.pending_reason());
+    // v1.4 N8: record the pair the session is on **before** the restart, so
+    // the report after it can say "from where to where".
+    impl_->session_state.path_change.note_before(current_pair());
+    if (!rec.note_restart_attempted(now_us, "budget-exhausted")) {
+        report_ice_recovery_terminal(reason, "budget-exhausted");
+        return;
+    }
+    const auto rc = ice_t_->restart();
+    if (rc != plugins::kOk) {
+        // The attempt already consumed a budget slot and doubled the
+        // backoff (spec §方案 语义 3): the transport stays down and the
+        // machine keeps waiting in kBackoff.  No callback fires — there
+        // are no new credentials to offer the peer.
+        rec.note_restart_failed(now_us);
+        core::log::Logger::instance().error(
+            std::string{"engine[ice-recovery]: ICE restart failed, status="} +
+            plugins::status_string(rc));
+        return;
+    }
+    core::log::Logger::instance().info(
+        std::string("engine[ice-recovery]: ICE restarted after ") + reason +
+        " (restarts this window: " +
+        std::to_string(rec.restarts_used(now_us)) + ")");
+
+    // v1.4 N7 (ADR-032): the rebuilt ICE agent re-reads the transport's
+    // TURN config, and the old credentials may have expired while the
+    // session was down — so the engine re-consults the host's provider
+    // and re-applies only when the pulled set differs from the last one
+    // (spec §二 8 / §二 9).  Static servers and a null provider make this
+    // a no-op (spec §二 7).
+    refresh_turn_credentials();
+
+    fire_ice_recovery_report(reason, false, "");
+
+    // v1.4 D7: the engine has entered an N3 recovery episode — the call is
+    // reconnecting.  The report carries the N3 details (restart count /
+    // remaining budget / terminal) read from the machine at fire time.
+    if (impl_->session_state.call_state.enter_reconnecting()) {
+        CallStateReport report;
+        report.state = CallState::kReconnecting;
+        fire_call_state(std::move(report));
+    }
+}
+
+void NimRTCEngine::fire_ice_recovery_report(
+    std::string_view reason, bool terminal,
+    std::string_view terminal_reason) noexcept {
+    auto& rec = impl_->session_state.ice_recovery;
+    const std::int64_t now_us = detail::steady_now_us();
+    IceRecoveryReport report;
+    report.reason = std::string(reason);
+    report.restart_count = rec.restarts_used(now_us);
+    report.remaining_budget = rec.remaining_budget(now_us);
+    report.terminal = terminal;
+    report.terminal_reason = std::string(terminal_reason);
+
+    // v1.4 N8: carry the path context.  `old_pair` is the pair the caller
+    // recorded before the restart (empty = none was selected yet); `new_pair`
+    // is the current selection (empty = the new pair is still gathering).
+    // The reason is refined from the two pairs: a relay-bit flip reports
+    // "relay-fallback" whatever the restart's trigger; anything else keeps
+    // the trigger's reason ("local-address-changed" / "ice-failed" /
+    // "manual"), so the N3 vocabulary is unchanged (spec §二).
+    const auto& before = impl_->session_state.path_change.before();
+    const auto now_pair = current_pair();
+    report.old_pair = before;
+    report.new_pair = now_pair;
+    const auto classified =
+        detail::PathChangeTracker::classify(before, now_pair);
+    if (classified == "relay-fallback") {
+        report.reason = std::string(classified);
+    }
+
+    // The flat `Stats` projection: a host that only polls `stats()` can
+    // still tell "the path changed since I last looked".
+    impl_->session_state.last_path_change_reason = report.reason;
+    impl_->session_state.last_path_change_new_pair = now_pair;
+
+    if (on_ice_recovery_) on_ice_recovery_(report);
+}
+
+void NimRTCEngine::report_ice_recovery_terminal(
+    std::string_view reason, std::string_view terminal_reason) noexcept {
+    // The three-place terminal report (ADR-031 §2.4): `on_error_` + one
+    // warn log line fire ONCE per terminal episode (not once per blocked
+    // attempt — spec §六 21); the `set_on_ice_recovery` callback fires on
+    // every terminal report, so the host also sees the specific blocked
+    // reason.
+    if (!impl_->session_state.ice_recovery_terminal_reported) {
+        impl_->session_state.ice_recovery_terminal_reported = true;
+        core::log::Logger::instance().warn(
+            std::string("engine[ice-recovery]: budget exhausted (reason=") +
+            std::string(reason) + "), giving up on automatic ICE restarts");
+        if (on_error_) {
+            on_error_(core::kIceRecoveryExhausted,
+                      std::string("ice recovery exhausted: reason=") +
+                      std::string(reason) + ", terminal_reason=" +
+                      std::string(terminal_reason));
+        }
+    }
+    fire_ice_recovery_report(reason, true, terminal_reason);
+
+    // v1.4 D7: N3's terminal is the call's ICE failure — the N4 reason
+    // attached, so the host sees *why* (acceptance 10 / 15).  This fires
+    // after any `kReconnecting` the episode produced: the ordering is the
+    // N3 machine's, not D7's (spec §风险).
+    fail_call_state(CallFailure::kIceFailed, current_ice_failure_reason());
+}
+
+
+// ---------------------------------------------------------------------------
+// v1.4 D7 — the call-state machine's engine-side wiring
+// ---------------------------------------------------------------------------
+//
+// `poll_call_state()` drives the private `CallStateMachine` from the engine's
+// ICE-state observations (the same observation point as the N3 poll, running
+// after it so the recovering gate sees the recovery machine's state on the
+// same tick).  The N3 / N8 details each report carries are attached at
+// `fire_call_state()` time from the owning collaborators, so the machine
+// itself stays pure (no clock / transport — C3).
+
+bool NimRTCEngine::ice_recovery_active() const noexcept {
+    const auto s = impl_->session_state.ice_recovery.state();
+    return s == detail::IceRecovery::State::kGrace ||
+           s == detail::IceRecovery::State::kBackoff;
+}
+
+void NimRTCEngine::poll_call_state() noexcept {
+    if (!ice_t_ || !impl_) return;
+    auto& cs = impl_->session_state.call_state;
+    const plugins::IceState cur = ice_t_->state();
+
+    // While the N3 machine is mid-recovery (grace / backoff), the ICE-down
+    // observations are absorbed into the ongoing reconnecting episode: the
+    // drop is expected and being repaired, so reporting kConnecting /
+    // kFailed here would fight N3's own ordering (spec §风险 / ADR-035 §2).
+    // Only an ICE-up observation (Connected / Completed) ends the episode.
+    if (ice_recovery_active()) {
+        if (cur != plugins::IceState::Connected &&
+            cur != plugins::IceState::Completed) {
+            return;
+        }
+    }
+
+    if (!cs.observe(cur)) return;  // no migration — no report
+    CallStateReport report;
+    report.state = cs.state();
+    report.failure = cs.failure();
+    report.failure_reason = cs.reason();
+    // A kFailed from an ICE `Failed` observation: the machine knows only the
+    // state, the caller knows why — attach the ICE failure (N4 reason).
+    if (report.state == CallState::kFailed) {
+        if (report.failure == CallFailure::kNone) {
+            report.failure = CallFailure::kIceFailed;
+        }
+        if (report.failure_reason.empty()) {
+            report.failure_reason = current_ice_failure_reason();
+        }
+    }
+    fire_call_state(std::move(report));
+}
+
+void NimRTCEngine::fail_call_state(CallFailure failure,
+                                   std::string_view reason) noexcept {
+    auto& cs = impl_->session_state.call_state;
+    if (!cs.fail(failure, reason)) return;  // already failed / closed — no repeat
+    CallStateReport report;
+    report.state = CallState::kFailed;
+    report.failure = failure;
+    report.failure_reason = std::string(reason);
+    fire_call_state(std::move(report));
+}
+
+void NimRTCEngine::fire_call_state(CallStateReport report) noexcept {
+    // Attach the N3 reconnection details (spec §三's sketch).
+    const std::int64_t now_us = detail::steady_now_us();
+    auto& rec = impl_->session_state.ice_recovery;
+    report.restart_count = rec.restarts_used(now_us);
+    report.remaining_budget = rec.remaining_budget(now_us);
+    report.terminal = rec.terminal();
+
+    // Attach the N8 path-change details — the *last* change, because a
+    // call-state migration and a path change do not always coincide: the
+    // report carries the context this migration can actually see (spec §三).
+    if (!impl_->session_state.last_path_change_reason.empty()) {
+        report.path_change_reason = impl_->session_state.last_path_change_reason;
+        report.old_pair = impl_->session_state.path_change.before();
+        report.new_pair = impl_->session_state.last_path_change_new_pair;
+    }
+
+    if (on_call_state_) on_call_state_(report);
+}
+
+// ---------------------------------------------------------------------------
+// Q5 �� stop sending once the transport is gone
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::update_ice_send_gate() noexcept {
+    // ---- Q5: stop sending once the transport is gone --------------------
+    //
+    // The Q5 soak found the failure mode this exists for.  libjuice's
+    // consent freshness expired, the agent moved to `failed`, and from
+    // then on **every** media send was refused with "Send while ICE is
+    // not connected" -- 26 627 times, at full media rate, for the
+    // remaining 21 minutes of the run.  The engine noticed the ICE state
+    // change (it logged "connected->failed") and kept sending anyway:
+    // there was no path from "the call is dead" to "stop the media
+    // source".
+    //
+    // Two things are wrong with that, and the gate fixes both:
+    //
+    //  1. **The CPU and the log.**  A refused send still costs a
+    //     scheduler slot, an SRTP protect, a UDP write attempt and a
+    //     log line.  At 50 packets a second for 21 minutes that is
+    //     26 627 error lines and a full-rate encode loop producing
+    //     nothing.
+    //  2. **The report.**  The host sees a stream of failures instead
+    //     of one clear "the transport died" event, so it cannot tell
+    //     "the peer is not there" from "the codec is broken".
+    //
+    // The gate is deliberately narrower than "ICE is not connected".
+    // The window between `open()` and the first successful connectivity
+    // check is a *normal* phase in which the host may already be feeding
+    // PCM; rejecting the media there would change a behaviour the host
+    // cannot see and cannot diagnose.  Only a transport that **was**
+    // connected and then stopped counts as dead -- which is exactly the
+    // `ice_connected_once` condition the flap tracker already keeps.
+    //
+    // RFC 7675 §5.1 is the reason this is a *stop* and not a *retry*:
+    // "if a valid STUN binding response has not been received from the
+    // remote peer's transport address in 30 seconds, the endpoint MUST
+    // cease transmission on that 5-tuple" and "After consent is lost,
+    // the same ICE credentials MUST NOT be used on the affected
+    // 5-tuple again".  Sending anyway is not a recovery attempt; it is
+    // the violation.
+    if (!ice_t_ || !impl_) return;
+
+    const plugins::IceState cur = ice_t_->state();
+    const bool up = (cur == plugins::IceState::Connected ||
+                     cur == plugins::IceState::Completed);
+
+    if (up) {
+        // The transport is up.  Record that it has been up, and clear the
+        // latch so a *later* outage is reported again.
+        impl_->session_state.ice_ever_connected.store(
+            true, std::memory_order_release);
+        if (impl_->session_state.ice_send_blocked.exchange(
+                false, std::memory_order_acq_rel)) {
+            core::log::Logger::instance().info(
+                "engine[ice]: the transport is back; media sending resumes");
+        }
+        return;
+    }
+
+    // Not up.  Before the transport has ever been up this is the normal
+    // startup phase -- not an outage -- so the gate stays closed.
+    if (!impl_->session_state.ice_ever_connected.load(
+            std::memory_order_acquire)) {
+        return;
+    }
+
+    if (impl_->session_state.ice_send_blocked.exchange(
+            true, std::memory_order_acq_rel)) {
+        return;   // already said it
+    }
+
+    impl_->session_state.ice_send_blocked_events.fetch_add(
+        1, std::memory_order_acq_rel);
+    core::log::Logger::instance().warn(
+        std::string("engine[ice]: the transport is ") +
+        (cur == plugins::IceState::Failed ? "failed" : "no longer connected") +
+        "; media sending is stopped until it recovers");
+}
+
+
 void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     // P0 (v0.12.0): guard against post-close use.  The ICE recv callback
     // can race with close(): a buffered packet may arrive on the transport
@@ -1945,7 +2366,8 @@ int NimRTCEngine::drain_dtls() noexcept {
     // member (not a static local) so two engines in the same process
     // (e.g. the loopback test) log their transitions independently.
     const auto new_state = d->state();
-    if (new_state != impl_->security.last_dtls_state) {
+    const bool dtls_transitioned = (new_state != impl_->security.last_dtls_state);
+    if (dtls_transitioned) {
         core::log::Logger::instance().info(
             "engine[dtls]: state transition " +
             std::string(nimrtc::dtls::DtlsSession::state_name(impl_->security.last_dtls_state)) + " → " +
@@ -1953,12 +2375,43 @@ int NimRTCEngine::drain_dtls() noexcept {
         impl_->security.last_dtls_state = new_state;
     }
 
+    if (new_state == nimrtc::dtls::DtlsState::Failed) {
+        // v1.4 D7: a definitive DTLS failure ends the call — but not while
+        // N3 is actively recovering (the failed handshake may belong to the
+        // restarted path; the recovery's own terminal is the definitive
+        // failure, ADR-035 §2).
+        if (!ice_recovery_active()) {
+            fail_call_state(CallFailure::kDtlsFailed, "dtls-handshake-failed");
+        }
+    }
+
     if (new_state == nimrtc::dtls::DtlsState::Connected) {
         // SRTP key installation happens here — this is the critical
         // handshake boundary the P1 interop tests verify.
-        core::log::Logger::instance().info(
-            "engine[dtls→srtp]: DTLS reached Connected, "
-            "calling maybe_install_srtp_keys()");
+        //
+        // The *call* stays on every tick: `maybe_install_srtp_keys()`
+        // is idempotent, but its idempotency is not the same as its
+        // readiness — the keying material (RFC 5764 §4.2) is only
+        // available once the Finished message has been processed, and
+        // the tick that observes `Connected` is not necessarily the
+        // tick that can read the material.  Retrying on the next tick
+        // is what makes the install eventual rather than lucky, so the
+        // call must not be narrowed to the transition.
+        //
+        // The *log line* is what was narrowed.  An earlier version
+        // logged on `state() == Connected`, which is true on every tick
+        // for the whole life of the connection: the 2026-11-20 Q5 soak
+        // printed "DTLS reached Connected" 169 983 times in 22½
+        // minutes — 15 % of every log line, and a projected 2.6 GB over
+        // a 24 h window.  A line that repeats once per tick is not a
+        // handshake trace; it is noise that buries the transitions it
+        // is meant to announce.  The message is now emitted once per
+        // handshake, at the transition.
+        if (dtls_transitioned) {
+            core::log::Logger::instance().info(
+                "engine[dtls→srtp]: DTLS reached Connected, "
+                "calling maybe_install_srtp_keys()");
+        }
         maybe_install_srtp_keys();
     }
 

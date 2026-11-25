@@ -119,9 +119,11 @@ inline std::string decoder_id_for_encoding(std::string_view encoding) {
  *     encoding *supports* (always 2 for Opus), so the actual count of
  *     the stream lives in the format parameters (A-5).
  *
- *  `usedtx` and `sprop-maxcapturesize` are parsed but not acted on:
- *  discontinuous transmission and the capture-size limit belong to the
- *  P2 line (WP-12).
+ *  `sprop-maxcapturesize` is parsed but not acted on: the capture-size
+ *  limit belongs to the P2 line (WP-12).  `usedtx` is parsed and echoed
+ *  since the D5 slice: a peer that negotiated DTX suppresses silent
+ *  frames on the wire, and the receiver treats those as sender-side
+ *  silence rather than as packet loss (RFC 6716 §8).
  *
  *  Every field is optional, because "the peer did not say" and "the
  *  peer said zero" are different facts — the answer must echo only
@@ -235,6 +237,7 @@ inline std::string build_opus_fmtp(const OpusFmtpParams& p) {
     if (p.minptime_ms) add("minptime", std::to_string(*p.minptime_ms));
     if (p.maxptime_ms) add("maxptime", std::to_string(*p.maxptime_ms));
     if (p.useinbandfec) add("useinbandfec", *p.useinbandfec ? "1" : "0");
+    if (p.usedtx)       add("usedtx", *p.usedtx ? "1" : "0");
     if (p.stereo)       add("stereo", *p.stereo ? "1" : "0");
     if (p.sprop_stereo) add("sprop-stereo", *p.sprop_stereo ? "1" : "0");
     return out;
@@ -254,15 +257,23 @@ inline std::string build_opus_fmtp(const OpusFmtpParams& p) {
  *     Opus' `a=rtpmap:` channel field is the maximum the encoding
  *     supports (always 2), so the real count lives here.
  *
+ *  `usedtx=1` is advertised only when the host enabled DTX: the peer
+ *  then knows we suppress silent frames on the wire, which is what lets
+ *  the *peer's* receiver treat our TOC-only packets as silence rather
+ *  than as loss (RFC 6716 §8).
+ *
  *  @param stream_channels  The channel count of the stream we send.
+ *  @param use_dtx          Whether we suppress silent frames (DTX).
  *  @return                 The parameter string. */
-inline std::string build_local_opus_fmtp(std::uint8_t stream_channels) {
+inline std::string build_local_opus_fmtp(std::uint8_t stream_channels,
+                                         bool use_dtx = false) {
     OpusFmtpParams p;
     p.minptime_ms  = 10;
     p.useinbandfec = true;
     const bool stereo = stream_channels >= 2;
     p.stereo       = stereo;
     p.sprop_stereo = stereo;
+    if (use_dtx) p.usedtx = true;
     return build_opus_fmtp(p);
 }
 
@@ -270,11 +281,18 @@ inline std::string build_local_opus_fmtp(std::uint8_t stream_channels) {
  *
  *  B-4: "The answer SDP echoes the negotiated values back, but only the
  *  subset NimRTC actually supports."  The parameters the peer sent are
- *  echoed, minus the ones NimRTC does not act on (`usedtx`,
- *  `sprop-maxcapturesize`).  The packet durations are clamped to the
+ *  echoed, minus the ones NimRTC does not act on
+ *  (`sprop-maxcapturesize`).  The packet durations are clamped to the
  *  Opus frame sizes, because a peer that names a duration Opus cannot
  *  produce (RFC 6716 §4) would otherwise negotiate a frame size the
  *  decoder has no way to honour.
+ *
+ *  `usedtx` is echoed three-state (RFC 6716 §8): `1` and `0` are echoed
+ *  verbatim, an absent value stays absent — a peer that negotiated DTX
+ *  is told we accept its suppression, a peer that explicitly turned it
+ *  off is told we expect none, and a peer that said nothing is left
+ *  alone.  `peer.usedtx` is the value the receive pipeline reads for
+ *  `AudioReceiverConfig::peer_dtx_enabled` (D5).
  *
  *  @param peer  The parameters the peer sent.
  *  @return      The parameter string; empty when there is nothing to
@@ -284,6 +302,7 @@ inline std::string build_negotiated_opus_fmtp(const OpusFmtpParams& peer) {
     out.minptime_ms  = peer.minptime_ms;
     out.maxptime_ms  = peer.maxptime_ms;
     out.useinbandfec = peer.useinbandfec;
+    out.usedtx       = peer.usedtx;
     out.stereo       = peer.stereo;
     out.sprop_stereo = peer.sprop_stereo;
 

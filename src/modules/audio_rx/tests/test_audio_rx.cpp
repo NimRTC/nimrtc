@@ -185,13 +185,23 @@ public:
         if (!payload || payload_len == 0 || !out || max_frames == 0) return 0;
 
         const std::uint8_t ch = fmt_.channels ? fmt_.channels : 1;
+
+        // A 1-byte payload is a TOC-only packet — the structural DTX
+        // suppression of a slot (RFC 6716 §3.4).  The double mirrors the
+        // concrete decoder's D5 behaviour: the slot is emitted as digital
+        // silence, flagged `dtx_silence`, so the pipeline under test can
+        // be driven with real DTX frames.
+        const bool dtx = (payload_len == 1);
+
         pcm_.assign(kSamplesPerFrame * ch, 0.0f);
-        for (std::size_t s = 0; s < kSamplesPerFrame; ++s) {
-            for (std::uint8_t c = 0; c < ch; ++c) {
-                // The value encodes the sample index and the channel, so a
-                // downmix is verifiable: channel 0 carries `s`, channel 1
-                // carries `s + 1000`.
-                pcm_[s * ch + c] = static_cast<float>(s + 1000u * c);
+        if (!dtx) {
+            for (std::size_t s = 0; s < kSamplesPerFrame; ++s) {
+                for (std::uint8_t c = 0; c < ch; ++c) {
+                    // The value encodes the sample index and the channel, so a
+                    // downmix is verifiable: channel 0 carries `s`, channel 1
+                    // carries `s + 1000`.
+                    pcm_[s * ch + c] = static_cast<float>(s + 1000u * c);
+                }
             }
         }
 
@@ -205,6 +215,7 @@ public:
             (kSamplesPerFrame * 1000u) / (fmt_.sample_rate_hz ? fmt_.sample_rate_hz : 1u));
         f.concealed = false;
         f.fec_recovered = false;
+        f.dtx_silence = dtx;
         out[0] = f;
 
         ++stats_.frames_decoded;
@@ -494,6 +505,72 @@ TEST_F(AudioRxTest, CadenceReceivedPlusConcealedEqualsTheTotalFrameCount) {
     EXPECT_EQ(received + concealed, frames_.size());
     EXPECT_EQ(received, 2u);
     EXPECT_EQ(concealed, 2u);
+}
+
+// ---------------------------------------------------------------------------
+// D5: DTX suppression is silence, not loss
+// ---------------------------------------------------------------------------
+
+TEST_F(AudioRxTest, DtxSilenceFramesArePlayedAsSilenceNotConcealment) {
+    // A peer that negotiated DTX suppresses silent slots on the wire and
+    // sends a 1-byte TOC-only packet in their place.  The pipeline has to
+    // treat those as sender-side silence: the frame fills its slot on the
+    // media timeline, no concealment is produced and none is counted
+    // (spec D5, acceptance criterion 2).
+    auto rx = make_receiver(make_config());
+    ASSERT_TRUE(rx);
+
+    push(*rx, 0, 1);        // a normal frame
+    push(*rx, 960, 2, 1);   // DTX (1-byte payload) at 960
+    push(*rx, 1920, 3, 1);  // DTX (1-byte payload) at 1920
+    rx->tick(3000);
+
+    ASSERT_EQ(frames_.size(), 3u);
+    EXPECT_FALSE(frames_[0].concealed);
+    EXPECT_FALSE(frames_[1].concealed);  // the suppressed slot is NOT concealed
+    EXPECT_FALSE(frames_[2].concealed);
+
+    // The suppressed slots are played as digital silence (the FakeDecoder
+    // emits zeros for a 1-byte payload).
+    EXPECT_FLOAT_EQ(frames_[1].pcm[0], 0.0f);
+    EXPECT_FLOAT_EQ(frames_[2].pcm[0], 0.0f);
+
+    // The timeline walked normally: all three frames were played out and
+    // nothing was concealed.
+    const auto stats = rx->stats();
+    EXPECT_EQ(stats.frames_played_out, 3u);
+    EXPECT_EQ(stats.frames_concealed, 0u);
+    EXPECT_EQ(stats.packets_lost, 0u);
+}
+
+TEST_F(AudioRxTest, ARealLossStillConcealsEvenWhenDtxFramesArrive) {
+    // Negative control (spec D5, acceptance criterion 3): the DTX
+    // handling must not disable concealment.  A slot that really never
+    // arrives — a timestamp jump with no frame to fill the gap — is
+    // still a loss and still increments `frames_concealed`, even right
+    // after DTX silence frames.
+    auto rx = make_receiver(make_config());
+    ASSERT_TRUE(rx);
+
+    push(*rx, 0, 1);        // a normal frame
+    push(*rx, 960, 2, 1);   // DTX at 960 (silence, no conceal)
+    rx->tick(2000);
+    ASSERT_EQ(frames_.size(), 2u);
+    EXPECT_EQ(rx->stats().frames_concealed, 0u);
+
+    // The slot at 1920 never arrives: the next packet is at 2880.
+    push(*rx, 2880, 4);
+    rx->tick(3000);
+
+    ASSERT_EQ(frames_.size(), 4u);
+    EXPECT_EQ(frames_[2].rtp_timestamp, 1920u);
+    EXPECT_TRUE(frames_[2].concealed);  // the real loss is concealed
+    EXPECT_FALSE(frames_[3].concealed);
+
+    const auto stats = rx->stats();
+    EXPECT_EQ(stats.frames_played_out, 4u);
+    EXPECT_EQ(stats.frames_concealed, 1u);  // 0 -> 1: concealment still works
+    EXPECT_EQ(stats.packets_lost, 1u);
 }
 
 // ---------------------------------------------------------------------------

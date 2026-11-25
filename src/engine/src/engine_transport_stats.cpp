@@ -71,6 +71,64 @@ std::string TransportStatsProjector::dtls_state_name(
     return out;
 }
 
+const char* TransportStatsProjector::ice_gathering_state_name(
+    ice::GatheringState state) noexcept {
+    switch (state) {
+        case ice::GatheringState::New:       return "new";
+        case ice::GatheringState::Gathering: return "gathering";
+        case ice::GatheringState::Complete:  return "complete";
+    }
+    return "unknown";
+}
+
+const char* TransportStatsProjector::turn_transport_name(
+    ice::TurnTransport transport) noexcept {
+    switch (transport) {
+        case ice::TurnTransport::Udp: return "udp";
+        case ice::TurnTransport::Tcp: return "tcp";
+        case ice::TurnTransport::Tls: return "tls";
+    }
+    return "";
+}
+
+TransportStatsProjector::CandidateCounts
+TransportStatsProjector::count_candidates(
+    const std::vector<std::string>& lines) noexcept {
+    CandidateCounts out;
+    for (const auto& line : lines) {
+        const auto c = ice::parse_candidate(line);
+        if (!c) continue;
+        switch (c->type) {
+            case ice::CandidateType::Host:  ++out.host;  break;
+            case ice::CandidateType::Srflx: ++out.srflx; break;
+            case ice::CandidateType::Relay: ++out.relay; break;
+            // Prflx is a peer-reflexive *remote* type; it never appears
+            // in the local gathered set, so it is not counted.
+            default: break;
+        }
+    }
+    return out;
+}
+
+std::string TransportStatsProjector::ice_failure_reason(
+    const FailureInputs& in) noexcept {
+    // The spec's priority order: first match reports first.
+    if (in.turn_transport_unsupported) return "transport-unsupported";
+    if (in.turn_credentials_rejected)  return "credentials-rejected";
+    if (in.gathering_complete &&
+        in.counts.host == 0 && in.counts.srflx == 0 && in.counts.relay == 0) {
+        return "no-candidates";
+    }
+    // "no-pair" fires as soon as there are candidates and no pair is
+    // selected (the checks have not nominated one yet).  It outranks
+    // "checks-failed" per the spec's first-match order.
+    if (in.counts.host != 0 || in.counts.srflx != 0 || in.counts.relay != 0) {
+        if (!in.pair_selected) return "no-pair";
+    }
+    if (in.agent_failed) return "checks-failed";
+    return "none";
+}
+
 }  // namespace nimrtc::engine::detail
 
 // ---------------------------------------------------------------------------
@@ -104,7 +162,44 @@ IceCandidatePairInfo to_engine_pair(const plugins::IceCandidatePair& p) {
     return out;
 }
 
+/** The N4 failure facts, projected from the transport seam's own reports.
+ *
+ *  Shared by `Stats::transport.ice_failure_reason` and the D7 call-state's
+ *  failure reason, so the two surfaces answer "why did ICE fail" with the
+ *  same decision (v1.4 D7 — the mapping is one pure function, spec §风险). */
+detail::TransportStatsProjector::FailureInputs build_failure_inputs(
+    const plugins::IICETransport* ice_t_) {
+    detail::TransportStatsProjector::FailureInputs fi;
+    if (ice_t_ == nullptr) return fi;
+    const auto diag = ice::connectivity_diagnostics_of(*ice_t_);
+    const auto counts =
+        detail::TransportStatsProjector::count_candidates(
+            ice_t_->gathered_local_candidates());
+    fi.gathering_complete = diag.gathering &&
+                            *diag.gathering == ice::GatheringState::Complete;
+    fi.counts = counts;
+    fi.pair_selected = ice_t_->selected_pair().has_value();
+    fi.agent_failed = ice_t_->state() == plugins::IceState::Failed;
+    fi.turn_transport_unsupported = diag.turn_transport_unsupported;
+    fi.turn_credentials_rejected = diag.turn_credentials_rejected;
+    return fi;
+}
+
 }  // namespace
+
+std::optional<IceCandidatePairInfo> NimRTCEngine::current_pair() const noexcept {
+    if (ice_t_ == nullptr) return std::nullopt;
+    const auto pair = ice_t_->selected_pair();
+    if (!pair) return std::nullopt;
+    return to_engine_pair(*pair);
+}
+
+std::string NimRTCEngine::current_ice_failure_reason() const noexcept {
+    // The same decision the `Stats` surface projects — shared through
+    // `build_failure_inputs` above, so the two never disagree.
+    return detail::TransportStatsProjector::ice_failure_reason(
+        build_failure_inputs(ice_t_));
+}
 
 void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
     // ---- ICE (RFC 8445) --------------------------------------------------
@@ -115,8 +210,8 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
     // so a copy in the engine would be a second answer that could
     // disagree with the first.
     if (ice_t_ != nullptr) {
-        out.ice_state = detail::TransportStatsProjector::ice_state_name(
-            ice_t_->state());
+        const plugins::IceState state = ice_t_->state();
+        out.ice_state = detail::TransportStatsProjector::ice_state_name(state);
         out.ice_restart_count = ice_t_->restart_count();
 
         const auto pair = ice_t_->selected_pair();
@@ -132,6 +227,40 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
             out.relayed = (pair->local.type == "relay") ||
                           (pair->remote.type == "relay");
         }
+
+        // ---- Connectivity diagnostics (v1.4 plan Track N / N4) ------------
+        //
+        // The gathering phase and the TURN facts are concrete-module
+        // knowledge the seam does not carry, so they are resolved through
+        // the module's own free function — the only engine-facing
+        // downcast (the engine never casts `ice_t_` itself; a foreign
+        // IICETransport reports nothing for these fields).  The candidate
+        // counts are derived from the same gathered candidates the seam
+        // already exposes.
+        const auto diag = ice::connectivity_diagnostics_of(*ice_t_);
+        const auto counts =
+            detail::TransportStatsProjector::count_candidates(
+                ice_t_->gathered_local_candidates());
+
+        if (diag.gathering) {
+            out.ice_gathering_state =
+                detail::TransportStatsProjector::ice_gathering_state_name(
+                    *diag.gathering);
+        }
+        out.ice_host_candidates  = counts.host;
+        out.ice_srflx_candidates = counts.srflx;
+        out.ice_relay_candidates = counts.relay;
+        if (diag.turn_transport_used) {
+            out.turn_transport_used =
+                detail::TransportStatsProjector::turn_transport_name(
+                    *diag.turn_transport_used);
+        }
+
+        // The failure reason is a pure decision over the facts above, in
+        // the spec's priority order (first match reports first).
+        const auto fi = build_failure_inputs(ice_t_);
+        out.ice_failure_reason =
+            detail::TransportStatsProjector::ice_failure_reason(fi);
     }
 
     // ---- The round-trip time --------------------------------------------
@@ -215,6 +344,114 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
             ? static_cast<std::uint64_t>(impl_->security.srtp_stats_drop)
             : 0u;
     }
+
+    // ---- ICE recovery (v1.4 N3, ADR-031) ---------------------------------
+    //
+    // NOTE: the ICE-recovery policy fields are projected onto the **flat
+    // `Stats`** (not onto this nested transport entry) — see
+    // `append_ice_recovery_stats()` below.  ADR-031 §3.2 and the slice
+    // spec §六(b) name them `Stats::ice_recovery_state` /
+    // `Stats::ice_recovery_restarts` / `Stats::ice_recovery_terminal_reason`.
+}
+
+// ---------------------------------------------------------------------------
+// ICE recovery (v1.4 N3, ADR-031)
+// ---------------------------------------------------------------------------
+
+/**
+ * Project the reconnection policy onto the flat `Stats`.
+ *
+ * The three fields answer "what is the reconnection policy doing right
+ * now" **from the stats alone** — a session that never recovers says
+ * why without the host having to subscribe to a callback (ADR-031 §3.2).
+ *
+ * When `ice_recovery_policy` is not "auto" the machine is not driven at
+ * all, so the surface says "disabled" rather than pretending to track an
+ * idle machine (spec §六 25).
+ */
+void NimRTCEngine::append_ice_recovery_stats(Stats& out) const noexcept {
+    if (impl_ == nullptr) return;
+
+    // v1.4 N7: the turn-credentials field rides on the same flat-stats hook
+    // (the media TU invokes only this method), so it is published whether
+    // or not the reconnection machine is driven.
+    append_turn_credentials_stats(out);
+
+    const auto& sst = impl_->session_state;
+
+    // v1.4 N8: the last path change rides the same flat-stats hook — it is
+    // a policy fact, so it is published whether or not the reconnection
+    // machine is driven.
+    out.last_path_change_reason = sst.last_path_change_reason;
+    out.last_path_change_new_pair = sst.last_path_change_new_pair;
+
+    if (sst.ice_recovery_policy != detail::IceRecoveryPolicy::kAuto) {
+        out.ice_recovery_state = "disabled";
+        out.ice_recovery_restarts = 0;
+        out.ice_recovery_terminal_reason = "";
+        return;
+    }
+
+    const std::int64_t now_us = detail::steady_now_us();
+    const auto& rec = sst.ice_recovery;
+    switch (rec.state()) {
+        case detail::IceRecovery::State::kIdle:
+            out.ice_recovery_state = "idle";
+            break;
+        case detail::IceRecovery::State::kGrace:
+            out.ice_recovery_state = "grace";
+            break;
+        case detail::IceRecovery::State::kBackoff:
+            out.ice_recovery_state = "backoff";
+            break;
+        case detail::IceRecovery::State::kTerminal:
+            out.ice_recovery_state = "terminal";
+            break;
+    }
+    out.ice_recovery_restarts = rec.restarts_used(now_us);
+    out.ice_recovery_terminal_reason = std::string(rec.terminal_reason());
+}
+
+// ---------------------------------------------------------------------------
+// TURN credentials (v1.4 N7, ADR-032)
+// ---------------------------------------------------------------------------
+
+/**
+ * Project the turn-credentials seam onto the flat `Stats`.
+ *
+ * The one field answers "what is the credentials provider doing right now"
+ * **from the stats alone** — a session whose TURN credentials were refused
+ * says "rejected" without the host having to read the ICE module's logs
+ * (the only other observer of the 401/403, ADR-032 §4).
+ *
+ * The "" value means "no provider configured": the host uses the static
+ * `add_turn_server()` path and there is nothing to report.  The rejection
+ * observation is folded into the collaborator every projection while the
+ * ICE module's latch is set; the latch itself clears when the transport
+ * restarts / re-opens, but the collaborator's "rejected" is sticky (the
+ * spec's 被拒闩锁).
+ */
+void NimRTCEngine::append_turn_credentials_stats(Stats& out) const noexcept {
+    if (impl_ == nullptr) return;
+
+    // Fold the ICE module's rejection latch (process-wide, set by the
+    // module's log hook on a 401/403) into the collaborator.  A foreign
+    // IICETransport reports nothing here (the downcast in
+    // `connectivity_diagnostics_of` returns defaults), so "rejected" is
+    // pinned by the collaborator unit tests instead of by a live engine.
+    if (ice_t_ != nullptr) {
+        const auto diag = ice::connectivity_diagnostics_of(*ice_t_);
+        if (diag.turn_credentials_rejected) {
+            impl_->session_state.turn_credentials.note_rejected();
+        }
+    }
+
+    if (config_.turn_credentials == nullptr) {
+        out.turn_credentials_state = "";
+        return;
+    }
+    out.turn_credentials_state =
+        std::string(impl_->session_state.turn_credentials.state_string());
 }
 
 }  // namespace nimrtc::engine

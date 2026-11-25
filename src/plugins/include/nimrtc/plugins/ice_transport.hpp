@@ -161,10 +161,7 @@ struct NIMRTC_API_STABLE IceCandidate {
     /** The candidate's port. */
     std::uint16_t port = 0;
 
-    /** The candidate's transport protocol, lower-cased: "udp" or "tcp".
-     *
-     *  ICE-over-TCP (RFC 6544) is not implemented yet (plan C2), so this
-     *  is "udp" for every pair a v1.2.0 engine can select. */
+    /** The candidate's transport protocol, lower-cased: "udp" or "tcp". */
     std::string protocol;
 
     /** The candidate's type, lower-cased: "host", "srflx", "prflx" or
@@ -174,6 +171,11 @@ struct NIMRTC_API_STABLE IceCandidate {
      *  single most useful thing a host can learn from this field: it
      *  says the path is not a direct one. */
     std::string type;
+
+    /** For a TCP candidate, the connection-role half (RFC 6544 §4.1):
+     *  "active", "passive" or "so".  Empty for UDP candidates, so a host
+     *  can test `!tcptype.empty()` to learn the pair runs over TCP. */
+    std::string tcptype;
 };
 
 /** The candidate pair the agent selected (RFC 8445 §5.1.2).
@@ -368,6 +370,42 @@ public:
         add_turn_server(host, port, username, password);
     }
 
+    /** Add a TURN server with an explicit transport *and* the TURN/TLS
+     *  trust policy (v1-turn-tls-trust, ADR-037).
+     *
+     *  The two extra parameters express how the host wants the server's
+     *  certificate treated when `transport == TurnTransport::Tls`:
+     *
+     *    - `turn_tls_verify_peer == true` — verify the certificate against
+     *      the trust anchors in `turn_tls_ca_file`.  An **empty**
+     *      `turn_tls_ca_file` means no trust anchors are loaded, so every
+     *      certificate is rejected (the safe default).
+     *    - `turn_tls_verify_peer == false` — explicitly skip verification.
+     *      Only for local experiments with self-signed certificates: the
+     *      host gives up the "the relay is who it says it is" guarantee.
+     *      A non-empty `turn_tls_ca_file` is then ignored.
+     *
+     *  The default implementation stores the policy in the interface's
+     *  own members and falls back to the 5-argument overload above, so a
+     *  concrete transport that overrides only the 5-argument form can
+     *  pick the policy up when it copies the server into its config (the
+     *  built-in ICE transport does exactly this — see
+     *  `src/modules/ice/src/ice.cpp`).  Existing implementers are
+     *  unaffected: this is a new overload, not a signature change, so
+     *  their 5-argument override keeps winning for the old call shape.
+     */
+    virtual void add_turn_server_with_transport(std::string_view host,
+                                                 std::uint16_t port,
+                                                 std::string_view username,
+                                                 std::string_view password,
+                                                 TurnTransport transport,
+                                                 bool turn_tls_verify_peer,
+                                                 std::string_view turn_tls_ca_file) noexcept {
+        turn_tls_verify_peer_ = turn_tls_verify_peer;
+        turn_tls_ca_file_ = std::string(turn_tls_ca_file);
+        add_turn_server_with_transport(host, port, username, password, transport);
+    }
+
     /** True when the transport can actually speak the given TURN
      *  transport.  `Tls` is false today: the vendored libjuice build has no
      *  TLS code path for TURN (RFC 6062). */
@@ -416,6 +454,15 @@ public:
     virtual std::optional<std::vector<std::uint8_t>> last_recv_packet() noexcept {
         return std::nullopt;
     }
+
+protected:
+    // The TURN/TLS trust policy of the most recent
+    // add_turn_server_with_transport() call (v1-turn-tls-trust, ADR-037).
+    // The 7-argument overload stores them; a concrete transport that
+    // overrides the 5-argument form reads them when it copies the server
+    // into its config.  Defaults match the built-in IceConfig defaults.
+    bool turn_tls_verify_peer_ = true;
+    std::string turn_tls_ca_file_;
 };
 
 // ---------------------------------------------------------------------------

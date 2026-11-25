@@ -63,6 +63,10 @@ set(_nimrtc_module_shorts
   jb
   bwe
   sched
+  # v1-install-tree-module-closure (ADR-039): `nimrtc_sched` links
+  # `nimrtc::pacing` PRIVATE, so the flat chain must carry pacing after
+  # sched — a GNU static linker resolves symbols left-to-right.
+  pacing
   jb_strategy
   audio3a
   audio_rx
@@ -73,10 +77,26 @@ set(_nimrtc_module_shorts
   session
   assembly
   datachannel
+  # v1-install-tree-module-closure (ADR-039): dtmf and the video
+  # bitrate-control / capture modules (engine PRIVATE).  video_capture
+  # links nimrtc::video_frame, so it must precede video_frame on the flat
+  # chain.
+  dtmf
+  video_bitrate_control
+  video_capture
   video_frame
   video_payload
   video_jb
   h264
+  # v1-install-tree-video-deps (ADR-038): `nimrtc_h264` links
+  # `nimrtc::nvcodec` PUBLIC, so the flat chain must carry the nvcodec
+  # archive after h264 — a GNU static linker resolves symbols left-to-right.
+  # v1-install-tree-module-closure (ADR-039): the H.265 / AV1 / VP9 codec
+  # modules link nvcodec the same way, so they precede it too.
+  av1
+  h265
+  vp9
+  nvcodec
   video_sdp_attributes
   video_source
   video_stats
@@ -84,6 +104,12 @@ set(_nimrtc_module_shorts
   rtx
   video_pipeline
   video_sink
+  # v1-install-tree-module-closure (ADR-039): the render-clock module and
+  # the remote-desktop audio-device / input / QoE modules (engine PRIVATE).
+  video_sync
+  audio_device
+  rd_input
+  rd_qoe
   sctp
   dtls_seam
   raw_udp
@@ -165,6 +191,41 @@ foreach(_vname IN LISTS _nimrtc_vendor_names)
 endforeach()
 unset(_vname)
 
+# OpenH264 vendored archives.
+#
+# The bundle ships the three upstream archives in <libdir>/ together with
+# the link-order manifest (written by cmake/NimRTCInstall.cmake §2d).  A
+# GNU static linker resolves symbols left-to-right: the encoder and the
+# decoder reference `WelsLog()` / `g_kuiMbCountScan4Idx` from common, so
+# common must come after the two consumers.  find_library() returns paths,
+# not order, so the order is read from the manifest rather than guessed —
+# the same shape as the WebRTC APM archives below.  When OpenH264 was not
+# built (NIMRTC_PLUGINS_OPENH264=OFF, or the submodule absent) no manifest
+# is installed and this block silently contributes nothing.
+set(_nimrtc_openh264_manifest "${NimRTC_LIB_DIR}/openh264_link_order.txt")
+set(_nimrtc_openh264_libs "")
+if(EXISTS "${_nimrtc_openh264_manifest}")
+  file(STRINGS "${_nimrtc_openh264_manifest}" _nimrtc_openh264_names)
+  foreach(_oh264_name IN LISTS _nimrtc_openh264_names)
+    if(_oh264_name STREQUAL "")
+      continue()
+    endif()
+    set(_oh264_path "${NimRTC_LIB_DIR}/${_oh264_name}")
+    if(EXISTS "${_oh264_path}")
+      list(APPEND _nimrtc_openh264_libs "${_oh264_path}")
+    else()
+      message(WARNING
+        "NimRTCConfig: OpenH264 archive '${_oh264_name}' is listed in the "
+        "link-order manifest but missing from ${NimRTC_LIB_DIR}")
+    endif()
+  endforeach()
+  list(APPEND _nimrtc_found_libs ${_nimrtc_openh264_libs})
+endif()
+unset(_oh264_name)
+unset(_oh264_path)
+unset(_nimrtc_openh264_names)
+unset(_nimrtc_openh264_manifest)
+
 # WebRTC APM prebuilt archives.
 #
 # The bundle ships them in <libdir>/webrtc_apm/ together with the link-order
@@ -204,7 +265,37 @@ unset(_nimrtc_apm_dir)
 # archives lose those properties, so
 # re-attach the equivalent plain names here.
 if(WIN32)
-  list(APPEND _nimrtc_found_libs ws2_32 bcrypt iphlpapi winmm crypt32)
+  # v1-install-tree-video-deps (ADR-038): d3d11/dxgi.  The D3D11 video
+  # sink (nimrtc_video_sink, D2) links them PRIVATE, and the NVENC path
+  # (nimrtc_nvcodec) pulls d3d11.h + `#pragma comment(lib, "d3d11.lib")` —
+  # the installed archives lose those properties, so re-attach the plain
+  # names here.  Both are Windows SDK system libs, so the bundle stays
+  # self-contained on any host with the SDK.
+  #
+  # v1-install-tree-module-closure (ADR-039): the *closure* modules the
+  # engine links PRIVATE have their own PRIVATE Windows system libs, and
+  # those are lost exactly the same way.  The installed archive keeps the
+  # object code but not the link properties, so a downstream host that
+  # chains the closure modules gets LNK2019 for the system symbols those
+  # objects reference.  Each name below is a plain Windows SDK import
+  # library, re-attached for the module that needs it:
+  #
+  #   video_capture (engine PRIVATE) -> d3d11 dxgi windowsapp
+  #                                    mf mfplat mfreadwrite mfuuid
+  #     The Media Foundation group (mf*) is what the MF camera backend
+  #     (mf_camera.obj) calls: MFStartup / MFShutdown / MFCreateAttributes
+  #     / MFCreateMediaType / MFCreateSourceReaderFromMediaSource /
+  #     MFEnumDeviceSources, plus the GUID constants MFVideoFormat_NV12 /
+  #     MF_MT_MAJOR_TYPE / MF_MT_SUBTYPE / MF_MT_FRAME_SIZE /
+  #     MF_MT_FRAME_RATE / MFMediaType_Video (those are the mfuuid ones).
+  #   audio_device (engine PRIVATE) -> ole32
+  #     IMMDeviceEnumerator / IAudioClient (WASAPI loopback).
+  #
+  # These are **Windows SDK system libs** — they are not part of the
+  # bundle and are not installed by it; they just have to be named on the
+  # final link line.  A host with the Windows SDK has them all.
+  list(APPEND _nimrtc_found_libs ws2_32 bcrypt iphlpapi winmm crypt32 d3d11 dxgi)
+  list(APPEND _nimrtc_found_libs windowsapp mf mfplat mfreadwrite mfuuid ole32)
 elseif(UNIX)
   list(APPEND _nimrtc_found_libs pthread dl m)
 endif()

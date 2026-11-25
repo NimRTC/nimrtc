@@ -7,7 +7,987 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Work that lands after `v1.3.0`.
+> Work that lands after `v1.3.1`.  The next release is **`v1.4.0`**
+> (`docs/plan/v1.4-plan.md`, Track N + Track D), so this section is the
+> `v1.4.0` release notes in progress — the tree carries `1.4.0-dev`.
+>
+> **There is no `v1.3.2`.**  The work that landed after `v1.3.1` changed
+> the public surface — `plugins::VideoReceiverConfig` lost
+> `h264_annex_b` (deprecated, no-op) and gained `h264_bare_nalus`, and
+> `EngineConfig::VideoReceiverTuning` gained the same key — so it is
+> breaking under `RELEASING.md` §1.1 and belongs on the `1.4.0` line.
+> Shipping it as `1.3.2` would promise a compatibility the tree no
+> longer has.
+
+### Fixed
+
+- **A transient `503` from GitHub's artifact store made the soak
+  window read "incomplete", and the whole soak leg red for a reason
+  that had nothing to do with the tree (2026-11-24).**
+  The window is read back from the artifacts of the last 21 days, and
+  the fetch is retried when a connection is reset or a request times
+  out.  A **5xx from the platform** was not retried: it was taken as
+  "the artifact is not there", so one failed download out of 55 made
+  the step exit 2 and the leg red:
+
+  ```text
+  error: soak-linux-x86_64-43860223478: HTTP 503 for
+  https://api.github.com/repos/NimRTC/nimrtc/actions/artifacts/14223975461/zip
+  error: 1 artifact(s) could not be read; the window read is INCOMPLETE
+  fetched 106 record(s) from 55 artifact(s) across 30 run(s)
+  ```
+
+  Fifty-four artifacts had been read.  The blob store answers 503
+  under load, and a window that spans 55 artifacts asks it 55 times,
+  so a 503 is a matter of *when*, not of whether.
+
+  A 5xx (and a 429, the platform's rate limit) is now transient and
+  is retried, with the backoff raised from three attempts over six
+  seconds to five over ~30 seconds.  A **404 is still not** retried:
+  that one says the artifact is gone, and a second attempt will say
+  the same thing.
+
+- **A `$var:` in a PowerShell workflow step is a parse error, and the
+  step dies before it does anything (2026-11-24).**
+  The hardware job's mirror-fetching step had three log lines of the
+  form:
+
+  ```powershell
+  Write-Host "mirror $m: not a clone"
+  ```
+
+  PowerShell reads `$var:` as a **drive reference** — the `:` is a drive
+  qualifier, not punctuation — so the whole step is a `ParserError`,
+  not a string with a colon in it.  The job fails before it fetches
+  anything, with `InvalidVariableReferenceWithDrive` in the log and no
+  mention of the mistake (run `45366086544`).
+
+  The irony is that the step existed to make the job *survive* a
+  broken network link, and the log line naming the mirror was the bug.
+
+  The lines are now format strings (`-f $m`), which parse.
+
+- **A native command's stderr is a terminating error in a workflow
+  step, and the hardware job died on it (2026-11-24).**
+  Run `45389282581` failed at the *end* of the fetch step, after the
+  local mirror had already answered:
+
+  ```text
+  git : error: remote origin already exists.
+  +   git remote add origin $url 2>$null
+  ```
+
+  Windows PowerShell turns a native command's stderr into **error
+  records**, and the runner runs every step with
+  `$ErrorActionPreference = 'Stop'` — so a command that was expected
+  to be able to complain became a terminating error, and the `2>$null`
+  did not help: the redirection happened, and the step still died.
+
+  The step now relaxes the preference to `Continue` and checks the
+  exit codes itself, which is what it was already doing.  The
+  `origin` remote is *replaced* (`remote set-url`) rather than added,
+  so the command does not complain in the first place.  The two mirror
+  probes (`cat-file -e`, `rev-parse`) took their answer from the exit
+  code with the complaint discarded, for the same reason: a mirror
+  that does not have the commit is a *expected* answer, not a fault.
+
+  The step had failed *after* the mirror fetch worked, so the mirror
+  was never the problem — the difference between a job that runs and
+  one that dies on its own log line was this.
+
+- **The job output file was not in the format the runner reads, and
+  the step failed on a record it had already written (2026-11-24).**
+  The hardware job publishes the evidence record into the job outputs
+  as well as into the step summary, because the API exposes the
+  outputs on the run object and a later process can read the evidence
+  without downloading anything.
+
+  The file was written as a bare marker, the value, and the marker
+  again:
+
+  ```text
+  EOF_NIMRTC_HARDWARE_EVIDENCE
+  {...}
+  EOF_NIMRTC_HARDWARE_EVIDENCE
+  ```
+
+  That is not the format.  The runner reads `GITHUB_OUTPUT` a line at
+  a time: a line carrying `<<` opens a heredoc, a line carrying `=`
+  is `name=value`, and **anything else** is rejected.  A bare marker
+  has neither, so the runner said:
+
+  ```text
+  ##[error]Unable to process file command 'output' successfully.
+  ##[error]Invalid format 'EOF_NIMRTC_HARDWARE_EVIDENCE'
+  ```
+
+  and failed the step — after the hardware test had passed and the
+  evidence record had been written and summarised.  The record was
+  fine; the *publication* was not.
+
+  The file is now a proper heredoc:
+
+  ```text
+  evidence<<EOF_NIMRTC_HARDWARE_EVIDENCE_<hash>
+  {...}
+  EOF_NIMRTC_HARDWARE_EVIDENCE_<hash>
+  ```
+
+  The delimiter carries a hash of the value, so it cannot appear as a
+  line of the record itself and end the heredoc early.  The
+  self-test pins the shape — the `name<<delimiter` prefix, the
+  delimiter alone on its closing line, and the delimiter absent from
+  the value.
+
+### Added
+
+- **`tools/check_workflow_powershell.py` — a guard against PowerShell
+  syntax errors in workflow steps.**
+  The YAML parses and the script reads as valid text, so a
+  PowerShell-only mistake is invisible until the runner executes it.
+  The guard takes every `run:` block, resolves the shell each one runs
+  under (the step's own `shell:`, else the job's `defaults.run.shell`,
+  else GitHub's default for the runner's OS), and parses the
+  PowerShell ones with the PowerShell parser itself.  The `${{ ... }}`
+  expressions are masked first, because GitHub substitutes them before
+  the shell sees the script and `${{` reads as a hashtable literal to
+  PowerShell.
+
+  A failure names the file, the job, the step and the line.  Wired
+  into CI as the `windows / msvc` job and registered as
+  `test_workflow_powershell`.
+
+- **The hardware job brings its vendored trees up from the local
+  mirror, instead of falling through to the network for trees it is
+  already holding (2026-11-24).**
+  The mirror was bought to keep the job off the network, and it was
+  not doing that: the copy it performed left git knowing nothing about
+  the submodule, so `git submodule status` kept reporting it as not
+  initialised (`-` in front of the commit) and the job went to the
+  network for a tree it had on disk.
+
+  Three defects are fixed in `tools/fetch_submodules.py`:
+
+  - The status sign is the *first character of the line*, so the line
+    must not be stripped before it is read.  `strip()` removes
+    exactly the leading space that says "at the recorded commit", and
+    a submodule that is right is reported as wrong.
+  - The tree is brought up by copying the mirror's **module cache**
+    (`.git/modules/<path>`) and pointing the worktree at it, rather
+    than by copying the working files.  The files alone carry no
+    objects, so the checkout of the recorded commit had nothing to
+    check out.
+  - The copied cache still carries the mirror's relative
+    `core.worktree`, and git refuses to run *any* command in a
+    repository whose worktree is missing — so `git config` cannot fix
+    it, and the setting is removed from the config file instead.
+
+  The copy **hardlinks** the object stores instead of duplicating
+  them and skips the nested submodule caches.  `msquic`'s cache holds
+  1.35 GB of nested caches the build never reads, and copying it
+  filled the runner's disk — a full disk truncates the copy, and a
+  truncated copy is reported as "object file is empty".
+
+  The submodule's *name* in `.gitmodules` — not its path — is
+  registered in the parent's config, so the status line loses its `-`.
+
+  Verified on all fourteen vendored trees: each comes up at the
+  recorded commit, with no network transfer.
+
+- **Two Windows file-handling defects kept the mirror copy from
+  finishing (2026-11-24).**
+  Run `45391469614` failed in the submodule step with
+  `could not copy the module cache` and
+  `could not get a repository handle for submodule`.
+
+  **Git writes its object store read-only**, and on Windows a
+  read-only file cannot be deleted: `shutil.rmtree` raises
+  `PermissionError: [WinError 5]`, gives up on the whole tree, and the
+  removal of the stale cache is abandoned.  The removal now clears the
+  read-only bit and retries.
+
+  **The submodule's `.git` pointer file could not be written.** The
+  runner's workspace holds one that another process has open without
+  write sharing, and opening it for writing fails with
+  `PermissionError: [Errno 13]` — while *deleting* it is allowed
+  (Windows marks it for deletion) and writing a *new* file with the
+  same name is allowed too.  The pointer is therefore *replaced*
+  rather than edited in place.
+
+  Verified on the runner's own workspace: all fourteen vendored trees
+  come up at the recorded commit.
+- **The deployment bundle can no longer ship stale binaries, or binaries
+  from two different build trees.**  Found while chasing a frame-drop
+  regression: the video fix was in the tree, the tests were green, and
+  the operator's bundle still dropped 81% of its frames — because the
+  bundle carried the binaries from *before* the fix, and nothing in the
+  bundle, in the script, or in the output said so.
+
+  Two defects in `scripts/package_rd_deploy.ps1`, both quiet:
+
+  **A missing `msquic.dll` was silently replaced by another tree's.**
+    The DLL has to come from the same build tree as the media binaries:
+    a different configuration links against a different msquic, and the
+    two do not agree on the ABI.  The failure mode on the operator's
+    machine is a crash with nothing in the bundle to explain it.  The
+    fallback search is gone; the bundle is built from one tree or not
+    at all.
+
+  **Nothing compared the binaries against the sources.**  A bundle
+    packaged before a fix landed ships the bug, and the operator sees
+    the old behaviour and concludes the fix did not work.  The script
+    now compares the binaries' timestamps against the newest source
+    file and **warns** when the binaries are older, naming both dates.
+    `-NoStaleCheck` silences it for the legitimate cases (a bisect, a
+    release candidate from a tag).
+
+  The bundle also carries **`BUNDLE-INFO.txt`**: the commit, the
+  branch, the build time and whether it was stale.  A bug report
+  against a bundle can now be answered with "which build did you
+  actually run?" instead of a guess.
+
+  `scripts/test_package_rd_deploy.py` pins all of it (24 checks), and
+  the Windows CI leg runs it — the script under test is a `.ps1`, so
+  that is the leg that can run it.
+
+- **The release gate's rules can no longer be changed on the day of the
+  cut, and a tag can no longer present itself under the wrong name.**
+  Two defects in the release machinery, both found by reviewing the
+  `v1.3.0` cut.
+
+  **The soak rule is now versioned, dated, and has a cooldown.** On
+  2026-11-23 — the same day `v1.3.0` was cut — the gate's window went
+  from seven consecutive green days to five, and the intra-day rule went
+  from "any `FAIL` spoils the day" to "every required case needs at
+  least one `PASS`". Both changes were defensible on their own: the
+  failure that motivated them was a single Chrome-interop timeout on a
+  shared runner, on a commit that had already passed the same case three
+  times that day, whose CI was 13/13 green.
+
+  The problem was not the judgement. It was that the *mechanism* let the
+  party a gate holds back change the criterion that was holding it back,
+  on the same day, with nothing between the two. So the rule now lives
+  in `GATE_RULE` (`tools/run_soak.py`) as a **named, versioned, dated
+  rule**, and a release is judged by the rule in force on the day it is
+  cut. A rule change carries a **cooldown**: it cannot decide a release
+  until the cooldown has elapsed. The release that changes the rule is
+  therefore judged by the rule it replaced — the change cannot be used to
+  release the very thing it was changed for. `docs/plan/soak-runbook.md`
+  §4.3.2 has the full rationale; the release workflow no longer passes
+  `--require-days` at all, because the day count is the rule's business
+  and not the release manager's.
+
+  **A tag object must name itself the way its ref does.** `v1.3.0` is
+  reached through `refs/tags/v1.3.0`, but the tag *object* names itself
+  `v1.3.0-staged` — the re-cut script signed under a throw-away probe
+  name and then pointed the ref at the resulting object with
+  `git update-ref`. The signature verified (it was a valid signature
+  over a valid object), and nothing complained, because nothing looked
+  at the object's *name*. But the internal name is what `git tag -v`,
+  `git describe` and the GitHub release page report, so the tag
+  presented itself to the world as `v1.3.0-staged`.
+  `tools/verify_tag_signature.py` now checks the name, and the check is
+  a *shape* property, so it fires under `--shape-only` too — which means
+  the release workflow's preflight refuses such a tag. The re-cut
+  script signs the tag under the name it will be released as, and
+  restores the previous tag object if signing fails.
+
+- **The hardware-codec claim now has a gate that can fail.** The
+  `hardware` job has failed all 22 times it has run — most at the
+  checkout stage, on the self-hosted runner's link dropping long
+  transfers — and no release gate noticed, because the job is not in the
+  `protect-main-and-releases` ruleset and the release workflow never
+  read its evidence. A release could therefore be cut with the Q7
+  hardware claim resting on nothing at all.
+
+  `scripts/check-release-freeze.sh` gains a `hardware` check that reads
+  the archived evidence in `build/hardware/` and requires it to be a
+  **PASS on the tree being tagged**: a record measured on another
+  commit, or on a dirty tree, is not evidence about the release. Under
+  `--final-tag` a missing record is a **FAIL**, not a skip — the same
+  rule the `api-symbols` check uses for a missing `node`, and for the
+  same reason: at tag-cut time there is no later CI run to catch it.
+  `RELEASING.md` §3.3 step 12 now says how to collect the evidence.
+
+- **The `v1.2.0` sidecars are documented for what they are.** Three of
+  the four `v1.2.0` `.sha256` sidecars cannot be checked with
+  `sha256sum -c`: the two Linux ones name `build/nimrtc-…tar.xz` (a
+  directory prefix that does not exist next to a downloaded bundle), and
+  the Windows one is a bare hex digest with no file name at all. The
+  macOS one is fine, and **all four digests are correct** — this was a
+  line-format defect, not a corruption. `README.md` and `README.zh.md`
+  now say so, and say how to verify a `v1.2.0` bundle by hand.
+
+- **The receiver delivers the Annex-B framing the frame contract
+  promises, so the pictures a decoder refuses are decoded again.**
+  The live remote-desktop demo dropped ~81% of its frames
+  (`frames=652 decoded=124 dropped=528`) while the network was fine.
+  The cause was in the video pipeline's receiver, not in the network:
+  RFC 6184 §5.1 puts a **bare** NAL unit in the RTP payload (the start
+  code is not on the wire), and the receiver forwarded the single-NAL
+  path's payload byte for byte — so a picture assembled from bare NAL
+  units reached the decoder as one unparsable blob.  The decoder could
+  not find the NAL boundary, refused the picture, the engine counted it
+  as a decoder drop, and a PLI went out — which is why the *only* frames
+  that decoded were the IDRs (their slice is large enough to be FU-A
+  fragmented, and a reassembled FU-A unit was framed).
+  The jitter buffer only *concatenates* a picture's payloads, so the
+  receiver is the only place that can put the start code back — and it
+  now does, for H.264 **and** H.265, on every single-NAL packet.  A
+  payload that already carries a start code is forwarded as-is, so the
+  framing is never doubled.
+
+  `ReceiverConfig::h264_annex_b` is **no longer consulted**: the
+  framing is unconditional now, because it is what
+  `NaluFormat::kAnnexBStartCode` (which `drain_frames()` states
+  unconditionally) promises and what every decoder NimRTC ships
+  (NVDEC, OpenH264) parses.  The field is retained for source
+  compatibility.  A host that needs the raw NAL units asks for them
+  with the new `h264_bare_nalus` (mirrored on
+  `plugins::VideoReceiverConfig` and
+  `EngineConfig::VideoReceiverTuning`); the `NIMRTC_HW_E2E_NALU_LIST`
+  hardware harness is the in-tree user.
+
+  The regression is asserted in
+  `VideoPipeline.ReceiverPFrameOfBareSingleNalPacketsIsAnnexBFramed`:
+  a picture of `SPS | PPS | bare slice` must reach the decoder with a
+  start code ahead of **every** NAL unit — the slice included.
+
+### Fixed
+
+- **A `$var:` in a PowerShell workflow step is a parse error, and the
+  step dies before it does anything (2026-11-24).**
+  The hardware job's mirror-fetching step had three log lines of the
+  form:
+
+  ```powershell
+  Write-Host "mirror $m: not a clone"
+  ```
+
+  PowerShell reads `$var:` as a **drive reference** — the `:` is a drive
+  qualifier, not punctuation — so the whole step is a `ParserError`,
+  not a string with a colon in it.  The job fails before it fetches
+  anything, with `InvalidVariableReferenceWithDrive` in the log and no
+  mention of the mistake (run `45366086544`).
+
+  The irony is that the step existed to make the job *survive* a
+  broken network link, and the log line naming the mirror was the bug.
+
+  The lines are now format strings (`-f $m`), which parse.
+
+- **A native command's stderr is a terminating error in a workflow
+  step, and the hardware job died on it (2026-11-24).**
+  Run `45389282581` failed at the *end* of the fetch step, after the
+  local mirror had already answered:
+
+  ```text
+  git : error: remote origin already exists.
+  +   git remote add origin $url 2>$null
+  ```
+
+  Windows PowerShell turns a native command's stderr into **error
+  records**, and the runner runs every step with
+  `$ErrorActionPreference = 'Stop'` — so a command that was expected
+  to be able to complain became a terminating error, and the `2>$null`
+  did not help: the redirection happened, and the step still died.
+
+  The step now relaxes the preference to `Continue` and checks the
+  exit codes itself, which is what it was already doing.  The
+  `origin` remote is *replaced* (`remote set-url`) rather than added,
+  so the command does not complain in the first place.  The two mirror
+  probes (`cat-file -e`, `rev-parse`) took their answer from the exit
+  code with the complaint discarded, for the same reason: a mirror
+  that does not have the commit is a *expected* answer, not a fault.
+
+  The step had failed *after* the mirror fetch worked, so the mirror
+  was never the problem — the difference between a job that runs and
+  one that dies on its own log line was this.
+
+- **The job output file was not in the format the runner reads, and
+  the step failed on a record it had already written (2026-11-24).**
+  The hardware job publishes the evidence record into the job outputs
+  as well as into the step summary, because the API exposes the
+  outputs on the run object and a later process can read the evidence
+  without downloading anything.
+
+  The file was written as a bare marker, the value, and the marker
+  again:
+
+  ```text
+  EOF_NIMRTC_HARDWARE_EVIDENCE
+  {...}
+  EOF_NIMRTC_HARDWARE_EVIDENCE
+  ```
+
+  That is not the format.  The runner reads `GITHUB_OUTPUT` a line at
+  a time: a line carrying `<<` opens a heredoc, a line carrying `=`
+  is `name=value`, and **anything else** is rejected.  A bare marker
+  has neither, so the runner said:
+
+  ```text
+  ##[error]Unable to process file command 'output' successfully.
+  ##[error]Invalid format 'EOF_NIMRTC_HARDWARE_EVIDENCE'
+  ```
+
+  and failed the step — after the hardware test had passed and the
+  evidence record had been written and summarised.  The record was
+  fine; the *publication* was not.
+
+  The file is now a proper heredoc:
+
+  ```text
+  evidence<<EOF_NIMRTC_HARDWARE_EVIDENCE_<hash>
+  {...}
+  EOF_NIMRTC_HARDWARE_EVIDENCE_<hash>
+  ```
+
+  The delimiter carries a hash of the value, so it cannot appear as a
+  line of the record itself and end the heredoc early.  The
+  self-test pins the shape — the `name<<delimiter` prefix, the
+  delimiter alone on its closing line, and the delimiter absent from
+  the value.
+
+### Added
+
+- **`tools/check_workflow_powershell.py` — a guard against PowerShell
+  syntax errors in workflow steps.**
+  The YAML parses and the script reads as valid text, so a
+  PowerShell-only mistake is invisible until the runner executes it.
+  The guard takes every `run:` block, resolves the shell each one runs
+  under (the step's own `shell:`, else the job's `defaults.run.shell`,
+  else GitHub's default for the runner's OS), and parses the
+  PowerShell ones with the PowerShell parser itself.  The `${{ ... }}`
+  expressions are masked first, because GitHub substitutes them before
+  the shell sees the script and `${{` reads as a hashtable literal to
+  PowerShell.
+
+  A failure names the file, the job, the step and the line.  Wired
+  into CI as the `windows / msvc` job and registered as
+  `test_workflow_powershell`.
+
+- **The hardware job brings its vendored trees up from the local
+  mirror, instead of falling through to the network for trees it is
+  already holding (2026-11-24).**
+  The mirror was bought to keep the job off the network, and it was
+  not doing that: the copy it performed left git knowing nothing about
+  the submodule, so `git submodule status` kept reporting it as not
+  initialised (`-` in front of the commit) and the job went to the
+  network for a tree it had on disk.
+
+  Three defects are fixed in `tools/fetch_submodules.py`:
+
+  - The status sign is the *first character of the line*, so the line
+    must not be stripped before it is read.  `strip()` removes
+    exactly the leading space that says "at the recorded commit", and
+    a submodule that is right is reported as wrong.
+  - The tree is brought up by copying the mirror's **module cache**
+    (`.git/modules/<path>`) and pointing the worktree at it, rather
+    than by copying the working files.  The files alone carry no
+    objects, so the checkout of the recorded commit had nothing to
+    check out.
+  - The copied cache still carries the mirror's relative
+    `core.worktree`, and git refuses to run *any* command in a
+    repository whose worktree is missing — so `git config` cannot fix
+    it, and the setting is removed from the config file instead.
+
+  The copy **hardlinks** the object stores instead of duplicating
+  them and skips the nested submodule caches.  `msquic`'s cache holds
+  1.35 GB of nested caches the build never reads, and copying it
+  filled the runner's disk — a full disk truncates the copy, and a
+  truncated copy is reported as "object file is empty".
+
+  The submodule's *name* in `.gitmodules` — not its path — is
+  registered in the parent's config, so the status line loses its `-`.
+
+  Verified on all fourteen vendored trees: each comes up at the
+  recorded commit, with no network transfer.
+
+- **Two Windows file-handling defects kept the mirror copy from
+  finishing (2026-11-24).**
+  Run `45391469614` failed in the submodule step with
+  `could not copy the module cache` and
+  `could not get a repository handle for submodule`.
+
+  **Git writes its object store read-only**, and on Windows a
+  read-only file cannot be deleted: `shutil.rmtree` raises
+  `PermissionError: [WinError 5]`, gives up on the whole tree, and the
+  removal of the stale cache is abandoned.  The removal now clears the
+  read-only bit and retries.
+
+  **The submodule's `.git` pointer file could not be written.** The
+  runner's workspace holds one that another process has open without
+  write sharing, and opening it for writing fails with
+  `PermissionError: [Errno 13]` — while *deleting* it is allowed
+  (Windows marks it for deletion) and writing a *new* file with the
+  same name is allowed too.  The pointer is therefore *replaced*
+  rather than edited in place.
+
+  Verified on the runner's own workspace: all fourteen vendored trees
+  come up at the recorded commit.
+
+## [1.3.1] - 2026-11-24
+
+### Status: Stable
+
+> The source version is `1.3.1` (`project(VERSION)` in `CMakeLists.txt`,
+> `NIMRTC_API_VERSION` = 10301, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
+> `v1.3.1` is a **patch release**: one line-format defect in the release
+> pipeline is fixed, and the release page gains the integrity data a
+> consumer needs to check a download.
+
+> There is no public API change.  `NIMRTC_API_VERSION` moves from 10300 to
+> 10301 only because `project(VERSION)` moved; ADR-015's stability policy
+> is unchanged, and a patch bump carries no compatibility promise
+> different from 10300.
+
+> The three things this release changes:
+
+> - **The `.sha256` sidecars are now `sha256sum -c` compatible at the
+>   cut, not patched afterwards.**  The v1.3.0 release shipped three
+>   broken sidecars and had them replaced in place; the build jobs that
+>   produced them are fixed here, so the next cut produces the right line
+>   the first time.
+> - **The release page now carries a digest table.**  The v1.3.0 body
+>   told a reader how to check a GPG signature but never printed the
+>   digests, so a consumer had no in-band value to compare against.  The
+>   published body now lists every bundle with its SHA-256 and its size.
+> - **`SECURITY.md` names the versions it actually supports.**  The
+>   table still said `1.0.x` / `0.9.x`, three minor versions stale.
+
+> **Why a patch release rather than a `v1.2.1`.**  `release/1.2` is a
+> 2026-11-18 snapshot 89 commits behind `main`, and the soak gate needs
+> five consecutive green days **at the tag**.  Every green day since
+> 2026-11-19 was measured on `main`, which is not an ancestor of
+> `release/1.2`, so none of it counts toward a `v1.2.1` cut.  `v1.3.1`
+> inherits the same window that closed `v1.3.0`.
+
+### Changed
+
+- **The release body carries a SHA-256 / size table for every bundle.**
+  The v1.3.0 release body instructed the reader to verify a GPG signature
+  and to run `sha256sum -c`, but it never printed a digest, so the only
+  in-band integrity value was the detached `.sha256` sidecar sitting next
+  to the asset on the same server.  A consumer who wanted to check a
+  mirror or an offline copy had nothing to compare against.
+
+  The publish job now appends a table -- one row per bundle, with its
+  SHA-256, its size in bytes and its platform -- built from the bundles it
+  is about to publish.  The table is generated after the "which platforms
+  are present" check, so a partial release lists exactly the bundles that
+  actually shipped.
+
+  The body-length guard moved with it.  The old check ran *before* the
+  footers were appended, so it could only ever measure the body proper
+  and the footers were never counted -- exactly the part that grows.  The
+  guard now runs in a step of its own, after every footer is in place, so
+  it measures the body GitHub will really receive.  It counts
+  **characters**, not bytes, because GitHub's limit is on characters and
+  the body carries non-ASCII.
+
+- **`SECURITY.md`'s supported-version table matches the releases that
+  exist.**  It listed `1.0.x` and `0.9.x` only.  It now lists `1.3.x`
+  (full support), `1.2.x` (security fixes only), and drops the `0.9.x`
+  LTS-bridge row, whose 90-day window after `1.0.0` elapsed long ago.
+
+### Fixed
+
+- **The published `.sha256` sidecars were not `sha256sum -c` compatible,
+  and the README documents that exact command.**
+  The README tells a reader to verify a bundle with
+
+  ```bash
+  sha256sum -c nimrtc-<version>-<platform>.tar.xz.sha256
+  ```
+
+  and at the v1.3.0 cut that command failed for **three of the four**
+  platforms:
+
+  - the **Windows** sidecar was the bare hex digest with no file name at
+    all, and `sha256sum -c` rejected it with *"no properly formatted
+    SHA256 checksum lines found"*;
+  - the **linux-x86_64** and **linux-aarch64** sidecars named
+    `build/nimrtc-...tar.xz`, so `sha256sum -c` looked for the bundle
+    under a `build/` directory that does not exist next to a downloaded
+    file -- *"No such file or directory"*;
+  - the **macos-arm64** sidecar was already right (the macOS job strips
+    the path itself), which is why the defect was invisible: three
+    platforms agreed with each other in the wrong way, and the release
+    log had nothing to say about it.
+
+  The digests were always correct -- all four match the OCI digest
+  GitHub exposes on the asset object -- so this was a *line format*
+  defect, and a digest check alone would never have caught it.  The
+  three broken sidecars of the published v1.3.0 release have been
+  replaced in place with the correct checksum lines (same digests), so
+  the command the README prints now works for every platform.
+
+  The three build jobs now write the sidecar the same way: the digest,
+  two spaces, and the **basename** of the bundle.  The Windows job gets
+  the file name from `Split-Path -Leaf`; the two Linux jobs pipe
+  `sha256sum` through `awk` to strip the `build/` prefix, the way the
+  macOS job already did.
+
+  `tools/check_sha256_sidecars.py` is the new gate: it parses every
+  sidecar the way `sha256sum -c` does and rejects a sidecar with no
+  file name, a directory component in the name, a malformed digest, or a
+  name that disagrees with the bundle it sits next to.  The release job
+  runs it on `dist/` and then runs `sha256sum -c` itself, so the command
+  the README prints is exercised on every cut.  Its `--self-test` pins
+  the rules and runs in CI.
+
+  The same defect was present in the published **v1.2.0** sidecars
+  (Windows bare hex, both Linux sidecars with the `build/` prefix); the
+  v1.2.0 release is not re-published for this, and the fact is recorded
+  in that release's section.
+
+- **The release body's length guard could not see the footers it was
+  supposed to protect.**
+  `release.yml` had two body-length checks.  The one that ran counted
+  the body *before* the signing-status and 3A-status footers were
+  appended, so it measured a document that was never published; the
+  footers -- the part most likely to grow -- were counted by nothing.
+  A body that passed both checks could still have exceeded GitHub's
+  125 000-character limit once the footers were in, and the failure
+  mode is GitHub's *silent truncation*: the release page would carry a
+  document that stops mid-sentence with no indication that the rest
+  exists.
+
+  The guard now runs in a step of its own, after every footer has been
+  appended, so it measures the body that is actually posted.  The
+  earlier check is kept, but it now says what it measures ("before the
+  footers") instead of claiming to cover them.
+
+
+- **The soak evidence fetch could hang a release run on a dead socket.**
+  `tools/fetch_soak_evidence.py` opened its connections with no timeout,
+  so a runner that stalled mid-response left the preflight job waiting
+  until GitHub killed it at the job limit -- the failure surfaced as "the
+  job timed out", with nothing pointing at the fetch.  It now sets a
+  connect and read timeout on every request and retries a bounded number
+  of times, so a stalled socket becomes a reported error rather than a
+  silent hang.
+
+
+- **The release's soak gate asks for five consecutive green days, and a
+  single failed run no longer condemns the whole day.**
+  Two changes to the window that `release.yml` gates the tag on, both
+  permanent and both made on 2026-11-23:
+
+  - **Seven days became five.**  Seven was the v1.1 plan C5 requirement.
+    The window exists to expose a *chronic* failure before a tag is cut,
+    and five consecutive green days on both platforms says that; the
+    extra two days bought nothing that the evidence record did not
+    already say.
+  - **The intra-day rule no longer treats one `FAIL` among passing runs
+    as a failed day.**  A day is normally measured several times -- the
+    CI job and the scheduled local task both write the same
+    platform/day -- and the old rule ("any `FAIL` in the day spoils it")
+    meant a single Chrome-interop timeout on a shared CI runner erased a
+    day in which the same case had passed three times earlier.  That
+    measured the runner's mood rather than the build's stability.  The
+    rule now is that every required case must have at least one `PASS`
+    for the day; a case whose **every** run failed still ends the
+    streak, and every `FAIL` is still reported with its reason and its
+    captured output.
+
+  The change is what let the v1.3.0 window close: the Linux half was
+  held at 2/7 by a single `subprocess.TimeoutExpired` on 2026-11-20
+  (case D on `b0191e0f`, Chrome interop never reaching a handshake),
+  on a commit that had already passed that case three times the same
+  day and whose CI was 13/13 green.
+
+
+### Verified
+
+- **The H.265 mid-stream parameter-set switch is now asserted end to end
+  on the hardware path (v1.3 plan item `Q1b`, Track R).**
+  `v1.3.0` shipped the two halves of Q1b but could only *prove* one of
+  them: the codec-level case ran on the standard matrix, while the
+  engine-level case needed the `gpu-nvenc` hardware leg, and the
+  repository had no runner registered for it.  The engine-level case
+  (`tests/test_engine_video_hw_h265.cpp`, landed with PR #144 inside the
+  `v1.3.0` tag) was run on 2026-11-23 on a **clean tree at `ce8f783f`**,
+  on an **NVIDIA GeForce RTX 3060, driver 616.92**:
+
+  ```
+  $ ctest --test-dir build/hw -C Release -R "test_engine_video_hw_h265" --output-on-failure
+  1/1 Test #303: test_engine_video_hw_h265 ........   Passed    0.79 sec
+  ```
+
+  The verbose log shows the real hardware path, not a skip: the encoder
+  is **reconfigured** mid-stream (`nvenc: reconfigured the encoder`,
+  320x240 -> 640x480, a fresh IRAP with inline VPS / SPS / PPS) and the
+  **same warm NVDEC session** decodes the new geometry, with no
+  key-frame round trip.  The engine-level loopback row
+  (`test_engine_video_hw_loopback`) passed on the same tree and host, and
+  the codec-level harness produced its `PASS` record again
+  (`encoder=nvenc hw=True frames=3 rtp=3 decoded=3 mae=0.001 r=1.0`,
+  `driver=616.92`, `failures: []`, `git_dirty: false`).
+
+  **The software-decoder half of Q1b stays deferred**, for the reason the
+  plan gave: there is still no software H.265 decoder to assert on.  A
+  half that cannot be written is not an open promise, and the skip reason
+  says so.  What this does *not* close is the `hardware.yml` job's own
+  wiring: `GET /actions/runners` returned `total_count: 0`, so the record
+  was produced by the same recorder and the same harness, driven by hand
+  on the GPU host.  See `docs/plan/v1.3-plan.md` §9.
+
+
+
+
+- **The shared write-set criterion now knows where a slice's work *ends*
+  (`slice v6-writeset-slice-boundary`, ADR-076).**  The boundary criterion
+  (`tests/acceptance/v5-writeset-acceptance/writeset-boundary.cjs`) decided
+  "this commit is the slice's work" from two things — the title
+  `feat(<id>): slice approved`, or a `Refs-Slice: <id>` trailer — and looked
+  at **neither** whether the commit happened *before* or *after* the slice was
+  signed.  So a **transactional** commit made after signing (this project's
+  habit is `docs(plan): X is signed`) that happened to carry a stray
+  `Refs-Slice:` trailer had its files counted as the slice's `changed` set —
+  and those files are usually *not* in the slice's write set, so the criterion
+  reported a **false** out-of-write-set violation.  N6's acceptance suite hit
+  exactly this (`docs/plan/v1.4-plan.md`, which N6 never touched); a scan of
+  the whole acceptance suite found **six** already-signed slices misjudged the
+  same way (`v1-sdk-sample` / `v1-ice-recovery` / `v1-path-change-report` /
+  `v1-turn-credentials` / `v1-video-render-engine` / `v1-turn-tls-trust`).
+  The rule is now "has the trailer **and** lies within the slice's signing
+  boundary", where the boundary is the slice's `Merge slice <id>` or
+  `feat(<id>): slice approved` commit (and all of its ancestors), found via a
+  deterministic fallback ladder (merge commit → sign-off commit → the
+  earliest `feat(<id>): ...` commit) so slices without a merge or sign-off
+  commit still get a boundary.  A **non-existent** slice id yields **no**
+  boundary at all, and the criterion then fails loudly instead of quietly
+  accepting everything.  Filtering only removes post-signing commits — it
+  does **not** weaken the judgement about commits inside the boundary.
+- **The renderer no longer flashes windows on your desktop (ADR-039, amends
+  ADR-030).**  With the default `EngineConfig` the engine resolves the
+  platform renderer, and the D3D11 / Metal renderers *built their own output
+  window* when the host supplied none — so every single engine unit test
+  popped a blank white window onto the screen, and a full `ctest` run did it
+  hundreds of times.  Window creation is now **opt-in**:
+  `EngineConfig::video_sink_viewport` (and the seam's
+  `plugins::VideoSinkConfig::create_viewport_window`) default to `false`, so
+  the renderer works offscreen — the presentation clock still ticks and the
+  frames are still counted, but nothing appears.  Hosts that *want* the
+  picture on the screen set the flag; `examples/remote-desktop/rd_viewer.cpp`
+  does exactly that for its real-renderer sinks.  Windows self-created
+  windows also carry `WS_EX_TOOLWINDOW` now, so they stay out of the taskbar
+  and the Alt-Tab list.
+  The same investigation turned up a second, independent bug: the D3D11 swap
+  chain description used `DXGI_SWAP_CHAIN_DESC{}`, whose `BufferCount` member
+  has no default and was therefore **0** — DXGI rejects the whole chain
+  (`0x887a0001`).  The self-window path had *never* actually presented a
+  frame; it opened a blank window and failed.  With `BufferCount = 1` the
+  swap chain is created and the viewport really does show the picture.
+
+- **The install tree's link closure is now a verified fact (`slice
+  v1-install-tree-module-closure`, ADR-039).**  The staged bundle used to
+  drift between what it *installs* (`_nimrtc_install_shorts`) and what the
+  installed config *chains* onto `nimrtc::engine` (`_nimrtc_module_shorts`);
+  N6's execution leg surfaced the cost: 14 unresolved externals — 9 module
+  registrars (`h265`/`av1`/`vp9`/`video_capture`/`video_bitrate_control`/
+  `rd_input`/`rd_qoe`/`video_sync`/`dtmf`) plus 5 `pacing::TokenBucket`
+  methods.  Both short lists now cover the full engine link closure (42
+  modules), including `pacing` and the eleven newly chained modules, in
+  static-link order (`pacing` after `sched`, codecs before `nvcodec`, the
+  rest grouped as the engine groups them).  `tools/check_install_tree_module_closure.py`
+  computes the closure from the repo tree alone (no build, no network,
+  deterministic) and fails the CI when either list misses a closure module —
+  naming the module and the list; its pinned self-test proves it can fail,
+  not just pass.  The acceptance test stages a clean prefix and links a
+  full-closure host against it (0 LNK2019).  Chaining the closure also
+  surfaced that the closure is not only module archives: a closure module's
+  own **private** system libraries are lost the same way, so the installed
+  config now re-attaches the Media Foundation group (`mf` / `mfplat` /
+  `mfreadwrite` / `mfuuid` / `windowsapp`, for `video_capture`) and `ole32`
+  (for `audio_device`) alongside the existing `d3d11`/`dxgi` — without them
+  the "the staged bundle always links" promise was false.
+
+- **The install tree now links a video host (`slice v1-install-tree-video-deps`,
+  ADR-038).**  The staged bundle (installed by `cmake --install` and consumed
+  via `find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`) used to drop
+  the video path: `nimrtc_nvcodec` was never installed, the three OpenH264
+  archives were not chained, and `d3d11`/`dxgi` were missing from the Windows
+  system-lib list — so a host with `h264` + the headless sink failed with
+  31 LNK2019.  Now the bundle ships `nimrtc_nvcodec` (archive + public
+  headers), the OpenH264 archives in their correct static-link order
+  (encoder / decoder / common) behind a link-order manifest
+  (`openh264_link_order.txt`, the same shape as the WebRTC APM archives), and
+  `d3d11`/`dxgi` on Windows.  NVIDIA's driver import libs are *not* needed —
+  NVENC / NVDEC load the driver dynamically.  `tools/check_install_tree_video_deps.py`
+  (with a pinned self-test) verifies the source and the staged tree, and the
+  acceptance test links a real downstream video host against a clean prefix.
+
+- **The ≤200-line SDK sample (`slice v1-sdk-sample`).**
+  `examples/sdk-sample/` is an independent host project: two processes on one
+  machine complete one audio+video+control call through the reference
+  signalling service (`examples/remote-desktop/signalling.py`) and a TLS-only
+  TURN relay, with the host writing only signalling and four hooks
+  (`set_on_call_state` D7, `set_on_control_message`, `set_on_ice_recovery` N8,
+  `EngineConfig::turn_credentials` N7).  The line budget (200 + 10% drift =
+  220 hard limit) is re-measured on every CI run by
+  `tools/check_sample_line_budget.py` (with a pinned self-test) and
+  cross-checked by the acceptance test's own JS counter — a limit that drifts
+  is a claim that drifted (ADR-036).  The sample consumes only the install
+  tree via `find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`.
+
+- **ICE-over-TCP (RFC 6544) — the TCP candidate shape (`slice v2-ice`).**
+  NimRTC now gathers host TCP candidates (`tcptype active` / `passive`)
+  on top of the UDP-only libjuice ICE layer, and its SDP serialisation
+  emits the full `a=candidate:… tcp <pri> <host> <port> typ host tcptype`
+  line.  This adds one public header (`ice/tcp_candidate.hpp`), so the
+  ADR-015 baseline is bumped 197 → 198 and the frozen manifest grows by
+  that one path — an explicit, reviewed bump, not a silent drift.
+
+- **Connectivity diagnostics (N4) + connectivity profiles (D6) —
+  (`slice v3-n4-d6-connectivity`).**
+  `TransportStats` gains six diagnostic fields: `ice_gathering_state`
+  (`"new"` / `"gathering"` / `"complete"`, independent of the ICE agent
+  state machine), per-type candidate counts (`ice_host_candidates` /
+  `ice_srflx_candidates` / `ice_relay_candidates`, summing to the
+  gathered set), a closed-vocabulary `ice_failure_reason`
+  (`transport-unsupported` → `credentials-rejected` → `no-candidates` →
+  `no-pair` → `checks-failed` → `none`, first match reports first), and
+  `turn_transport_used` (`"udp"` / `"tcp"` / `"tls"`).  Separately,
+  `EngineConfig::connectivity_profile` defaults to `"auto"` — STUN on,
+  TURN/TLS when credentials exist, TCP after UDP — with an explicit
+  host STUN server always winning over the profile's default, and
+  `profiles/connectivity/connectivity-profiles.json` ships as the reviewed template.
+  Fields only — no new public headers — so the ADR-015 baseline stays at
+  198.
+
+- **The engine runs the renderer (`slice v1-video-render-engine`).**
+  `EngineConfig::video_sink_name` now defaults to `"auto"`: the engine
+  resolves the platform renderer (D3D11 on Windows, Metal on macOS, EGL on
+  Linux) and **degrades instead of failing** — a machine with no display is
+  a normal machine, not an error.  The degrade is never silent: the sink
+  falls back to `"headless"` and `Stats::video_sink_backend_reason` says
+  why (`no-platform-backend` / `backend-not-registered` /
+  `backend-open-failed`).  The value table adds `"none"` (an explicit
+  opt-out — no sink instance) alongside today's `""` / `"headless"` (both
+  the headless sink, verbatim), and an explicit backend id stays a
+  *promise*: unknown id → `kVideoSinkPluginMissing`, open failure →
+  `kVideoSinkOpenFailed`, never a silent degrade.  The platform renderers
+  now create their own window when the host hands over none
+  (`CreateWindowExW` / `ShowWindow(SW_SHOWNOACTIVATE)` on Windows, an
+  `NSWindow` with a `CAMetalLayer` on macOS), so a host that wants a
+  picture writes no window code.  Stats gains `video_sink_backend` and
+  `video_sink_backend_reason`.  Fields only — no new public headers — so
+  the ADR-015 baseline stays at 198.
+
+- **The engine runs the ICE reconnection policy (`slice v1-ice-recovery`,
+  N3 / ADR-031).**
+  `EngineConfig::ice_recovery_policy` defaults to `"auto"`: after a
+  session that *has* connected, a `Disconnected` observation enters a
+  5-second grace window and, when the grace lapses, the engine restarts
+  ICE on a 1 / 2 / 4 / 8 / 8 s backoff — capped at **5 restarts per
+  sliding 10-minute window** (`"off"` disables it; an unknown name
+  resolves to `"off"`, never a policy the host did not ask for).  Manual
+  `restart_ice()` draws from the *same* budget.  When the budget is
+  exhausted the engine reports once, in three places: `on_error_`
+  receives `kIceRecoveryExhausted` (0x1F01), a warn log line is written,
+  and `set_on_ice_recovery` receives a terminal `IceRecoveryReport`
+  (`reason` / `restart_count` / `remaining_budget` / `terminal` /
+  `terminal_reason`).  `reset_ice_recovery_budget()` tops the budget back
+  up.  `TransportStats` gains `ice_recovery_state`,
+  `ice_recovery_restarts`, and `ice_recovery_terminal_reason`.  Fields
+  and one new error code only — no new public headers — so the ADR-015
+  baseline stays at 198.
+
+- **TURN credentials as a provider seam (`slice v1-turn-credentials`,
+  N7 / ADR-032).**
+  `EngineConfig::turn_credentials` hands the engine a
+  `TurnCredentialsProvider` callback (a raw function pointer, not
+  `std::function` — ABI-stable per ADR-015) plus a `turn_credentials_ctx`
+  handle.  The engine *pulls* a fresh `TurnCredentials` set (host / port
+  / username / password / `plugins::TurnTransport` / `tls_server_name`)
+  at the two moments a TURN server is (re)configured: before candidate
+  gathering (`open()`), and after every N3 reconnection restart — real
+  credentials carry a TTL, so the engine must ask again.  A static
+  `add_turn_server()` list **wins** over the callback (explicit host
+  configuration is never overridden); a null provider or a failed pull
+  keeps the session going direct.  A transport-reported 401/403 now
+  surfaces as `"credentials-rejected"` in the failure-reason projection
+  (instead of a generic `"checks-failed"`), and the new flat
+  `Stats::turn_credentials_state` reports `""` / `"idle"` / `"ok"` /
+  `"unavailable"` / `"rejected"`.  Fields only — no new public headers —
+  so the ADR-015 baseline stays at 198.
+
+- **TURN/TLS trust policy on the public surface (`slice v1-turn-tls-trust`,
+  ADR-037).**
+  A host can now say how it wants a TURN/TLS relay's certificate treated:
+  `TurnCredentials` gains `turn_tls_verify_peer` (bool, default `true`)
+  and `turn_tls_ca_file` (a PEM trust-anchor path, default empty).  The
+  knobs ride on the credential set — a changed relay carries a changed
+  trust anchor ("换中继就换信任锚") — and `same_credentials()` treats
+  either trust-field change as a credential change, so N7 re-applies
+  instead of silently reusing a stale anchor.  The engine translates them
+  through a new additive 7-argument `plugins::IICETransport`
+  `add_turn_server_with_transport()` overload (the existing 5-argument
+  signature is untouched) into the ICE layer's existing `IceConfig`
+  knobs, so a host can actually run the N5 self-signed relay by handing
+  it a `ca_file` — or explicitly skipping verification.  Failures are no
+  longer silent: a missing / non-PEM `turn_tls_ca_file` fires
+  `set_on_error` with `core::kEngineInvalidParam` naming the file.
+  `NimRTCEngine::turn_tls_peer_verification()` exposes the state as a
+  queryable fact — `""` / `"verified"` / `"unverified"` / `"failed"` —
+  so "verified", "never verified" and "configured but broken" are
+  mutually distinguishable.  One new public method, no new public
+  headers — the ADR-015 baseline stays at 198.
+
+- **Path-change reporting (`slice v1-path-change-report`, N8 / ADR-033).**
+  The engine now tells the host *from where to where, and why* a path
+  switch happened — no polling, no diffing `selected_pair` strings.
+  `IceRecoveryReport` gains `old_pair` / `new_pair`
+  (`std::optional<IceCandidatePairInfo>`, empty = none selected yet /
+  still gathering) and a new `set_on_peer_restart(EnginePeerRestartCallback)`
+  fires **alongside** the unchanged `set_on_ice_restart` with a
+  `PeerRestartReport` when the *peer* restarts ICE.  The reason is a
+  closed vocabulary: `"local-address-changed"` / `"peer-restart"` /
+  `"relay-fallback"` (the pair flipped direct ↔ relay) / `"manual"` /
+  `"ice-failed"`.  Flat `Stats` gains `last_path_change_reason` and
+  `last_path_change_new_pair` (populated even when
+  `ice_recovery_policy == "off"`).  **Note:** the `Stats` struct is passed
+  by value and grows by two fields — hosts must recompile (allowed within
+  the v1.3 → v1.4 MINOR bump per ADR-015 Decision 4).  No new public
+  headers — the ADR-015 baseline stays at 198.
+
+- **macOS install + downstream proof (`slice v1-macos-install-proof`,
+  N9 / ADR-034).**
+  The `macos-clang` CI leg now installs the bundle into a staging dir
+  (`build/_install/macos-arm64`) and builds a minimal
+  `find_package(NimRTC 1.0 REQUIRED)` consumer against it **out-of-tree** —
+  including `<nimrtc/engine/engine.hpp>` and linking `nimrtc::engine`, with
+  no pinned `CMAKE_CXX_STANDARD` — the same proof Windows and Linux already
+  ran on every push, so macOS's export path (the `NimRTCConfig.cmake`
+  template, the `CMAKE_INSTALL_*` paths, the `nimrtc::engine` imported
+  target) is no longer unverified.  A new static check
+  (`tools/check_install_export.py`, with a self-test) runs on all three legs
+  and catches a config-template placeholder that would reach the installed
+  file as an empty string; the release workflow's macOS leg now asserts the
+  archive carries `NimRTCConfig.cmake` and the engine public header.  No C++
+  interface change — CI/export-config only — so the ADR-015 baseline stays
+  at 198.
+
+- **The call-state surface (`slice v1-call-state-surface`, D7 / ADR-035).**
+  One callback now spans a whole call's lifecycle — `connecting` →
+  `connected` → `reconnecting` → `failed` / `closed` — carrying the N3
+  (reconnection), N4 (failure) and N8 (path-change) details, so a host no
+  longer assembles the answer from `set_on_state_change` + `set_on_error`
+  + polling `Stats`.  New public types `CallState` (five states),
+  `CallFailure` (six kinds: `kIceFailed` / `kDtlsFailed` / `kTurnRefused` /
+  `kCredentialsRejected` / `kMediaFailed`), `CallStateReport` (the failure
+  **string** is the N4 vocabulary verbatim; `failure_from_reason()` maps it
+  onto the enum in one place) and `EngineCallStateCallback`, installed via
+  `set_on_call_state()`.  The callback fires on a real **migration** — the
+  same state is never reported twice; `failed` / `closed` are **absorbing**,
+  so a DTLS failure cannot oscillate the report between `kConnected` and
+  `kFailed`.  Three lifecycle methods wrap the defined teardown order:
+  `start(config)` (configure → `open()`), `stop()` (`close()` under its
+  lifecycle name), and `hangup(reason)` (notifies the peer first, then
+  closes in the same order).  `set_on_control_message` is declared next to
+  `set_on_call_state` — signature and semantics unchanged.  All new symbols
+  are additive, so the ADR-015 baseline stays at 198.
 
 ## [1.3.0] - 2026-11-20
 
@@ -46,10 +1026,12 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 >   the tree; the runner is what is missing.
 
 > **The release gates are read, not assumed.**  The `release` workflow's
-> preflight now verifies the seven-day soak window at the tag, checks that
-> the tag is an ancestor of `main`, and confirms the README already
-> describes the release being published.  The release lines and the
-> release tags are protected by rulesets.
+> preflight now verifies the soak window at the tag (five consecutive
+> green days on each platform -- seven until the 2026-11-23 change
+> recorded under `[Unreleased]`), checks that the tag is an ancestor of
+> `main`, and confirms the README already describes the release being
+> published.  The release lines and the release tags are protected by
+> rulesets.
 
 > **Q1b (the H.265 half of the parameter-set switch) is a `1.3.x` item.**
 > The codec-level assertion and the engine-level hardware case both ship
@@ -985,6 +1967,33 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > - **The ABR benchmark measures a loop the engine drives.**  The engine feeds the controller `BitrateController::on_measured_bitrate()` with a one-second closed window over the encoder's outbound byte counters, and `on_keyframe_requested()` when the peer asks for a key frame (PLI / FIR).  The *estimator*, the *pacer* and the *resolution ladder* under test are the shipped ones, and the loop is closed in production as well as in the benchmark.
 > - **HEVC has no software decoder.** x265 is GPL-2.0, which the licence review excludes, so the HEVC screen-content path is hardware-only.
 > - **The QoE latency percentiles are measured but the freeze *finding* is only wired on the video path.** The input-to-photon measurement covers the control transport, as the acceptance criterion requires.
+> - **The v1.2.0 bundles ship no third-party licence text.**  The
+>   licence obligation was noticed during the v1.3.0 review and is
+>   discharged *from v1.3.0 onward*, not retroactively: the collector
+>   (`tools/collect_licenses.py`) and the `release.yml` step that runs it
+>   were both introduced on 2026-11-19 (`1dbc9f32`, `d6c3e38c`), one day
+>   *after* this tag was cut, and the v1.2.0 `cmake/NimRTCInstall.cmake`
+>   installs only headers, libraries and the CMake package config --
+>   there is no `install()` rule for a licence file.  The `sbom.json`
+>   published alongside each v1.2.0 bundle carries the SPDX identifiers
+>   and upstream URLs for all 18 vendored components, so the components
+>   are *identifiable*, but the BSD-3-Clause and Apache-2.0 notice texts
+>   that must accompany a binary redistribution are absent from the
+>   published archives.  The v1.3.0 bundles carry them under
+>   `licenses/`; anyone redistributing a v1.2.0 binary should add the
+>   upstream notices themselves.
+> - **The published v1.2.0 `.sha256` sidecars are not `sha256sum -c`
+>   compatible.**  The Windows sidecar is the bare hex digest with no
+>   file name, and the two Linux sidecars name `build/nimrtc-...tar.xz`,
+>   so the verification command the README documents
+>   (`sha256sum -c <file>.sha256`) cannot read them.  The digests
+>   themselves are correct -- they match the OCI digest GitHub exposes on
+>   the asset object -- so a digest check would not have caught it; the
+>   *line* is what is wrong.  The defect was found at the v1.3.0 cut,
+>   fixed there, and the v1.3.0 sidecars were replaced in place with
+>   the correct lines.  The v1.2.0 sidecars are not re-published: a
+>   reader who wants to verify a v1.2.0 bundle should compare the
+>   digest GitHub shows for the asset against the file they downloaded.
 
 
 ### Added

@@ -359,6 +359,7 @@ struct VideoReceiver::Impl {
                              std::uint32_t                      rtp_ts,
                              bool                               marker,
                              std::int64_t                       arrival_us,
+                             video_frame::CodecKind             codec,
                              const std::vector<std::uint8_t>&   bytes) noexcept {
         if (bytes.empty()) return;
         video_jb::InboundPacket pkt{};
@@ -368,7 +369,7 @@ struct VideoReceiver::Impl {
         pkt.arrival_us    = arrival_us;
         pkt.marker        = marker;
         pkt.payload_type  = cfg.payload_type;
-        pkt.codec         = video_frame::CodecKind::kH264;
+        pkt.codec         = codec;
         pkt.payload       = core::ByteSpan{bytes.data(), bytes.size()};
         jb->insert(pkt);
     }
@@ -385,23 +386,32 @@ struct VideoReceiver::Impl {
     // destroyed, so the steady state performs no allocation.
     std::vector<std::uint8_t> rx_annex_b_scratch;
 
-    /** Hand one H.264 RTP payload to the jitter buffer in Annex-B framing.
+    /** Hand one H.264 / H.265 RTP payload to the jitter buffer in Annex-B
+     *  framing.
      *
-     *  The bitstream the sender was handed is Annex-B, and a single NAL
-     *  unit that already carries its start code is forwarded byte for
+     *  RFC 6184 §5.1 / RFC 7798 §4.3.1 carry *bare* NAL units in the RTP
+     *  payload — the start code is not on the wire.  The receiver is the
+     *  only place that knows where one NAL unit ends and the next begins,
+     *  so the start code is put back here, at the point where the NAL
+     *  boundary is still known.
+     *
+     *  A payload that already carries its start code is forwarded byte for
      *  byte: the jitter buffer only *concatenates* the packets of a
-     *  picture, so the framing is the sender's.  A payload without a
-     *  start code gets one; an unexercised FU-A fragment is handed on
-     *  as-is (the jitter buffer reassembles it). */
-    void insert_h264_payload_annex_b(core::ByteSpan payload,
-                                     std::uint32_t rtp_ts,
-                                     bool          marker,
-                                     std::uint16_t seq,
-                                     std::int64_t  arrival_us) noexcept {
+     *  picture, so a framing the sender wrote is the sender's.  A bare
+     *  payload gets one; an unexercised FU fragment is handed on as-is
+     *  (the jitter buffer reassembles it and frames the result). */
+    void insert_nalu_annex_b(core::ByteSpan       payload,
+                             std::uint32_t        rtp_ts,
+                             bool                 marker,
+                             std::uint16_t        seq,
+                             std::int64_t         arrival_us,
+                             video_frame::CodecKind codec) noexcept {
         const bool framed =
             payload.size() >= 4 && payload[0] == 0x00 && payload[1] == 0x00 &&
             payload[2] == 0x00 && payload[3] == 0x01;
-        if (cfg.h264_validate_nalus) {
+        if (payload.empty()) return;
+        const bool is_h264 = codec == video_frame::CodecKind::kH264;
+        if (is_h264 && cfg.h264_validate_nalus) {
             // Validate every NAL unit the packet carries.  A unit whose
             // header is a reserved type means the bytes are not what the
             // sender wrote (a hole stitched by the jitter buffer, or a
@@ -435,16 +445,24 @@ struct VideoReceiver::Impl {
                 return;
             }
         }
-        const bool fu_a = !payload.empty() &&
-                          (payload[0] & kNaluTypeMask) == kFuAType;
+        // A FU fragment must reach the jitter buffer with its FU
+        // indicator visible: the jitter buffer detects the fragment by
+        // its NAL unit type and does the reassembly itself (this path is
+        // only taken when `expect_fu_a` is off).
+        const bool fu_fragment =
+            is_h264
+                ? (!payload.empty() && (payload[0] & kNaluTypeMask) == kFuAType)
+                : (!payload.empty() &&
+                   video_payload::h265::peek_payload_type(payload) ==
+                       static_cast<H265NaluType>(kH265FuType));
         rx_annex_b_scratch.clear();
-        if (framed || fu_a) {
+        if (framed || fu_fragment) {
             rx_annex_b_scratch.insert(rx_annex_b_scratch.end(),
                                       payload.begin(), payload.end());
         } else {
             append_annex_b(rx_annex_b_scratch, payload);
         }
-        insert_h264_annex_b(seq, rtp_ts, marker, arrival_us,
+        insert_h264_annex_b(seq, rtp_ts, marker, arrival_us, codec,
                             rx_annex_b_scratch);
     }
 
@@ -477,6 +495,7 @@ struct VideoReceiver::Impl {
         rx_annex_b_scratch.insert(rx_annex_b_scratch.end(),
                                   body.begin(), body.end());
         insert_h264_annex_b(start_seq, rtp_ts, marker, arrival_us,
+                            video_frame::CodecKind::kH264,
                             rx_annex_b_scratch);
     }
     // ---------------------------------------------------------------------
@@ -655,6 +674,7 @@ struct VideoReceiver::Impl {
                                    core::ByteSpan{n.data.data(), n.data.size()});
                 }
                 insert_h264_annex_b(seq, rtp_ts, marker, arrival_us,
+                                    video_frame::CodecKind::kH264,
                                     rx_annex_b_scratch);
                 return;
             }
@@ -776,18 +796,25 @@ struct VideoReceiver::Impl {
 
         // Generic: VP8, VP9, or a single NAL unit of H.264 / H.265.
         //
-        // A single NAL unit packet carries exactly one NAL unit, framed
-        // (for the Annex-B codecs) exactly as the sender was handed it:
-        // `00 00 00 01 | nalu`.  The jitter buffer concatenates the
-        // packets of one picture, so the start codes are what delimit
-        // the NAL units - re-adding one here would double the framing.
+        // A single NAL unit packet carries exactly one NAL unit.  RFC
+        // 6184 §5.1 / RFC 7798 §4.3.1 put a *bare* NAL unit on the wire —
+        // the start code is not part of the payload — so the receiver has
+        // to put it back.  The jitter buffer only *concatenates* the
+        // packets of one picture, so without a start code per NAL unit a
+        // picture assembled from several bare units reaches the decoder as
+        // one unparsable blob.
         //
-        // The exception is an FU-A fragment: the receiver did not
-        // reassemble it (`ReceiverConfig::expect_fu_a` false), so the
-        // jitter buffer does the reassembly itself and puts the start
-        // code on the reassembled NAL unit.  Prepending one here would
-        // hide the FU indicator from the jitter buffer, which detects
-        // the fragment by its NAL unit type.
+        // The frame contract (`video_frame::NaluFormat::kAnnexBStartCode`,
+        // which `drain_frames()` states unconditionally) is therefore the
+        // *only* shape this path may produce: a unit that already carries
+        // its start code is forwarded as-is, a bare one gets one.
+        //
+        // The exception is an FU fragment: the receiver did not reassemble
+        // it (`ReceiverConfig::expect_fu_a` false), so the jitter buffer
+        // does the reassembly itself and puts the start code on the
+        // reassembled NAL unit.  Prepending one here would hide the FU
+        // indicator from the jitter buffer, which detects the fragment by
+        // its NAL unit type.
         if (cfg.codec == video_frame::CodecKind::kH264 ||
             cfg.codec == video_frame::CodecKind::kH265) {
             const bool is_fu_fragment =
@@ -798,42 +825,34 @@ struct VideoReceiver::Impl {
                      static_cast<H265NaluType>(kH265FuType));
 
             if (!is_fu_fragment) {
+                // The escape hatch: a host whose decoder consumes the raw
+                // NAL units itself asked for the bare form.  Everything
+                // else gets the Annex-B framing the frame contract
+                // promises.
                 if (cfg.codec == video_frame::CodecKind::kH264 &&
-                    cfg.h264_annex_b) {
-                    // The sender was declared to produce an Annex-B
-                    // stream, and the frame contract is Annex-B: a unit
-                    // that already carries its start code is forwarded
-                    // as-is, a bare one (RFC 6184 §5.1 — what a sender
-                    // that was handed an Annex-B frame still emits on the
-                    // wire) gets one, exactly like a reassembled FU-A
-                    // does.  Without this, a frame assembled from a bare
-                    // SPS + PPS + slice reaches the decoder as one
-                    // unparsable blob.
-                    //
-                    // With the flag off the receiver keeps the RFC 6184
-                    // default: a single NAL unit packet is forwarded
-                    // byte for byte, bare or framed.
-                    insert_h264_payload_annex_b(payload, rtp_ts, marker,
-                                                seq, arrival_us);
+                    cfg.h264_bare_nalus) {
+                    video_jb::InboundPacket pkt{};
+                    pkt.ssrc          = cfg.ssrc;
+                    pkt.seq           = seq;
+                    pkt.rtp_timestamp = rtp_ts;
+                    pkt.arrival_us    = arrival_us;
+                    pkt.marker        = marker;
+                    pkt.payload_type  = cfg.payload_type;
+                    pkt.codec         = cfg.codec;
+                    pkt.payload       = payload;
+                    jb->insert(pkt);
                     return;
                 }
-                // H.265 (and H.264 with the default framing): pass the NAL
-                // unit through untouched.  Its start code, if the sender
-                // put one there, is part of the framing.
-                video_jb::InboundPacket pkt{};
-                pkt.ssrc          = cfg.ssrc;
-                pkt.seq           = seq;
-                pkt.rtp_timestamp = rtp_ts;
-                pkt.arrival_us    = arrival_us;
-                pkt.marker        = marker;
-                pkt.payload_type  = cfg.payload_type;
-                pkt.codec         = cfg.codec;
-                pkt.payload       = payload;
-                jb->insert(pkt);
+                // Re-frame the NAL unit in Annex-B, which is what the
+                // frame contract promises.  A payload that already
+                // carries its start code is left alone, so the framing is
+                // never doubled.
+                insert_nalu_annex_b(payload, rtp_ts, marker, seq,
+                                    arrival_us, cfg.codec);
                 return;
             }
 
-            // A FU-A fragment the receiver did not reassemble is handed to
+            // A FU fragment the receiver did not reassemble is handed to
             // the jitter buffer as-is: it detects the fragment by its NAL
             // unit type, and re-frames the reassembled NAL unit itself.
             video_jb::InboundPacket pkt{};
@@ -1469,6 +1488,31 @@ struct VideoSender::Impl {
             use_fua[i] = nalus[i].size() > cfg.mtu;
         }
 
+        // ---- The marker bit (RFC 7798 §4.4) -------------------------------
+        //
+        // The marker marks the LAST packet of a *frame* — the packet that
+        // carries the frame's LAST NAL unit — not the last packet of every
+        // NAL group.  RFC 6184 §5.1 says the same for H.264, and the H.264
+        // path above already follows it.
+        //
+        // Getting this wrong is not cosmetic.  The jitter buffer groups the
+        // packets of a frame by RTP timestamp and uses the marker bit to
+        // decide that a frame is complete, so a marker on an intermediate
+        // packet makes the receiver emit a *truncated* frame and discard
+        // everything that arrives after it.
+        //
+        // The case that bites is the NVENC HEVC output: an IDR frame that
+        // carries `VPS | SPS | PPS | <oversized IDR slice>`.  The three
+        // parameter sets are small, so they are aggregated into one AP
+        // packet, while the slice is fragmented into FU packets.  A marker
+        // on the AP packet made the receiver emit "VPS + SPS + PPS" as if it
+        // were the whole picture, and the IDR slice that followed was
+        // dropped because its frame had already been played out.
+        //
+        // `last_nalu` is therefore the index of the frame's last NAL unit:
+        // the marker goes on the packet that carries it.
+        const std::size_t last_nalu = nalus.size() - 1;
+
         // ---- Walk the NAL units ----
         std::size_t i = 0;
         while (i < nalus.size()) {
@@ -1510,7 +1554,7 @@ struct VideoSender::Impl {
                             "video_pipeline: build_fu failed");
                     }
                     emit(core::ByteSpan{fua_buf.data(), wrote},
-                         rtp_ts, /*marker=*/end);
+                         rtp_ts, /*marker=*/end && (i == last_nalu));
                     offset += this_len;
                 }
                 stats.fua_frames_packetized++;
@@ -1541,14 +1585,20 @@ struct VideoSender::Impl {
                 const std::size_t wrote = build_ap(
                     ap_group, /*layer_id=*/0, /*tid=*/1,
                     core::MutableByteSpan{group_out.data(), group_out.size()});
+                // The group spans the NAL units [i, j) — the marker goes on
+                // the packet only when the group carries the frame's LAST
+                // NAL unit (see the marker note above).
+                const bool group_is_last = (j - 1 == last_nalu);
                 if (wrote == 0) {
-                    for (const auto& g : ap_group) {
-                        emit(g.data, rtp_ts, /*marker=*/false);
+                    for (std::size_t k = 0; k < ap_group.size(); ++k) {
+                        const std::size_t idx = i + k;
+                        emit(ap_group[k].data, rtp_ts,
+                             /*marker=*/(idx == last_nalu));
                         stats.single_nal_frames_packetized++;
                     }
                 } else {
                     emit(core::ByteSpan{group_out.data(), wrote},
-                         rtp_ts, /*marker=*/true);
+                         rtp_ts, /*marker=*/group_is_last);
                     stats.stapa_frames_packetized++;
                 }
                 i = j;
@@ -1556,9 +1606,28 @@ struct VideoSender::Impl {
             }
 
             if (ap_group.size() == 1) {
-                emit(ap_group[0].data, rtp_ts, /*marker=*/true);
+                emit(ap_group[0].data, rtp_ts, /*marker=*/(i == last_nalu));
                 stats.single_nal_frames_packetized++;
                 i = j;
+                continue;
+            }
+
+            // The group is EMPTY: the NAL unit at `i` is too large to be
+            // aggregated (it does not fit the AP budget — an aggregated
+            // NAL unit costs a two-byte length prefix on top of its own
+            // bytes) but not large enough to be fragmented either, because
+            // `use_fua` only fires above the MTU.
+            //
+            // Such a unit is dropped by the aggregation walk unless it is
+            // handled here.  It still fits a *Single NAL unit* packet,
+            // whose payload is the NAL unit verbatim — the two-byte header
+            // IS the payload header, so no length prefix is needed — and
+            // `use_fua[i] == false` guarantees it is no larger than the
+            // MTU.
+            if (ap_group.empty()) {
+                emit(nalus[i], rtp_ts, /*marker=*/(i == last_nalu));
+                stats.single_nal_frames_packetized++;
+                ++i;
                 continue;
             }
 

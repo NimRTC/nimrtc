@@ -1,10 +1,17 @@
 name: soak
 
-# The daily evidence collector for the seven-day release gate
+# The daily evidence collector for the release's soak gate
 # (v1.1 plan §2 Track C, item C5).  The gate needs SEVEN CONSECUTIVE
 # green days of Case D + Case E on Windows AND Linux x86_64; the
 # collector is `tools/run_soak.py` and its operating procedure is
 # `docs/plan/soak-runbook.md`.
+#
+# The day count is the RULE's business, not this workflow's and not the
+# release workflow's: `tools/run_soak.py` carries a versioned, dated
+# rule (`GATE_RULE`) and picks the rule in force on the cut date.  This
+# workflow only RECORDS evidence and REPORTS the window -- it does not
+# gate, so it does not need to know how many days the rule wants.  See
+# `docs/plan/soak-runbook.md` §4.3.2.
 #
 # The Windows half of the window is produced by a local Scheduled Task
 # (the runbook §4.1).  This workflow produces the Linux half, which had
@@ -129,7 +136,7 @@ jobs:
     timeout-minutes: 60
     # A red acceptance run is EVIDENCE, not a build break: the collector
     # records FAIL (or INCONCLUSIVE) for the day, which is exactly what
-    # breaks the seven-day streak.  Failing the job as well would add a
+    # breaks the streak.  Failing the job as well would add a
     # red check on `main` that gates nothing and trains everyone to
     # ignore it.  The evidence file and the Step Summary carry the
     # verdict.

@@ -27,6 +27,12 @@
 #include <nimrtc/plugins/audio3a.hpp>
 #include <nimrtc/plugins/audio_decoder.hpp>
 #include <nimrtc/plugins/audio_receiver.hpp>
+// v1.4 (remote-desktop plan D1): the audio *device* seams.  Kept
+// separate from the audio decoder / receiver seams above: a device
+// enumerates and negotiates a format, while a decoder turns packets
+// into PCM.
+#include <nimrtc/plugins/audio_source.hpp>
+#include <nimrtc/plugins/audio_sink.hpp>
 #include <nimrtc/plugins/bwe.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
@@ -84,6 +90,29 @@ resolve_audio_decoder(std::string_view id) noexcept {
 [[nodiscard]] inline const plugins::IAudioReceiverFactory*
 resolve_audio_receiver(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_audio_receiver(id);
+}
+
+/** Resolve an `IAudioSourceFactory` by plugin id. Returns nullptr if not
+ *  registered.
+ *
+ *  Used by the engine to satisfy `EngineConfig::audio_source_name`
+ *  (empty = the host feeds PCM itself; "none" = explicit opt-out) — the
+ *  audio *capture* device seam of the remote-desktop plan (F1 / D1). */
+[[nodiscard]] inline const plugins::IAudioSourceFactory*
+resolve_audio_source(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_audio_source(id);
+}
+
+/** Resolve an `IAudioSinkFactory` by plugin id. Returns nullptr if not
+ *  registered.
+ *
+ *  Used by the engine to satisfy `EngineConfig::audio_sink_name`
+ *  (empty = the host plays decoded PCM itself; "none" = explicit
+ *  opt-out) — the audio *playback* device seam of the remote-desktop
+ *  plan (F1 / D1). */
+[[nodiscard]] inline const plugins::IAudioSinkFactory*
+resolve_audio_sink(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_audio_sink(id);
 }
 
 /** Resolve an `IDtmfCodecFactory` by plugin id. Returns nullptr if not

@@ -156,10 +156,13 @@
           },
           {
             "context": "docs / markdown links"
+          },
+          {
+            "context": "linux-turn / reference TURN server"
           }
         ],
         "_comment": [
-          "The twelve checks the CI matrix produces on `main` and on",
+          "The thirteen checks the CI matrix produces on `main` and on",
           "every pull request into `main`.",
           "",
           "Strict mode is on: the pull request head has to be up to date",
@@ -176,7 +179,20 @@
           "`NIMRTC_VENDORED_WEBRTC_APM=OFF`, so without this leg the",
           "option's *default* (ON) would be asserted nowhere: flipping",
           "the default to OFF in cmake/NimRTCVendored.cmake would leave",
-          "the whole matrix green while shipping the stub 3A."
+          "the whole matrix green while shipping the stub 3A.",
+          "",
+          "`linux-turn / reference TURN server` is the leg that",
+          "exercises the reference TURN deployment",
+          "(`examples/turn-server/`, v1.4 plan item N5).  The",
+          "deployment is not compiled into the library, so it has no",
+          "compiler and no unit test to catch a mistake in it -- and",
+          "coturn's answer to a misconfigured deployment is to *start",
+          "anyway*, so a missing certificate or a TLS listener on the",
+          "wrong port leaves a healthy server behind that answers with",
+          "something that is not TLS.  This leg starts a real coturn",
+          "and asserts the behaviour: a TLS handshake that verifies, a",
+          "real TURN allocation over that TLS session, and the negative",
+          "control on the *same* port that gets no allocation."
         ]
       }
     }

@@ -11,7 +11,10 @@
 //   2. 本片自己的提交（提交历史里带 `Refs-Slice: <id>` trailer 或
 //      `feat(<id>): slice approved` 标题的提交，逐个算
 //      `git diff --name-only <commit>^..<commit>`）
-//      覆盖切片已提交、签收之后的产物；
+//      覆盖切片已提交、签收之前的产物；
+//      **只算签收边界之内**的提交 —— 签收之后的事务性提交（误带
+//      `Refs-Slice: <id>` trailer 的 `docs(plan): ...` 提交）不再算进
+//      本片的工作（ADR-076）；
 //   3. 未跟踪文件（`git ls-files --others --exclude-standard`）
 //      覆盖 agent 新建还没 add 的文件。
 //
@@ -205,11 +208,73 @@ function findSliceCommits({ root, sliceId, baseCommit, headRef }) {
 }
 
 // ---------------------------------------------------------------------------
+// 签收边界：本片的提交算到哪儿为止（ADR-076）
+// ---------------------------------------------------------------------------
+/**
+ * 算本片的「签收边界」提交。边界（含）及其全部祖先算本片的工作；边界**之后**
+ * 的提交（签收之后的事务性提交，如 `docs(plan): X is signed`）不算。
+ *
+ * fallback 阶梯（一步找不到就落下一步；三步都找不到 → null，退回当前行为，
+ * 不判红）：
+ *   1. `Merge slice <id>` 合并提交（最常见：切片以 merge commit 进主干）；
+ *   2. `feat(<id>): slice approved` 签收提交；
+ *   3. 最早的 `feat(<id>): ...` 提交（迭代开发的起点锚点 —— 边界应包含
+ *      全部工作，不该切在途中）。
+ *
+ * 为什么不用「具体路径白名单」：白名单要维护「哪些文件是事务性文档」，
+ * 新来一个事务性提交照样误伤。边界只看提交时序与标题约定，不需要知道
+ * 任何具体路径。
+ *
+ * @param {string} root      仓库根目录
+ * @param {string} sliceId   切片 id，如 'v1-sdk-sample'
+ * @param {string} headRef   搜索终点 ref，默认 HEAD（只认 headRef 可达的提交）
+ * @returns {string|null} 边界 commit 的 hash；找不到 → null
+ */
+function sliceBoundaryCommit(root, sliceId, headRef = 'HEAD') {
+    // 阶梯 1：合并提交（`git log` 新→旧，`-1` 取最近的匹配）。
+    const merge = gitLogRecords(root, [headRef, '--grep', `Merge slice ${sliceId}`,
+        '--fixed-strings', '-1']);
+    if (merge.length) return merge[0].hash;
+    // 阶梯 2：签收提交。
+    const approved = gitLogRecords(root, [headRef, '--grep',
+        `feat(${sliceId}): slice approved`, '--fixed-strings', '-1']);
+    if (approved.length) return approved[0].hash;
+    // 阶梯 3：最早的 feat(<id>): ... 提交（git log 是新→旧，最后一条最早）。
+    const feats = gitLogRecords(root, [headRef, '--grep', `feat(${sliceId}):`,
+        '--fixed-strings']);
+    if (feats.length) return feats[feats.length - 1].hash;
+    return null;
+}
+
+/**
+ * 边界提交的祖先集合（**含边界本身**）。
+ *
+ * `git rev-list <commit>` 一次 git 进程返回 commit 可达的全部提交 ——
+ * 与「逐提交走父链」（`git log -1 --format=%P`）的集合相同（同一个 commit
+ * graph），但只需一次进程启动：父链遍历在**一次** git log 之后就是纯内存
+ * 集合判定（ADR-076）。
+ *
+ * @param {string} root    仓库根目录
+ * @param {string} commit  边界 commit 的 hash
+ * @returns {Set<string>} 祖先 hash 集合（含边界本身）
+ */
+function sliceAncestors(root, commit) {
+    return new Set(runGit(root, ['rev-list', commit]));
+}
+
+// ---------------------------------------------------------------------------
 // 三源并集：本片 agent 改了什么
 // ---------------------------------------------------------------------------
 /**
  * 收集「本片 agent 改了什么」的文件清单，三个来源并集：
  *   工作区未提交差异 ∪ 本片自己的提交差异 ∪ 未跟踪文件。
+ *
+ * 来源 2 只算**签收边界之内**的提交（ADR-076）：签收之后的事务性提交
+ * （误带 `Refs-Slice: <id>` trailer 的 `docs(plan): ...` 提交）不再算进
+ * 本片的工作。边界找不到 → 退回当前行为（不过滤，不更差）。
+ *
+ * 来源 1（工作区差异）与来源 3（未跟踪文件）天然是「当前会话」的，
+ * 不属于任何历史提交，不受边界过滤。
  *
  * @param {object} opts
  * @param {string} opts.root      仓库根目录
@@ -217,14 +282,19 @@ function findSliceCommits({ root, sliceId, baseCommit, headRef }) {
  * @param {string|null} opts.baseCommit 基点 commit（本片记录的 baseCommit；缺省按
  *                                    feat(<id>): slice approved 提交的父提交推导）
  * @param {string}   opts.headRef 终点 ref，默认 HEAD
- * @returns {{ changed: string[], sliceCommits: string[], base: string|null,
- *             committed: string[], workingTree: string[], untracked: string[] }}
+ * @returns {{ changed: string[], sliceCommits: string[], boundary: string|null,
+ *             base: string|null, committed: string[], workingTree: string[],
+ *             untracked: string[] }}
  */
 function collectSliceChanges({ root, sliceId, baseCommit = null, headRef = 'HEAD' }) {
-    // 来源 2：本片自己的提交 → 逐提交算差异。
+    // 来源 2：本片自己的提交 → 先按签收边界过滤，再逐提交算差异。
     const { base, commits } = findSliceCommits({ root, sliceId, baseCommit, headRef });
+    const boundary = sliceBoundaryCommit(root, sliceId, headRef);
+    const ancestors = boundary ? sliceAncestors(root, boundary) : null;
+    const ownCommits = ancestors ? commits.filter((c) => ancestors.has(c)) : commits;
+
     const committed = new Set();
-    for (const c of commits) {
+    for (const c of ownCommits) {
         for (const p of runGit(root, ['diff', '--name-only', `${c}^`, c])) {
             committed.add(p);
         }
@@ -240,7 +310,8 @@ function collectSliceChanges({ root, sliceId, baseCommit = null, headRef = 'HEAD
     const changed = [...new Set([...committed, ...workingTree, ...untracked])].sort();
     return {
         changed,
-        sliceCommits: [...commits],
+        sliceCommits: [...ownCommits],
+        boundary,
         base,
         committed: [...committed].sort(),
         workingTree: [...workingTree].sort(),
@@ -362,6 +433,8 @@ module.exports = {
     trackedOnTree,
     findSliceApprovedCommit,
     findSliceCommits,
+    sliceBoundaryCommit,
+    sliceAncestors,
     isAllowed,
     isSliceMarker,
 };

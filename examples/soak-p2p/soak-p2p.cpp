@@ -275,6 +275,19 @@ struct Measurement {
 
     // Memory bound proxies (Q2).
     std::uint64_t audio_samples_pending = 0;
+
+    // ---- The early-exit channel ----------------------------------------
+    //
+    // A run that dies before its window is over still has to leave
+    // evidence.  The 2026-11-20 Q5 run died 3 h 48 m in with an ICE
+    // consent expiry, and because the harness only wrote its artifact on
+    // the success path, that failure left **no** record at all -- no
+    // JSON, no row in the archive, nothing but a 508 MB log that the
+    // daily soak task later deleted.  A failure is exactly the moment
+    // the evidence matters most, so the artifact is written on both
+    // paths, and these two fields say which path it was.
+    bool        failed_early = false;
+    std::string failure_reason;
 };
 
 /** Total PCM memory the receiver is holding, in bytes (a Q2 proxy). */
@@ -347,11 +360,50 @@ int run(const Params& p, Measurement* m) {
     std::string error;
     if (!relay.start(&error)) {
         std::fprintf(stderr, "[soak-p2p] the relay could not start: %s\n", error.c_str());
+        m->failed_early = true;
+        m->failure_reason = std::string("the relay could not start: ") + error;
         return 2;
     }
     std::fprintf(stderr, "[soak-p2p] relay: A=%s  B=%s  impaired=%d\n",
                  relay.endpoint_a().c_str(), relay.endpoint_b().c_str(),
                  relay_cfg.impaired ? 1 : 0);
+
+    // The largest `audio_samples_pending` seen: the Q2 bound is about
+    // the peak, not the final reading.  Declared before `collect` so
+    // that the early-exit path can record it too.
+    std::uint64_t peak_pending_bytes = 0;
+
+    // ---- Collect the counters -------------------------------------------
+    //
+    // A closure, so that the early-exit path can record what the run
+    // *did* measure before it died.  A run that fails at 3 h 48 m has
+    // three hours and forty-eight minutes of numbers in it, and they
+    // are the only evidence of what went wrong; the artifact must
+    // carry them.
+    auto collect = [&](NimRTCEngine& a, NimRTCEngine& b) {
+        const NatRelay::Stats rs = relay.stats();
+        m->relay_received    = rs.packets_received;
+        m->relay_forwarded   = rs.packets_forwarded;
+        m->relay_dropped     = rs.packets_dropped;
+        m->relay_reordered   = rs.packets_reordered;
+        m->relay_buffered    = rs.packets_buffered;
+
+        const auto sa = a.stats();
+        const auto sb = b.stats();
+        m->audio_packets_sent     = sa.audio_packets_sent;
+        m->audio_frames_received  = sb.audio_frames_received;
+        m->audio_concealed        = sb.audio_concealed_frames;
+        m->audio_fec_recovered    = sb.audio_fec_recovered_frames;
+        m->audio_packets_lost     = sb.audio_packets_lost;
+        m->audio_decode_errors    = sb.audio_decode_errors;
+        m->jb_dropped             = sb.audio_packets_dropped;
+        m->audio_samples_pending  = peak_pending_bytes;
+
+        m->feedback_tx_nack = sb.video_feedback_tx_nack;
+        m->feedback_rx_nack = sa.video_feedback_rx_nack;
+        m->feedback_tx_pli  = sb.video_feedback_tx_pli;
+        m->feedback_rx_pli  = sa.video_feedback_rx_pli;
+    };
 
     // ---- The two engines ------------------------------------------------
     EngineConfig cfg;
@@ -437,6 +489,11 @@ int run(const Params& p, Measurement* m) {
                          "[soak-p2p] ICE did not connect through the relay in time "
                          "(A=%s, B=%s)\n",
                          a.ice_state_string(), b.ice_state_string());
+            m->failed_early = true;
+            m->failure_reason =
+                std::string("ICE did not connect through the relay in time (A=") +
+                a.ice_state_string() + ", B=" + b.ice_state_string() + ")";
+            collect(a, b);
             a.close();
             b.close();
             relay.stop();
@@ -453,8 +510,28 @@ int run(const Params& p, Measurement* m) {
 
     // Keep the largest `audio_samples_pending` seen: the Q2 bound is about
     // the peak, not the final reading.
-    std::uint64_t peak_pending_bytes = 0;
     std::uint64_t next_audio_at_us = 0;
+
+    // ---- Watch the ICE state for the whole window ------------------------
+    //
+    // The 2026-11-20 Q5 run died 3 h 48 m in with an ICE consent expiry
+    // ("Consent expired for candidate pair" -> "Lost connectivity" ->
+    // "Changing state to failed"), and then spent the remaining twenty
+    // hours sending into a dead transport: 26 627 "Send while ICE is
+    // not connected" errors.  Nothing in the harness noticed, because
+    // the harness never looked.  It would have run to the end of its
+    // 24 h window, collected its counters, and every one of them would
+    // have satisfied the green criteria -- the sender had emitted
+    // packets, the receiver had decoded frames, the relay had forwarded
+    // traffic -- so the archive would have filed a **green** Q5 record
+    // for a run whose connection was dead for five sixths of its life.
+    //
+    // A soak that cannot see its own subject failing is not evidence.
+    // So the loop watches both peers, and the moment either leaves the
+    // connected state the run stops, records why, and writes its
+    // artifact with `failed_early` set.
+    bool ice_lost = false;
+    std::string ice_lost_reason;
 
     while (clk::now() < run_end) {
         a.tick();
@@ -471,6 +548,25 @@ int run(const Params& p, Measurement* m) {
         peak_pending_bytes =
             std::max(peak_pending_bytes, pending_audio_bytes(b.stats()));
 
+        // The ICE state is only interesting once it has *been* good: a
+        // peer that never connected is a different failure (the
+        // connect phase above catches that), and polling the state
+        // before the first nomination would fire on it.
+        if (!ice_lost && elapsed_us > 5000000) {   // 5 s of grace
+            const std::string sa_state = a.ice_state_string();
+            const std::string sb_state = b.ice_state_string();
+            if (!is_connected(sa_state) || !is_connected(sb_state)) {
+                ice_lost = true;
+                ice_lost_reason = "ICE left the connected state during the run "
+                                  "(A=" + sa_state + ", B=" + sb_state + ")";
+                std::fprintf(stderr, "[soak-p2p] %s\n", ice_lost_reason.c_str());
+                std::fprintf(stderr,
+                             "[soak-p2p] stopping at %.1f s of %.1f s\n",
+                             static_cast<double>(elapsed_us) / 1e6, p.seconds);
+                break;
+            }
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
@@ -483,28 +579,13 @@ int run(const Params& p, Measurement* m) {
     }
 
     // ---- Collect the counters -------------------------------------------
+    collect(a, b);
     const NatRelay::Stats rs = relay.stats();
-    m->relay_received    = rs.packets_received;
-    m->relay_forwarded   = rs.packets_forwarded;
-    m->relay_dropped     = rs.packets_dropped;
-    m->relay_reordered   = rs.packets_reordered;
-    m->relay_buffered    = rs.packets_buffered;
 
-    const auto sa = a.stats();
-    const auto sb = b.stats();
-    m->audio_packets_sent     = sa.audio_packets_sent;
-    m->audio_frames_received  = sb.audio_frames_received;
-    m->audio_concealed        = sb.audio_concealed_frames;
-    m->audio_fec_recovered    = sb.audio_fec_recovered_frames;
-    m->audio_packets_lost     = sb.audio_packets_lost;
-    m->audio_decode_errors    = sb.audio_decode_errors;
-    m->jb_dropped             = sb.audio_packets_dropped;
-    m->audio_samples_pending  = peak_pending_bytes;
-
-    m->feedback_tx_nack = sb.video_feedback_tx_nack;
-    m->feedback_rx_nack = sa.video_feedback_rx_nack;
-    m->feedback_tx_pli  = sb.video_feedback_tx_pli;
-    m->feedback_rx_pli  = sa.video_feedback_rx_pli;
+    if (ice_lost) {
+        m->failed_early = true;
+        m->failure_reason = ice_lost_reason;
+    }
 
     if (p.verbose) {
         std::fprintf(stderr,
@@ -531,7 +612,10 @@ int run(const Params& p, Measurement* m) {
     a.close();
     b.close();
     relay.stop();
-    return 0;
+    // A run whose ICE died is not a run that completed: the exit code
+    // says so, and the artifact (written by the caller on both paths)
+    // says why.
+    return ice_lost ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -560,6 +644,16 @@ void require(Verdict* v, bool condition, const std::string& message) {
  */
 Verdict evaluate(const Measurement& m) {
     Verdict v;
+
+    // 0. The run has to have *survived* its window.  A run whose ICE
+    //    died at 3 h 48 m would otherwise sail through every criterion
+    //    below -- the sender had emitted packets, the receiver had
+    //    decoded frames, the relay had forwarded traffic -- and be
+    //    filed as a green Q5 record for a session that was dead for
+    //    five sixths of its life.  The criterion that catches it is not
+    //    about the media; it is about the connection.
+    require(&v, !m.failed_early,
+            "the run did not survive its window: " + m.failure_reason);
 
     // 1. The media path carried media.  Without this the rest of the
     //    measurements describe nothing.
@@ -650,6 +744,8 @@ std::string to_json(const Measurement& m, const Verdict& v) {
         "  \"memory\": {\"peak_pending_audio_bytes\": %" PRIu64 "},\n"
         "  \"feedback\": {\"tx_nack\": %" PRIu64 ", \"rx_nack\": %" PRIu64
         ", \"tx_pli\": %" PRIu64 ", \"rx_pli\": %" PRIu64 "},\n"
+        "  \"failed_early\": %s,\n"
+        "  \"failure_reason\": \"\",\n"
         "  \"green\": %s,\n"
         "  \"failures\": [%s]\n"
         "}\n",
@@ -663,8 +759,17 @@ std::string to_json(const Measurement& m, const Verdict& v) {
         m.audio_decode_errors, m.jb_dropped,
         m.audio_samples_pending, m.feedback_tx_nack,
         m.feedback_rx_nack, m.feedback_tx_pli,
-        m.feedback_rx_pli, v.ok ? "true" : "false", "");
+        m.feedback_rx_pli, m.failed_early ? "true" : "false",
+        v.ok ? "true" : "false", "");
     std::string json(buf);
+    if (!m.failure_reason.empty()) {
+        const std::string needle = "\"failure_reason\": \"\"";
+        const std::size_t at = json.find(needle);
+        if (at != std::string::npos) {
+            json.replace(at, needle.size(),
+                         "\"failure_reason\": \"" + json_escape(m.failure_reason) + "\"");
+        }
+    }
     if (!v.failures.empty()) {
         std::string list;
         for (std::size_t i = 0; i < v.failures.size(); ++i) {
@@ -701,8 +806,12 @@ int main(int argc, char** argv) {
 
     Measurement m;
     const int rc = run(p, &m);
-    if (rc != 0) return rc;
 
+    // The artifact is written on **both** paths.  A run that died before
+    // its window ended still measured something -- and that measurement
+    // is the only evidence of the failure.  Writing it only on success
+    // meant that the 2026-11-20 Q5 run (ICE consent expiry at 3 h 48 m)
+    // left no record at all: no JSON, no archive row, nothing.
     const Verdict v = evaluate(m);
     const std::string json = to_json(m, v);
     std::fputs(json.c_str(), stdout);
@@ -716,6 +825,14 @@ int main(int argc, char** argv) {
         } else {
             std::fprintf(stderr, "[soak-p2p] could not write %s\n", p.json_path.c_str());
         }
+    }
+
+    // A run that never got off the ground has nothing to judge: its
+    // counters are all zero and the verdict would say so, but the
+    // reason is more useful than the verdict.
+    if (rc != 0 && !m.failed_early) {
+        std::fprintf(stderr, "[soak-p2p] the run did not complete (rc=%d)\n", rc);
+        return rc;
     }
 
     if (!v.ok) {

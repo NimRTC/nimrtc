@@ -28,7 +28,14 @@ param(
     [string]$CrtDir = '',
 
     [string]$OutDir = 'build/rd-deploy',
-    [string]$ZipPath = 'build/rd-deploy.zip'
+    [string]$ZipPath = 'build/rd-deploy.zip',
+
+    # Silence the "the binaries are older than the sources" warning.
+    # It is a warning, not an error: there are legitimate reasons to
+    # package a build that is not the newest one (a bisect, a release
+    # candidate from a tag).  The warning exists so the *common* mistake
+    # -- forgetting to rebuild -- is visible, not to forbid the rest.
+    [switch]$NoStaleCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,22 +109,105 @@ $wantCrt = @(
 # different configuration (Debug vs Release) links against a different
 # msquic, and the two would not agree on the ABI.  The copy that sits
 # next to the binaries in the build tree is that one.
+#
+# There is deliberately **no fallback search** here.  Picking up a
+# msquic.dll from some *other* tree in `build/` produces a bundle whose
+# media binary and whose QUIC runtime were built in different
+# configurations -- an ABI mismatch that shows up as a crash on the
+# operator's machine, with nothing in the bundle to explain it.  The
+# bundle has to come from one tree, or not at all.
 $msquic = Join-Path $BinDir 'msquic.dll'
 if (-not (Test-Path $msquic)) {
-    $msquic = (Get-ChildItem (Join-Path $root 'build') -Recurse -Filter 'msquic.dll' -ErrorAction SilentlyContinue |
-               Where-Object { $_.FullName -notlike '*rd-deploy*' } |
-               Sort-Object LastWriteTime -Descending |
-               Select-Object -First 1).FullName
-}
-if (-not $msquic -or -not (Test-Path $msquic)) {
-    throw 'Cannot find msquic.dll in the build tree.'
+    throw ("Cannot find msquic.dll next to the media binaries ($BinDir). " +
+           "The bundle must be built from ONE build tree: the DLL and the " +
+           "EXEs have to come from the same configuration. " +
+           "Build the tree first, then re-run this script with -BinDir.")
 }
 Log "msquic.dll comes from $msquic"
+
+# ---- the bundle's provenance -------------------------------------------
+#
+# A bundle is only useful if it carries the code that was just fixed.
+# The failure this guards against is quiet and expensive: the binaries
+# in `build/` are rebuilt, the bundle is *not* refreshed, and the
+# operator receives a bundle with the old code in it.  Nothing in the
+# bundle says so -- the operator just sees the bug they thought was
+# fixed.
+#
+# So the bundle records what it was built from, and the staleness check
+# compares the binaries against the sources they were built from.
+#
+# A binary is *older* than the sources when a source file is newer than
+# it.  That is the conservative direction: a rebuild that touched
+# nothing relevant still counts as fresh, but a source edited after the
+# last build always marks the bundle as stale.  The comparison ignores
+# `src/third_party/` (vendored code, and its timestamps say nothing
+# about *this* build) and the build tree itself.
+function Get-NewestSourceTime {
+    $srcRoot = Join-Path $root 'src'
+    if (-not (Test-Path $srcRoot)) { return [datetime]::MinValue }
+    $newest = [datetime]::MinValue
+    Get-ChildItem $srcRoot -Recurse -File -Include *.cpp,*.hpp,*.h,*.cc,*.cxx -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notlike '*\third_party\*' } |
+        ForEach-Object {
+            if ($_.LastWriteTime -gt $newest) { $newest = $_.LastWriteTime }
+        }
+    return $newest
+}
+
+$newestSource = Get-NewestSourceTime
+$staleBinaries = @()
+foreach ($exe in 'rd_device.exe', 'rd_viewer.exe') {
+    $src = Join-Path $BinDir $exe
+    if (-not (Test-Path $src)) { continue }
+    $built = (Get-Item $src).LastWriteTime
+    if ($built -lt $newestSource) {
+        $staleBinaries += "$exe (built $built, newest source $newestSource)"
+    }
+}
+
+if ($staleBinaries.Count -gt 0 -and -not $NoStaleCheck) {
+    Write-Host ''
+    Write-Host 'WARNING: the binaries are OLDER than the sources they were built from:' -ForegroundColor Yellow
+    $staleBinaries | ForEach-Object { Write-Host ("  " + $_) -ForegroundColor Yellow }
+    Write-Host ''
+    Write-Host 'The bundle would ship code that predates the current sources.' -ForegroundColor Yellow
+    Write-Host 'Rebuild the tree, or pass -BinDir pointing at a freshly built one.' -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host 'Continuing anyway (pass -NoStaleCheck to silence this).' -ForegroundColor Yellow
+    Write-Host ''
+}
 
 # ---- assemble -----------------------------------------------------------
 if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
 New-Item -ItemType Directory -Path $OutDir | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $OutDir 'crt') | Out-Null
+
+# The DTLS certificate.  It is looked up **relative to the working
+# directory** first (`certs/server-ecc.pem` next to the executable), and
+# the absolute fallback (`NIMRTC_WOLFSSL_CERT_DIR`) points into the
+# *build machine's* source tree -- which does not exist on the
+# operator's machine.  Without this copy the operator gets a bundle
+# whose signalling works, whose pairing works, whose ICE candidates
+# gather, and which then dies at the handshake with
+# "wolfSSL_CTX setup failed": the one failure the operator cannot
+# diagnose from the message.
+$certSrc = Join-Path $BinDir 'certs'
+foreach ($pem in 'server-ecc.pem', 'ecc-key.pem') {
+    $src = Join-Path $certSrc $pem
+    if (-not (Test-Path $src)) {
+        throw ("Missing $src`n" +
+               "The DTLS certificate is part of this bundle: without it the " +
+               "handshake fails on the operator's machine with " +
+               "'wolfSSL_CTX setup failed'.  Build the tree first (CMake " +
+               "stages the certs next to the executables).")
+    }
+}
+$certDst = Join-Path $OutDir 'certs'
+New-Item -ItemType Directory -Path $certDst | Out-Null
+foreach ($pem in 'server-ecc.pem', 'ecc-key.pem') {
+    Copy-Item (Join-Path $certSrc $pem) $certDst -Force
+}
 
 foreach ($exe in 'rd_device.exe', 'rd_viewer.exe') {
     $src = Join-Path $BinDir $exe
@@ -146,6 +236,43 @@ foreach ($dll in $wantCrt) {
 if ($missingCrt.Count -gt 0) {
     throw "These runtime DLLs are missing from $CrtDir : $($missingCrt -join ', ')"
 }
+
+# ---- the bundle's provenance --------------------------------------------
+#
+# The operator receives a zip and cannot see into the tree it came from.
+# A record inside the bundle says what it was built from, so a bug
+# report ("it still drops frames") can be answered with "which build
+# did you actually run?" instead of a guess.
+#
+# It is a plain text file on purpose: it has to be readable with
+# `notepad` on a machine that has no toolchain at all.
+$commit = 'unknown'
+try {
+    $commit = (& git -C $root rev-parse --short HEAD 2>$null).Trim()
+    if (-not $commit) { $commit = 'unknown' }
+} catch { $commit = 'unknown' }
+
+$branch = 'unknown'
+try {
+    $branch = (& git -C $root rev-parse --abbrev-ref HEAD 2>$null).Trim()
+    if (-not $branch) { $branch = 'unknown' }
+} catch { $branch = 'unknown' }
+
+$provenance = @(
+    'NimRTC remote-desktop bundle',
+    '',
+    "built:      $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+    "commit:     $commit",
+    "branch:     $branch",
+    "binaries:   $BinDir",
+    "msquic:     $(Split-Path -Leaf $msquic)",
+    "stale:      $(if ($staleBinaries.Count -gt 0) { 'YES -- the binaries predate the sources' } else { 'no' })",
+    '',
+    'If a bug is reported against this bundle, quote the commit above.',
+    ''
+)
+$provenance | Set-Content (Join-Path $OutDir 'BUNDLE-INFO.txt') -Encoding ascii
+Log "the bundle records commit $commit"
 
 Log "the bundle is in $OutDir"
 

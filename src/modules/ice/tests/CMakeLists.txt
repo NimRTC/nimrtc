@@ -30,16 +30,24 @@ if(NOT GTEST_FOUND)
 endif()
 
 add_executable(test_ice_test test_ice.cpp)
+add_executable(test_ice_log_volume_test test_ice_log_volume.cpp)
 add_executable(test_consent_freshness_test test_consent_freshness.cpp)
 add_executable(test_ice_restart_test test_ice_restart.cpp)
 add_executable(test_turn_relay_test test_turn_relay.cpp)
 add_executable(test_turn_tls_test test_turn_tls.cpp)
+add_executable(test_tcp_candidate_test test_tcp_candidate.cpp)
+add_executable(test_tcp_framing_test test_tcp_framing.cpp)
+add_executable(test_tcp_stun_test test_tcp_stun.cpp)
+add_executable(test_ice_tcp_test test_ice_tcp.cpp)
+add_executable(test_connectivity_diagnostics_test test_connectivity_diagnostics.cpp)
 
 # The VS multi-config generator sets LinkLibraryDependencies=false on
 # Application targets, which strips transitive PUBLIC deps from the vcxproj.
 # Enable the legacy behaviour so nimrtc_ice.lib's PUBLIC deps
 # (nimrtc::core, nimrtc::plugins) appear in the link line.
 set_target_properties(test_ice_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_ice_log_volume_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 set_target_properties(test_consent_freshness_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
@@ -49,9 +57,22 @@ set_target_properties(test_turn_relay_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 set_target_properties(test_turn_tls_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_tcp_candidate_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_tcp_framing_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_tcp_stun_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_ice_tcp_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_connectivity_diagnostics_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
 nimrtc_apply_options(test_ice_test LENIENT)
 nimrtc_link_libjuice(test_ice_test)
+
+nimrtc_apply_options(test_ice_log_volume_test LENIENT)
+nimrtc_link_libjuice(test_ice_log_volume_test)
 
 nimrtc_apply_options(test_consent_freshness_test LENIENT)
 nimrtc_link_libjuice(test_consent_freshness_test)
@@ -65,7 +86,29 @@ nimrtc_link_libjuice(test_turn_relay_test)
 nimrtc_apply_options(test_turn_tls_test LENIENT)
 nimrtc_link_libjuice(test_turn_tls_test)
 
+nimrtc_apply_options(test_tcp_candidate_test LENIENT)
+nimrtc_link_libjuice(test_tcp_candidate_test)
+
+nimrtc_apply_options(test_tcp_framing_test LENIENT)
+nimrtc_link_libjuice(test_tcp_framing_test)
+
+nimrtc_apply_options(test_tcp_stun_test LENIENT)
+nimrtc_link_libjuice(test_tcp_stun_test)
+
+nimrtc_apply_options(test_ice_tcp_test LENIENT)
+nimrtc_link_libjuice(test_ice_tcp_test)
+
+nimrtc_apply_options(test_connectivity_diagnostics_test LENIENT)
+nimrtc_link_libjuice(test_connectivity_diagnostics_test)
+
 target_link_libraries(test_ice_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+target_link_libraries(test_ice_log_volume_test PRIVATE
     nimrtc::ice
     nimrtc::core
     nimrtc::plugins
@@ -85,7 +128,6 @@ target_link_libraries(test_ice_restart_test PRIVATE
     nimrtc::plugins
     GTest::gtest_main
     GTest::gtest)
-
 # The TURN relay test needs libjuice's *server* half (juice_server_create)
 # to stand up an in-tree TURN server.  That is why the vendored libjuice
 # build keeps NO_SERVER=OFF.
@@ -105,11 +147,59 @@ target_link_libraries(test_turn_tls_test PRIVATE
     GTest::gtest_main
     GTest::gtest)
 
+target_link_libraries(test_tcp_candidate_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+target_link_libraries(test_tcp_framing_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+target_link_libraries(test_tcp_stun_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+target_link_libraries(test_ice_tcp_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+# N4 connectivity diagnostics: relay tests stand up the in-tree TURN server
+# (juice_server_create, which is why the vendored libjuice keeps NO_SERVER=OFF),
+# and the gathering tests use the module's gathering-state seam.
+target_link_libraries(test_connectivity_diagnostics_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+# The framing and STUN tests reach into the module's src/ headers
+# (tcp_framing.hpp, tcp_ice.hpp) that are not part of the public include dir.
+target_include_directories(test_tcp_framing_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_include_directories(test_tcp_stun_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+
 # NOTE: No top-level add_test() —see modules/audio3a/tests/CMakeLists.txt
 # for the rationale (CMake 4.0 multi-config conditional bug).
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_ice_test
         PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
+    gtest_discover_tests(test_ice_log_volume_test
+        PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_consent_freshness_test
         PROPERTIES TIMEOUT 30
@@ -121,6 +211,22 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 90
         DISCOVERY_TIMEOUT 60)
     gtest_discover_tests(test_turn_tls_test
+        PROPERTIES TIMEOUT 120
+        DISCOVERY_TIMEOUT 60)
+    gtest_discover_tests(test_tcp_candidate_test
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
+    gtest_discover_tests(test_tcp_framing_test
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
+    gtest_discover_tests(test_tcp_stun_test
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 60)
+    gtest_discover_tests(test_ice_tcp_test
+        PROPERTIES TIMEOUT 120
+        DISCOVERY_TIMEOUT 60)
+    # Relay allocations and the blackhole-STUN windows are slower.
+    gtest_discover_tests(test_connectivity_diagnostics_test
         PROPERTIES TIMEOUT 120
         DISCOVERY_TIMEOUT 60)
 endif()

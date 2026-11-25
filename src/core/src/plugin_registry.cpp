@@ -157,6 +157,18 @@ void PluginRegistry::register_video_capture(std::string_view id,
     video_capture_.register_one(id, f);
 }
 
+// v1.4 (remote-desktop plan D1): the audio *device* slots.  The built-in
+// backends register under "portaudio" / "synthetic".
+void PluginRegistry::register_audio_source(std::string_view id,
+                                           const plugins::IAudioSourceFactory* f) {
+    audio_source_.register_one(id, f);
+}
+
+void PluginRegistry::register_audio_sink(std::string_view id,
+                                         const plugins::IAudioSinkFactory* f) {
+    audio_sink_.register_one(id, f);
+}
+
 void PluginRegistry::register_video_sink(std::string_view id,
                                          const plugins::IVideoSinkFactory* f) {
     video_sink_.register_one(id, f);

@@ -66,6 +66,10 @@ set(_nimrtc_install_headers
   "${CMAKE_SOURCE_DIR}/src/modules/video_payload/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_jb/include"
   "${CMAKE_SOURCE_DIR}/src/modules/h264/include"
+  # v1-install-tree-video-deps (ADR-038): the shared NVIDIA / VideoToolbox
+  # codec-adapter headers ship with the nvcodec archive so a downstream
+  # host that registers the NVENC / NVDEC plugins can include them.
+  "${CMAKE_SOURCE_DIR}/src/modules/nvcodec/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_sdp_attributes/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
   "${CMAKE_SOURCE_DIR}/src/modules/video_stats/include"
@@ -113,10 +117,33 @@ set(_nimrtc_install_shorts
   session
   assembly
   datachannel
+  # v1-install-tree-module-closure (ADR-039): the DTMF module (engine
+  # PRIVATE, session-capability plan D1) and the video bitrate-control /
+  # capture modules (engine PRIVATE).  video_capture links
+  # nimrtc::video_frame, so it must come before video_frame on the flat
+  # chain (GNU static linker resolves symbols left-to-right).
+  dtmf
+  video_bitrate_control
+  video_capture
   video_frame
   video_payload
   video_jb
   h264
+  # v1-install-tree-video-deps (ADR-038): `nimrtc_h264` links
+  # `nimrtc::nvcodec` PUBLIC, so a downstream link of `nimrtc::engine`
+  # that pulls in H.264 also needs the nvcodec archive on the flat chain.
+  # The module builds on every platform (NVIDIA / VideoToolbox paths are
+  # dynamic-load or "unavailable" stubs off their host), so the install
+  # rule needs no platform branch.
+  #
+  # v1-install-tree-module-closure (ADR-039): the H.265 / AV1 / VP9 codec
+  # modules also link `nimrtc::nvcodec` (shared NVENC / NVDEC backends), so
+  # they must come before nvcodec too — grouped with h264, alphabetical
+  # among the codecs.
+  av1
+  h265
+  vp9
+  nvcodec
   video_sdp_attributes
   video_source
   video_stats
@@ -124,6 +151,10 @@ set(_nimrtc_install_shorts
   rtx
   video_pipeline
   video_sink
+  # v1-install-tree-module-closure (ADR-039): the render-clock module
+  # (engine PRIVATE, remote-desktop plan R3).  It follows video_sink exactly
+  # as the engine groups it.
+  video_sync
   audio_device
   rd_input
   rd_qoe
@@ -216,6 +247,70 @@ if(_apm_archives)
     "Installing WebRTC APM archives (${_apm_count}) into ${_apm_dest}")
 endif()
 unset(_apm_archives)
+
+# --- 2d. OpenH264 vendored archives + link-order manifest ---------------------
+# The OpenH264 wrapper (src/third_party/openh264/CMakeLists.txt) has no
+# upstream install() rules, so without this section the installed bundle
+# would ship without the three upstream archives and a video host linking
+# nimrtc::engine would miss the Wels* / WelsCommon::* symbols.
+#
+# The wrapper publishes the archive set AND their link order as a GLOBAL
+# property (NIMRTC_OPENH264_LINK_ARCHIVES) — the same shape as the WebRTC
+# APM archives above (NIMRTC_APM_LINK_ARCHIVES, §2c): the module that
+# builds the archives owns the order, not the install logic.
+#
+# A GNU static linker resolves symbols left-to-right, so the order is part
+# of the contract: the encoder and the decoder reference `WelsLog()` /
+# `g_kuiMbCountScan4Idx` from common, so common must come last.  MSVC
+# ignores archive order (the wrapper documents this), so the order is
+# harmless on Windows.  The manifest travels with the archives: the
+# installed NimRTCConfig.cmake reads the order from it rather than
+# guessing from find_library() (which returns paths, not order).
+get_property(_openh264_targets GLOBAL PROPERTY NIMRTC_OPENH264_LINK_ARCHIVES)
+if(_openh264_targets)
+  set(_openh264_names "")
+  foreach(_oh_target IN LISTS _openh264_targets)
+    if(NOT TARGET "${_oh_target}")
+      message(FATAL_ERROR
+        "NIMRTC_OPENH264_LINK_ARCHIVES lists '${_oh_target}' but no such "
+        "target exists — the OpenH264 wrapper must create all three "
+        "archives together")
+    endif()
+    get_target_property(_oh_type "${_oh_target}" TYPE)
+    if(NOT _oh_type STREQUAL "STATIC_LIBRARY")
+      message(FATAL_ERROR
+        "NIMRTC_OPENH264_LINK_ARCHIVES target '${_oh_target}' is "
+        "${_oh_type}, expected STATIC_LIBRARY")
+    endif()
+    install(TARGETS "${_oh_target}"
+      ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    # The installed archive keeps the target's default file name
+    # (no OUTPUT_NAME is set on the wrapper targets), so the manifest
+    # can spell out the platform prefix/suffix.
+    get_target_property(_oh_outname "${_oh_target}" OUTPUT_NAME)
+    if(_oh_outname)
+      set(_oh_base "${_oh_outname}")
+    else()
+      set(_oh_base "${_oh_target}")
+    endif()
+    list(APPEND _openh264_names
+      "${CMAKE_STATIC_LIBRARY_PREFIX}${_oh_base}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    unset(_oh_outname)
+    unset(_oh_base)
+  endforeach()
+  unset(_oh_target)
+
+  list(LENGTH _openh264_names _oh_count)
+  string(REPLACE ";" "\n" _oh_manifest_text "${_openh264_names}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/openh264_link_order.txt"
+       "${_oh_manifest_text}\n")
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/openh264_link_order.txt"
+          DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+  message(STATUS
+    "Installing OpenH264 archives (${_oh_count}) into ${CMAKE_INSTALL_LIBDIR}")
+endif()
+unset(_openh264_targets)
+unset(_openh264_names)
 
 # --- 3. Package config + version file ----------------------------------------
 configure_package_config_file(

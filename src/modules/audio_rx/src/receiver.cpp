@@ -163,6 +163,10 @@ bool Pipeline::open_stream(StreamState& st, std::uint32_t ssrc) noexcept {
     fmt.packet_loss_perc = cfg_.packet_loss_perc < 0 ? 0
                               : (cfg_.packet_loss_perc > 100 ? 100
                                                            : cfg_.packet_loss_perc);
+    // The negotiated DTX state (D5): a peer that negotiated `usedtx=1`
+    // suppresses silent frames on the wire, and the decoder has to mark
+    // the resulting TOC-only packets as sender-side silence.
+    fmt.use_dtx = cfg_.peer_dtx_enabled;
     st.decoder->update_format(fmt);
 
     return true;
@@ -302,6 +306,16 @@ void Pipeline::consume(StreamState& st, const plugins::MediaSample& sample,
             // The slot of this frame was already filled — the frame
             // arrived too late to be played out.
             continue;
+        }
+
+        if (f.dtx_silence) {
+            // D5: a `dtx_silence` frame is the peer suppressing this
+            // media slot — it is silence, not a loss.  It fills its
+            // slot on the timeline like a normal frame, so no
+            // concealment is produced and none is counted; the missing
+            // slots in front of it (a real loss) were already concealed
+            // by the loop above.
+            st.consecutive_concealed = 0;
         }
 
         DecodedSlot slot;

@@ -7,6 +7,13 @@
  */
 #include "engine_impl.hpp"
 
+// v1-device-policy D3: the default device policy ("auto" resolution).
+#include "engine_device_policy.hpp"
+
+// v1-video-render-engine D2: the default render policy ("auto" sink
+// resolution and its degrade ladder).
+#include "engine_render_policy.hpp"
+
 // v1.2.0 (video plan F8): the per-stream share rule of the session
 // bandwidth budget.  The audio path is the first consumer — the audio
 // is the session's *reserved* stream.
@@ -254,6 +261,15 @@ void NimRTCEngine::init_audio_modules() noexcept {
         // flight.
         rx_cfg.packet_loss_perc       = config_.audio_redundancy_percent;
         rx_cfg.enable_downmix         = config_.audio_downmix_to_pcm_channels;
+        // The peer's DTX state (D5): the negotiated `usedtx` reaches the
+        // receiver, which forwards it to the decoder as
+        // `AudioDecodeFormat::use_dtx`.  The receiver is created before
+        // the remote description is processed, so at open time the
+        // negotiated table is empty and this reads false — DTX is off by
+        // default (D5-1); the value only matters for a stream opened
+        // after the negotiation.
+        rx_cfg.peer_dtx_enabled =
+            impl_->audio_state.negotiated_opus_fmtp.usedtx.value_or(false);
         if (!config_.audio_downmix_to_pcm_channels) {
             // Without the downmix the pipeline keeps the decoder's own
             // channel count (spec B-9).
@@ -350,21 +366,60 @@ void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame
         audio3a_plugin_->process_render(frame.pcm, samples_per_ch, channels);
     }
 
-    if (on_audio_frame_) {
-        on_audio_frame_(frame.pcm, total_floats);
-    }
+    // When the engine drives the loudspeaker through the audio sink
+    // (remote-desktop plan D1), the legacy and detailed callbacks are
+    // *not* invoked: the frame was consumed by the engine, and a host
+    // that also played it from `on_audio_frame()` would hear double
+    // audio (spec risk 2).  The write happens on this thread, so the
+    // 3A / codec are only ever touched from one thread (RD-6).
+    if (audio_sink_) {
+        const plugins::Status wrc =
+            audio_sink_->write(frame.pcm, samples_per_ch, channels);
+        if (wrc != plugins::kOk) {
+            // The frame is lost, but never silently: a closed device or a
+            // malformed call is visible instead of turning into silence.
+            if (on_error_) {
+                on_error_(core::kEngineInternal,
+                          "audio_sink write failed: the decoded audio "
+                          "frame could not reach the playback device");
+            }
+        }
+    } else {
+        if (on_audio_frame_) {
+            on_audio_frame_(frame.pcm, total_floats);
+        }
 
-    // The detailed callback fires *after* the legacy one (spec E-2):
-    // both receive the same buffer, and the detailed one adds the
-    // metadata (RTP timestamp, playout instant, capture instant, the
-    // concealment / FEC flags).
-    deliver_audio_frame_info(frame);
+        // The detailed callback fires *after* the legacy one (spec E-2):
+        // both receive the same buffer, and the detailed one adds the
+        // metadata (RTP timestamp, playout instant, capture instant, the
+        // concealment / FEC flags).
+        deliver_audio_frame_info(frame);
+    }
 
     // The frame has been handed over for playback — tell the 3A plugin
     // that the reference signal reached the speaker so it can track the
     // system delay.
     if (audio3a_plugin_) {
-        audio3a_plugin_->set_render_delivered(samples_per_ch);
+        if (audio_sink_) {
+            // With a sink the frame is *queued*, not audible yet.  What
+            // actually reached the speaker is the sink's `played_samples()`
+            // delta since the last frame — the AEC reference must see the
+            // delivered signal, or it converges on the queue latency
+            // instead of the acoustic delay (spec §四 / risk 3).
+            const std::uint64_t played = audio_sink_->played_samples();
+            const std::uint64_t baseline =
+                impl_->audio_state.audio_sink_played_baseline;
+            std::size_t delivered = 0;
+            if (played >= baseline) {
+                delivered = static_cast<std::size_t>(played - baseline);
+            }
+            impl_->audio_state.audio_sink_played_baseline = played;
+            audio3a_plugin_->set_render_delivered(delivered);
+        } else {
+            // Today's behaviour, unchanged: the frame has been handed to
+            // the host, so the engine assumes it reached the speaker.
+            audio3a_plugin_->set_render_delivered(samples_per_ch);
+        }
     }
 
     // ---- The audio side of the render clock (remote-desktop plan E5) ---
@@ -401,6 +456,85 @@ void NimRTCEngine::set_video_sink(std::unique_ptr<plugins::IVideoSink> sink) noe
             if (on_error_) on_error_(core::kVideoSinkOpenFailed, "video_sink open failed");
             video_sink_.reset();
         }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// "auto" sink resolution and its degrade ladder (v1-video-render-engine D2)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::resolve_auto_sink() noexcept {
+    const detail::RenderPolicy policy = detail::default_render_policy();
+    if (policy.preferred_backend.empty()) {
+        // No platform default on this build (a non-desktop target):
+        // "auto" cannot resolve, so it degrades.  This is the D2
+        // "no-platform-backend" case.
+        degrade_sink("headless", "no-platform-backend");
+        return;
+    }
+
+    const std::string id = detail::resolve_auto_sink_backend(
+        policy,
+        [](std::string_view candidate) noexcept {
+            return pal::resolve_video_sink(candidate) != nullptr;
+        });
+    if (id.empty()) {
+        // The policy named a backend this build does not register.
+        // "auto" is a recommendation, not a requirement — degrade.
+        degrade_sink("headless", "backend-not-registered");
+        return;
+    }
+
+    // "auto" opens in Fallback mode: a sink that cannot open is a
+    // *normal* machine (no display in CI, a driver that refuses), so the
+    // engine warns and degrades instead of failing the session.  The
+    // enum spells this Warn — it logs the warning and lets the caller
+    // fall back; it is deliberately NOT the Error mode the explicit-id
+    // path uses below.
+    const bool opened = pal::make_plugin<&pal::resolve_video_sink>(
+        id,
+        video_sink_,
+        resolve_sink_config(),
+        {.err_open_failed = core::kVideoSinkOpenFailed,
+         .err_missing = core::kVideoSinkPluginMissing,
+         .open_fail_mode = pal::PluginFailureMode::Warn,
+         .missing_mode = pal::PluginFailureMode::Warn,
+         .on_error = on_error_});
+    if (opened) {
+        video_sink_backend_ = id;
+        video_sink_backend_reason_ = "";
+    } else {
+        degrade_sink("headless", "backend-open-failed");
+    }
+}
+
+void NimRTCEngine::degrade_sink(std::string_view fallback_id,
+                                std::string_view reason) noexcept {
+    core::log::Logger::instance().warn(
+        std::string{"engine: video_sink_name=\"auto\" could not use the "
+                    "platform renderer ("} + std::string{reason} +
+        "); degrading to '" + std::string{fallback_id} + "'");
+    // The fallback is the last rung of the ladder ("headless"), so a
+    // sink always exists after "auto".  It is opened with the Error
+    // modes: if even the fallback is missing that is a registration
+    // failure worth reporting loudly rather than another silent degrade.
+    (void)pal::make_plugin<&pal::resolve_video_sink>(
+        fallback_id,
+        video_sink_,
+        resolve_sink_config(),
+        {.err_open_failed = core::kVideoSinkOpenFailed,
+         .err_missing = core::kVideoSinkPluginMissing,
+         .open_fail_mode = pal::PluginFailureMode::Error,
+         .missing_mode = pal::PluginFailureMode::Error,
+         .on_error = on_error_});
+    if (video_sink_) {
+        video_sink_backend_ = std::string(fallback_id);
+        video_sink_backend_reason_ = std::string(reason);
+    } else {
+        // Even the fallback could not be installed: no sink at all.
+        video_sink_backend_.clear();
+        video_sink_backend_reason_ = std::string(reason);
     }
 }
 
@@ -546,26 +680,52 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             capture_cfg.format.zero_copy = true;
         }
 
-        (void)pal::make_plugin<&pal::resolve_video_capture>(
-            config_.video_capture_name,
-            video_capture_,
-            std::move(capture_cfg),
-            {.err_open_failed = core::kVideoCaptureOpenFailed,
-             .err_missing = core::kVideoCapturePluginMissing,
-             .open_fail_mode = pal::PluginFailureMode::Error,
-             .missing_mode = pal::PluginFailureMode::Error,
-             .on_error = on_error_,
-             // The capture device knows *why* it refused -- another
-             // program holds the desktop-duplication slot, the display
-             // does not support duplication, the consent prompt was
-             // declined -- and that reason is what the operator can act
-             // on.  It is read while the device is still alive.
-             .open_failure_detail =
-                 [](const void* plugin) -> std::string {
-                     if (plugin == nullptr) return {};
-                     return static_cast<const plugins::IVideoCapture*>(plugin)
-                         ->last_error_message();
-                 }});
+        // "auto" (v1-device-policy D3) resolves through the platform's
+        // default policy instead of naming one id.  D3-1: kText -> screen
+        // backend, every other hint (incl. kUnspecified) -> camera.  A
+        // policy backend that this build does not register is NOT an
+        // error — it degrades to "no capture device" (warn), unlike an
+        // unknown *explicit* id below, which fires
+        // kVideoCapturePluginMissing.
+        std::string resolved = config_.video_capture_name;
+        if (resolved == "auto") {
+            const detail::DevicePolicy policy = detail::default_device_policy();
+            const bool want_camera =
+                config_.video_content_hint != plugins::ContentHint::kText;
+            resolved = detail::resolve_auto_capture_backend(
+                policy, want_camera,
+                [](std::string_view id) noexcept {
+                    return pal::resolve_video_capture(id) != nullptr;
+                });
+            if (resolved.empty()) {
+                core::log::Logger::instance().warn(
+                    "engine: video_capture_name=\"auto\" did not resolve "
+                    "to a registered capture backend on this platform; "
+                    "continuing without a capture device");
+            }
+        }
+        if (!resolved.empty()) {
+            (void)pal::make_plugin<&pal::resolve_video_capture>(
+                resolved,
+                video_capture_,
+                std::move(capture_cfg),
+                {.err_open_failed = core::kVideoCaptureOpenFailed,
+                 .err_missing = core::kVideoCapturePluginMissing,
+                 .open_fail_mode = pal::PluginFailureMode::Error,
+                 .missing_mode = pal::PluginFailureMode::Error,
+                 .on_error = on_error_,
+                 // The capture device knows *why* it refused -- another
+                 // program holds the desktop-duplication slot, the display
+                 // does not support duplication, the consent prompt was
+                 // declined -- and that reason is what the operator can act
+                 // on.  It is read while the device is still alive.
+                 .open_failure_detail =
+                     [](const void* plugin) -> std::string {
+                         if (plugin == nullptr) return {};
+                         return static_cast<const plugins::IVideoCapture*>(plugin)
+                             ->last_error_message();
+                     }});
+        }
     }
 
 
@@ -648,19 +808,71 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     }
 
     // ---- Video Sink --------------------------------------------------------
+    //
+    // The value table (v1-video-render-engine D2):
+    //   ""       → "headless" (today's behaviour, verbatim).
+    //   "auto"   → the platform renderer; on any failure it degrades to
+    //              "headless" with a warn, and open() never fails.  A
+    //              sink is an *output* device, and a missing output
+    //              device must not fail the session (ADR-030 decision
+    //              two — the audio side degrades the same way).
+    //   "none"   → explicit opt-out: no sink instance at all.
+    //   "<id>"   → an explicit backend.  Explicit ids are promises: an
+    //              unknown id fails with kVideoSinkPluginMissing, an
+    //              open() failure with kVideoSinkOpenFailed (the same
+    //              hard-error rule the capture side applies).
     if (!video_sink_) {
-        // PAL Slice 1.5 — replaces the 5-step "factory → create → null-check
-        // → open → report" dance with one helper call. The Error/Error
-        // policy matches the original on_error_ path.
-        (void)pal::make_plugin<&pal::resolve_video_sink>(
-            config_.video_sink_name,
-            video_sink_,
-            resolve_sink_config(),                    // plan E7: the presentation
-            {.err_open_failed = core::kVideoSinkOpenFailed,
-             .err_missing = core::kVideoSinkPluginMissing,
-             .open_fail_mode = pal::PluginFailureMode::Error,
-             .missing_mode = pal::PluginFailureMode::Error,
-             .on_error = on_error_});
+        const std::string_view configured = config_.video_sink_name;
+        if (configured == "none") {
+            // Explicit opt-out.  No sink instance is created; the render
+            // path below reports kVideoSinkIncompatible, and
+            // `set_on_video_frame` keeps firing (it is the host's
+            // decoded-frame callback, unrelated to the sink).
+            video_sink_backend_ = "";
+            video_sink_backend_reason_ = "";
+        } else if (configured.empty() || configured == "headless") {
+            // "" is today's behaviour, verbatim; "headless" is the
+            // explicit spelling of the same sink.
+            (void)pal::make_plugin<&pal::resolve_video_sink>(
+                "headless",
+                video_sink_,
+                resolve_sink_config(),                    // plan E7: the presentation
+                {.err_open_failed = core::kVideoSinkOpenFailed,
+                 .err_missing = core::kVideoSinkPluginMissing,
+                 .open_fail_mode = pal::PluginFailureMode::Error,
+                 .missing_mode = pal::PluginFailureMode::Error,
+                 .on_error = on_error_});
+            video_sink_backend_ = video_sink_ ? "headless" : "";
+            video_sink_backend_reason_ = "";
+        } else if (configured == "auto") {
+            resolve_auto_sink();
+        } else {
+            // An explicit id is a promise.  A factory that is missing or
+            // a sink that refuses to open is a hard error that fails the
+            // session — never a silent degrade.
+            const bool opened = pal::make_plugin<&pal::resolve_video_sink>(
+                configured,
+                video_sink_,
+                resolve_sink_config(),
+                {.err_open_failed = core::kVideoSinkOpenFailed,
+                 .err_missing = core::kVideoSinkPluginMissing,
+                 .open_fail_mode = pal::PluginFailureMode::Error,
+                 .missing_mode = pal::PluginFailureMode::Error,
+                 .on_error = on_error_});
+            if (opened) {
+                video_sink_backend_ = std::string(configured);
+                video_sink_backend_reason_ = "";
+            } else {
+                const bool missing =
+                    pal::resolve_video_sink(configured) == nullptr;
+                const uint32_t rc = missing
+                    ? core::kVideoSinkPluginMissing
+                    : core::kVideoSinkOpenFailed;
+                impl_->session_state.last_open_rc = rc;
+                shutdown_video_plugins();
+                return rc;
+            }
+        }
     }
 
     // ---- Video Bitrate Controller (remote-desktop plan D1) -----------------
@@ -1045,6 +1257,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             config_.video_receiver_tuning.initial_jitter_buffer_ms;
         cfg.emit_nacks  = config_.video_receiver_tuning.emit_nacks;
         cfg.adaptive_playout = config_.video_receiver_tuning.adaptive_playout;
+        cfg.h264_bare_nalus = config_.video_receiver_tuning.h264_bare_nalus;
         (void)pal::make_plugin<&pal::resolve_video_receiver>(
             config_.video_receiver_name,
             video_receiver_,
@@ -1398,6 +1611,33 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             decode_end - decode_start).count()));
                 if (decode_rc != plugins::kOk) {
+                    // `kErrNotReady` is not a decoder failure.
+                    //
+                    // Every decoder backend in this tree documents
+                    // `kErrNotReady` as "not an error": NVDEC has not
+                    // seen the parameter sets or the reference frame
+                    // yet, VideoToolbox is waiting for the SPS/PPS, and
+                    // OpenH264 is waiting for a reference picture.  It
+                    // is the *normal* answer for the first frames of a
+                    // stream.
+                    //
+                    // Counting it as a decoder error was wrong twice
+                    // over: it inflated `video_frames_dropped_decoder`
+                    // with frames that were never really lost, and it
+                    // asked the peer for a new IDR on every single
+                    // frame — a PLI storm that the peer answered with
+                    // yet more keyframes, each of which the decoder then
+                    // rejected again because the parameter sets had
+                    // still not arrived.
+                    //
+                    // So `kErrNotReady` is reported as what it is: the
+                    // decoder is not ready *yet*.  The frame is neither
+                    // decoded nor dropped; the jitter buffer's own
+                    // accounting is untouched.
+                    if (decode_rc == plugins::kErrNotReady) {
+                        return;
+                    }
+
                     // The decoder refused the frame.  That is a
                     // decoder-side drop (Phase 4.2 / D2), and it is
                     // counted as such so a host can see a stream that
@@ -1582,6 +1822,16 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
     if (decode_rc != plugins::kOk) {
         surface->release_ref();   // the engine's reference
         surface->release_ref();   // the pool's reference
+        // `kErrNotReady` is not a decoder failure — see the long note
+        // on the CPU path's `decode_rc` check.  It means the decoder is
+        // still waiting for the parameter sets or the reference frame,
+        // which is the *normal* state for the first frames of a
+        // stream.  It is neither a dropped frame nor a reason to ask
+        // the peer for a new IDR (asking would start a PLI storm that
+        // the decoder would reject again for the very same reason).
+        if (decode_rc == plugins::kErrNotReady) {
+            return decode_rc;
+        }
         // Same signal as on the CPU path: the decoder refused the
         // picture, so the peer has to send a new IDR.
         request_keyframe_on_decode_failure();
@@ -1627,6 +1877,12 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     close_all(video_receiver_);
     close_all(video_sender_);
     close_all(video_codec_);
+    // v1-video-render-engine D2: the negotiated sink backend and its
+    // degradation reason are per-session, so a re-open() starts from a
+    // clean slate (an old "backend-open-failed" must not leak into the
+    // next session's stats).
+    video_sink_backend_.clear();
+    video_sink_backend_reason_.clear();
     // Remote-desktop plan D1: the rate controller closes with the rest
     // of the video plugins.
     close_all(video_bitrate_controller_);
@@ -1694,6 +1950,32 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // to Failed.
     auto d_check = impl_->dtls.lock();
     if (!d_check || !d_check->is_connected()) {
+        return core::kEngineNotReady;
+    }
+
+    // Q5: gate on the transport, not just the crypto session.
+    //
+    // The DTLS session stays in `Connected` after the ICE consent
+    // freshness expires — the DTLS layer has no idea the 5-tuple died —
+    // so the check above passes and the audio keeps being encoded,
+    // SRTP-protected and queued for a transport that refuses every one
+    // of them.  The 24 h soak measured that refusal 26 627 times.
+    //
+    // `ice_send_blocked` is set by `update_ice_send_gate()`, and is
+    // *only* set for a transport that was connected and then stopped, so
+    // this does not reject the audio a host feeds before the first
+    // connectivity check completes.
+    //
+    // The gate is refreshed *here* rather than only in `tick()`: the
+    // host's call thread is where the media is produced, and a gate
+    // that only the engine thread can update would leave a window in
+    // which the media path sees a stale "connected".  The refresh is
+    // one atomic load of the transport's state plus two atomic
+    // exchanges — cheap enough for the hot path, and it is the price of
+    // not sending into a dead transport.
+    update_ice_send_gate();
+    if (impl_->session_state.ice_send_blocked.load(
+            std::memory_order_acquire)) {
         return core::kEngineNotReady;
     }
 
@@ -3341,6 +3623,8 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_capture_restarts       = impl_->video_state.video_capture_restarts;
     out.video_capture_format_changes = impl_->video_state.video_capture_format_changes;
     out.video_capture_bytes_copied   = impl_->video_state.video_capture_bytes_copied;
+    // v1-device-policy D4: device-list changes, cumulative.
+    out.video_capture_device_changes = impl_->video_state.video_capture_device_changes;
 
     // ---- Codec telemetry (remote-desktop plan B15) ------------------------
     //
@@ -3442,6 +3726,12 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
                                        ? audio_bitrate_current_bps_
                                        : 0);
 
+    // The transport gate's outage count (Q5 finding).  See the field's
+    // declaration for why this counts outages and not packets.
+    out.ice_send_blocked_events =
+        impl_->session_state.ice_send_blocked_events.load(
+            std::memory_order_acquire);
+
     // ---- The per-stream audio entries (plan Track S / S4) -------------
     //
     // The audio plane's counterpart of the per-stream video list.  The
@@ -3471,6 +3761,20 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_capture_pumped_frames   = impl_->video_state.video_capture_pumped_frames;
     out.video_capture_pump_errors     = impl_->video_state.video_capture_pump_errors;
     out.video_capture_pumped_metadata = impl_->video_state.video_capture_pumped_metadata;
+
+    // ---- The audio device layer (remote-desktop plan D1) ----------------
+    //
+    // The device ids are the *actually negotiated* ones (read back from
+    // the plugin's `config()` at open() time), not the ids the host
+    // requested — a device may fall back to a different device or
+    // format.  Empty strings mean no device (the host feeds / plays PCM
+    // itself, or the "auto" device could not be opened and degraded).
+    out.audio_source_device_id  = impl_->audio_state.audio_source_device_id;
+    out.audio_source_backend    = impl_->audio_state.audio_source_backend;
+    out.audio_sink_device_id    = impl_->audio_state.audio_sink_device_id;
+    out.audio_sink_backend      = impl_->audio_state.audio_sink_backend;
+    out.audio_device_pumped_frames = impl_->audio_state.audio_device_pumped_frames;
+    out.audio_device_pump_errors   = impl_->audio_state.audio_device_pump_errors;
 
     // ---- The zero-copy seam (remote-desktop plan B10) ------------------
     //
@@ -3535,6 +3839,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.video_sink_render_errors          = ss.render_errors;
         out.video_sink_present_fps             = ss.present_fps;
     }
+
+    // ---- The negotiated sink backend (v1-video-render-engine D2) ------
+    //
+    // The backend id and the degradation reason are engine-owned (they
+    // are strings, not counters), so they are read from the private
+    // members set at open() time rather than from the sink plugin.
+    out.video_sink_backend       = video_sink_backend_;
+    out.video_sink_backend_reason = video_sink_backend_reason_;
 
     // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
     //
@@ -3679,6 +3991,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // feedback collector -- so every number here is the number its owner
     // reports, not a second measurement of it.
     append_transport_stats(out.transport);
+
+    // ---- The reconnection policy (v1.4 N3, ADR-031) --------------------
+    //
+    // Three fields on the **flat** `Stats`: `ice_recovery_state` /
+    // `ice_recovery_restarts` / `ice_recovery_terminal_reason`.  They
+    // are policy facts rather than transport-plane measurements, so they
+    // do not ride along on `out.transport` (ADR-031 §3.2).
+    append_ice_recovery_stats(out);
 
     // ---- The data-channel plane (plan Track S / S6) ---------------------
     //
@@ -3856,6 +4176,62 @@ void NimRTCEngine::send_video_rtp_packet(plugins::BufferView payload,
                                           plugins::Priority prio,
                                           bool count_bytes) noexcept {
     if (impl_ == nullptr) return;
+
+    // ---- The DTLS gate --------------------------------------------------
+    //
+    // The audio path has always refused to send media before the DTLS
+    // handshake completed (`send_audio()` — see the `d_check` gate
+    // there).  The video path did not, and that was a real leak: ICE
+    // completes *before* DTLS, so in the window between the two the
+    // capture pump kept encoding frames and handed them to this
+    // function, which shipped them as **plaintext RTP** (no SRTP key
+    // was installed yet).
+    //
+    // The peer, also pre-DTLS and therefore unkeyed, parsed those
+    // plaintext packets as ordinary RTP, pushed them into the jitter
+    // buffer and asked the decoder to decode frames whose SPS/PPS/IDR
+    // had not arrived yet.  Two things followed from that:
+    //
+    //   1. the peer's sequence-number space was polluted with frames
+    //      it would never be able to render, and
+    //   2. every one of those decode attempts returned `kErrNotReady`
+    //      — which this engine used to mis-count as a *decoder error*,
+    //      i.e. as a dropped frame.
+    //
+    // That is exactly the "2 frames dropped" the remote-desktop run
+    // reported: the two drops were not a network loss, they were the
+    // first two plaintext frames of the session being counted as
+    // decoder failures.
+    //
+    // The gate mirrors the audio path's, and it is deliberately
+    // permissive about a *missing* DTLS session: a stack that has no
+    // DTLS at all (the raw-udp-arq profile, the shell) sends plaintext
+    // media on purpose, and the gate must not silence it.  Only a
+    // DTLS session that exists and has *not* reached `Connected` blocks
+    // the send.
+    auto d_gate = impl_->dtls.lock();
+    if (d_gate && !d_gate->is_connected()) {
+        return;
+    }
+
+    // Q5: the transport gate.
+    //
+    // Same reason as the audio path: the DTLS session stays `Connected`
+    // after the ICE consent expires, so without this the video keeps
+    // being encoded and SRTP-protected for a transport that refuses
+    // every packet.  The gate is only set for a transport that *was*
+    // connected and then stopped, so a stream that starts before the
+    // first connectivity check is unaffected.
+    //
+    // The gate is refreshed here as well as in `tick()`: this callback
+    // runs on the encoder's thread, and a gate only the engine thread
+    // could update would leave a window in which the video path sees a
+    // stale "connected".
+    update_ice_send_gate();
+    if (impl_->session_state.ice_send_blocked.load(
+            std::memory_order_acquire)) {
+        return;
+    }
 
     detail::RtpPacketSpec spec;
     spec.ssrc         = ssrc;

@@ -61,6 +61,14 @@ struct ScratchBuffers {
     // what the encoder consumes.
     std::vector<float> audio_pcm_buf;
 
+    // The audio device pump's read destination (remote-desktop plan D1).
+    // Deliberately separate from `audio_pcm_buf`: the pump pulls a frame
+    // here and then hands it to `send_audio()`, which copies it into
+    // `audio_pcm_buf` for 3A processing — sharing one buffer would make
+    // that copy a self-copy of a `const` source, which is valid but
+    // pointless.  Capacity grows monotonically across calls.
+    std::vector<float> audio_device_pcm_buf;
+
     // ---- send_video scratch buffer (P0#4) -----------------------------
     // Reusable buffer for the encoded H.264 frame.  Default reserve size
     // matches the worst-case 64 KiB IDR; resize grows monotonically.

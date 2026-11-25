@@ -45,6 +45,7 @@
 #include <vector>
 
 #include <nimrtc/core/registry.hpp>
+#include <nimrtc/dtls/dtls_session_factory.hpp>
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
@@ -53,6 +54,7 @@
 namespace {
 
 namespace np = nimrtc::plugins;
+namespace nd = nimrtc::dtls;
 using nimrtc::core::PluginRegistry;
 using nimrtc::engine::EngineConfig;
 using nimrtc::engine::NimRTCEngine;
@@ -247,6 +249,67 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// Fake DTLS session — reports the handshake as complete
+// ---------------------------------------------------------------------------
+//
+// The video send path refuses to emit a packet until the DTLS session
+// reaches `Connected` (the same gate the audio path has always had).
+// The retransmission tests drive the *outbound* half, so they need a DTLS
+// session that reports the handshake as done.
+//
+// The fake exports no SRTP keying material, so the traffic travels in
+// cleartext — which is what makes the wire format assertable here.
+class ConnectedDtlsSession final : public nd::IDtlsSession {
+public:
+    // ---- The seam surface ------------------------------------------------
+    void set_role(nd::Role) noexcept override {}
+    void set_peer_fingerprint(std::span<const std::uint8_t>) noexcept override {}
+    void start() noexcept override {}
+    void pump() noexcept override {}
+    void on_handshake_complete(OnCompleteCb) noexcept override {}
+    np::Status export_srtp_key_material(std::span<std::uint8_t, 60>) noexcept override {
+        return np::kErrNotReady;
+    }
+
+    // ---- The legacy engine-facing surface --------------------------------
+    nimrtc::core::Result<void> open() noexcept override {
+        return nimrtc::core::Result<void>::make_ok();
+    }
+    void set_role(nd::DtlsRole) noexcept override {}
+    void set_peer_fingerprint(std::string, std::vector<std::uint8_t>) noexcept override {}
+    std::size_t feed_inbound(std::span<const std::uint8_t>,
+                             const nd::DtlsAddr&) noexcept override {
+        return 0;
+    }
+    std::vector<nd::DtlsRecord> take_outbound() noexcept override { return {}; }
+    void tick() noexcept override {}
+
+    nd::DtlsState state() const noexcept override { return nd::DtlsState::Connected; }
+    bool is_connected() const noexcept override { return true; }
+    const nd::Fingerprint& local_fingerprint() const noexcept override {
+        return fingerprint_;
+    }
+    std::optional<nd::SrtpKeyingMaterial>
+    srtp_keying_material() const noexcept override {
+        return std::nullopt;
+    }
+
+private:
+    nd::Fingerprint fingerprint_{"sha-256", {}, {}, ""};
+};
+
+class ConnectedDtlsFactory final : public nd::IDtlsSessionFactory {
+public:
+    std::string_view id() const noexcept override { return "connected-dtls"; }
+    std::string_view display_name() const noexcept override {
+        return "Connected DTLS session (test)";
+    }
+    std::unique_ptr<nd::IDtlsSession> create(const nd::DtlsConfig&) const override {
+        return std::make_unique<ConnectedDtlsSession>();
+    }
+};
+
+// ---------------------------------------------------------------------------
 // A minimal video codec
 // ---------------------------------------------------------------------------
 
@@ -336,6 +399,9 @@ protected:
         static FakeIceFactory ice_factory;
         PluginRegistry::instance().register_ice_transport("fake-ice", &ice_factory);
 
+        static ConnectedDtlsFactory dtls_factory;
+        PluginRegistry::instance().register_dtls_session("connected-dtls", &dtls_factory);
+
         static FakeVideoCodecFactory codec_factory;
         PluginRegistry::instance().register_video_codec("rtx-test-codec", &codec_factory);
     }
@@ -343,6 +409,11 @@ protected:
     EngineConfig make_config() {
         EngineConfig cfg{};
         cfg.transport_name = "fake-ice";
+        // The video send path refuses to emit a packet until the DTLS
+        // session reaches `Connected`; the fake reports the handshake as
+        // complete (and exports no SRTP keys, so the traffic stays in
+        // cleartext).
+        cfg.dtls_name = "connected-dtls";
         cfg.video_receiver_name = "reference";
         cfg.video_sender_name   = "reference";
         cfg.video_codec_name    = "rtx-test-codec";

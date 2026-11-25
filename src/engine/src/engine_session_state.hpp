@@ -28,6 +28,8 @@
  */
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -37,6 +39,11 @@
 #include <nimrtc/plugins/session.hpp>
 #include <nimrtc/sdp/session_description.hpp>
 #include <nimrtc/web_transport/web_transport_session_iface.hpp>
+
+#include "engine_call_state.hpp"
+#include "engine_ice_recovery.hpp"
+#include "engine_path_change.hpp"
+#include "engine_turn_credentials.hpp"
 
 namespace nimrtc::engine::detail {
 
@@ -118,6 +125,86 @@ struct SessionState {
     plugins::IceState last_ice_state = plugins::IceState::Disconnected;
     bool ice_connected_once = false;
     bool ice_rehandshake_armed = false;
+
+    // ---- ICE recovery -> automatic restart (v1.4 N3, additive) ----------
+    // The engine-driven reconnection policy (ADR-031).  The machine is
+    // owned here and driven by poll_ice_recovery() on the tick thread — an
+    // independent state machine that shares only the `ice_connected_once`
+    // gate with the flap detector above.  `ice_recovery_last_state` is this
+    // machine's own observation register, so it never disturbs
+    // `last_ice_state` (the flap detector's).
+    IceRecovery ice_recovery;
+    IceRecoveryPolicy ice_recovery_policy = IceRecoveryPolicy::kAuto;
+    plugins::IceState ice_recovery_last_state = plugins::IceState::Disconnected;
+    bool ice_recovery_terminal_reported = false;
+
+    // ---- TURN credentials -> provider seam (v1.4 N7, ADR-032) ----------
+    // The bookkeeping for the host's `EngineConfig::turn_credentials`
+    // provider: what the last pull produced and how the transport answered
+    // it.  `has_static_turn_server` records that the host called
+    // `add_turn_server()` — a static server list wins over the provider,
+    // so the provider is never consulted for that engine.
+    TurnCredentialsState turn_credentials;
+    bool has_static_turn_server = false;
+
+    // ---- Path change -> report (v1.4 N8, additive) -----------------------
+    // The ledger and the flat `Stats` projection for "the last time the
+    // path changed".  `path_change` holds the pair the engine was on
+    // **before** the current restart (recorded at each report point, reset
+    // only at open()/close()); `last_path_change_*` is the flat-Stats
+    // projection of the last reported change, so a host that only polls
+    // `stats()` can still tell "the path changed since I last looked".
+    PathChangeTracker path_change;
+    std::string last_path_change_reason;
+    std::optional<IceCandidatePairInfo> last_path_change_new_pair;
+
+    // ---- Call state -> one lifecycle report (v1.4 D7, additive) ----------
+    // The D7 confluence point: a host sees the whole call lifecycle in one
+    // callback (`set_on_call_state`) instead of assembling it from
+    // `set_on_state_change` / `set_on_error` / `Stats` polling.  The machine
+    // is pure state (no clock / transport); the N3 / N8 details the reports
+    // carry are read from the collaborators above at report time.
+    CallStateMachine call_state;
+    // ---- ICE failure -> stop sending (Q5 finding, v1.3 plan) -----------
+    //
+    // When ICE gives up (`Failed`), libjuice clears its selected pair and
+    // every `ice_t_->send()` is refused with "Send while ICE is not
+    // connected".  The Q5 soak measured that refusal **26 627 times** at
+    // full media rate, for the remaining 21 minutes of a 24 h run: a
+    // failed call that still costs the host a full-rate send loop.
+    //
+    // The engine therefore stops *producing* media once the transport is
+    // gone, and says so **once** rather than once per packet.
+    //
+    // The condition is deliberately *not* "ICE is not connected": the
+    // window between `open()` and the first successful connectivity
+    // check is a normal phase in which the host may already be feeding
+    // PCM, and rejecting it there would be a behaviour change the host
+    // cannot see.  Only a transport that **was** connected and then
+    // stopped is treated as dead.
+    //
+    // The two flags below are **atomic** because the gate is read from
+    // the host's thread (`send_audio()`) as well as from the engine
+    // thread (`tick()`).  A `bool` written by one thread and read by
+    // another is a data race, and this is a flag whose whole job is to
+    // be read on the hot path.
+    //
+    // `ice_ever_connected` is the gate's own record, deliberately
+    // **separate** from `ice_connected_once` above: that field belongs
+    // to the rehandshake logic, which observes the ICE state
+    // *transitions* from `poll_ice_flap_for_rehandshake()`.  The gate
+    // needs a simpler question -- "has this transport ever been up?" --
+    // and it must be answerable at the moment the transport dies.
+    std::atomic<bool> ice_send_blocked{false};
+    // "The transport has been up at least once."
+    std::atomic<bool> ice_ever_connected{false};
+    // The latch above fires once per outage; this one counts the
+    // outages, so a host (and the soak) can tell "the link flapped
+    // twice" from "the link flapped once and stayed down".
+    //
+    // Also atomic: `stats()` may be called from the host's thread while
+    // the engine thread is updating it.
+    std::atomic<std::uint32_t> ice_send_blocked_events{0};
 
     // ---- DataChannel DTLS-transport cookie (v1.x follow-up) ------------
     //

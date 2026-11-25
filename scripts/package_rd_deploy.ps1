@@ -183,6 +183,32 @@ if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
 New-Item -ItemType Directory -Path $OutDir | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $OutDir 'crt') | Out-Null
 
+# The DTLS certificate.  It is looked up **relative to the working
+# directory** first (`certs/server-ecc.pem` next to the executable), and
+# the absolute fallback (`NIMRTC_WOLFSSL_CERT_DIR`) points into the
+# *build machine's* source tree -- which does not exist on the
+# operator's machine.  Without this copy the operator gets a bundle
+# whose signalling works, whose pairing works, whose ICE candidates
+# gather, and which then dies at the handshake with
+# "wolfSSL_CTX setup failed": the one failure the operator cannot
+# diagnose from the message.
+$certSrc = Join-Path $BinDir 'certs'
+foreach ($pem in 'server-ecc.pem', 'ecc-key.pem') {
+    $src = Join-Path $certSrc $pem
+    if (-not (Test-Path $src)) {
+        throw ("Missing $src`n" +
+               "The DTLS certificate is part of this bundle: without it the " +
+               "handshake fails on the operator's machine with " +
+               "'wolfSSL_CTX setup failed'.  Build the tree first (CMake " +
+               "stages the certs next to the executables).")
+    }
+}
+$certDst = Join-Path $OutDir 'certs'
+New-Item -ItemType Directory -Path $certDst | Out-Null
+foreach ($pem in 'server-ecc.pem', 'ecc-key.pem') {
+    Copy-Item (Join-Path $certSrc $pem) $certDst -Force
+}
+
 foreach ($exe in 'rd_device.exe', 'rd_viewer.exe') {
     $src = Join-Path $BinDir $exe
     if (-not (Test-Path $src)) { throw "Missing $src" }

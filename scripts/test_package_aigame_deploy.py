@@ -77,6 +77,7 @@ def run_package(bin_dir: Path, out_dir: Path, crt_dir: Path,
 
 def make_tree(root: Path, *, with_msquic: bool = True,
               with_agents: bool = True,
+              with_certs: bool = True,
               binary_mtime: float | None = None) -> tuple[Path, Path]:
     """A build tree with the media binaries (and optionally msquic).
 
@@ -94,6 +95,15 @@ def make_tree(root: Path, *, with_msquic: bool = True,
             os.utime(path, (binary_mtime, binary_mtime))
     if with_msquic:
         (bin_dir / "msquic.dll").write_bytes(b"MZ fake dll")
+
+    # The DTLS certificate.  CMake stages it next to the executables,
+    # and the bundle has to carry it: the operator's machine has no
+    # source tree for the absolute fallback to find.
+    if with_certs:
+        cert_dir = bin_dir / "certs"
+        cert_dir.mkdir(parents=True, exist_ok=True)
+        for pem in ("server-ecc.pem", "ecc-key.pem"):
+            (cert_dir / pem).write_bytes(b"-----BEGIN CERTIFICATE-----\n")
 
     agent_bin_dir = examples / "demo-agent-realtime" / "Release"
     agent_bin_dir.mkdir(parents=True, exist_ok=True)
@@ -144,6 +154,18 @@ def main() -> int:
                      "BUNDLE-INFO.txt", "AIGAME-README.md"):
             failures += not check(f"{name} is in the bundle",
                                   (out_dir / name).exists())
+
+        # ---- The DTLS certificate travels with the bundle ------------------
+        # Without it the operator's machine fails at the handshake with
+        # "wolfSSL_CTX setup failed" -- after the signalling, the pairing
+        # and the ICE gathering all succeeded.
+        for pem in ("server-ecc.pem", "ecc-key.pem"):
+            failures += not check(
+                f"certs/{pem} is in the bundle",
+                (out_dir / "certs" / pem).exists())
+        failures += not check(
+            "the archive carries the DTLS certificate",
+            (out_dir / "certs" / "server-ecc.pem").exists())
         for exe in AGENT_EXES:
             failures += not check(f"{exe} is in the bundle",
                                   (out_dir / exe).exists())
@@ -204,6 +226,22 @@ def main() -> int:
                               proc.stdout + proc.stderr)
         failures += not check("the refusal names the missing binaries",
                               "demo-agent-realtime" in (proc.stdout + proc.stderr),
+                              proc.stdout + proc.stderr)
+        failures += not check("no bundle was left behind",
+                              not (out_dir / "rd_viewer.exe").exists())
+
+    # ------------------------------------------------------------------
+    section("a tree without the DTLS certificate is refused")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bin_dir, agent_bin_dir = make_tree(root, with_certs=False)
+        crt_dir = make_crt(root)
+        out_dir = root / "out"
+        proc = run_package(bin_dir, out_dir, crt_dir, agent_bin_dir)
+        failures += not check("the script refused", proc.returncode != 0,
+                              proc.stdout + proc.stderr)
+        failures += not check("the refusal names the certificate",
+                              "server-ecc.pem" in (proc.stdout + proc.stderr),
                               proc.stdout + proc.stderr)
         failures += not check("no bundle was left behind",
                               not (out_dir / "rd_viewer.exe").exists())

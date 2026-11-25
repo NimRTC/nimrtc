@@ -2510,7 +2510,45 @@ See §8.3 — `remote_audio_format()`.
 
 ---
 
-## 18. See also
+## 18. 安装树里的视频依赖（what the install tree provides for video, v1.4 / ADR-038）
+
+安装出来的 SDK bundle（`find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`）
+现在提供**完整的视频链**，一个 h264 + headless sink 的宿主可以直接链通
+（0 个 LNK2019；ADR-038）。bundle 在 `<prefix>/lib/` 里装了什么：
+
+- **`nimrtc_nvcodec`** —— 共享的 NVIDIA / VideoToolbox 编解码适配器 archive，
+  公开头（`<nimrtc/nvcodec/nv_backends.hpp>`、`nv_codec_kind.hpp`）随 bundle
+  安装。`nimrtc_h264` 用 PUBLIC 链它，所以平铺链上它排在 `h264` 之后。
+- **三个 OpenH264 archive** —— `nimrtc_vendor_openh264_encoder.lib` /
+  `_decoder.lib` / `_common.lib`，顺序由 `<prefix>/lib/openh264_link_order.txt`
+  清单写明（encoder / decoder / common），config 按清单读，不靠
+  `find_library()` 的返回顺序。
+- **Windows 系统库 `d3d11` / `dxgi`** —— D3D11 视频 sink 与 NVENC 路径需要，
+  随 `ws2_32 bcrypt iphlpapi winmm crypt32` 一起补在链尾。
+
+宿主怎么用：`EngineConfig` 里 `video_source_name = "memory"` +
+`video_sink_name = "headless"` + `video_codec_name = "h264"`（§17），或者
+直接注册插件 / 探针：
+
+```cpp
+#include <nimrtc/h264/codec_plugin.hpp>
+#include <nimrtc/h264/hw_backends.hpp>
+#include <nimrtc/nvcodec/nv_backends.hpp>
+#include <nimrtc/video_sink/video_sink.hpp>
+
+nimrtc::h264::register_default_plugins();
+const bool nvenc_ok =
+    nimrtc::nvcodec::nvenc_codec_available(nimrtc::nvcodec::NvCodec::kH264);
+auto sink = nimrtc::video_sink::create_headless_sink(sink_cfg);
+```
+
+NVIDIA 的驱动 import lib（`nvidia-encode` / `nvidia-video`）**不需要**：
+NVENC / NVDEC 用 `LoadLibrary` + `GetProcAddress` 动态加载驱动，没有链接期
+引用（ADR-038 决策四）。
+
+---
+
+## 19. See also
 
 - `engine_config.md` — full field reference for `EngineConfig`.
 - `plugin_author_guide.md` — how to write your own plugin (DTLS,

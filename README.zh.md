@@ -25,9 +25,17 @@
 > 的祖先，并确认 README 已经描述了正在发布的版本。
 > 见 [CHANGELOG.md](CHANGELOG.md) `## [1.3.1]` 与 `## [1.3.0]`。
 >
-> **当前 `main`（v1.3.1 之后，尚未发版）**：主干上挂着 **v1.4** 计划
-> （Track N / D —— 真实 TURN + TLS、macOS 下游验证、原生 coturn CI 任务，以及 H.265
-> 参数集断言的软件半边）—— 见 [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md)。
+> **当前 `main`（v1.3.1 之后，尚未发版）**：主干处在 **`v1.4.0` 周期**
+> （`NIMRTC_API_VERSION` = 10400，`NIMRTC_API_VERSION_PRE_RELEASE` = `"dev"`），挂着 **v1.4** 计划
+> —— 见 [`docs/plan/v1.4-plan.md`](docs/plan/v1.4-plan.md)。
+>
+> **不会有 `v1.3.2`。** v1.3.1 之后落地的改动动了公开表面：
+> `plugins::VideoReceiverConfig` 移除了 `h264_annex_b`（已弃用、现在是空操作 —— 接收端
+> 无条件把单 NAL 包重新加上 Annex-B 起始码），新增 `h264_bare_nalus`；
+> `EngineConfig::VideoReceiverTuning` 也新增了同名键。按
+> [RELEASING.md](RELEASING.md) §1.1 这属于 breaking，因此属于 `1.4.0` 线。
+> 下一个发布是 **`v1.4.0`**，在计划里的 M3 达成时发布（Track N + Track D）。
+>
 > **v1.3.x 的 bundle 里已经包含** NimRTC 自己的头文件、静态库与 `NimRTCConfig.cmake`，
 > 因此从下载的 bundle 就能直接 `find_package(NimRTC)`。
 > 详见 [当前进度](#当前进度v131-已发布--main-领先) 与 [路线图](#路线图)。

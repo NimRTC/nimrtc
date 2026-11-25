@@ -2589,7 +2589,48 @@ NVENC / NVDEC 用 `LoadLibrary` + `GetProcAddress` 动态加载驱动，没有�
 
 ---
 
-## 19. See also
+## 19. 安装树的模块闭包（what the install tree's link closure is, v1.4 / ADR-039）
+
+「链接闭包」= 下游宿主链 `nimrtc::engine` 时，**必须**出现在同一条链接行上的
+全部 `nimrtc_*` 静态 archive。它由三个来源的不动点算出：引擎自己的 PRIVATE
+`nimrtc::X` 链接、每个模块自己的 `nimrtc::X` 链接、以及递归展开到不动点
+（排除 `core` / `plugins` / `vendor` —— 那三个不是 module archive）。
+
+装出来的 bundle 里，`lib/` 装了什么由 `cmake/NimRTCInstall.cmake` 的
+`_nimrtc_install_shorts` 决定，config 链了什么由
+`cmake/NimRTCConfig.cmake.in` 的 `_nimrtc_module_shorts` 决定 —— 两份清单
+必须**都**覆盖闭包，缺一个下游宿主就撞 LNK2019 / LNK2001。本仓库树上的
+闭包是 42 个模块。
+
+```text
+tools/check_install_tree_module_closure.py   # 只读仓库树即可判定，不需要构建
+```
+
+它读仓库树、算闭包、比对两份清单，缺口**点名模块 + 点名清单**。同一棵树跑
+两次输出一致（判定确定，不触网、不调模型、不依赖随机与时间）。
+
+闭包里有两个容易漏的成员，它们不是「多一个 archive」那么简单：
+
+- **`pacing`** —— `nimrtc_sched` PRIVATE 链 `nimrtc::pacing`，而
+  `pacing::TokenBucket` 的方法（`set_config` / `available` / `try_consume` /
+  `refund` / `reset`）是**宿主自己**会调的。所以它必须在链上，且在 `sched`
+  **之后**（GNU 静态链接器从左往右扫）。
+- **闭包模块自己的 PRIVATE 系统库** —— 装好的 archive 保留了目标代码，但
+  **丢掉了链接属性**。所以 config 在 Windows 上除了 `ws2_32 bcrypt iphlpapi
+  winmm crypt32 d3d11 dxgi`，还要补 Media Foundation 那一组
+  （`windowsapp mf mfplat mfreadwrite mfuuid`，`video_capture` 需要）与
+  `ole32`（`audio_device` 的 WASAPI 需要）—— 少了它们，下游宿主链上
+  `video_capture` 就是 12 个 LNK2019（`MFStartup` / `MFCreateMediaType` /
+  `MFVideoFormat_NV12` …）。
+
+  运行时还有一件：安装树把 MsQuic 装在 `<prefix>/bin/msquic.dll`（它是动态
+  库，`lib/msquic.lib` 只是导入桩）。宿主跑起来时那个 `bin/` 得在 `PATH`
+  上，否则进程以 `0xC0000135`（`STATUS_DLL_NOT_FOUND`）起不来 —— 那是
+  「找不到 DLL」，不是「链接失败」。
+
+---
+
+## 20. See also
 
 - `engine_config.md` — full field reference for `EngineConfig`.
 - `plugin_author_guide.md` — how to write your own plugin (DTLS,

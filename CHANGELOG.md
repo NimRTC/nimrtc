@@ -755,6 +755,29 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   frame; it opened a blank window and failed.  With `BufferCount = 1` the
   swap chain is created and the viewport really does show the picture.
 
+- **The install tree's link closure is now a verified fact (`slice
+  v1-install-tree-module-closure`, ADR-039).**  The staged bundle used to
+  drift between what it *installs* (`_nimrtc_install_shorts`) and what the
+  installed config *chains* onto `nimrtc::engine` (`_nimrtc_module_shorts`);
+  N6's execution leg surfaced the cost: 14 unresolved externals — 9 module
+  registrars (`h265`/`av1`/`vp9`/`video_capture`/`video_bitrate_control`/
+  `rd_input`/`rd_qoe`/`video_sync`/`dtmf`) plus 5 `pacing::TokenBucket`
+  methods.  Both short lists now cover the full engine link closure (42
+  modules), including `pacing` and the eleven newly chained modules, in
+  static-link order (`pacing` after `sched`, codecs before `nvcodec`, the
+  rest grouped as the engine groups them).  `tools/check_install_tree_module_closure.py`
+  computes the closure from the repo tree alone (no build, no network,
+  deterministic) and fails the CI when either list misses a closure module —
+  naming the module and the list; its pinned self-test proves it can fail,
+  not just pass.  The acceptance test stages a clean prefix and links a
+  full-closure host against it (0 LNK2019).  Chaining the closure also
+  surfaced that the closure is not only module archives: a closure module's
+  own **private** system libraries are lost the same way, so the installed
+  config now re-attaches the Media Foundation group (`mf` / `mfplat` /
+  `mfreadwrite` / `mfuuid` / `windowsapp`, for `video_capture`) and `ole32`
+  (for `audio_device`) alongside the existing `d3d11`/`dxgi` — without them
+  the "the staged bundle always links" promise was false.
+
 - **The install tree now links a video host (`slice v1-install-tree-video-deps`,
   ADR-038).**  The staged bundle (installed by `cmake --install` and consumed
   via `find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`) used to drop

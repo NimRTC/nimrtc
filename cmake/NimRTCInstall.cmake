@@ -117,6 +117,14 @@ set(_nimrtc_install_shorts
   session
   assembly
   datachannel
+  # v1-install-tree-module-closure (ADR-039): the DTMF module (engine
+  # PRIVATE, session-capability plan D1) and the video bitrate-control /
+  # capture modules (engine PRIVATE).  video_capture links
+  # nimrtc::video_frame, so it must come before video_frame on the flat
+  # chain (GNU static linker resolves symbols left-to-right).
+  dtmf
+  video_bitrate_control
+  video_capture
   video_frame
   video_payload
   video_jb
@@ -127,6 +135,14 @@ set(_nimrtc_install_shorts
   # The module builds on every platform (NVIDIA / VideoToolbox paths are
   # dynamic-load or "unavailable" stubs off their host), so the install
   # rule needs no platform branch.
+  #
+  # v1-install-tree-module-closure (ADR-039): the H.265 / AV1 / VP9 codec
+  # modules also link `nimrtc::nvcodec` (shared NVENC / NVDEC backends), so
+  # they must come before nvcodec too — grouped with h264, alphabetical
+  # among the codecs.
+  av1
+  h265
+  vp9
   nvcodec
   video_sdp_attributes
   video_source
@@ -135,6 +151,10 @@ set(_nimrtc_install_shorts
   rtx
   video_pipeline
   video_sink
+  # v1-install-tree-module-closure (ADR-039): the render-clock module
+  # (engine PRIVATE, remote-desktop plan R3).  It follows video_sink exactly
+  # as the engine groups it.
+  video_sync
   audio_device
   rd_input
   rd_qoe

@@ -229,8 +229,11 @@ int main() {
            NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION);
     const std::uint32_t max = driver_max_version();
     if (max) {
-        printf("the installed driver supports up to NVENCAPI %u.%u\n",
-               (max >> 4) & 0xFF, max & 0x0F);
+        // The raw word is printed too: the human-readable rendering below
+        // is a *decoding* of it, and a reader who suspects the decoding is
+        // wrong can check it against the hex.
+        printf("the installed driver supports up to NVENCAPI %u.%u (raw 0x%08X)\n",
+               (max >> 4) & 0xFF, max & 0x0F, max);
     } else {
         printf("the driver's maximum version could not be queried\n");
     }

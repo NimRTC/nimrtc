@@ -50,6 +50,7 @@ Write an ADR when a decision:
 | [ADR-029](ADR-029-engine-driven-audio-device-layer.md) | 引擎驱动音频设备层 — 音频设备的注册表槽位与引擎侧设备泵 | v1.4 (D1) |
 | [ADR-030](ADR-030-engine-driven-video-renderer.md) | 引擎驱动视频渲染器 — `video_sink_name = "auto"` 的平台解析与降级 | v1.4 (D2) |
 | [ADR-039](ADR-039-viewport-window-opt-in.md) | 渲染器自建窗口是显式 opt-in（修订 ADR-030 决策三） | v1.4 (D2) |
+| [ADR-040](ADR-040-audio-device-plugin-registry.md) | 音频设备后端并入 PluginRegistry — 设备接缝与其它接缝同构（原 ADR-028，撞号后重编） | v1.4 (D1) |
 
 ### Reserved numbers
 

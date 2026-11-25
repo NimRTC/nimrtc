@@ -23,7 +23,11 @@ name: hardware
 #      stamp and the tree's git provenance;
 #   2. `ctest -R test_engine_video_hw_loopback` — the *engine-level*
 #      test that drives two `NimRTCEngine`s with `video_codec_backend =
-#      "hardware"` and asserts `Stats::video_codec_hardware_accelerated`.
+#      "hardware"` and asserts `Stats::video_codec_hardware_accelerated`;
+#   3. `ctest -R test_engine_video_hw_h265` — the *engine-level*
+#      H.265 parameter-set-switch test (v1.3 plan Q1b), which asserts
+#      that a mid-stream resolution change decodes on a warm NVDEC
+#      session with no key-frame round-trip.
 #
 # The record is the evidence.  A run on a runner that has lost its GPU
 # is a **SKIPPED** record, and `--require-hardware` makes that a red
@@ -33,6 +37,27 @@ name: hardware
 # The job only runs on the self-hosted runner (label `gpu-nvenc`): on a
 # hosted runner it would skip, and a green check that means "nothing
 # ran" is worse than no check at all.
+#
+# **This job uses no GitHub actions at all.**  Not "no actions for now" --
+# a standing rule, because the runner's action download is the one
+# failure this job cannot reach from the workflow file.  The runner
+# downloads a job's actions *before any step runs*, with its own
+# timeout and its own retry count, and neither is configurable from
+# the workflow.  On this runner that download failed, and the job
+# produced nothing at all:
+#
+#   ##[warning]Failed to download action
+#   'https://codeload.github.com/actions/upload-artifact/zip/...'.
+#   Error: The request was canceled due to the configured
+#   HttpClient.Timeout of 100 seconds elapsing.
+#   ##[error]Failed to download archive ... after 3 attempts.
+#
+# Every step after it was skipped, because the actions are fetched up
+# front.  So the rule is: **a `uses:` in this file is a dependency the
+# runner may fail to satisfy before the job starts, and this job must
+# not have any.**  The two actions it used to have are replaced --
+# `actions/checkout` by the job's own fetch, `ilammy/msvc-dev-cmd` and
+# `actions/upload-artifact` by `tools/run_hardware_job.py`.
 #
 # **There is deliberately no `pull_request` trigger.**  A PR trigger
 # would put a job that needs a runner the repository does not have
@@ -73,83 +98,251 @@ jobs:
     # must not pick this job up.  A hosted runner never matches, so the
     # job stays "queued" rather than pretending to pass.
     runs-on: [self-hosted, windows, gpu-nvenc]
-    timeout-minutes: 60
+    # Generous, because the vendored trees are the slow part of this
+    # job and they are fetched over a link that is not always fast: the
+    # largest of them is over 100 MB, and a run that fetched seven of
+    # the fourteen in an hour was cancelled here before it ever
+    # reached the build.  This is an evidence collector on a
+    # self-hosted runner -- it is not a PR gate, and nothing waits on
+    # it -- so a long timeout costs nothing but wall-clock, while a
+    # short one makes the job unrunnable on the machine it is meant
+    # for.
+    timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-          fetch-depth: 0
-          ref: ${{ inputs.ref || github.sha }}
+      - name: Fetch the repository (with retries)
+        # Not `actions/checkout`.  The checkout retries a cut-off
+        # transfer three times, which is not enough for a link that
+        # drops long ones, and its failure is blunt -- 'Failed to
+        # connect to github.com port 443' -- and the job ends there
+        # with nothing built and no evidence recorded.
+        #
+        # So the fetch is done here, with a bounded retry around it.
+        # `git init` rather than `git clone`: an init leaves the
+        # repository *in place* when the transfer is cut off, so the
+        # objects that did arrive stay and the next attempt asks only
+        # for the missing ones.  A clone deletes the whole directory
+        # on failure, and on this link the first attempt routinely dies
+        # with 'early EOF' after ten minutes.
+        #
+        # The fetch is shallow: the evidence record resolves the commit
+        # with `git rev-parse HEAD`, which a shallow fetch answers, and
+        # the full history is a large transfer that this link makes
+        # very slow.
+        #
+        # `shell: powershell` -- Windows PowerShell, which every
+        # Windows runner has.  This job asked for `pwsh` and the
+        # runner answered 'pwsh: command not found': PowerShell 7 is
+        # not installed on a self-hosted Windows machine by default --
+        # it is on the hosted images, which is why every other
+        # workflow in the tree can ask for it.
+        shell: powershell
+        run: |
+          $ref = "${{ inputs.ref || github.sha }}"
+          $url = "https://github.com/${{ github.repository }}.git"
+          cd $env:GITHUB_WORKSPACE
 
-      - name: Set up MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+          # Windows PowerShell turns a native command's stderr into
+          # *error records*, and the runner runs every step with
+          # `$ErrorActionPreference = 'Stop'` -- so a command that
+          # writes to stderr becomes a terminating error even when
+          # its exit code says the step should carry on.  That is not
+          # a subtlety: `git remote add origin` on an existing origin
+          # writes 'error: remote origin already exists.' to stderr
+          # and, with the error redirected, took the whole step down
+          # with it.
+          #
+          # So the step runs with the preference relaxed.  The exit
+          # codes are still checked -- the loops below test
+          # `$LASTEXITCODE` -- and the failure paths still `exit 1`.
+          # What is given up is only the *termination* of a command
+          # that was expected to be able to complain.
+          $ErrorActionPreference = 'Continue'
+
+          # A local clone of this repository, on this same machine,
+          # has the commit already -- and the runner and the tree it
+          # builds usually are the same machine.  Copying from it is
+          # the difference between a job that runs and a job that
+          # waits on a link that is not always there: eight attempts
+          # at this repository's own fetch have failed in a row with
+          # 'Failed to connect to github.com port 443'.
+          #
+          # The mirror is only used for a ref it can *prove* it has:
+          # a commit is checked for as an object, and a branch is
+          # resolved in the mirror and then checked for.  A mirror
+          # that does not have it is refused, not substituted.
+          # The candidates are named, not searched for: a scan is
+          # convenient but it depends on the shape of the machine,
+          # and a job that cannot find its mirror fails in a way that
+          # looks like the network is down.  The list is a starting
+          # point -- each one is *checked* before it is used, so a
+          # candidate that does not exist, or does not have the ref,
+          # is simply passed over.
+          $candidates = @(
+            "D:\MyOpen\NimRTC",
+            "D:\MyOpen\NimRTC-followup",
+            "C:\actions-runner\_work\nimrtc\nimrtc"
+          )
+          $copied = $false
+          foreach ($m in $candidates) {
+            if (-not (Test-Path (Join-Path $m ".git"))) {
+              Write-Host ("mirror {0}: not a clone" -f $m)
+              continue
+            }
+            $have = $null
+            if ($ref -match '^[0-9a-f]{40}$') {
+              # A mirror that does not have the commit says so on
+              # stderr.  That is the *expected* answer for a mirror
+              # that is not the right one, so the answer is taken
+              # from the exit code and the complaint is discarded --
+              # `2>&1` and the exit code, rather than a redirection
+              # that turns the complaint into a terminating error
+              # under the runner's `$ErrorActionPreference`.
+              git -C $m cat-file -e "$ref" 2>&1 | Out-Null
+              if ($LASTEXITCODE -eq 0) { $have = $ref }
+            } else {
+              $have = (git -C $m rev-parse $ref 2>&1)
+              if ($LASTEXITCODE -ne 0) { $have = $null }
+            }
+            if (-not $have) {
+              Write-Host ("mirror {0}: does not have {1}" -f $m, $ref)
+              continue
+            }
+            Write-Host "using the local mirror $m at $have"
+            git init
+            git fetch --no-tags "$m" "$have"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host ("mirror {0}: the fetch failed" -f $m)
+              continue
+            }
+            git checkout --force FETCH_HEAD
+            # The runner's workspace already has an `origin`, so
+            # `remote add` is the wrong command: it fails with
+            # 'error: remote origin already exists.' and, its stderr
+            # being an error record under the runner's
+            # `$ErrorActionPreference`, took the step down.  The
+            # remote is *replaced* instead, so the url is the one the
+            # job asked for either way.
+            $remotes = @(git remote 2>&1)
+            if ($remotes -contains 'origin') {
+              git remote set-url origin $url
+            } else {
+              git remote add origin $url
+            }
+            $copied = $true
+            break
+          }
+          if ($copied) {
+            git submodule sync --recursive
+            exit 0
+          }
+          Write-Host "no local mirror had $ref -- fetching from the network"
+
+          # No mirror had it.  Fetch from the network, with a bounded
+          # retry around it.  'git init' rather than 'git clone': an
+          # init leaves the repository *in place* when the transfer is
+          # cut off, so the objects that did arrive stay and the next
+          # attempt asks only for the ones that are missing.  A clone
+          # deletes the whole directory on failure, and on this link
+          # the first attempt routinely dies with 'early EOF' after
+          # ten minutes.
+          # The `origin` remote is *replaced* rather than added, so the
+          # command does not complain about an existing one -- and the
+          # complaint, its stderr being an error record under the
+          # runner's `$ErrorActionPreference`, took the step down.
+          $remotes = @(git remote 2>&1)
+          if ($remotes -contains 'origin') {
+            git remote set-url origin $url
+          } else {
+            git remote add origin $url
+          }
+          $attempts = 8
+          for ($i = 1; $i -le $attempts; $i++) {
+            Write-Host "fetch attempt $i/$attempts"
+            git -c http.version=HTTP/1.1 `
+                -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=120 `
+                fetch --depth 1 --no-tags origin $ref
+            if ($LASTEXITCODE -eq 0) {
+              git checkout --force FETCH_HEAD
+              git submodule sync --recursive
+              exit 0
+            }
+            Start-Sleep -Seconds 10
+          }
+          Write-Error "could not fetch $ref in $attempts attempts"
+          exit 1
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+
+      - name: Fetch the vendored submodules (with retries)
+        # One submodule at a time, each with a bounded retry around it.
+        # The step also fails if a submodule ends up *empty*, which is a
+        # silent failure the build would only surface much later.
+        #
+        # The fetch tries the runner's local object cache before the
+        # network: '.git/modules' survives from one job to the next --
+        # the fetch above cleans the worktree, not the object cache --
+        # so on a runner that has been here before, most of the
+        # vendored trees are already on disk.
+        shell: powershell
+        run: |
+          python tools/fetch_submodules.py --retries 5
+        env:
+          PYTHONIOENCODING: utf-8
 
       - name: Stamp the machine (driver + GPU)
         # The evidence record carries its own stamp; printing it up front
         # keeps the job log self-contained when something goes wrong
         # *before* the harness runs.
-        shell: pwsh
+        shell: powershell
         run: |
           nvidia-smi --query-gpu=name,driver_version --format=csv
 
-      - name: Configure (NVENC + NVDEC on, examples on)
-        shell: pwsh
+      - name: Build, run and record the evidence
+        # One step, and no `uses:`.
+        #
+        # Not `ilammy/msvc-dev-cmd` and not `actions/upload-artifact`:
+        # the runner downloads a job's actions *before any step runs*,
+        # in a step called "Prepare all required actions", and that
+        # download's timeout and retry count are the runner's, not the
+        # workflow's -- there is no setting in the workflow file that
+        # reaches them.  On this runner the download of
+        # `actions/upload-artifact` timed out at 100 s and then failed
+        # to resolve `codeload.github.com`, and the job ended there:
+        #
+        #   ##[error]Failed to download archive
+        #   'https://codeload.github.com/actions/upload-artifact/zip/...'
+        #   after 3 attempts.
+        #
+        # Every step after it -- the build, the harness, the record --
+        # was skipped, because the actions are fetched up front.  The
+        # run produced nothing at all, and the failure said nothing
+        # about the GPU, the codecs or the tests the job exists to
+        # prove.
+        #
+        # So this job uses no actions at all.  That is the only fix
+        # that reaches the failure: there is nothing to download up
+        # front, so there is nothing that can fail there.
+        #
+        # `tools/run_hardware_job.py` does what the two actions did:
+        # it runs `vcvars64.bat` and imports the environment it sets
+        # (which is what `msvc-dev-cmd` does), and it publishes the
+        # evidence record.  It has to be one step, because the MSVC
+        # environment has to survive into the build -- a step boundary
+        # would drop it, which is why the action existed in the first
+        # place.
+        #
+        # The record is published two ways, because there is no REST
+        # endpoint that *creates* an artifact (the API can list, get
+        # and delete them, but not create): into the step summary,
+        # which is rendered on the run page and archived with the run,
+        # and into the job outputs, which the API exposes on the run.
+        shell: powershell
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-            -DNIMRTC_PLUGINS_NVENC=ON `
-            -DNIMRTC_PLUGINS_NVDEC=ON `
-            -DNIMRTC_BUILD_EXAMPLES=ON `
-            -DNIMRTC_BUILD_TESTS=ON
-
-      - name: Build hw-e2e + the engine-level hardware test
-        shell: pwsh
-        run: |
-          cmake --build build --config Release -j --target hw-e2e test_engine_video_hw_loopback
-
-      - name: The codec-level end-to-end run (recorded evidence)
-        id: hw_e2e
-        shell: pwsh
-        run: |
-          # The binary was built above, so no `--build` here: the tool
-          # would otherwise re-configure `build/` without the module
-          # options this job set, and under a different configuration.
-          # `--require-hardware`: a runner that lost its GPU must fail
-          # here, not skip — this job exists to prove the GPU path ran.
-          python tools/run_hardware_e2e.py --require-hardware `
-            --binary build/examples/Release/hw-e2e.exe `
-            --config Release
+          python tools/run_hardware_job.py `
+            --work $env:GITHUB_WORKSPACE `
+            --out-dir build/hardware `
+            --summary-file $env:GITHUB_STEP_SUMMARY `
+            --output-file $env:GITHUB_OUTPUT `
+            --expect-green
         env:
           PYTHONIOENCODING: utf-8
-
-      - name: The engine-level hardware test
-        # ctest's exit code is the verdict: the test skips only when the
-        # host has no hardware encoder, which `--require-hardware` above
-        # has already turned into a failure — so a green ctest here means
-        # the engine ran the pinned hardware path end to end.
-        shell: pwsh
-        run: |
-          ctest --test-dir build -C Release -R test_engine_video_hw_loopback `
-            --output-on-failure
-
-      - name: Surface the evidence summary
-        if: always()
-        shell: pwsh
-        run: |
-          # Write the summary into the Step Summary so the run page shows
-          # the window (driver, ref, verdict) without downloading the
-          # artifact.  `--days 0` keeps the window to *today*, i.e. this
-          # run's record: a stale record from an earlier job must not be
-          # what the page shows.
-          python tools/run_hardware_e2e.py --summary --days 0 |
-            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-
-      - name: Upload the evidence record
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: hardware-evidence-${{ github.run_id }}
-          path: build/hardware/*.jsonl
-          retention-days: 365
-          if-no-files-found: error

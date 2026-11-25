@@ -53,6 +53,29 @@
 #               output at the project root (project cleanliness rule;
 #               the pre-commit hook scripts/check-root-clean.sh enforces
 #               the same list at commit time).
+#   hardware    The hardware-codec evidence (v1.3 plan Q7) must EXIST and
+#               be a PASS on the tree being tagged.  The evidence lives in
+#               build/hardware/ and is produced by the `hardware.yml`
+#               workflow on a self-hosted GPU runner -- a machine the
+#               standard CI matrix does not have, which is why this check
+#               reads an ARCHIVED record rather than running anything.
+#
+#               The distinction this check exists to draw is between
+#               "the hardware path was proven" and "nothing says it was
+#               never proven".  The `hardware` job has failed three times
+#               in a row at the checkout stage (the runner's link drops
+#               long transfers), and no release gate noticed, because
+#               the job is not in the `protect-main-and-releases`
+#               ruleset and the release workflow never read its
+#               evidence.  So a release could be cut with the hardware
+#               claim resting on nothing at all.
+#
+#               A MISSING record is a SKIP outside a final tag and a FAIL
+#               under --final-tag: the same rule the `api-symbols` check
+#               uses for a missing node.  A record that exists but is a
+#               SKIP (the runner lost its GPU) or a FAIL is a FAIL under
+#               both modes -- a record that says "the hardware path did
+#               not work" must never read as a pass.
 #
 # Written as POSIX sh rather than Python so it runs on every platform
 # NimRTC targets (including runners with no Python) and so it shares a
@@ -91,6 +114,7 @@ while [ $# -gt 0 ]; do
             echo "version"
             echo "submodules"
             echo "root"
+            echo "hardware"
             exit 0
             ;;
         --only)
@@ -111,7 +135,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-ALL_CHECKS="sfu api api-symbols vendor version submodules root"
+ALL_CHECKS="sfu api api-symbols vendor version submodules root hardware"
 if [ -n "$ONLY" ]; then
     for c in $(echo "$ONLY" | tr ',' ' '); do
         case " $ALL_CHECKS " in
@@ -472,6 +496,88 @@ if want root; then
         report FAIL root "$notes"
     else
         report PASS root "no scratch / log / keylog / Testing artifacts at the root"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# hardware — the hardware-codec evidence must exist and be a PASS
+# ---------------------------------------------------------------------------
+if want hardware; then
+    # The evidence lives in build/hardware/, one JSONL file per platform
+    # per day, and is produced by the `hardware.yml` workflow on the
+    # self-hosted GPU runner.  This check reads the ARCHIVE; it does not
+    # run anything, because the machine that can produce the evidence is
+    # not the machine the tag is cut on.
+    #
+    # The tree it is judged against is the tree being tagged.  A record
+    # measured on some other tree is evidence about a different program,
+    # exactly as in the soak window -- so a PASS on an unrelated commit
+    # does not satisfy this check.
+    notes=""
+    failures=""
+    evidence_dir="$REPO_ROOT/build/hardware"
+    candidate=$(git rev-parse HEAD 2>/dev/null || echo "")
+    if [ ! -d "$evidence_dir" ]; then
+        notes="no hardware evidence directory at build/hardware (the hardware.yml workflow has not produced any here)"
+        if [ "$FINAL_TAG" -eq 1 ]; then
+            report FAIL hardware "$notes" \
+                "the hardware-codec claim (v1.3 plan Q7) is unproven at tag cut time; run the hardware.yml workflow on the GPU runner and archive its evidence"
+        else
+            report SKIP hardware "$notes"
+        fi
+    else
+        # The newest PASS record, and whether it was measured on the
+        # tree being tagged.  POSIX sh, so the JSON is scanned with
+        # grep/sed rather than a JSON parser.
+        pass_commit=""
+        pass_date=""
+        pass_dirty=""
+        any_record=0
+        for f in "$evidence_dir"/*.jsonl; do
+            [ -e "$f" ] || continue
+            any_record=1
+            line=$(grep '"status": "PASS"' "$f" 2>/dev/null | tail -n 1)
+            [ -n "$line" ] || continue
+            c=$(printf '%s' "$line" | sed -n 's/.*"git_commit": "\([0-9a-f]*\)".*/\1/p')
+            d=$(printf '%s' "$line" | sed -n 's/.*"date": "\([0-9-]*\)".*/\1/p')
+            [ -n "$c" ] || continue
+            pass_commit="$c"
+            pass_date="$d"
+            case "$line" in
+                *'"git_dirty": true'*) pass_dirty=yes ;;
+                *) pass_dirty=no ;;
+            esac
+        done
+        if [ -z "$pass_commit" ]; then
+            notes="no PASS record in $evidence_dir (the hardware workflow ran, but never recorded a green hardware-encode result)"
+            if [ "$FINAL_TAG" -eq 1 ]; then
+                report FAIL hardware "$notes"
+            else
+                report SKIP hardware "$notes"
+            fi
+        elif [ "$pass_dirty" = "yes" ]; then
+            # A record measured on a dirty tree is not a record about a
+            # commit -- the tree it ran was not the tree it names.
+            notes="the newest PASS hardware record is on a DIRTY tree ($pass_date), so it is not a measurement of any commit"
+            if [ "$FINAL_TAG" -eq 1 ]; then
+                report FAIL hardware "$notes" \
+                    "re-run the hardware workflow on a clean checkout of the tree being tagged"
+            else
+                report SKIP hardware "$notes"
+            fi
+        elif [ -n "$candidate" ] && [ "$pass_commit" != "$candidate" ]; then
+            # A PASS on another tree.  Report it, but do not count it:
+            # this is the same rule the soak window applies.
+            notes="the newest PASS hardware record is on $pass_commit (${pass_date:-unknown date}), which is not the tree being checked ($candidate)"
+            if [ "$FINAL_TAG" -eq 1 ]; then
+                report FAIL hardware "$notes" \
+                    "the hardware evidence must be measured on the tree being tagged"
+            else
+                report SKIP hardware "$notes"
+            fi
+        else
+            report PASS hardware "the hardware-encode evidence is a PASS on this tree (${pass_date:-unknown date})"
+        fi
     fi
 fi
 

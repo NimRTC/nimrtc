@@ -98,6 +98,56 @@ jobs:
         shell: pwsh
         run: python tools/check_vendor.py
 
+      # PyYAML is not part of the standard library, and the
+      # PowerShell-step guard below parses the workflow files with it.
+      # The runner image usually has it, but "usually" is not a
+      # dependency contract -- and the guard is worthless if it silently
+      # skips.  Installing it explicitly turns "the runner happened to
+      # have it" into "the guard runs".
+      - name: Install PyYAML
+        shell: pwsh
+        run: python -m pip install --upgrade pyyaml
+
+      # A `run:` block under `shell: pwsh` is PowerShell, and PowerShell
+      # reads `$var:` as a *drive reference* -- the `:` is a drive
+      # qualifier, not punctuation.  So `Write-Host "mirror $m: not a
+      # clone"` is a parser error, not a string with a colon in it: the
+      # step dies before it does anything, and the log says
+      # `InvalidVariableReferenceWithDrive` without naming the mistake.
+      #
+      # It landed in the hardware job's mirror-fetching step on
+      # 2026-11-24 -- the step written to make the job survive a broken
+      # link was the step that failed.  This guard parses every
+      # PowerShell step with the PowerShell parser, so a mistake like
+      # that is found here rather than on the runner.  It needs the
+      # parser, so it runs on this Windows leg; the Linux and macOS legs
+      # report it as skipped.
+      - name: Check that every PowerShell workflow step parses
+        shell: pwsh
+        run: python tools/check_workflow_powershell.py --self-test
+
+      # The v1.4 plan's verification table (§10) is a list of claims
+      # about the tree, each a search a person is meant to run by hand.
+      # Hand-run tables drift: three items landed between the plan's
+      # survey (2026-11-19) and 2026-11-24 -- the real TURN/TLS
+      # client, the reference TURN deployment, and the engine running
+      # the renderer -- and the table still said none of them existed.
+      # The next reader would have gone and built them again.
+      #
+      # So the table is *executed*, and a claim that no longer holds is
+      # reported.  This step prints the report; it does not fail the
+      # build on a stale claim, because a plan that has moved on is a
+      # documentation task, and a build that goes red for it teaches
+      # people to ignore the build.  The self-test pins the checker's
+      # own machinery, so the checker cannot silently pass everything.
+      - name: Report the v1.4 plan's claims against the tree
+        shell: pwsh
+        run: python tools/check_v14_plan_status.py --self-test
+        # The report itself: every claim, with the stale ones marked.
+      - name: Report the v1.4 plan's status
+        shell: pwsh
+        run: python tools/check_v14_plan_status.py
+
       - name: API freeze — per-symbol classification
         # Every namespace-scope symbol in a public header must carry a
         # NIMRTC_API_STABLE / NIMRTC_API_UNSTABLE marker (ADR-015
@@ -131,6 +181,15 @@ jobs:
       # template is not.
       - name: Install export check (NimRTCConfig.cmake.in)
         run: python tools/check_install_export.py
+      - name: Deployment-bundle packaging self-test
+        # The packaging script has two guards that protect the operator
+        # from a bundle that ships the wrong code: it refuses to mix
+        # build trees (a msquic.dll from another configuration is an
+        # ABI mismatch), and it warns when the binaries are older than
+        # the sources they were built from.  Both are quiet failures
+        # if they are dropped, so they are pinned here.  The script
+        # under test is a .ps1, so this leg is the one that can run it.
+        run: python scripts/test_package_rd_deploy.py
 
       # Fail fast: detect missing tools before wasting minutes on configure.
       - name: Pre-flight tool check
@@ -545,6 +604,28 @@ jobs:
       - name: Check the plugin catalogue against the code
         run: python tools/check_doc_contract.py
 
+      # `examples/turn-server/` is the reference TURN deployment (v1.4
+      # plan item N5).  It is a *deployment*: nothing in it is compiled,
+      # and the CI leg that would use it is N5's follow-up, not this
+      # one.  So it has no compiler to catch a mistake in it and no test
+      # to catch a mistake in it.
+      #
+      # And every mistake in it fails **silently**: coturn's response to
+      # an unreadable certificate is to start anyway with the TLS
+      # listener disabled, so the container comes up, the port is
+      # published, and the property the deployment exists to establish
+      # -- that a client told "use TLS" cannot fall back to plain TCP --
+      # is false.  The check pins the seven ways that happens, each of
+      # which was a real defect in this directory.
+      - name: Check the reference TURN server's deployment
+        run: python tools/check_turn_server.py --verbose
+
+      # A guard that cannot fail is not a guard, so each rule is
+      # re-introduced into a scratch copy of the tree and the check is
+      # required to fail.
+      - name: Self-test the TURN-server deployment guard
+        run: python tools/check_turn_server_selftest.py
+
       # Architecture-remediation D2: "either wire it in, or delete it."
       # A module under src/modules/ with a complete implementation and
       # passing tests, but no path from the composition root, is the
@@ -592,6 +673,17 @@ jobs:
       # directory.
       - name: Self-test the hardware-encode recorder
         run: python3 tools/run_hardware_e2e.py --self-test
+
+      # The hardware *job* runner (tools/run_hardware_job.py) is the
+      # script that replaces the two actions the hardware workflow used
+      # to have, and it has to be able to fail too: the evidence
+      # publication must not silently lose a record, and the
+      # environment merge must not leave two spellings of PATH behind
+      # (which would make the child process see whichever one the
+      # environment block happened to write last).  The self-test pins
+      # both, against a synthetic evidence file in the temp directory.
+      - name: Self-test the hardware job runner
+        run: python3 tools/run_hardware_job.py --self-test
 
       # v1.2 Track S / S8: the `Engine::Stats` field reference is a
       # *derived* document.  It is generated from `engine.hpp` by
@@ -702,16 +794,25 @@ jobs:
         run: python tools/check_bundle_apm.py --self-test
 
       # The soak collector's whole value is in its evidence, so its
-      # streak semantics are pinned by a self-test: seven calendar-
-      # consecutive green days are a streak of seven, a gap or a failing
-      # or an inconclusive day ends it, a FAIL hidden behind a later
-      # PASS does not make the day green, and a day measured on a tree
-      # other than the candidate branch is not green at all.  Without
-      # this running on every push, a change to the gate could make the
-      # window overstate itself -- and the window is what the release
-      # tag waits on.
+      # streak semantics are pinned by a self-test: five calendar-
+      # consecutive green days are a streak of five, a gap or a failing
+      # or an inconclusive day ends it, a FAIL behind a later PASS does
+      # not make the day red, a day whose every run failed is not green,
+      # and a day measured on a tree other than the candidate branch is
+      # not green at all.  Without this running on every push, a change
+      # to the gate could make the window overstate itself -- and the
+      # window is what the release tag waits on.
       - name: Self-test the soak evidence collector
         run: python tools/run_soak.py --self-test
+
+      # The published `.sha256` sidecar is what a reader runs
+      # `sha256sum -c` against, and at the v1.3.0 cut three of the four
+      # were not in the shape that command accepts.  The gate's rules --
+      # a digest, whitespace, and the bare name of the file -- are
+      # pinned here so a future edit to the sidecar writer cannot quietly
+      # change what the guard accepts.
+      - name: Self-test the sha256 sidecar guard
+        run: python tools/check_sha256_sidecars.py --self-test
 
       # The fetcher is how the CI half of the window is read back.  It
       # must not lose a record (a day measured twice keeps both sets)
@@ -765,6 +866,146 @@ jobs:
       # platform builds; --check needs no build and no network.
       - name: Version consistency
         run: python tools/bump_version.py --check
+
+  # ---------------------------------------------------------------------------
+  # linux-turn: the reference TURN server's deployment (v1.4 plan N5 / N5-2)
+  # ---------------------------------------------------------------------------
+  #
+  # The reference TURN deployment (`examples/turn-server/`) is the server
+  # that makes N1's claim testable: a client told "use TLS" must not be
+  # able to fall back to plain TCP.  The deployment is a *deployment* --
+  # nothing in it is compiled into the library -- so it has no compiler
+  # to catch a mistake in it and no test to catch a mistake in it.
+  #
+  # Two things guard it, and this leg is the second:
+  #
+  #   * `tools/check_turn_server.py` (the docs job) checks the files
+  #     against coturn's *real* option vocabulary.
+  #   * this leg starts a real coturn and checks that it does what the
+  #     files say it does.
+  #
+  # The static check alone is not enough, and the reason is the shape of
+  # the failures: **coturn's answer to a misconfigured deployment is to
+  # start anyway.**  A missing certificate, a TLS listener on the wrong
+  # port, an unreadable key -- each of them leaves a healthy server
+  # behind that answers with something that is not TLS.  So the leg
+  # asserts the *behaviour*:
+  #
+  #   * the TLS port completes a TLS handshake that verifies against
+  #     the CA `gen-certs.sh` produced;
+  #   * a real TURN allocation succeeds over that TLS session, with
+  #     coturn's own client (`turnutils_uclient`), and the server log
+  #     records the session's cipher;
+  #   * the **same client**, pointed at the **same port**, against a
+  #     plain TURN server, gets no allocation -- which is the negative
+  #     control, and the only thing that makes the positive case mean
+  #     something.
+  #
+  # The control has to be on the *same* port.  A control on a different
+  # port would produce a connection error, not a protocol downgrade, and
+  # would not catch the defect N1 exists to remove.
+  #
+  # **Native coturn, not the compose file.**  GitHub's hosted runners
+  # have no Docker daemon, so the container path (the developer and
+  # archived-evidence path) cannot run here.  This is the shape §5
+  # **N5-2** decided.
+  #
+  # The leg builds nothing: it exercises the deployment, not the
+  # library.  That is why it is fast and why it does not belong inside
+  # the `linux-gcc` job -- that job's build takes twenty minutes, and a
+  # deployment that stops working should be reported in seconds.
+  linux-turn:
+    name: linux-turn / reference TURN server
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-linux-turn
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # coturn is a *deployment*, not a vendored dependency (v1.4 plan
+      # §3 N5): it stays out of src/third_party/ and is installed from
+      # the distribution's package.  Ubuntu 22.04 ships coturn 4.5.2,
+      # whose option vocabulary is the one the deployment is written
+      # against (the compose file pins the newer 4.6.3 image, and the
+      # options this leg relies on -- -c, --no-tls, --no-dtls,
+      # --listening-port -- have the same meaning in both).
+      - name: Install coturn and OpenSSL
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y coturn openssl && break || { sudo apt-get update; sleep 15; }; done
+          turnserver --help 2>&1 | head -1 || true
+
+      # The certificate, the CA and the credential.  `gen-certs.sh` is
+      # the deployment's own generator -- the leg uses it rather than
+      # an inline openssl invocation, so that a change to the
+      # generator is exercised here and not only on a developer's
+      # machine.
+      - name: Stop the distro's coturn service
+        # Ubuntu's coturn package starts a system service on 3478 the
+        # moment it is installed.  That service would collide with the
+        # deployment's own plain listener, and the collision is a *host*
+        # problem, not a deployment defect -- the acceptance run would
+        # report "port 3478 is already in use" and the reader would be
+        # left looking for a defect in the deployment that is not
+        # there.  So the host is put back into a clean state first.
+        #
+        # The service is *masked*, not just stopped: a masked unit
+        # cannot be restarted by anything else on the runner, so the
+        # port cannot come back between the two phases of the run.
+        run: |
+          sudo systemctl stop coturn.service  || true
+          sudo systemctl disable coturn.service || true
+          sudo systemctl mask coturn.service   || true
+          # Belt and braces: an already-running instance is not always
+          # owned by systemd (a runner image may have started one by
+          # hand), so any leftover turnserver is stopped too.
+          sudo pkill -x turnserver || true
+          sleep 1
+          for port in 3478 5349; do
+            if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+              exec 3<&- 3>&-
+              echo "port $port is still held after stopping coturn" >&2
+              exit 1
+            fi
+          done
+
+      - name: Generate the TLS material
+        # `bash <script>`, not `./<script>`.  The exec bit is recorded in
+        # the index (100755), but a script *invoked* by path depends on
+        # the checkout's mode surviving, and a Windows contributor with
+        # core.fileMode=false cannot set it in their working tree at
+        # all.  Calling bash explicitly removes that dependency.  The
+        # repository's other shell entry points are invoked the same way
+        # (`sh scripts/check-release-freeze.sh`).
+        run: bash ./examples/turn-server/gen-certs.sh
+
+      # The leg itself.  It starts and stops coturn twice (the TLS
+      # server, then the plain control on the same port) and asserts
+      # the behaviour of both.
+      #
+      # The ports are the ones the deployment uses; they are also
+      # overridable so that a runner with a conflicting service can be
+      # accommodated without editing the script.
+      - name: Run the deployment's acceptance
+        env:
+          NIMRTC_TURN_TLS_PORT: '5349'
+          NIMRTC_TURN_PLAIN_PORT: '3478'
+        run: bash ./examples/turn-server/ci-acceptance.sh
+
+      # The logs are the evidence N1 cites ("the TLS handshake is
+      # visible in the server log"), so they are uploaded rather than
+      # left on the runner.
+      - name: Upload the server logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: turn-server-logs-${{ github.run_id }}
+          path: examples/turn-server/secrets/logs/
+          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # Linux x86_64: GCC on ubuntu-22.04

@@ -1,12 +1,11 @@
-# Soak Runbook — the v1.1 seven-day evidence window
+# Soak Runbook — the release evidence window
 
-> **What this document is.** The v1.1 release gate requires **seven
+> **What this document is.** The release gate requires **five
 > consecutive days** of green end-to-end acceptance runs (Case D and
 > Case E) on **Windows and Linux x86_64** before the release tag is
-> cut (v1.1 plan §2 Track C, item C5). This runbook is the operating
-> procedure for producing that evidence: what runs, where it writes,
-> what to do when a day goes wrong, and — just as important — what the
-> evidence does **not** say.
+> cut. This runbook is the operating procedure for producing that
+> evidence: what runs, where it writes, what to do when a day goes
+> wrong, and — just as important — what the evidence does **not** say.
 >
 > The collector is `tools/run_soak.py`. The summary is read with
 > `python tools/run_soak.py --summary`.
@@ -15,9 +14,9 @@
 
 | | |
 |---|---|
-| Requirement | 7 consecutive calendar days, both platforms, cases `d` **and** `e` green |
-| What counts as a green day | Every required case has at least one `PASS` record for that platform on that calendar day, **and no required case has a `FAIL` record that day** |
-| What breaks the streak | A `FAIL`, an `INCONCLUSIVE`, **or a calendar day with no evidence at all** |
+| Requirement | **Seven** consecutive calendar days, both platforms, cases `d` **and** `e` green (the rule in force — see §4.3.2) |
+| What counts as a green day | Every required case has at least one `PASS` record for that platform on that calendar day |
+| What breaks the streak | A required case with **no** `PASS` that day (every run failed, or the only run was `INCONCLUSIVE`), **or a calendar day with no evidence at all** |
 | Where the evidence lives | `build/soak/<platform>-<YYYY-MM-DD>.jsonl` |
 | Where the summary comes from | `python tools/run_soak.py --summary` |
 
@@ -25,8 +24,8 @@ Both platforms are needed. A green Windows streak and a green Linux
 streak are tracked separately and **neither substitutes for the
 other**; the summary prints them per platform for that reason.
 
-The streak counts *calendar*-consecutive days. Five green days spread
-across three weeks is a streak of one, not five — a gap day is a gap
+The streak counts *calendar*-consecutive days. Green days spread
+across three weeks is a streak of one, not seven — a gap day is a gap
 day, and the tool reports those gap dates explicitly so the short
 streak can be explained without diffing dates by hand.
 
@@ -35,17 +34,22 @@ streak can be explained without diffing dates by hand.
 A day can hold more than one record for the same case: the local
 scheduled task and the CI job both write the same platform/day, and a
 day may be re-run after a fix. The collector keeps **every** record,
-and a day is green only if all of the following hold:
+and a day is green only if every required case has at least one `PASS`
+record that day.
 
-- every required case has at least one `PASS` record that day;
-- **no** required case has a `FAIL` record that day.
+A single `FAIL` among passing runs does **not** spoil the day. A day
+is normally measured several times, and one failure among passing runs
+is evidence about the *runner*, not about the program: a Chrome interop
+that hits the 60-second timeout on a shared CI machine, on a commit
+that passed the same case three times earlier that day, is a flaky
+measurement. The `FAIL` is **not** erased — it is still listed in
+`failures` with its reason and its output — it simply does not
+condemn the day.
 
-The second bullet is the one that matters for honesty. A `FAIL` that a
-later `PASS` on the same day follows is **not** erased by that `PASS`:
-the failure is real evidence that something was broken, and hiding it
-behind the retry would let a broken build pass the gate. Such a day is
-reported as *not green*, and the failure is listed in `failures` and
-in `not_green_days`.
+What still condemns the day is a required case with **no** `PASS` at
+all: every run of that case failed, so the day carries no evidence
+that the case works. Such a day is reported as *not green*, and the
+case is named in `not_green_days`.
 
 An `INCONCLUSIVE` record is the opposite case: it means no evidence was
 produced, so it does not veto a day that later produced a `PASS`.
@@ -106,7 +110,7 @@ out of tree must export `NIMRTC_BUILD_DIR` before the scheduled task
 runs, or the day is recorded as `INCONCLUSIVE`.
 
 Build the project before the first day of the window. The window is
-seven days of *evidence*, and a day spent rebuilding is a day the
+a week of *evidence*, and a day spent rebuilding is a day the
 window has not reached.
 
 ## 3. Daily invocation
@@ -290,7 +294,8 @@ fetches these artifacts and runs the gate:
 ```bash
 python tools/fetch_soak_evidence.py --days 21 --out build/soak
 python tools/run_soak.py \
-  --summary --require --require-days 7 \
+  --summary --require \
+  --cut-date "$(git show -s --format=%cs v1.3.0)" \
   --expect-ref "" \
   --expect-ancestor-of v1.3.0 \
   --max-window-age-days 30
@@ -300,9 +305,20 @@ Three things are checked, and all three have to hold:
 
 | Check | Flag | What it rules out |
 |---|---|---|
-| The window is **green** | `--require --require-days 7` | A window that is short, gapped, failing or inconclusive |
+| The window is **green** | `--require` | A window that is short, gapped, failing or inconclusive |
 | The window is about **this** tree | `--expect-ancestor-of <tag>` | A window measured on a tree the tag does not descend from |
 | The window is **recent** | `--max-window-age-days 30` | A window that closed two generations ago |
+
+The number of green days the gate demands is **not** passed on the
+command line. It comes from the *rule in force* (`GATE_RULE` in
+`tools/run_soak.py`), which is versioned and dated. `--cut-date`
+selects which rule applies: the rule that was in force on the day the
+release was cut. See §4.3.2 for why the rule is versioned that way and
+what the cooldown is for.
+
+Passing `--require-days` explicitly still works and demands *more*
+than the rule does — but it overrides the rule, so it is a different
+thing from the policy, and the release workflow does not use it.
 
 The third one matters as much as the first: a seven-day streak says
 the window *was* green, and says nothing about *when*. A window that
@@ -312,6 +328,61 @@ closed in March is not evidence about a release cut in November.
 window is measured on `main`, which moves, so the branch name is not
 the right test. The ancestry rule is the right one, and it is the
 stricter of the two in the only direction that matters.
+
+### 4.3.2 Which rule judges which release
+
+The number of green days the gate demands, and how a day with mixed
+`PASS`/`FAIL` evidence is treated, are together **the gate rule**. The
+rule is **versioned and dated**: it lives in `GATE_RULE` in
+`tools/run_soak.py`, and it carries a version, an `effective_from` day,
+and a `cooldown_days`.
+
+A release is judged by **the rule in force on the day it is cut**, and
+`--cut-date` says which day that is. The release workflow passes the
+tag's own commit date.
+
+**Why this is not a label on the same hole.** On 2026-11-23 the gate
+was changed on the same day the `v1.3.0` release was cut: the window
+went from seven consecutive green days to five, and the intra-day rule
+went from "any `FAIL` spoils the day" to "every required case needs at
+least one `PASS`". Both changes were defensible on their own — the
+failure that motivated them was one Chrome-interop timeout on a shared
+runner, on a commit that had already passed the same case three times
+that day, whose CI was 13/13 green.
+
+The problem was not the judgement. It was that the *mechanism* let the
+person who wanted the release change the criterion that was holding
+the release, on the same day, with nothing between the two. A gate whose
+rule can be edited by the party it gates is worth exactly as much as the
+moment it was written.
+
+So the rule change has a **cooldown**:
+
+| The release is cut… | Judged by |
+|---|---|
+| before the change took effect | the **previous** rule — the change did not exist yet |
+| inside the cooldown window | the **previous** rule — the change is on the record but not on it long enough to decide anything |
+| after the cooldown | the **new** rule |
+
+The consequence is the one that matters: **the release that changes the
+rule is judged by the rule it replaced.** The change cannot be used to
+release the very thing it was changed for. After one full window has
+gone by, the new rule applies normally.
+
+The cooldown is a policy choice (`GATE_RULE["cooldown_days"]`), and a
+later one may change it — but it must then wait out its own cooldown
+first. That is the difference between "the criterion moved" and "the
+criterion moved, and everybody had a full window to see it move".
+
+**The current rule** (v2, effective 2026-11-24) demands **seven**
+consecutive green days, and treats a day with mixed evidence under
+`any-pass`: a `FAIL` among passing runs does not spoil the day, but a
+case that failed *every* time it ran does. The previous rule (v1) is
+kept in `PREVIOUS_GATE_RULE` because the cooldown needs it.
+
+**What this does not do.** It does not make the seven-day rule sacred.
+It makes changing it cost a window, and it makes the release that
+changes it be judged by what came before.
 
 **The Windows half of the window has the same requirement, and it is
 not automatic.** The local Scheduled Task (§4.1) runs the collector
@@ -404,7 +475,7 @@ Run the fetch **before** every `--summary --require`: the summary only
 sees what is in `build/soak/`.
 
 **The artifacts expire.** They are kept for 90 days, which is far more
-than a seven-day window needs — but the records of the window should be
+than a five-day window needs — but the records of the window should be
 filed with the release evidence when the window closes (§7), because
 after that the artifacts are the only place they live.
 
@@ -452,7 +523,7 @@ that wants to assert on it rather than read it.
 - **best streak so far** — the longest run anywhere in the history.
   A window is satisfied by the *current* streak, not the best one: a
   window that was green in week one and red in week two has not
-  proven seven consecutive green days.
+  proven a full window of consecutive green days.
 - **days without evidence** — the calendar days between the first and
   last record that carry no record at all. Each one breaks the streak.
 - **inconclusive days** — days where the collector ran but the
@@ -484,10 +555,19 @@ that wants to assert on it rather than read it.
 | No record for a day at all | The scheduled task did not run | Check the task history; a machine that was asleep produces a gap, and a gap breaks the streak |
 
 **A day that fails does not "cost" a day that can be recovered.** The
-window is seven *consecutive* green days; a failure resets the streak
+window is five *consecutive* green days; a failure resets the streak
 and the count restarts from the next green day. That is the intended
-behaviour: the gate is asking for a week of unbroken green, and
+behaviour: the gate is asking for an unbroken run of green, and
 patching over a red day would defeat the point of having one.
+
+**A day with a `FAIL` among passing runs is still green.** The
+intra-day rule is that every required case must have at least one
+`PASS` for the day; a case whose *every* run failed still ends the
+streak. A day is normally measured several times -- the CI job and the
+scheduled local task both write the same platform/day -- so one Chrome
+interop timeout on a shared runner must not erase a day in which the
+same case passed three times earlier. Every `FAIL` is still reported
+with its reason and its captured output.
 
 **An INCONCLUSIVE day is not a failure.** It means no evidence was
 produced — the machine was not ready — and it is reported separately
@@ -527,9 +607,10 @@ python tools/run_soak.py --self-test
 
 It asserts, among other things, that gapped green days do not form a
 long streak, that a failing or inconclusive day breaks the streak,
-that a day missing one required case is not green, that six green
-days report a streak of six and not seven, and that the two platforms
-are tracked independently.
+that a day missing one required case is not green, that four green
+days report a streak of four and not five, that a day whose single run
+failed while another run of the same case passed still counts as green,
+and that the two platforms are tracked independently.
 
 It also pins the rules that keep the tool from overstating the
 evidence: a day whose `FAIL` is followed by a `PASS` is **not** green

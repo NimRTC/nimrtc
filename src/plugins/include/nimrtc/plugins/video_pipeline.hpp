@@ -157,6 +157,25 @@ struct NIMRTC_API_STABLE VideoReceiverConfig {
     /** If true (recommended for H.264), the receiver runs FU-A reassembly
      *  itself. Otherwise the codec layer is expected to. */
     bool           expect_fu_a   = true;
+
+    /** Hand the decoder a **bare** NAL unit instead of an Annex-B one.
+     *
+     *  The frame contract is Annex-B, and every decoder NimRTC ships
+     *  (NVDEC, OpenH264) parses the Annex-B framing.  RFC 6184 §5.1
+     *  carries *bare* NAL units on the wire, so the receiver synthesises
+     *  the start code where the NAL boundary is known — otherwise a
+     *  picture assembled from several bare NAL units reaches the decoder
+     *  as one unparsable blob and is refused.
+     *
+     *  With this flag **on** the receiver hands the single-NAL path's
+     *  payload to the jitter buffer byte for byte, and the frame that
+     *  reaches the decoder is the concatenation of bare NAL units — which
+     *  is *not* the Annex-B the frame contract promises, so the decoder
+     *  has to re-frame the picture itself.
+     *
+     *  It exists for a host whose decoder consumes the raw NAL units; an
+     *  ordinary host leaves it off.  Default off. */
+    bool           h264_bare_nalus = false;
 };
 
 /** Receiver statistics. */

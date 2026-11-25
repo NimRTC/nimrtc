@@ -192,6 +192,56 @@ def classify_signature(raw):
     return None
 
 
+def read_tag_object_name(raw):
+    """Return the tag's INTERNAL name, or None when it cannot be read.
+
+    An annotated tag object has a header block before its message:
+
+        object 1a2b3c...
+        type commit
+        tag v1.3.0
+        tagger NimRTC <...> 1763980800 +0800
+
+        NimRTC v1.3.0
+
+    The third header line is the tag's own name -- the name the tag was
+    CREATED with, which is not necessarily the name of the ref that
+    points at it.  A ref and a tag object can disagree: `git update-ref
+    refs/tags/X <tag-object>` moves the ref without rewriting the object,
+    so the ref can be called `v1.3.0` while the object still says
+    `v1.3.0-staged`.
+
+    That is not a cosmetic difference.  `git tag -v`, `git describe`,
+    the GitHub release page, and every tool that reads the object
+    directly report the INTERNAL name, so a tag whose object disagrees
+    with its ref is a tag that presents itself to the world under the
+    wrong name.
+
+    Returns None when the header is absent or malformed -- the caller
+    then reports "the tag object carries no name", which is itself a
+    failure, not a pass.
+    """
+    if raw is None:
+        return None
+    text = decode(raw)
+    # The header ends at the first empty line.  Reading past it would
+    # pick up a "tag ..." line out of the commit message.
+    header = text.split("\n\n", 1)[0]
+    for line in header.splitlines():
+        if line.startswith("tag "):
+            name = line[len("tag "):].strip()
+            return name or None
+    return None
+
+
+def ref_basename(tag):
+    """The short name of a tag ref, without the `refs/tags/` prefix."""
+    name = (tag or "").strip()
+    if name.startswith("refs/tags/"):
+        name = name[len("refs/tags/"):]
+    return name
+
+
 # ---------------------------------------------------------------------------
 # Verification
 # ---------------------------------------------------------------------------
@@ -295,6 +345,32 @@ def verify_tag(repo, tag, allowed_signers, principal, namespace,
     kind = classify_signature(raw)
     result["annotated"] = True
     result["signature_kind"] = kind
+
+    # The tag object's own name must match the ref it is reached
+    # through.  A mismatch means the tag presents itself under a
+    # different name than the one it was released as -- `git tag -v`,
+    # `git describe` and the GitHub release page all read the internal
+    # name, so this is what a consumer actually sees.
+    object_name = read_tag_object_name(raw)
+    expected_name = ref_basename(tag)
+    result["tag_object_name"] = object_name
+    result["expected_tag_name"] = expected_name
+    result["tag_name_matches"] = (object_name == expected_name)
+
+    if not result["tag_name_matches"]:
+        if object_name is None:
+            detail = ("the tag object %s carries no 'tag' header line, so it "
+                      "does not name itself; expected the object to be "
+                      "named %s" % (tag, expected_name))
+        else:
+            detail = ("the tag object reached through %s names itself %r, "
+                      "but the ref is named %r; the tag therefore presents "
+                      "itself under the wrong name (the internal name is "
+                      "what `git tag -v`, `git describe` and the GitHub "
+                      "release page report)"
+                      % (tag, object_name, expected_name))
+        result.update({"ok": False, "detail": detail})
+        return result
 
     if kind is None:
         result.update({
@@ -471,6 +547,78 @@ def _self_test():
                 failures += 1
         else:
             print("[FAIL] self-test: could not create the second key")
+            failures += 1
+
+        # 6. A tag whose OBJECT names itself differently from the ref it
+        #    is reached through is rejected.  This is the defect the
+        #    v1.3.0 release carried: the signing script created the tag
+        #    object under a probe name (`v1.3.0-staged`) and then moved
+        #    the ref onto that object with `git update-ref`, so the ref
+        #    said `v1.3.0` while the object still said `v1.3.0-staged`.
+        #    The signature verified -- it was a valid signature over a
+        #    valid object -- and nothing complained, because nothing
+        #    looked at the object's name.
+        #
+        #    The reproduction is the same two-step dance: sign under one
+        #    name, point a differently-named ref at the resulting object.
+        git(["tag", "-s", "-a", "v0.0.0-probe", "-m", "probe tag"], repo=tmp)
+        probe_sha = git(["rev-parse", "refs/tags/v0.0.0-probe"],
+                        repo=tmp).stdout.decode().strip()
+        git(["update-ref", "refs/tags/v0.0.0-renamed", probe_sha], repo=tmp)
+        res = verify_tag(tmp, "v0.0.0-renamed", signers, DEFAULT_PRINCIPAL,
+                         DEFAULT_NAMESPACE)
+        if not res.get("ok") and res.get("tag_object_name") == "v0.0.0-probe":
+            print("[OK  ] a tag object whose internal name differs from the "
+                  "ref is rejected")
+        else:
+            print("[FAIL] a tag object whose internal name differs from the "
+                  "ref was accepted (ok=%s, name=%s)"
+                  % (res.get("ok"), res.get("tag_object_name")))
+            failures += 1
+
+        # 7. The name check fires even under `--shape-only`, because it
+        #    is a shape property, not a cryptographic one.  The release
+        #    workflow only ever runs the shape check, so a check that
+        #    only ran under full verification would never guard the
+        #    release at all.
+        res = verify_tag(tmp, "v0.0.0-renamed", signers, DEFAULT_PRINCIPAL,
+                         DEFAULT_NAMESPACE, shape_only=True)
+        if not res.get("ok"):
+            print("[OK  ] the name check also fires under --shape-only")
+        else:
+            print("[FAIL] the name check did not fire under --shape-only")
+            failures += 1
+
+        # 8. A tag whose object names itself correctly is accepted by the
+        #    name check -- the check must not reject well-formed tags.
+        res = verify_tag(tmp, "v0.0.0-self", signers, DEFAULT_PRINCIPAL,
+                         DEFAULT_NAMESPACE)
+        if res.get("tag_name_matches") and res.get("tag_object_name") == "v0.0.0-self":
+            print("[OK  ] a correctly named tag object matches its ref")
+        else:
+            print("[FAIL] a correctly named tag object did not match its ref "
+                  "(name=%s)" % res.get("tag_object_name"))
+            failures += 1
+
+        # 9. The name is read from the HEADER, not from the message.
+        #    A tag whose commit message happens to contain a line
+        #    starting with "tag " must not be misread as naming itself.
+        res = verify_tag(tmp, "v0.0.0-self", signers, DEFAULT_PRINCIPAL,
+                         DEFAULT_NAMESPACE)
+        if res.get("tag_object_name") != "v0.0.0-self":
+            print("[FAIL] the tag name was read from the wrong part of the "
+                  "object (name=%s)" % res.get("tag_object_name"))
+            failures += 1
+        else:
+            print("[OK  ] the tag name is read from the header, not the message")
+
+        # 10. `ref_basename` strips the `refs/tags/` prefix, so a caller
+        #     may pass either form.
+        if ref_basename("refs/tags/v1.2.3") == "v1.2.3" and \
+                ref_basename("v1.2.3") == "v1.2.3":
+            print("[OK  ] the ref basename is computed correctly")
+        else:
+            print("[FAIL] the ref basename is computed incorrectly")
             failures += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

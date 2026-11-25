@@ -678,6 +678,51 @@ int ViewerSession::run() {
                          static_cast<unsigned long long>(
                              heartbeat_ ? heartbeat_->beats_sent() : 0),
                          static_cast<unsigned long long>(control.messages_sent));
+
+            // ---- The latency numbers ------------------------------------------
+            //
+            // The QoE collector is fed on every tick above (the
+            // end-to-end latency from the engine's resolved capture
+            // timestamp, and the input-to-photon latency from the
+            // control-plane acceptance instant), but **without printing
+            // them the session says nothing about its own latency** --
+            // and a latency session is the whole reason the collector
+            // exists.  So the snapshot goes out with the counters.
+            //
+            // The units are milliseconds, because that is the unit a
+            // human reasons about a game in: `p50=42.3` reads as "the
+            // picture was 42 ms old", which is the question "does the
+            // game feel laggy" is really asking.
+            //
+            // No sample yet means the collector has nothing to report
+            // (the pipeline carried no capture timestamp, or no frame
+            // has been presented since the last reset).  That is printed
+            // as `-` rather than `0.0`, because "no measurement" and
+            // "zero latency" are very different claims, and a report
+            // that cannot tell them apart is worse than no report.
+            if (qoe_) {
+                const auto snap = qoe_->snapshot();
+                char p50[64], p95[64], itp[64];
+                if (snap.frames_presented > 0) {
+                    std::snprintf(p50, sizeof p50, "%.1f",
+                                  static_cast<double>(snap.latency_p50_us) / 1000.0);
+                    std::snprintf(p95, sizeof p95, "%.1f",
+                                  static_cast<double>(snap.latency_p95_us) / 1000.0);
+                    std::snprintf(itp, sizeof itp, "%.1f",
+                                  static_cast<double>(snap.input_to_photon_p50_us) / 1000.0);
+                } else {
+                    std::snprintf(p50, sizeof p50, "-");
+                    std::snprintf(p95, sizeof p95, "-");
+                    std::snprintf(itp, sizeof itp, "-");
+                }
+                std::fprintf(stderr,
+                             "[rd_viewer] latency_ms p50=%s p95=%s "
+                             "input_to_photon_p50=%s presented=%llu "
+                             "freeze_count=%llu\n",
+                             p50, p95, itp,
+                             static_cast<unsigned long long>(snap.frames_presented),
+                             static_cast<unsigned long long>(snap.freeze_count));
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(5));

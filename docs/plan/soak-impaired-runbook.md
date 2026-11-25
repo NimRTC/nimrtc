@@ -184,3 +184,58 @@ dirty-tree run is marked, that `--expect-q5` refuses a short run, and
 that an orphaned artifact folds back in as a recovered record (and a
 recovered run whose numbers fail the criteria stays a `FAIL`). A
 guard that cannot fail is a decoration, so the self-test runs in CI.
+
+## 9. The log is evidence too — keep it readable
+
+A 24 h run writes a lot of log, and the log is the *other* half of the
+evidence: the archived JSON says what the counters were, the log says
+what the engine was doing when they moved.
+
+Two defects made the 2026-11-20 run's log unreadable, and both are
+fixed:
+
+* the engine logged `"DTLS reached Connected, calling
+  maybe_install_srtp_keys()"` once per tick, not once per handshake
+  (169 983 times in 22½ minutes);
+* libjuice's VERBOSE and DEBUG levels are *per-datagram*, and the ICE
+  module asked for VERBOSE — 660 620 lines in 950 s, 71 % of the log's
+  bytes.
+
+The ICE module now asks libjuice for **INFO**, which is the level that
+carries the lifecycle lines (`Changing state to %s`, `Candidate
+gathering done`, `STUN server binding successful`, `STUN entry %d:
+Consent expired for candidate pair`, `Lost connectivity`) and nothing
+per-packet.
+
+When you are *chasing* a packet-level problem, the per-datagram trace
+is one environment variable away:
+
+```bash
+NIMRTC_ICE_VERBOSE=1 python tools/run_soak_impaired.py --seconds 3600 ...
+```
+
+Do not leave it on for a 24 h window: it is exactly the firehose the
+default cut exists to stop.
+
+### 9.1 The forensic counters need `NIMRTC_ICE_VERBOSE=1`
+
+A warning about what the cut takes with it.  Some libjuice counters are
+emitted at `JLOG_DEBUG` — among them "Candidate pair check failed
+(non-symmetric source address in response)" and the STUN message
+integrity failures.  The Q5 consent-expiry finding
+(`docs/plan/q5-consent-expiry-finding.md` §4.1) is read *from* exactly
+those counters, and its conclusion depends on their being present.
+
+With the default cut they are **not** in the log: libjuice drops a line
+below the threshold before it formats it, so a DEBUG counter never
+reaches the sink.
+
+So: **any analysis that reads a libjuice DEBUG counter needs
+`NIMRTC_ICE_VERBOSE=1` in the environment of the run it reads.**  A
+run without it cannot answer the question — and the absence of the
+counter must not be read as the counter being zero.  That confusion is
+exactly what the finding's "On the log level" note records having
+nearly cost a sound piece of evidence.
+
+The lifecycle lines a *reader* needs are unaffected: they are INFO and
+WARN, and they survive the cut.

@@ -640,20 +640,19 @@ Record run_hardware_e2e(const Options& opts) {
     // The receiver runs FU-A reassembly itself (the default), which is
     // what every multi-packet picture on this path is.
     //
-    // `h264_annex_b` decides what happens to a *single NAL unit* packet
-    // (the RFC 6184 §5.1 default: forwarded byte for byte, bare).  The
-    // jitter buffer only *concatenates* a picture's payloads, so a frame
-    // assembled from several bare NAL units reaches the decoder as one
-    // unparsable blob -- which is why the escape hatch below re-frames
-    // it.  The default path does not need that: the sender aggregates
-    // the small NAL units into a STAP-A, and the receiver unpacks a
-    // STAP-A into one start-coded NAL unit each.
+    // The receiver delivers the Annex-B framing by default -- the shape
+    // the frame contract promises and the shape the decoder parses.  The
+    // escape hatch below asks for the *bare* NAL units instead (the
+    // RFC 6184 §5.1 wire shape): the jitter buffer only *concatenates* a
+    // picture's payloads, so a frame assembled from several bare NAL
+    // units reaches the decoder as one unparsable blob -- which is why
+    // the harness re-frames it itself on that path.
     //
     // Off by default: the escape hatch exists to *exercise* the bare-NAL
     // path, not to be the path the harness normally runs on.
     const bool use_nalu_list =
         std::getenv("NIMRTC_HW_E2E_NALU_LIST") != nullptr;
-    receiver_cfg.h264_annex_b = !use_nalu_list;
+    receiver_cfg.h264_bare_nalus = use_nalu_list;
     vp::VideoReceiver receiver(receiver_cfg);
 
     /** One payload the sender emitted, with the metadata a caller needs

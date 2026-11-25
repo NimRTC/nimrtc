@@ -1045,6 +1045,18 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
 int NimRTCEngine::tick() noexcept {
     if (!is_open()) return 0;
 
+    // ---- Q5: the transport gate, before anything produces media -------
+    //
+    // This runs first so that every send path in this tick sees an
+    // up-to-date view of the transport.  If the ICE agent has given up
+    // (consent expired, or the link dropped after having been up), the
+    // gate closes and the media paths below stop producing packets for
+    // a transport that cannot carry them.  See
+    // `update_ice_send_gate()` for why this is a stop rather than a
+    // retry -- RFC 7675 §5.1 requires the sender to cease transmission
+    // once consent is lost.
+    update_ice_send_gate();
+
     // ---- WebTransport session state poll (v0.15.0 product route) --------
     // ` wt_session` is created lazily by create_data_channel(); poll it
     // here and surface kConnected/kFailed transitions via on_data_state_.
@@ -1283,10 +1295,23 @@ int NimRTCEngine::tick() noexcept {
     // The scheduler holds outbound packets (audio / video / control) and
     // dispatches them in priority order.  drain_with() invokes our callback
     // for each packet; we send it through ICE.
-    if (scheduler_) {
+    //
+    // Q5: the gate.  When the transport is dead (ICE failed, or dropped
+    // after having been up), the packets in the scheduler cannot go
+    // anywhere -- libjuice refuses every one of them with "Send while
+    // ICE is not connected".  Draining them anyway is what produced
+    // 26 627 refusals in the 24 h soak.  The drain is therefore skipped
+    // entirely, and the callback keeps its own guard as a belt-and-braces
+    // for the packets that were already queued when the link died.
+    if (scheduler_ && !impl_->session_state.ice_send_blocked.load(
+                           std::memory_order_acquire)) {
         scheduler_->drain_with(64, [this](plugins::Priority,
                                           core::ByteSpan data) noexcept -> bool {
             if (!ice_t_) return false;
+            // Same gate, one level down: a packet that was queued before
+            // the outage must not be pushed into a dead transport.
+            if (impl_->session_state.ice_send_blocked.load(
+                    std::memory_order_acquire)) return false;
             plugins::BufferView bv{data.data(), data.size()};
             ice_t_->send(bv, {});
             return true;
@@ -2064,6 +2089,87 @@ void NimRTCEngine::fire_call_state(CallStateReport report) noexcept {
     if (on_call_state_) on_call_state_(report);
 }
 
+// ---------------------------------------------------------------------------
+// Q5 �� stop sending once the transport is gone
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::update_ice_send_gate() noexcept {
+    // ---- Q5: stop sending once the transport is gone --------------------
+    //
+    // The Q5 soak found the failure mode this exists for.  libjuice's
+    // consent freshness expired, the agent moved to `failed`, and from
+    // then on **every** media send was refused with "Send while ICE is
+    // not connected" -- 26 627 times, at full media rate, for the
+    // remaining 21 minutes of the run.  The engine noticed the ICE state
+    // change (it logged "connected->failed") and kept sending anyway:
+    // there was no path from "the call is dead" to "stop the media
+    // source".
+    //
+    // Two things are wrong with that, and the gate fixes both:
+    //
+    //  1. **The CPU and the log.**  A refused send still costs a
+    //     scheduler slot, an SRTP protect, a UDP write attempt and a
+    //     log line.  At 50 packets a second for 21 minutes that is
+    //     26 627 error lines and a full-rate encode loop producing
+    //     nothing.
+    //  2. **The report.**  The host sees a stream of failures instead
+    //     of one clear "the transport died" event, so it cannot tell
+    //     "the peer is not there" from "the codec is broken".
+    //
+    // The gate is deliberately narrower than "ICE is not connected".
+    // The window between `open()` and the first successful connectivity
+    // check is a *normal* phase in which the host may already be feeding
+    // PCM; rejecting the media there would change a behaviour the host
+    // cannot see and cannot diagnose.  Only a transport that **was**
+    // connected and then stopped counts as dead -- which is exactly the
+    // `ice_connected_once` condition the flap tracker already keeps.
+    //
+    // RFC 7675 §5.1 is the reason this is a *stop* and not a *retry*:
+    // "if a valid STUN binding response has not been received from the
+    // remote peer's transport address in 30 seconds, the endpoint MUST
+    // cease transmission on that 5-tuple" and "After consent is lost,
+    // the same ICE credentials MUST NOT be used on the affected
+    // 5-tuple again".  Sending anyway is not a recovery attempt; it is
+    // the violation.
+    if (!ice_t_ || !impl_) return;
+
+    const plugins::IceState cur = ice_t_->state();
+    const bool up = (cur == plugins::IceState::Connected ||
+                     cur == plugins::IceState::Completed);
+
+    if (up) {
+        // The transport is up.  Record that it has been up, and clear the
+        // latch so a *later* outage is reported again.
+        impl_->session_state.ice_ever_connected.store(
+            true, std::memory_order_release);
+        if (impl_->session_state.ice_send_blocked.exchange(
+                false, std::memory_order_acq_rel)) {
+            core::log::Logger::instance().info(
+                "engine[ice]: the transport is back; media sending resumes");
+        }
+        return;
+    }
+
+    // Not up.  Before the transport has ever been up this is the normal
+    // startup phase -- not an outage -- so the gate stays closed.
+    if (!impl_->session_state.ice_ever_connected.load(
+            std::memory_order_acquire)) {
+        return;
+    }
+
+    if (impl_->session_state.ice_send_blocked.exchange(
+            true, std::memory_order_acq_rel)) {
+        return;   // already said it
+    }
+
+    impl_->session_state.ice_send_blocked_events.fetch_add(
+        1, std::memory_order_acq_rel);
+    core::log::Logger::instance().warn(
+        std::string("engine[ice]: the transport is ") +
+        (cur == plugins::IceState::Failed ? "failed" : "no longer connected") +
+        "; media sending is stopped until it recovers");
+}
+
 
 void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     // P0 (v0.12.0): guard against post-close use.  The ICE recv callback
@@ -2260,7 +2366,8 @@ int NimRTCEngine::drain_dtls() noexcept {
     // member (not a static local) so two engines in the same process
     // (e.g. the loopback test) log their transitions independently.
     const auto new_state = d->state();
-    if (new_state != impl_->security.last_dtls_state) {
+    const bool dtls_transitioned = (new_state != impl_->security.last_dtls_state);
+    if (dtls_transitioned) {
         core::log::Logger::instance().info(
             "engine[dtls]: state transition " +
             std::string(nimrtc::dtls::DtlsSession::state_name(impl_->security.last_dtls_state)) + " → " +
@@ -2281,9 +2388,30 @@ int NimRTCEngine::drain_dtls() noexcept {
     if (new_state == nimrtc::dtls::DtlsState::Connected) {
         // SRTP key installation happens here — this is the critical
         // handshake boundary the P1 interop tests verify.
-        core::log::Logger::instance().info(
-            "engine[dtls→srtp]: DTLS reached Connected, "
-            "calling maybe_install_srtp_keys()");
+        //
+        // The *call* stays on every tick: `maybe_install_srtp_keys()`
+        // is idempotent, but its idempotency is not the same as its
+        // readiness — the keying material (RFC 5764 §4.2) is only
+        // available once the Finished message has been processed, and
+        // the tick that observes `Connected` is not necessarily the
+        // tick that can read the material.  Retrying on the next tick
+        // is what makes the install eventual rather than lucky, so the
+        // call must not be narrowed to the transition.
+        //
+        // The *log line* is what was narrowed.  An earlier version
+        // logged on `state() == Connected`, which is true on every tick
+        // for the whole life of the connection: the 2026-11-20 Q5 soak
+        // printed "DTLS reached Connected" 169 983 times in 22½
+        // minutes — 15 % of every log line, and a projected 2.6 GB over
+        // a 24 h window.  A line that repeats once per tick is not a
+        // handshake trace; it is noise that buries the transitions it
+        // is meant to announce.  The message is now emitted once per
+        // handshake, at the transition.
+        if (dtls_transitioned) {
+            core::log::Logger::instance().info(
+                "engine[dtls→srtp]: DTLS reached Connected, "
+                "calling maybe_install_srtp_keys()");
+        }
         maybe_install_srtp_keys();
     }
 

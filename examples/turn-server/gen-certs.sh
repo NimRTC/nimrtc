@@ -1,38 +1,183 @@
 #!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# examples/turn-server/gen-certs.sh
+# ---------------------------------------------------------------------------
 #
-# Generate a self-signed certificate for the coturn TLS listener
-# (RFC 6062 TURN over TLS, conventional port 5349).
+# Generates the TLS material the reference TURN server presents, into
+# ./secrets/:
 #
-# The certificate carries the two reference identities the NimRTC ICE
-# TURN-over-TLS client verifies (see docs/adr/ADR-027):
-#   * dNSName SAN   "turn.nimrtc.local"
-#   * iPAddress SAN "127.0.0.1"
-# It is a self-signed RSA-2048 leaf, so a client must be told to skip
-# certificate verification (the N5 acceptance client does exactly that;
-# see the slice spec's risk note about untrusted certificates).
+#   secrets/tls/turn.key      the server's private key (RSA 2048)
+#   secrets/tls/turn.pem      the *certificate chain* coturn reads:
+#                             the server certificate, then the CA
+#   secrets/ca/ca.pem         the CA that signed it — this is what a
+#                             verifying client pins, or installs into its
+#                             trust store
+#
+# and drops a `secrets/creds.txt` with the static credential the tests
+# use, so that the credential has exactly one source.
+#
+# Why self-signed, and why a real CA file on top: a client that verifies
+# the TURN control stream needs *something* to verify against.  A
+# self-signed leaf certificate is the wrong shape for that — the leaf is
+# its own trust anchor, and pinning it means re-pinning whenever it is
+# regenerated.  A one-off CA makes the pin stable: the client trusts
+# `ca.pem`, and the certificate may rotate underneath it.
+#
+# The certificate is valid for:
+#
+#   DNS: turn.nimrtc.local   the name the tests use (SNI, and what
+#                            TurnServer::tls_server_name carries)
+#   DNS: localhost
+#   IP:  127.0.0.1           so a client that connects by address
+#                            verifies too
+#
+# Idempotent: an existing key and certificate are left alone unless
+# --force is passed.  Regenerating them rotates the trust anchor, which
+# breaks every client pinned to the old one — so it is an explicit act.
+#
+# Cross-platform note: this runs under Git Bash on Windows, and under
+# bash on macOS / Linux.  It needs `openssl` on PATH.  There is no
+# PowerShell twin on purpose — one script, one behaviour.
+# ---------------------------------------------------------------------------
+
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CERT_DIR="${TURN_CERT_DIR:-${SCRIPT_DIR}/certs}"
-REALM="${TURN_REALM:-turn.nimrtc.local}"
+# The help text is this file's own header, so it is read from *this*
+# file.  `$0` is the path the script was invoked with, and it is
+# resolved to an absolute path **before** the `cd` below -- after the
+# cd, that relative path would no longer name anything.
+self="$0"
+case "$self" in
+    /*) ;;
+    *) self="$(pwd)/$self" ;;
+esac
+self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")"
 
-mkdir -p "${CERT_DIR}"
+cd "$(dirname "$self")"
 
-CERT="${CERT_DIR}/turn-server-cert.pem"
-KEY="${CERT_DIR}/turn-server-key.pem"
+force=0
+for arg in "$@"; do
+    case "$arg" in
+        --force|-f) force=1 ;;
+        -h|--help)
+            sed -n '2,45p' "$self" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "gen-certs.sh: unknown argument: $arg" >&2
+            exit 2
+            ;;
+    esac
+done
 
-# openssl req 自签证书 —— N5 验收标准 2（自签证书生成命令）。
-openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout "${KEY}" \
-  -out "${CERT}" \
-  -days 365 \
-  -subj "/CN=${REALM}" \
-  -addext "subjectAltName=DNS:${REALM},IP:127.0.0.1" \
-  -addext "basicConstraints=critical,CA:FALSE" \
-  -addext "keyUsage=digitalSignature,keyEncipherment" \
-  -addext "extendedKeyUsage=serverAuth" \
-  >/dev/null 2>&1
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "gen-certs.sh: openssl not found on PATH" >&2
+    exit 1
+fi
 
-chmod 600 "${KEY}"
-chmod 644 "${CERT}"
-printf 'Generated %s\n         %s\n' "${CERT}" "${KEY}"
+key=secrets/tls/turn.key
+cert=secrets/tls/turn.pem
+cacert=secrets/ca/ca.pem
+cakey=secrets/ca/ca.key
+
+if [[ -s "$cert" && -s "$key" && -s "$cacert" && $force -eq 0 ]]; then
+    echo "gen-certs.sh: $cert already exists (use --force to rotate)"
+    exit 0
+fi
+
+mkdir -p secrets/tls secrets/ca
+
+echo "gen-certs.sh: generating a one-off CA"
+openssl genrsa -out "$cakey" 2048 2>/dev/null
+openssl req -x509 -new -nodes -key "$cakey" -sha256 -days 3650 \
+    -subj "/CN=NimRTC test CA/O=nimrtc.local" \
+    -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -out "$cacert" 2>/dev/null
+
+echo "gen-certs.sh: generating the server key and request"
+openssl genrsa -out "$key" 2048 2>/dev/null
+openssl req -new -key "$key" \
+    -subj "/CN=turn.nimrtc.local/O=nimrtc.local" \
+    -out secrets/tls/turn.csr 2>/dev/null
+
+# The SAN is what a client actually verifies against; CN alone has been
+# ignored by every sane TLS stack for years.
+cat > secrets/tls/turn.ext <<'EOF'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:turn.nimrtc.local,DNS:localhost,IP:127.0.0.1,IP:::1
+EOF
+
+echo "gen-certs.sh: signing the server certificate"
+openssl x509 -req -in secrets/tls/turn.csr \
+    -CA "$cacert" -CAkey "$cakey" -CAcreateserial \
+    -days 825 -sha256 \
+    -extfile secrets/tls/turn.ext \
+    -out secrets/tls/turn-leaf.pem 2>/dev/null
+
+# coturn reads `cert` as the full chain: leaf first, then the issuer.
+cat secrets/tls/turn-leaf.pem "$cacert" > "$cert"
+
+# The CSR and the extension file have done their job.
+rm -f secrets/tls/turn.csr secrets/tls/turn.ext
+
+# The credential has one source: turnserver.conf has the `user=` line,
+# and this file is what the tests and the sample read it from.
+cat > secrets/creds.txt <<'EOF'
+# The static long-term credential the reference server accepts.
+# Mirrors the `user=` line in turnserver.conf.  Test-only.
+TURN_REALM=nimrtc.local
+TURN_USERNAME=nimrtc
+TURN_PASSWORD=nimrtc-test-secret
+EOF
+
+mkdir -p secrets/logs
+
+# ---------------------------------------------------------------------------
+# The permissions the *server* needs
+# ---------------------------------------------------------------------------
+#
+# The container runs as `nobody:nogroup` (the coturn image's own
+# `USER nobody:nogroup`), and the host bind-mount at /etc/coturn carries
+# the ownership and modes of the files this script just wrote.  Two
+# consequences, and both of them are silent:
+#
+# 1. **OpenSSL writes private keys 0600.**  The key would be owned by
+#    whoever ran this script (the developer, on the host) and unreadable
+#    by `nobody` inside the container.  coturn's response to an
+#    unreadable key is not an error exit -- it logs
+#    "cannot start TLS and DTLS listeners because private key file is
+#    not set properly" and **starts anyway with the TLS listener
+#    disabled**.  The container then comes up healthy, the port is
+#    published, and the N1 client fails to connect -- to a server that
+#    looks like it is serving TLS.  That is the worst possible shape
+#    for a *negative control*, because it is indistinguishable from the
+#    defect the control is meant to catch.
+#
+# 2. **The log directory is not writable by `nobody`.**  coturn creates
+#    the log file itself; if it cannot, the file never appears and N1's
+#    "the TLS handshake is visible in the server log" evidence is
+#    missing -- again silently.
+#
+# So the key is widened to be *readable* by the server (0644 is enough
+# for a test key; it is not a production secret, and the CA key below
+# is the one that would actually hurt), and the directories are made
+# group-agnostic-writable so that whoever runs the container -- root
+# or `nobody` -- can write them.
+#
+# `chmod` is applied with `|| true` on purpose: on a filesystem without
+# POSIX permissions (some Windows and WSL mounts) these calls fail, and
+# a failure here must not stop the certificate from being generated.
+# ---------------------------------------------------------------------------
+chmod 0644 "$key" 2>/dev/null || true
+chmod 0644 "$cert" 2>/dev/null || true
+chmod 0755 secrets secrets/tls secrets/ca secrets/logs 2>/dev/null || true
+chmod 0777 secrets/logs 2>/dev/null || true
+
+echo "gen-certs.sh: done"
+echo "  server chain : $cert"
+echo "  server key   : $key"
+echo "  client trust : $cacert"
+echo "  credential   : secrets/creds.txt"

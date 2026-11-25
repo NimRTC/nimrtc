@@ -100,6 +100,22 @@ jobs:
         with:
           submodules: recursive
           ref: ${{ inputs.tag || github.ref }}
+          # Full history, and the point of it is stated where it is
+          # needed rather than here: the soak gate reads the window
+          # with `--expect-ancestor-of "$tag"`, which asks git
+          # `merge-base --is-ancestor <measured commit> <tag>` for
+          # every day of the window.  A shallow checkout holds ONE
+          # commit, so that question cannot be answered for any day
+          # but the last, and the collector answers "unknown" -- which
+          # the gate counts as NOT green.  The window therefore scored
+          # 0/7 on both platforms, and the v1.3.0 release failed in
+          # preflight on a window that was green on every one of its
+          # days (release run 44687753371, 2026-11-20).
+          #
+          # `soak.yml` already checks out with `fetch-depth: 0` for
+          # exactly this reason; the release workflow did not, and the
+          # two disagreed about the same evidence.
+          fetch-depth: 0
 
       - name: Resolve release tag (push vs workflow_dispatch)
         id: resolve-tag
@@ -200,7 +216,7 @@ jobs:
           fi
           echo "Tag '$tag' is an ancestor of main."
 
-      # The seven-day soak evidence, read AT THE TAG.
+      # The soak evidence, read AT THE TAG.
       #
       # This step did not exist: the release was cut with no reading of
       # the soak evidence at all, and the plan's "7-day soak before the
@@ -249,9 +265,25 @@ jobs:
           #
           # The `--require` gate is what makes this a gate rather than
           # a report: it exits non-zero unless EVERY tracked platform
-          # has a 7-day streak.
+          # has the streak the rule in force demands.
+          #
+          # The rule is NOT spelled out here.  `--require-days` is
+          # deliberately NOT passed: the day count and the intra-day
+          # rule are the RULE's business, and the rule is versioned and
+          # dated (`GATE_RULE` in `tools/run_soak.py`).  Passing a
+          # number here would put it back under the release manager's
+          # thumb on the day of the cut -- which is how the 2026-11-23
+          # release came to be gated by a window shortened on the very
+          # day it was cut.
+          #
+          # `--cut-date` is the tag's own date, so the rule that judges
+          # this release is the one that was in force on the day it was
+          # cut.  A rule change cannot decide a release until its
+          # cooldown has elapsed, so the release that changes the rule
+          # is judged by the rule it replaced.
           python3 tools/run_soak.py \
-            --summary --require --require-days 7 \
+            --summary --require \
+            --cut-date "$(git show -s --format=%cs "$tag")" \
             --expect-ref "" \
             --expect-ancestor-of "$tag" \
             --max-window-age-days "$max_age" \
@@ -296,6 +328,18 @@ jobs:
       # --shape-only selects exactly that reduced check; the full
       # verification would need the tag-signing key and an
       # allowed_signers file, neither of which exists on the runner.
+      #
+      # The shape check also covers a third thing the v1.3.0 release
+      # got wrong: the tag OBJECT's own name.  An annotated tag object
+      # carries the name it was created with, and `git update-ref` can
+      # move a ref onto an object whose name says something else.  The
+      # v1.3.0 tag is reached through `refs/tags/v1.3.0` but the object
+      # names itself `v1.3.0-staged` -- so `git tag -v`, `git describe`
+      # and the GitHub release page all report `v1.3.0-staged`.  The
+      # signature verified, because it was a valid signature over a
+      # valid object; what was wrong was the name the object presents.
+      # That is a SHAPE property, detectable from the object alone, so
+      # it belongs in this check rather than in the cryptographic one.
       - name: Verify the release tag carries a signature
         shell: bash
         run: |
@@ -313,6 +357,7 @@ jobs:
           fi
           python3 tools/verify_tag_signature.py --tag "$tag" --shape-only
           echo "Tag '$tag' is an annotated tag carrying a signature block."
+          echo "Tag '$tag' names itself correctly."
 
       # The README is the front page of a release: its badge says which
       # version is published and its "Latest release" paragraph says what
@@ -369,9 +414,38 @@ jobs:
           submodules: recursive
           ref: ${{ needs.preflight.outputs.release_tag }}
 
+      # EVERY pwsh step below opens with this preamble.  GitHub's pwsh
+      # shell appends `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) {
+      # exit $LASTEXITCODE }` to the END of the script, so it checks only
+      # the LAST native command's exit code.  A failure in the middle of
+      # a multi-command step is silently ignored, and the step reports
+      # success.
+      #
+      # That is not hypothetical.  In release run 45103898215 (the
+      # v1.3.0 cut, 2026-11-23) `python tools/collect_licenses.py`
+      # printed
+      #
+      #     ERROR: vendor(s) linked into the bundle whose licence text
+      #     was not found: svt-av1
+      #
+      # and exited 1 -- and the Windows job still reported SUCCESS,
+      # because `make_release_bundle.py` (the next command) succeeded.
+      # The bundle it uploaded shipped svt-av1's static codec library
+      # with NO licence text, which is the BSD-2-Clause / AOM-Patent
+      # obligation the collector exists to discharge.  A published
+      # bundle that violates a licence is worse than a failed release.
+      #
+      # `$ErrorActionPreference = 'Stop'` turns a non-terminating error
+      # into a terminating one, and the explicit `if ($LASTEXITCODE -ne
+      # 0) { exit $LASTEXITCODE }` after each native command catches the
+      # case the preference cannot: a native command that failed but
+      # wrote nothing to the error stream.
       - name: Install Ninja
         shell: pwsh
-        run: choco install -y ninja
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install -y ninja
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Set up MSVC dev environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -394,8 +468,11 @@ jobs:
       - name: Install meson (for WebRTC APM prebuild)
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           python -m pip install --user --quiet "meson>=1.10"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $userScripts = python -c "import sysconfig; print(sysconfig.get_path('scripts', scheme='nt_user'))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "Adding to GITHUB_PATH: $userScripts"
           Add-Content -Path $env:GITHUB_PATH -Value $userScripts
 
@@ -428,11 +505,15 @@ jobs:
       - name: Prebuild WebRTC APM
         id: apm_prebuild
         shell: pwsh
-        run: python tools/fetch_webrtc_apm.py
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python tools/fetch_webrtc_apm.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Configure
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           # W3 (flipped 2026-11-06): the APM prebuild is a hard gate, so
           # the mode is pinned to ON — there is no degraded fallback
           # branch any more.
@@ -448,19 +529,25 @@ jobs:
             -DNIMRTC_BUILD_TESTS=OFF `
             -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON `
             -DNIMRTC_INSTALL=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force -Path build | Out-Null
           "3a=$apm" | Set-Content -Path build/3a-status-windows.txt
 
       - name: Build
         shell: pwsh
-        run: cmake --build build --config Release -j
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build build --config Release -j
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install into staging dir
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $version = "$env:RELEASE_TAG" -replace '^v',''
           $staging = "build/_install/windows"
           cmake --install build --prefix $staging --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           # BSD-3-Clause and Apache-2.0 both require the licence text to
           # travel with a binary redistribution.  The SBOM names each
@@ -471,6 +558,7 @@ jobs:
           # `licenses/` inside the staging tree, and fail the cut if a
           # distributed vendor has no licence file.
           python tools/collect_licenses.py --staging $staging
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           # Bundle name: nimrtc-${version}-windows-x86_64-msvc.tar.xz
           $bundle = "build/nimrtc-$version-windows-x86_64-msvc.tar.xz"
@@ -489,22 +577,34 @@ jobs:
           # layout of the Linux/macOS jobs, and fails the step if the bundle
           # comes out empty or unreasonably large.
           python tools/make_release_bundle.py --staging $staging --output $bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # `Get-FileHash` as a pipeline command writes a 3-column tabular
           # line (Algorithm/Hash/Path) which is PowerShell-specific and not
           # consumable by `sha256sum -c` on Linux/macOS downstream. Read
-          # the structured object's `.Hash` property instead, lowercase
-          # it, and write the bare hex (no `sha256:` prefix, no path) so
-          # the sidecar matches the `sha256sum -c` "binary" mode that
-          # the Linux/macOS jobs already produce. Detected at v0.14.0
-          # cut: the Windows sidecar was the odd one out and downstream
-          # verification (`sha256sum -c` against the published file)
-          # failed because the first token was the word "Algorithm" not
-          # a hex digest. The v0.14.0 release asset has been manually
-          # replaced with the correct bare-hex sidecar (using the OCI
-          # digest GitHub exposes on the asset object as the source of
-          # truth); this fix prevents the same regression in future cuts.
+          # the structured object's `.Hash` property instead and lowercase
+          # it.  Detected at v0.14.0 cut: the Windows sidecar was the odd
+          # one out and downstream verification (`sha256sum -c` against the
+          # published file) failed because the first token was the word
+          # "Algorithm" not a hex digest.
+          #
+          # The bare hex alone is NOT enough either.  `sha256sum -c` needs
+          # a *checksum line* -- a hex digest, two spaces, and a file name
+          # -- and it rejects a line that carries no name at all ("no
+          # properly formatted SHA256 checksum lines found").  That is
+          # the shape the v1.3.0 cut shipped for Windows, and the README
+          # documents `sha256sum -c` as the way to verify a bundle, so the
+          # command the README prints was the command that failed.  The
+          # name is the BASENAME, without the `build/` prefix the Linux
+          # jobs leave in, so the sidecar works when the file has been
+          # downloaded next to it.
+          #
+          # The line ending must be LF.  `Set-Content` on Windows writes
+          # CRLF, and `sha256sum -c` then reads the `\r` as part of the
+          # file name ("...tar.xz'$'\r': No such file or directory").
+          # `[IO.File]::WriteAllText` with an explicit `\n` avoids it.
           $hash = (Get-FileHash -Algorithm SHA256 $bundle).Hash.ToLower()
-          Set-Content -Path "$bundle.sha256" -Value $hash -NoNewline
+          $leaf = Split-Path -Leaf $bundle
+          [IO.File]::WriteAllText("$bundle.sha256", "$hash  $leaf`n")
           Get-Content "$bundle.sha256"
 
       - name: Upload artefact bundle
@@ -601,7 +701,15 @@ jobs:
             echo "::error::bundle is $size bytes — refusing to publish"
             exit 1
           fi
+          # `sha256sum` writes the path it was given, so the sidecar would
+          # say "build/nimrtc-...tar.xz" -- and `sha256sum -c` then looks
+          # for a file *under a `build/` directory that does not exist*
+          # once the bundle has been downloaded next to its sidecar
+          # ("No such file or directory").  Strip the directory prefix:
+          # the sidecar must name the file the way the reader has it.
+          # The same is true of the macOS job's `shasum` below.
           sha256sum "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz" \
+            | awk '{print $1"  "substr($2,index($2,"/")+1)}' \
             > "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz.sha256"
 
       - name: Upload artefact bundle
@@ -715,7 +823,10 @@ jobs:
             echo "::error::bundle is $size bytes — refusing to publish"
             exit 1
           fi
+          # Strip the `build/` prefix -- see the linux-gcc job above for
+          # why `sha256sum -c` needs the basename.
           sha256sum "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz" \
+            | awk '{print $1"  "substr($2,index($2,"/")+1)}' \
             > "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz.sha256"
 
       - name: Upload artefact bundle
@@ -937,6 +1048,35 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Verify the `.sha256` sidecars are `sha256sum -c` compatible
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The README tells a reader to verify a bundle with
+          # `sha256sum -c <file>.sha256`, so every published sidecar has
+          # to be a checksum line: a digest, whitespace, and the name of
+          # the file the digest belongs to.  The v1.3.0 cut shipped three
+          # sidecars that were not: the Windows one was the bare hex with
+          # no name at all ("no properly formatted SHA256 checksum lines
+          # found") and the two Linux ones said `build/<file>`, so
+          # `sha256sum -c` looked for a file under a directory that does
+          # not exist next to a downloaded bundle ("No such file or
+          # directory").  The digest was always right; the *line* was
+          # not, and the release log could not see that.
+          #
+          # This gate is the format check.  The digest itself is checked
+          # by `sha256sum -c` below, which verifies each sidecar against
+          # the bundle it sits next to.
+          python3 tools/check_sha256_sidecars.py dist/
+
+          # And now the real thing: run the command the README prints.
+          for sidecar in dist/*.sha256; do
+            [[ -f "$sidecar" ]] || continue
+            bundle="${sidecar%.sha256}"
+            [[ -f "$bundle" ]] || continue
+            ( cd dist && sha256sum -c "$(basename "$sidecar")" )
+          done
+
       - name: Sign each artefact (detached GPG signature)
         if: needs.preflight.outputs.configured == 'true'
         shell: bash
@@ -1105,19 +1245,27 @@ jobs:
           fi
           # A second, independent guard: the body that is about to be
           # posted must fit, *including* the footers appended below
-          # (the signing status and the per-platform 3A status).  The
-          # tool already budgets for them; this check is what catches
-          # a change to the footers that outgrows the margin.
+          # (the signing status, the digest table and the per-platform
+          # 3A status).  The tool already budgets for them; this check
+          # is what catches a change to the footers that outgrows the
+          # margin.
           #
           # The count is in **characters**, not bytes: GitHub's limit
           # is on characters, and the body carries non-ASCII (arrows,
           # em-dashes) that would make a byte count the wrong number
           # to compare against it.
+          #
+          # This guard runs where it does -- *before* the footers are
+          # appended -- so it can only ever see the body proper.  The
+          # guard that actually protects the published body is the one
+          # in the "Verify the release body length" step below, which
+          # runs after every footer has been appended and therefore
+          # counts the body that is really posted.
           body_chars=$(python3 -c "
           import pathlib, sys
           print(len(pathlib.Path('dist/release_notes.md').read_text(encoding='utf-8')))
           ")
-          echo "release body: ${body_chars} characters"
+          echo "release body: ${body_chars} characters (before the footers)"
           if (( body_chars > 125000 )); then
             echo "::error::The release body is ${body_chars} characters, over GitHub's 125000-character limit."
             exit 1
@@ -1208,6 +1356,53 @@ jobs:
             } >> dist/release_notes.md
           fi
 
+          # The digest table.  The v1.3.0 body told a reader how to check a
+          # GPG signature and how to run `sha256sum -c`, but it never
+          # printed a single digest -- so the only in-band integrity value
+          # was the detached `.sha256` sidecar, which sits next to the
+          # asset on the SAME server.  A consumer checking a mirror, a
+          # mirror-of-a-mirror, or an offline copy had nothing to compare
+          # against.
+          #
+          # The table below is built from the bundles this run is about to
+          # publish: the digest is computed from the file itself, so it
+          # cannot drift from the artefact, and a bundle that was not
+          # built simply does not appear.  It is emitted AFTER the
+          # "which platforms are present" check above, so a partial
+          # release lists exactly the bundles that actually shipped.
+          {
+            echo
+            echo "---"
+            echo
+            echo "> **Bundle digests (SHA-256)**"
+            echo
+            echo "> | Bundle | Platform | Size | SHA-256 |"
+            echo "> |---|---|---|---|"
+            for tarball in dist/nimrtc-*.tar.xz; do
+              [[ -f "$tarball" ]] || continue
+              leaf="$(basename "$tarball")"
+              digest="$(sha256sum "$tarball" | awk '{print $1}')"
+              bytes="$(stat -c%s "$tarball")"
+              platform="${leaf#nimrtc-}"
+              platform="${platform%.tar.xz}"
+              platform="${platform#*-}"
+              echo "> | \`${leaf}\` | \`${platform}\` | ${bytes} bytes | \`${digest}\` |"
+            done
+            echo
+            echo "> The digests above are the **full** SHA-256 of each published"
+            echo "> bundle.  The same value ships in the detached \`.sha256\`"
+            echo "> sidecar next to each asset, in \`sha256sum -c\` format:"
+            echo
+            echo "> \`\`\`bash"
+            echo "> sha256sum -c nimrtc-<version>-<platform>.tar.xz.sha256"
+            echo "> \`\`\`"
+            echo
+            echo "> A digest check alone does not authenticate the bundle --"
+            echo "> it tells you the bytes you received are the bytes that were"
+            echo "> published.  The detached \`.asc\` signature over the same"
+            echo "> file is what establishes *who* published them; verify both."
+          } >> dist/release_notes.md
+
           # W3: per-platform 3A (AEC/ANS/AGC) status.  TWO DIFFERENT
           # facts must be reported per platform, and conflating them is
           # what made the v1.0.2 body wrong:
@@ -1288,6 +1483,36 @@ jobs:
             echo "> a platform counts as \"real 3A bundled\" only when"
             echo "> \`lib/webrtc_apm/\` is actually present in the tarball."
           } >> dist/release_notes.md
+
+      # The guard that actually protects the published body.
+      #
+      # Every footer is now appended: the signing status, the digest
+      # table and the per-platform 3A status.  This is the first point
+      # at which the body that GitHub will really receive can be
+      # measured, so this is the check that has to pass -- the earlier
+      # one (in "Build the release body") runs before the footers and
+      # therefore cannot see them.
+      #
+      # GitHub's limit is on CHARACTERS, not bytes: the body carries
+      # non-ASCII (arrows, em-dashes, the `…` in the 3A table) that
+      # would make a byte count the wrong number to compare against it.
+      # And the failure GitHub reports for an over-long body is a 422
+      # at the publish step, which is far too late and far too
+      # indirect: the body that is over the limit is the *whole*
+      # release notes, and truncating it would lose the release notes.
+      - name: Verify the release body length
+        shell: bash
+        run: |
+          set -euo pipefail
+          body_chars=$(python3 -c "
+          import pathlib
+          print(len(pathlib.Path('dist/release_notes.md').read_text(encoding='utf-8')))
+          ")
+          echo "release body (with every footer): ${body_chars} characters"
+          if (( body_chars > 125000 )); then
+            echo "::error::The release body is ${body_chars} characters, over GitHub's 125000-character limit. The body would be rejected with a 422, or silently truncated. Shorten the CHANGELOG section, or shrink a footer."
+            exit 1
+          fi
 
       - name: Draft GitHub Release
         uses: softprops/action-gh-release@v3

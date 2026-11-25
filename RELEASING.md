@@ -317,6 +317,24 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
     Note that the "Verified" badge does **not** depend on C6 when the SSH
     path is used.
 
+    **The tag object must name itself the way the ref does.** An
+    annotated tag object carries the name it was *created* with, and
+    `git update-ref` can move a ref onto an object whose name says
+    something else — so the ref can say `v1.3.0` while the object says
+    `v1.3.0-staged`. The `v1.3.0` tag is exactly that: it is reached
+    through `refs/tags/v1.3.0`, but the object names itself
+    `v1.3.0-staged`, so `git tag -v`, `git describe` and the GitHub
+    release page all report the staged name. The signature verified —
+    it was a valid signature over a valid object — and nothing
+    complained, because nothing was looking at the object's *name*.
+
+    `tools/verify_tag_signature.py` now checks this, and it is a SHAPE
+    property, so it fires under `--shape-only` too: the release
+    workflow's preflight refuses a tag whose object names itself
+    differently from its ref. Sign the tag **under the name it will be
+    released as**; do not sign under a probe name and move the ref
+    afterwards.
+
     #### Historical tags carry no signature
 
     Every tag released so far is unsigned. `v1.0.0` is a *lightweight*
@@ -328,7 +346,42 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
     are signed; the pre-`v1.1.0` tags cannot be signed retroactively
     without rewriting published history.
 
-12. The push triggers `.github/workflows/release.yml` which:
+12. **Collect the hardware evidence (Q7) before the tag.** The
+    hardware-codec claim is proved by a record, not by a build: the
+    `hardware.yml` workflow runs on the self-hosted GPU runner
+    (`nimrtc-gpu-nvenc`) and writes a record to
+    `build/hardware/<platform>-<date>.jsonl`. That record has to be
+    fetched onto the tree being tagged, and it has to be a **PASS on
+    that tree** — a record measured on another commit, or on a dirty
+    tree, is not evidence about the release.
+
+    ```bash
+    # Run the hardware job on the tree being tagged (the runner needs
+    # the ref; a SHA is the most precise thing to ask for):
+    gh workflow run hardware.yml -f ref=<the-tagged-commit-sha>
+
+    # Then fetch its record down onto the tag cut, and check it:
+    gh api repos/NimRTC/nimrtc/actions/workflows/hardware.yml/runs \
+      --jq '.workflow_runs[] | select(.head_sha=="<the-tagged-commit-sha>")'
+    # ... and place the record at build/hardware/<platform>-<date>.jsonl
+    python tools/run_hardware_e2e.py --summary --expect-green
+    sh scripts/check-release-freeze.sh --only hardware --final-tag
+    ```
+
+    The `hardware` check in the freeze checklist is what the release
+    workflow runs, and under `--final-tag` a missing record is a
+    **FAIL**, not a skip: at tag-cut time there is no later CI run to
+    catch it. The same rule the `api-symbols` check uses for a missing
+    `node`.
+
+    > **The `hardware` job has never completed successfully.** All 22
+    > of its runs so far failed — most at the checkout stage, on the
+    > runner's link dropping long transfers. That is why the check is
+    > here: until the job runs green on the tree being tagged, the
+    > hardware claim is unproven, and the release must say so rather
+    > than quietly ship without it.
+
+13. The push triggers `.github/workflows/release.yml` which:
     - Builds the four-platform release artefacts (`nimrtc-{windows,linux,linux-aarch64,macos}.tar.xz`
       containing headers, CMake config files, and the static `.lib`/`.a`).
     - Signs the artefacts with the release manager's GPG key (see
@@ -379,9 +432,9 @@ gpg --send-keys "$GPG_FPR"
 
 ### 3.4 Post-tag (T+1 day)
 
-13. Merge `release/X.Y` back into `main` (fast-forward) so the version bump
+14. Merge `release/X.Y` back into `main` (fast-forward) so the version bump
     is visible on `main` too. This merge commit is **not** a new release.
-14. Open a PR titled `chore: post-release version bump` that advances
+15. Open a PR titled `chore: post-release version bump` that advances
     the project version to `X.Y.(Z+1)-dev` on `main` so
     `find_package(NimRTC)` cannot accidentally pick up an in-progress build
     as `X.Y.Z`. Make the change with
@@ -401,9 +454,9 @@ gpg --send-keys "$GPG_FPR"
     builds — a report that says nothing about the real cause.
     `python tools/bump_version.py --check` runs on every push and names
     any site that drifted.
-15. Mark the milestone as `100% complete` on GitHub.
-16. Announce:
-    - GitHub Release (auto-created in step 12) — pinned to the repo front page.
+16. Mark the milestone as `100% complete` on GitHub.
+17. Announce:
+    - GitHub Release (auto-created in step 13) — pinned to the repo front page.
     - Project mailing list / Discussions thread for public RCs and stable
       releases only (not for `*-alpha.*` / `*-beta.*` internal tags).
 
@@ -502,6 +555,9 @@ This section is appended at release time. Each entry cross-references the
 | `v1.0.2`       | 2026-11-02 | Patch release fixing the WebTransport ALPN mismatch, the oversized Windows bundle, and the missing signing public key. All four platform bundles ship with detached `.asc` signatures plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`). Known limitation: the bundles carry only the vendored third-party stack, not NimRTC's own headers/static lib/`NimRTCConfig.cmake` (§4) — tracked for `v1.1.0` (Track D). See `CHANGELOG.md` `[1.0.2]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2 |
 | `v1.1.0`       | 2026-11-08 | Feature release — the GM/T TLCP backend (GmSSL), the WebRTC APM 3A path, the v1.1 transport/strategy surface and the `nimrtc::engine` bundle that `v1.0.2` did not ship (Track D closed). The tag is annotated and SSH-signed (tag object `4177d00`, peeling to commit `50358b8`) and GitHub reports it as `verified: true`. The `release.yml` run [42463218202](https://github.com/NimRTC/nimrtc/actions/runs/42463218202) built all four platform bundles and left a **draft** release; the draft was published on 2026-11-09 after the 7-day soak window (§12.3.6 Gate 6) closed. See `CHANGELOG.md` `[1.1.0]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.1.0 |
 | `v1.2.0`       | 2026-11-18 | The release that closes the `v1.2` plan: **Track E** (the eight convergence gates E1–E8) and **Track S** (the `getStats()` observability surface, S1–S8) are both complete, and the **remote-desktop** track ships with it. The tag is annotated and SSH-signed (tag object `e7d28e8f`, peeling to commit `6295ed47`); `tools/verify_tag_signature.py --tag v1.2.0` reports the signature verified against the ed25519 key `SHA256:3z9Lz53tKDBFwsXxiJMvFHhPm/jLdnJUrVaw/QVSxkA` (principal `realdesktop@163.com`). All four platform bundles ship with detached `.asc` signatures plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`) and an `sbom.json`. The bundles carry NimRTC's own headers, static libraries and `NimRTCConfig.cmake` (§4), plus the WebRTC APM archives in `lib/webrtc_apm/` — so `find_package(NimRTC)` works from a downloaded bundle. The published release body is the **digest** produced by `tools/release_body.py` (the full `## [1.2.0]` section is 367 858 characters, over GitHub's 125 000-character limit). Published 2026-11-18, not a prerelease. See `CHANGELOG.md` `[1.2.0]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.2.0 |
+| `v1.3.0`       | 2026-11-23 | The release that closes the `v1.3` plan: **Track Q** (Q1–Q7) is complete, and the release's headline is that the engine now **degrades gracefully under a hostile network** — the axis `v1.2.0` explicitly did not claim. The tag is annotated and SSH-signed (tag object `7ac9881f`, peeling to commit `0fd6f0b8`); `tools/verify_tag_signature.py --tag v1.3.0` reports the signature verified against the ed25519 key `SHA256:3z9Lz53tKDBFwsXxiJMvFHhPm/jLdnJUrVaw/QVSxkA` (principal `realdesktop@163.com`). All four platform bundles ship with detached `.asc` signatures plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`) and an `sbom.json`; the bundles carry NimRTC's own headers, static libraries and `NimRTCConfig.cmake` (§4), plus the WebRTC APM archives in `lib/webrtc_apm/`. **This tag was re-cut** — the original cut at `df71a37a` did not survive the release-blocker review, and four fixes landed between the two cuts: the licence collector missed a vendored dependency whose licence file carried an extension (PR #150), the Windows job did not fail on a failed licence check (PR #151), the re-cut's own final step signed `HEAD` instead of its target (PR #152), and the release body claimed a seven-day window the gate no longer asks for (PR #154). The bundles that shipped were built from `fd244475` by run [45118362383](https://github.com/NimRTC/nimrtc/actions/runs/45118362383); the later re-run [45123680856](https://github.com/NimRTC/nimrtc/actions/runs/45123680856) built all four platforms successfully but its publish step died on a stale draft, and the published assets are the earlier run's. **Published 2026-11-23** (GitHub's `published_at`), not a prerelease; the `CHANGELOG.md` heading still reads `2026-11-20`, which is the date of the *first* cut, and it is left as it is — that heading is what produced the published release body, so rewriting it now would make the tree disagree with the release it documents. See `CHANGELOG.md` `[1.3.0]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.3.0 |
+| `v1.3.1`       | 2026-11-24 | The patch release that fixes the `v1.3.0` line's licence/sidecar problems, and the first release whose body carries an **in-band digest table**. The release notes live in `CHANGELOG.md` `[1.3.1]`. The tag is annotated and SSH-signed (tag object `9db729a8`, peeling to commit `afded4a5`); `tools/verify_tag_signature.py --tag v1.3.1` reports the signature verified against the ed25519 key `SHA256:3z9Lz53tKDBFwsXxiMJvFHhPm/jLdnJUrVaw/QVSxkA` (principal `realdesktop@163.com`). All four platform bundles ship with detached `.asc` signatures plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`) and an `sbom.json`. Three things are new here: (1) the `.sha256` sidecars are `sha256sum -c` compatible — they name the bundle next to them with no directory component and carry no carriage return, which `v1.3.0`'s did not; (2) the release body ends with a **Bundle digests (SHA-256)** markdown table, so a consumer can verify a bundle against the release page itself, with no second download; (3) the body's 125 000-character length guard now runs **after** the signing, digest and 3A-status footers are appended, so the guard measures the body that actually ships rather than a truncated one. The `release.yml` run [45323043368](https://github.com/NimRTC/nimrtc/actions/runs/45323043368) built all four platforms and left a draft; the draft was published on 2026-11-24. The release also carries the Q1b H.265 mid-stream parameter-set switch hardware verification, which `v1.3.0` deferred. **Published 2026-11-24** (GitHub's `published_at`), not a prerelease. See `CHANGELOG.md` `[1.3.1]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.3.1 |
+| `v1.4.0`       | *pending* | The release that closes the `v1.4` plan: **Track N** (N1–N9, the real TURN / TLS transport) and **Track D** (D1–D7, the device layer).  **There is no `v1.3.2`** — the work that landed after `v1.3.1` changed the public surface (§1.1), so the tree moved to `1.4.0-dev` on 2026-11-25 and `[Unreleased]` is this release's notes in progress.  Cut when M3 is reached; the seven-day soak window that precedes it puts the earliest cut at 2026-12-08.  See `docs/plan/v1.4-plan.md`. | — |
 
 ---
 

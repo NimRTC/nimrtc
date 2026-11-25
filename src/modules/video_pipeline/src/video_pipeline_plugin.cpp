@@ -154,6 +154,7 @@ ReceiverConfig to_concrete_receiver_cfg(const plugins::VideoReceiverConfig& p) n
     c.payload_type  = p.payload_type;
     c.expect_fu_a   = p.expect_fu_a;
     c.rtx_payload_type = p.rtx_payload_type;
+    c.h264_bare_nalus  = p.h264_bare_nalus;
 
     video_jb::Config jb{};
     jb.mode = video_jb::Mode::kLowLatency;
@@ -180,6 +181,7 @@ to_plugin_receiver_cfg(const ReceiverConfig& c) noexcept {
     p.payload_type = c.payload_type;
     p.expect_fu_a  = c.expect_fu_a;
     p.rtx_payload_type = c.rtx_payload_type;
+    p.h264_bare_nalus  = c.h264_bare_nalus;
     p.max_inflight_frames = c.jitter_buffer_config.max_inflight_frames;
     p.max_jitter_buffer_ms = c.jitter_buffer_config.max_wait_ms;
     p.emit_nacks          = c.jitter_buffer_config.emit_nacks;

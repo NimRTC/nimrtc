@@ -1,0 +1,179 @@
+# ---------------------------------------------------------------------------
+# examples/turn-server/docker-compose.yml
+# ---------------------------------------------------------------------------
+#
+# The developer / archived-evidence path for the reference TURN server
+# (v1.4 plan item **N5**, §5 N5-1).
+#
+#   ./gen-certs.sh                     # once; writes ./secrets/
+#   docker compose up -d              # TLS-only on 5349
+#   docker compose --profile plain up -d   # the NEGATIVE CONTROL (see below)
+#   docker compose down
+#
+# ---------------------------------------------------------------------------
+# The two services are MUTUALLY EXCLUSIVE, and that is the whole point.
+# ---------------------------------------------------------------------------
+#
+#   coturn        TLS listener on 5349.  The target N1's
+#                 positive test points at.
+#
+#   coturn-plain  a plain TURN server on **the same port 5349**, with TLS
+#                 switched off.  It is N1's **negative control**.
+#
+# Why the same port, and why not both at once:
+#
+#   The defect N1 removes is a client that is told "use TLS" and quietly
+#   connects over **plain TCP** instead.  A negative control on a
+#   *different* port cannot catch that: the client would fail to reach
+#   the wrong port, which is a connection error, not a protocol
+#   downgrade.  The control has to be a plain server **on the port the
+#   client was told to use**, so that the only thing standing between
+#   the client and a working session is whether it actually negotiated
+#   TLS.
+#
+#   They therefore cannot run simultaneously (one host port, two
+#   listeners), and the control is brought up *instead of* the TLS
+#   server.  The `--profile plain` switch expresses exactly that: it
+#   starts the control and stops the positive.
+#
+# ---------------------------------------------------------------------------
+#
+# The relay ports are published on **loopback only**.  A TURN allocation
+# forwards datagrams from the peer, and the peer is unauthenticated by
+# construction, so a relay range bound to 0.0.0.0 turns the host into an
+# open relay.  CI and the sample both run on the same machine, so
+# loopback is enough.  Widen the binding only if the machine needs to
+# serve peers on other hosts — and then firewall it.
+#
+# The image is `coturn/coturn`, pinned.  coturn is **not** vendored under
+# `src/third_party/`: it is a deployment, not a library dependency (v1.4
+# plan §3 N5).
+# ---------------------------------------------------------------------------
+
+name: nimrtc-turn
+
+# The relay range.  coturn's default (49152-65535) is too wide to publish
+# port by port; this range is 41 ports, which covers a handful of
+# simultaneous clients — the sample, the N1 test and the N2 test — with
+# headroom.  `turnserver.conf` must carry the same range.
+x-relay-ports: &relay-ports
+  - "49160-49200:49160-49200/udp"
+
+services:
+  # -------------------------------------------------------------------------
+  # The positive server: TLS only.
+  # -------------------------------------------------------------------------
+  coturn:
+    image: coturn/coturn:4.6.3
+    container_name: nimrtc-turn-tls
+    restart: unless-stopped
+    command:
+      # **The config file is `-c`, not `--config`.**  coturn's
+      # long-option table has no `config` entry at all: `--config` makes
+      # the server print "unrecognized option '--config=...'" and
+      # **exit**, so the container never starts and the deployment
+      # looks like a Docker problem rather than a spelling problem.
+      # The short form takes the path as its argument.
+      - -c
+      - /etc/coturn/turnserver.conf
+      # The external IP, so that a relay allocation hands the peer an
+      # address the peer can actually reach.
+      #
+      # The image's default CMD carries `--external-ip=$(detect-external-ip)`,
+      # and **overriding `command` replaces the CMD wholesale** -- so
+      # without this line the container would advertise its *container*
+      # address (172.x.x.x), which no peer on the host can route to, and
+      # every relayed session would be established but dead.
+      #
+      # `$(detect-external-ip)` is expanded by the image's entrypoint,
+      # which evaluates each argument separately (see
+      # docker/coturn/rootfs/usr/local/bin/docker-entrypoint.sh).  It
+      # resolves the host's public address over DNS, so it needs the
+      # container to have working DNS -- which the default bridge
+      # network provides.
+      #
+      # It is **not** the host's address as seen from the compose
+      # network, and it is not what `host.docker.internal` would give
+      # either: it is the address the *internet* sees.  That is the
+      # right one for a relayed allocation, and it is also the reason
+      # this server is a *developer* path rather than the CI path --
+      # CI's Linux leg has no public address and uses the native
+      # install instead (v1.4 plan §5 N5-2).
+      - --external-ip=$(detect-external-ip)
+    volumes:
+      # The configuration, the credential list and the certificate.
+      #
+      # **The configuration file is mounted separately**, because it
+      # lives in this directory and `secrets/` is gitignored (it holds
+      # the generated key material).  Mounting only `./secrets` would
+      # leave `/etc/coturn/turnserver.conf` *absent*, and coturn's
+      # response to a missing config file is a warning plus
+      # "Default and command-line settings will be used" -- so the
+      # server would start with **coturn's built-in defaults**: no
+      # realm, no user, no certificate, and therefore no TLS listener.
+      # The container would be healthy and the port would be published.
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./secrets:/etc/coturn
+    ports:
+      # TLS on the conventional port (RFC 8656 § 7.2).  **This is the
+      # port N1's client is told to use**, and it is the port the
+      # negative control also takes -- so it has to be the port the
+      # server actually binds.
+      - "5349:5349/tcp"
+      # The plain port is published too, so the server is reachable the
+      # way a fallback client would try.  A server that cannot be
+      # reached proves nothing about a client that should not fall back.
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - *relay-ports
+
+  # -------------------------------------------------------------------------
+  # The negative control: plain TURN on the SAME port 5349.
+  # -------------------------------------------------------------------------
+  #
+  # `docker compose --profile plain up -d` starts this and stops the
+  # TLS service, because both would claim host port 5349.
+  coturn-plain:
+    image: coturn/coturn:4.6.3
+    container_name: nimrtc-turn-plain
+    profiles: ["plain"]
+    restart: "no"
+    command:
+      # `-c`, not `--config` -- see the note on the TLS service above.
+      - -c
+      # The control's **own** configuration file, not the positive
+      # server's.  It is a separate file because coturn **ignores a
+      # command-line `--log-file`**: `set_option()` lists `'l'` among
+      # the options "already taken care of before", and the pass that
+      # applies the config file's `log-file=` runs *after* the command
+      # line.  So the control could not be given its own log by
+      # `--log-file=...` -- it would have kept writing to the positive
+      # server's log file, and whichever run happened last would have
+      # destroyed the other's evidence.
+      - /etc/coturn/turnserver.plain.conf
+      # Everything identical to the TLS service except the transport:
+      # a client that connects here when told to use 5349 has fallen
+      # back, not succeeded.
+      - --no-tls
+      - --no-dtls
+      # The same external IP as the positive server, for the same
+      # reason: the control must fail *only* because TLS is off, so
+      # everything else has to be identical.
+      - --external-ip=$(detect-external-ip)
+    volumes:
+      # The configuration file, mounted separately from `secrets/` for
+      # the same reason as on the TLS service: it is not in `secrets/`.
+      - ./turnserver.plain.conf:/etc/coturn/turnserver.plain.conf:ro
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      # The credential list and the certificate, read-only: the
+      # control has no business rewriting them.
+      - ./secrets:/etc/coturn:ro
+      # ... but the log directory has to be writable, and the `:ro`
+      # mount above covers it.  This more specific mount wins, so the
+      # control can write its own log.
+      - ./secrets/logs:/etc/coturn/logs
+    ports:
+      - "5349:5349/tcp"
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - *relay-ports

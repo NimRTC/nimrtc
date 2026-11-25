@@ -204,6 +204,33 @@ Windows 上是不是真用了 D3D11 —— 若用了，缺它们就是链接期 
 22. `CHANGELOG.md` 有对应条目。
 23. `specs/slices/v1-install-tree-video-deps.md` 记录实施中的发现。
 
+## 实施记录（2026-11-25）
+
+本片实现时核实 / 修正了规格里几处「需要在实现时核实，不能猜」的点：
+
+- **openh264 archive 的文件名**（设计 §二）：wrapper 的三个目标没设
+  `OUTPUT_NAME`，装出来就叫 `nimrtc_vendor_openh264_encoder.lib` /
+  `_decoder.lib` / `_common.lib`（Windows 静态库前缀/后缀）。顺序清单直接
+  写这些文件名，`NimRTCInstall.cmake` §2d 用
+  `CMAKE_STATIC_LIBRARY_PREFIX/SUFFIX` 拼出再写进 manifest。
+- **NVIDIA import lib 的处置**（设计 §四）：核实 `nvenc_encoder.cpp` /
+  `nvdec_decoder.cpp` 走 `LoadLibrary` + `GetProcAddress`（dynlink），对
+  `nvidia-encode` / `nvidia-video` **没有链接期引用** → bundle 不需要装它们，
+  链上也不需要。只有 `d3d11`（`#pragma comment(lib, "d3d11.lib")`）与 `dxgi`
+  （video_sink PRIVATE 链）需要补进 WIN32 系统库列表。结论记入 ADR-038 决策四。
+- **nvcodec 的平台分支**（设计 §一）：确认 `nimrtc_nvcodec` 在所有平台都是
+  `STATIC_LIBRARY`（VideoToolbox 路径非 Apple 上编译成「不可用」桩），
+  安装规则不需要平台分支。公开头随 archive 一起装（宿主注册 NVENC/NVDEC
+  插件要 include）。
+- **安装树自洽的验证方式**：`tools/check_install_tree_video_deps.py` 在
+  源侧（config / install / wrapper 三个文件）与树侧（暂存 prefix 的
+  archive + manifest + 装好的 config）各跑一遍；自检含 5 个负样本 + 1 个
+  正样本，保证工具不是「永远绿」。
+- **下游链接证明的形态**：验收测试真的 `cmake --install` 一个干净 prefix，
+  真的链一个 h264 + headless sink 的视频宿主（只链 `nimrtc::engine`），
+  断言 0 个 LNK2019，并解析生成工程的 `AdditionalDependencies` 证明链接
+  行只用了 bundle 里的 archive。
+
 ## 归属
 
 **`version/v3`**。

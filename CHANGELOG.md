@@ -9,6 +9,21 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Work that lands after `v1.3.0`.
 
+- **The install tree now links a video host (`slice v1-install-tree-video-deps`,
+  ADR-038).**  The staged bundle (installed by `cmake --install` and consumed
+  via `find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`) used to drop
+  the video path: `nimrtc_nvcodec` was never installed, the three OpenH264
+  archives were not chained, and `d3d11`/`dxgi` were missing from the Windows
+  system-lib list — so a host with `h264` + the headless sink failed with
+  31 LNK2019.  Now the bundle ships `nimrtc_nvcodec` (archive + public
+  headers), the OpenH264 archives in their correct static-link order
+  (encoder / decoder / common) behind a link-order manifest
+  (`openh264_link_order.txt`, the same shape as the WebRTC APM archives), and
+  `d3d11`/`dxgi` on Windows.  NVIDIA's driver import libs are *not* needed —
+  NVENC / NVDEC load the driver dynamically.  `tools/check_install_tree_video_deps.py`
+  (with a pinned self-test) verifies the source and the staged tree, and the
+  acceptance test links a real downstream video host against a clean prefix.
+
 - **The ≤200-line SDK sample (`slice v1-sdk-sample`).**
   `examples/sdk-sample/` is an independent host project: two processes on one
   machine complete one audio+video+control call through the reference

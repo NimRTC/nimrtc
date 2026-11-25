@@ -96,7 +96,7 @@ target_compile_definitions(nimrtc_dtls
         NIMRTC_HAS_DTLS=1
         NIMRTC_USE_WOLFSSL_DTLS=1
     PRIVATE
-        # Absolute path to the directory holding the vendored ECC cert/key.
+        # Absolute path to the directory holding the generated ECC cert/key.
         # The wolfSSL session resolves its certificate relative to the
         # process working directory first (so a build-dir override wins),
         # then falls back to this absolute source-tree path.  The fallback
@@ -106,10 +106,16 @@ target_compile_definitions(nimrtc_dtls
         # Without it every DTLS-dependent engine test fails with
         # "wolfSSL_CTX setup failed" on multi-config generators.
         #
+        # This points at `tests/wolfssl_dtls/certs/`, where
+        # `scripts/build_dtls_cert.py` writes the Chrome-friendly pair.  It
+        # used to point into wolfSSL's own cert tree, but `server-ecc.pem` is
+        # **tracked** inside that submodule — overwriting it left the
+        # submodule permanently `-dirty`.  Changed 2026-11-22.
+        #
         # The path is spelled relative to *this* directory (not
         # CMAKE_SOURCE_DIR) so it stays correct when NimRTC is consumed
         # via add_subdirectory() from a larger project.
-        NIMRTC_WOLFSSL_CERT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/wolfssl/src/certs")
+        NIMRTC_WOLFSSL_CERT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/wolfssl_dtls/certs")
 
 target_include_directories(nimrtc_dtls
     PUBLIC

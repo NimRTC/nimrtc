@@ -48,18 +48,27 @@ import ipaddress
 
 
 ROOT = Path(__file__).resolve().parent.parent
-# Primary fixture location — what's checked in for fresh checkouts and
-# what CMake's `copy_if_different` rule picks up to seed the build dir.
+# The generated pair lives HERE and only here.
+#
+# Why not also mirror into wolfSSL's own cert tree (`src/third_party/wolfssl/
+# src/certs/`)?  That tree is a **git submodule**, and the two files behave
+# differently inside it:
+#
+#   * `certs/ecc-key.pem`  is in wolfSSL's .gitignore (line 109) → writing it
+#     leaves the submodule clean;
+#   * `certs/server-ecc.pem` is **tracked** upstream → writing it makes the
+#     submodule report `-dirty`, and the whole main repo then shows
+#     `m src/third_party/wolfssl/src` forever.
+#
+# A build artefact has no business dirtying a vendored dependency's tracked
+# files, so the mirror was removed (2026-11-22).  CMake now sources the pair
+# from this directory instead — see cmake/NimRTCTest.cmake and
+# cmake/NimRTCRuntime.cmake.
+#
+# This directory is itself gitignored (`.gitignore:227`), so the pair is a
+# pure build artefact: regenerate it, never commit it.
 CERT_PATH = ROOT / "tests" / "wolfssl_dtls" / "certs" / "server-ecc.pem"
 KEY_PATH  = ROOT / "tests" / "wolfssl_dtls" / "certs" / "ecc-key.pem"
-# Mirror into wolfSSL's own cert tree so the upstream copy rule picks up
-# the regenerated cert without anyone editing CMakeLists.txt.  The
-# directory is pre-populated by wolfSSL itself (with hundreds of test
-# certs) so we never want to wipe it — only overwrite these two files.
-WOLFSSL_CERT_PATH = (ROOT / "src" / "third_party" / "wolfssl" / "src"
-                     / "certs" / "server-ecc.pem")
-WOLFSSL_KEY_PATH  = (ROOT / "src" / "third_party" / "wolfssl" / "src"
-                     / "certs" / "ecc-key.pem")
 
 
 def collect_local_ips() -> list[str]:
@@ -240,24 +249,6 @@ def build_or_skip() -> int:
     )
     print(f"[ok] wrote {CERT_PATH.relative_to(ROOT)}")
     print(f"[ok] wrote {KEY_PATH.relative_to(ROOT)}")
-
-    # Mirror into wolfSSL's own cert tree so the build-time
-    # `copy_if_different` rule in `tests/wolfssl_dtls/CMakeLists.txt`
-    # (and friends) picks up the regenerated cert into the build dir
-    # alongside `demo-p2p.exe`.  Without this mirror, `demo-p2p` would
-    # still load the old SAN-less upstream cert from
-    # `build/tests/Debug/certs/server-ecc.pem`.
-    WOLFSSL_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    WOLFSSL_CERT_PATH.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    WOLFSSL_KEY_PATH.write_bytes(
-        key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-    )
-    print(f"[ok] wrote {WOLFSSL_CERT_PATH.relative_to(ROOT)}")
-    print(f"[ok] wrote {WOLFSSL_KEY_PATH.relative_to(ROOT)}")
     return 0
 
 

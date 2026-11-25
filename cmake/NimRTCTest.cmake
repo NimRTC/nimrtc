@@ -48,9 +48,22 @@ endif()
 # DTLS tests need server-ecc.pem and ecc-key.pem at runtime. The search paths
 # in dtls_wolfssl_session.cpp are relative to the CWD when the test runs, which
 # is the test output directory.  This helper appends a POST_BUILD custom command
-# to the given test target that copies the two cert files from the wolfssl source
-# tree into the test's output directory at build time.
+# to the given test target that copies the two cert files from the generated
+# cert directory into the test's output directory at build time.
 # Call it from any test function that links nimrtc::dtls.
+#
+# The source is `tests/wolfssl_dtls/certs/`, NOT wolfSSL's own cert tree.
+# The pair is produced by `scripts/build_dtls_cert.py` and that directory is
+# gitignored (`.gitignore:227`) — it is a build artefact.  It used to be
+# mirrored into `src/third_party/wolfssl/src/certs/`, but `server-ecc.pem` is
+# **tracked** inside that submodule, so overwriting it left the submodule
+# permanently `-dirty`.  Removed 2026-11-22.
+#
+# Consequence: the pair must exist before the build.  `zelto` generates it via
+# `worktree.prepare` (ADR-095); a hand-driven build should run
+# `python scripts/build_dtls_cert.py` first.  A missing source file makes the
+# POST_BUILD step fail loudly — which is what we want: better a red build than
+# a silently shipped SAN-less cert that Chrome rejects with alert 46.
 #
 # Two destinations are seeded, because the CWD a test actually runs with is not
 # the same as the directory the executable lives in:
@@ -74,7 +87,7 @@ endif()
 # binary dir of whichever test directory invoked this helper.
 # -----------------------------------------------------------------------------
 set(_nimrtc_wolfssl_cert_dir
-    "${CMAKE_SOURCE_DIR}/src/third_party/wolfssl/src/certs")
+    "${CMAKE_SOURCE_DIR}/tests/wolfssl_dtls/certs")
 
 function(nimrtc_copy_wolfssl_certs target)
     # Guard against double-call (this file may be included multiple times across

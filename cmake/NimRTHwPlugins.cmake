@@ -38,6 +38,10 @@ include(FindPackageHandleStandardArgs)
 
 # --- NVENC --------------------------------------------------------------------
 function(_nimrtc_locate_nvenc)
+    # The cached "have we found it" flag is cleared first: it is a
+    # `CACHE INTERNAL ... FORCE` variable, so it survives a re-configure and
+    # would keep a *stale* TRUE after the option was turned off.
+    unset(NIMRTC_HW_HAVE_NVENC CACHE)
     if(NOT NIMRTC_PLUGINS_NVENC)
         return()
     endif()
@@ -55,6 +59,7 @@ endfunction()
 
 # --- AMF ----------------------------------------------------------------------
 function(_nimrtc_locate_amf)
+    unset(NIMRTC_HW_HAVE_AMF CACHE)
     if(WIN32 AND NIMRTC_PLUGINS_AMF)
         find_package(AMF QUIET)
         if(AMF_FOUND)
@@ -69,6 +74,7 @@ endfunction()
 
 # --- QSV / libvpl -------------------------------------------------------------
 function(_nimrtc_locate_qsv)
+    unset(NIMRTC_HW_HAVE_QSV CACHE)
     if(NOT NIMRTC_PLUGINS_QSV)
         return()
     endif()
@@ -88,6 +94,19 @@ endfunction()
 # trivial find_path.  We only consider it if we're on Windows AND the user
 # flipped NIMRTC_PLUGINS_DXVA on.
 function(_nimrtc_locate_dxva)
+    # The cached "have we found it" flag is cleared first.
+    #
+    # `NIMRTC_HW_HAVE_DXVA` is a `CACHE INTERNAL ... FORCE` variable, so it
+    # *survives* a re-configure.  Without this reset, turning the option
+    # back off left the flag TRUE in the cache, and `nimrtc_link_dxva()`
+    # kept compiling `dxva_decoder.cpp` into the module — with the
+    # `NIMRTC_PLUGINS_DXVA_ON` definition still on the compile line, so
+    # the *real* implementation was built even though the option was OFF.
+    #
+    # That is not a cosmetic problem: the DXVA decoder does not compile
+    # against the current codec seam (it targets a pre-split interface),
+    # so the build broke with the option visibly OFF.
+    unset(NIMRTC_HW_HAVE_DXVA CACHE)
     if(WIN32 AND NIMRTC_PLUGINS_DXVA)
         # d3d11.h lives in the Windows 8+ SDK; always present on Windows
         # builds that have C++ compilers installed.  We use a single test
@@ -112,6 +131,7 @@ endfunction()
 
 # --- VA-API --------------------------------------------------------------------
 function(_nimrtc_locate_vaapi)
+    unset(NIMRTC_HW_HAVE_VAAPI CACHE)
     if(UNIX AND NIMRTC_PLUGINS_VAAPI)
         find_package(LibVA QUIET)
         if(LIBVA_FOUND)
@@ -135,6 +155,7 @@ endfunction()
 # The vendored pack is preferred over any system SDK install: it pins the
 # struct layout to one known ABI (see the README next to the headers).
 function(_nimrtc_locate_nvdec)
+    unset(NIMRTC_HW_HAVE_NVDEC CACHE)
     if(NOT NIMRTC_PLUGINS_NVDEC)
         return()
     endif()

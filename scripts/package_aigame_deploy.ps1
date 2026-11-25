@@ -321,6 +321,41 @@ foreach ($exe in 'demo-agent-realtime.exe', 'demo-agent-teammate.exe') {
     Copy-Item (Join-Path $AgentBinDir $exe) $OutDir -Force
 }
 
+# ---- the decode fallbacks must be in the binary --------------------------
+#
+# The viewer only *decodes* video, but the engine builds a bidirectional
+# codec, and `--backend hardware` demands a hardware *encoder* too.  So
+# the viewer needs a hardware decoder on the remote machine, and when the
+# NVIDIA one is unusable (an old driver, a non-default adapter) the
+# Microsoft DXVA decoder is the fallback that keeps `--backend hardware`
+# working.
+#
+# DXVA is OFF by default in CMake, so a bundle built from a default
+# configure silently has no DXVA decoder — and the remote operator finds
+# out at 0x1A31, on the other machine, with no way to fix it.  Checking
+# here turns that into a message on the build machine.
+#
+# The probe looks for the seam id string in the binary.  It is a coarse
+# check — it cannot tell whether the decoder *works* on the target
+# machine — but it catches the case that actually bites: a bundle built
+# without the fallback at all.
+$viewerExe = Join-Path $OutDir 'rd_viewer.exe'
+if (Test-Path $viewerExe) {
+    $bytes = [System.IO.File]::ReadAllBytes($viewerExe)
+    $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+    foreach ($seam in 'dxva_h264', 'nvdec_h264', 'openh264_h264') {
+        if ($ascii.Contains($seam)) {
+            Log "the viewer carries the '$seam' decoder seam"
+        } else {
+            Log "WARNING: the viewer does NOT carry the '$seam' decoder seam"
+        }
+    }
+    if (-not $ascii.Contains('dxva_h264')) {
+        Log 'WARNING: no DXVA decoder in the bundle - configure with -DNIMRTC_PLUGINS_DXVA=ON,'
+        Log '         or the remote viewer has no hardware decode fallback when NVDEC is unusable'
+    }
+}
+
 Copy-Item $msquic $OutDir -Force
 
 foreach ($py in 'client.py', 'wsproto.py', 'signalling.py', 'signalling_core.py') {

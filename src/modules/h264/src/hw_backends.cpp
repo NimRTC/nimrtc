@@ -583,9 +583,11 @@ plugins::VideoDecoderBackend make_dxva_decoder_backend() {
         return dxva_h264_available();
     };
     be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
-        return "dxva: no usable Microsoft DXVA / MediaFoundation H.264 "
-               "decoder on this host — the decoder MFT could not be created "
-               "or activated";
+        return "dxva: this host cannot decode H.264 through DXVA — the Media "
+               "Foundation H.264 decoder MFT exists, but it does not accept a "
+               "D3D manager here (no DXVA-capable device, or the driver "
+               "refuses the device), and without one the MFT produces no "
+               "picture at all";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoDecoder> {

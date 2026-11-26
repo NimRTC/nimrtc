@@ -1207,11 +1207,18 @@ private:
 
         // ---- the D3D manager: this is what makes it *hardware* --------------
         //
-        // Without a D3D manager the MFT decodes on the CPU.  The manager
-        // is what routes the decode through DXVA, so its acceptance is
-        // the difference between "a hardware decoder" and "a software
-        // decoder wearing a hardware decoder's name".
-        attach_d3d_manager();
+        // The manager is what routes the decode through DXVA.  Without it
+        // the MFT does **not** fall back to a working CPU decode: it
+        // answers `ProcessOutput` with `E_INVALIDARG` and never produces
+        // a picture (measured).  So a rejected manager is fatal — the
+        // decoder refuses to open rather than opening into a stream
+        // that never yields a frame.  See `attach_d3d_manager()`.
+        if (!attach_d3d_manager()) {
+            NIMRTC_LOG_ERROR("dxva: the hardware decode path is not "
+                             "available on this host — the decoder will not "
+                             "open");
+            return E_NOINTERFACE;
+        }
 
         hr = transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
         if (FAILED(hr)) return hr;
@@ -1248,17 +1255,30 @@ private:
      * The MFT does not take the `ID3D11Device` itself: it takes an
      * `IMFDXGIDeviceManager` — the DXGI§MF bridge object that owns the
      * reset token and hands out the device to the transform.  Handing
-     * the MFT the raw device is rejected with `E_NOTIMPL`, which is
-     * exactly the "the decode will run on the CPU" path this method
-     * is meant to avoid.
+     * the MFT the raw device is rejected with `E_NOINTERFACE`.
      *
      * The MFT answers `MFT_MESSAGE_SET_D3D_MANAGER` with whether it
-     * accepted the manager.  A MFT that does not support DXVA rejects
-     * it, and the decode then runs on the CPU — which is fine, but the
-     * backend has to *say* so rather than claim a hardware path it does
-     * not have.
+     * accepted the manager.
+     *
+     * **A rejected manager is fatal, and the failure is reported.**
+     * The comment that used to sit here claimed that "the decode then
+     * runs on the CPU — which is fine".  That is **not** what happens,
+     * and it was measured: with no D3D manager the MFT answers
+     * `ProcessOutput` with `E_INVALIDARG` (`0x80070057`) and never
+     * produces a picture at all.  A decoder that opens successfully and
+     * then never yields a frame is the worst possible outcome — the
+     * engine has committed to it, the peer sends, and the pictures never
+     * arrive, with nothing in the logs but a warning.
+     *
+     * So the decoder refuses to open instead.  The registry's
+     * availability probe (`dxva_decode_capable()`) asks the same
+     * question — through this very class — and answers the same way, so
+     * on a host without a DXVA-capable device the row is simply *not
+     * available* and the software backend is selected instead.
+     *
+     * @return `true` when the MFT accepted the manager.
      */
-    void attach_d3d_manager() noexcept {
+    bool attach_d3d_manager() noexcept {
         static const D3D_FEATURE_LEVEL kLevels[] = {
             D3D_FEATURE_LEVEL_11_0,
             D3D_FEATURE_LEVEL_10_1,
@@ -1274,8 +1294,8 @@ private:
         if (FAILED(hr)) {
             NIMRTC_LOG_WARN("dxva: the D3D11 device could not be created (hr="
                             << hr_text(hr)
-                            << ") — the MFT will decode on the CPU");
-            return;
+                            << ") — this host cannot decode through DXVA");
+            return false;
         }
 
         // The device manager wraps the device and owns the reset token
@@ -1286,19 +1306,19 @@ private:
         if (FAILED(mhr)) {
             NIMRTC_LOG_WARN("dxva: the DXGI device manager could not be created "
                             "(hr=" << hr_text(mhr)
-                            << ") — the MFT will decode on the CPU");
+                            << ") — this host cannot decode through DXVA");
             d3d_device_.Reset();
-            return;
+            return false;
         }
 
         mhr = device_manager_->ResetDevice(d3d_device_.Get(), reset_token);
         if (FAILED(mhr)) {
             NIMRTC_LOG_WARN("dxva: the DXGI device manager rejected the D3D11 "
                             "device (hr=" << hr_text(mhr)
-                            << ") — the MFT will decode on the CPU");
+                            << ") — this host cannot decode through DXVA");
             device_manager_.Reset();
             d3d_device_.Reset();
-            return;
+            return false;
         }
 
         mhr = transform_->ProcessMessage(
@@ -1307,15 +1327,16 @@ private:
         if (FAILED(mhr)) {
             NIMRTC_LOG_WARN("dxva: the MFT did not accept the D3D manager (hr="
                             << hr_text(mhr)
-                            << ") — the decode will run on the CPU");
+                            << ") — this host cannot decode through DXVA");
             device_manager_.Reset();
             d3d_device_.Reset();
-            return;
+            return false;
         }
 
         hardware_path_ = true;
         NIMRTC_LOG_INFO("dxva: the D3D manager was accepted — the decode runs "
                         "through DXVA");
+        return true;
     }
 
     /** Hand one access unit to the MFT. */
@@ -1793,45 +1814,93 @@ private:
     bool                         hardware_path_ = false;
 };
 
+// ---------------------------------------------------------------------------
+// The DXVA capability probe
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Ask whether this host can decode H.264 through DXVA.
+ *
+ * The probe answers the question the *registry* actually has to answer:
+ * "can this host decode H.264 through DXVA?" — not "does the MFT CLSID
+ * exist?".
+ *
+ * The distinction is not academic, and it was measured on a Windows
+ * Server 2022 hosted runner:
+ *
+ *  - `CoCreateInstance(CLSID_MSH264DecoderMFT)` **succeeded** there, so a
+ *    probe that only asks "does the CLSID exist?" answers *yes*.
+ *  - But `MFT_MESSAGE_SET_D3D_MANAGER` was then **rejected** with
+ *    `0x80004002` (E_NOINTERFACE) — that runner has no DXVA-capable
+ *    device.
+ *  - And the "CPU fallback" the code used to believe in does **not**
+ *    exist: with no D3D manager the MFT answers `ProcessOutput` with
+ *    `0x80070057` (E_INVALIDARG) and never produces a picture at all.
+ *
+ * So on such a host the MFT exists, the registry happily selects
+ * `dxva_h264` (priority 320) over the software `openh264_h264` (50),
+ * and the receive path is handed a decoder that produces **no picture,
+ * ever**.  The probe therefore has to find out whether the MFT accepts a
+ * D3D manager — that is the only signal that distinguishes "this host
+ * can decode" from "this host has the CLSID".
+ *
+ * **The probe asks the *decoder*, not a re-implementation of it.**
+ * That is deliberate.  An earlier version of this function duplicated
+ * the D3D negotiation; a duplicated negotiation is a second place for
+ * the answer to go wrong, and the probe and the decoder could then
+ * disagree — which is precisely the failure this function exists to
+ * prevent.  Asking the real decoder makes the agreement *structural*
+ * rather than a thing to be maintained by hand.
+ *
+ * The cost is one decoder instance, once per process (the answer is
+ * cached).  That is the price of an honest answer, and it is the same
+ * price the other backends pay: `nvdec_codec_available()` initialises
+ * CUDA and asks `cuvidGetDecoderCaps()`.
+ */
+bool dxva_decode_capable() noexcept {
+    // One probe per process.  The answer cannot change while the process
+    // lives: it is a property of the machine's silicon and drivers.
+    static const bool capable = []() noexcept {
+        plugins::VideoCodecConfig cfg;
+        cfg.width        = 1280;
+        cfg.height       = 720;
+        cfg.fps          = 30;
+        cfg.pixel_format = plugins::VideoPixelFormat::kI420;
+
+        DxvaDecoder probe(cfg);
+        if (probe.open() != plugins::kOk) {
+            NIMRTC_LOG_INFO("dxva: this host cannot decode H.264 through "
+                            "DXVA — the DXVA decoder is not available");
+            return false;
+        }
+        if (!probe.is_hardware_accelerated()) {
+            // `open()` only succeeds on the hardware path (a rejected
+            // D3D manager makes it fail), so this is belt and braces.
+            NIMRTC_LOG_INFO("dxva: the decoder opened but is not on the "
+                            "hardware path — the DXVA decoder is not "
+                            "available");
+            return false;
+        }
+        NIMRTC_LOG_INFO("dxva: the hardware decode path is available on this "
+                        "host");
+        return true;
+    }();
+    return capable;
+}
+
 } // namespace nimrtc::h264::dxva_backend
 
 namespace nimrtc::h264 {
 
 bool dxva_h264_available() noexcept {
 #if defined(NIMRTC_PLUGINS_DXVA_ON) && defined(_WIN32)
-    // The probe asks the *system* whether the H.264 decoder MFT exists.
-    // It does not create a session: an availability probe that opens a
-    // full decoder session would cost far more than it is worth, and the
-    // session's own failure is reported by the create path.
-    //
-    // The COM apartment is initialised for the probe and torn down
-    // again: `CoInitializeEx` is per-thread and the probe may run on a
-    // different thread than the decoder will.
-    const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(hr)) {
-        NIMRTC_LOG_INFO("dxva: COM initialization failed (hr="
-                        << hr_text(hr)
-                        << ") — the DXVA decoder is not available");
-        return false;
-    }
-
-    bool available = false;
-    {
-        ComPtr<IMFTransform> probe;
-        const HRESULT chr = CoCreateInstance(CLSID_MSH264DecoderMFT, nullptr,
-                                             CLSCTX_INPROC_SERVER,
-                                             IID_PPV_ARGS(&probe));
-        available = SUCCEEDED(chr);
-        if (!available) {
-            NIMRTC_LOG_INFO("dxva: the H.264 decoder MFT is not available (hr="
-                            << hr_text(chr) << ")");
-        }
-        // The probe is released *before* the apartment is torn down: the
-        // MFT lives in the apartment, and releasing a COM pointer after
-        // `CoUninitialize` is an access violation.
-    }
-    CoUninitialize();
-    return available;
+    // The probe asks the *host* whether it can decode H.264 through
+    // DXVA — not whether the MFT CLSID exists.  See
+    // `dxva_decode_capable()` for why the difference matters: on a
+    // runner without a DXVA-capable device the CLSID is there, the
+    // registry would select this backend over the software one, and the
+    // decode would never produce a picture.
+    return dxva_backend::dxva_decode_capable();
 #else
     return false;
 #endif

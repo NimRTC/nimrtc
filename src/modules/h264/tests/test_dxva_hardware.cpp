@@ -26,11 +26,26 @@
  * i.e. on Windows with `NIMRTC_PLUGINS_DXVA=ON`.  On any other host the
  * row is simply absent from the registry and there is nothing to test.
  *
- * The decode test is *skipped* (not failed) when the host has no
- * Media Foundation H.264 decoder — a Windows Server Core container, for
- * instance, has the MFT but no usable media stack.  Skipping rather than
- * failing keeps the suite honest: the capability probe answers the
- * question, and a host without the capability is not a bug.
+ * The decode cases are *skipped* (not failed) when the host cannot
+ * decode H.264 through DXVA.  That is a real host class, not a
+ * hypothetical one: a Windows Server 2022 hosted runner has the Media
+ * Foundation H.264 decoder MFT — `CoCreateInstance` succeeds — but no
+ * DXVA-capable device, so the MFT **rejects** the D3D manager with
+ * `0x80004002` (E_NOINTERFACE).
+ *
+ * The "CPU fallback" is a trap, and it is worth spelling out because
+ * the code used to believe in it: with no D3D manager the MFT does
+ * *not* decode on the CPU.  It answers `ProcessOutput` with
+ * `0x80070057` (E_INVALIDARG) and never produces a picture at all.  A
+ * decoder that opens and then never yields a frame is the worst
+ * possible failure — the engine has committed to it, the peer sends,
+ * and the pictures never arrive.
+ *
+ * So the backend's availability probe asks the *real* question ("does
+ * the MFT accept a D3D manager here?"), the decoder refuses to open
+ * when the answer is no, and these tests skip on such a host.  A host
+ * without the capability is not a bug; a host that *claims* the
+ * capability and then produces no picture is.
  */
 
 #include <gtest/gtest.h>
@@ -85,6 +100,40 @@ const plugins::VideoEncoderBackend* openh264_backend() {
     }
     return nullptr;
 }
+
+/**
+ * @brief Skip the calling test when this host cannot decode via DXVA.
+ *
+ * The backend's `available()` is the *capability* probe: it opens a real
+ * session and asks the Media Foundation H.264 MFT whether it accepts a
+ * D3D manager on this host.  When the answer is no, there is no DXVA
+ * decode to test — and that is not a failure, it is a host without the
+ * capability.
+ *
+ * The skip carries the backend's own explanation, so the test report
+ * says *why* the case did not run rather than leaving a bare "skipped".
+ *
+ * This is a **macro**, not a function, and it has to be: `GTEST_SKIP()`
+ * works by `return`ing from the *test body*, so a `GTEST_SKIP()` inside
+ * a helper function only returns from the helper — the test then walks
+ * on and fails on the assertion that follows.  (Measured: the helper
+ * version reported "Skipped" *and* "FAILED" for the same case.)  The
+ * macro keeps the `return` in the test body, where it belongs.
+ */
+#define SKIP_WITHOUT_DXVA(be, cfg)                                           \
+    do {                                                                     \
+        const plugins::VideoDecoderBackend* nimrtc_skip_be = (be);          \
+        const plugins::VideoCodecConfig& nimrtc_skip_cfg = (cfg);           \
+        if (!nimrtc_skip_be->available(nimrtc_skip_cfg)) {                   \
+            const std::string nimrtc_skip_reason =                           \
+                nimrtc_skip_be->unavailable_reason                            \
+                    ? nimrtc_skip_be->unavailable_reason(nimrtc_skip_cfg)     \
+                    : std::string{"the DXVA decode path is not available "    \
+                                  "on this host"};                           \
+            GTEST_SKIP() << "no usable DXVA decode path on this host — "     \
+                          << nimrtc_skip_reason;                             \
+        }                                                                    \
+    } while (false)
 
 // ---------------------------------------------------------------------------
 // The synthetic source picture
@@ -244,6 +293,70 @@ TEST(DxvaHardware, BackendReportsItsOwnAvailability) {
 }
 
 // ---------------------------------------------------------------------------
+// The probe must tell the truth
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The availability probe and the decoder must agree.
+ *
+ * This is the regression test for the bug that made the `windows / dxva`
+ * CI leg red — and, far worse, made the *production* decode path select
+ * a decoder that never produced a picture.
+ *
+ * The bug: the probe asked "does the Media Foundation H.264 MFT CLSID
+ * exist?" and answered *yes* on a host with no DXVA-capable device
+ * (a Windows Server 2022 hosted runner, for instance).  The registry
+ * then selected `dxva_h264` (priority 320) over the software
+ * `openh264_h264` (50), and the MFT — which produces **no** picture at
+ * all without a D3D manager, despite the code's belief that it would
+ * "decode on the CPU" — never yielded a frame.
+ *
+ * The contract this test pins:
+ *
+ *  - `available() == true`  ⇒ the decoder opens **and** really is
+ *    hardware accelerated.
+ *  - `available() == false` ⇒ the decoder does **not** open, so the
+ *    registry moves on to the next backend instead of handing the engine
+ *    a dead decoder.
+ *
+ * Either way the two answers agree.  A host without the capability is
+ * not a bug; a probe that answers differently from the truth is.
+ */
+TEST(DxvaHardware, TheProbeAgreesWithTheDecoder) {
+    const plugins::VideoDecoderBackend* be = dxva_backend();
+    ASSERT_NE(be, nullptr);
+
+    plugins::VideoCodecConfig cfg;
+    cfg.width        = kWidth;
+    cfg.height       = kHeight;
+    cfg.fps          = 30;
+    cfg.pixel_format = plugins::VideoPixelFormat::kI420;
+
+    const bool available = be->available(cfg);
+
+    auto codec = be->create(cfg);
+    if (!codec) {
+        // The decoder refused to open.  That is only legitimate when the
+        // probe said the host cannot do it — otherwise the registry was
+        // told "yes" and handed a dead decoder.
+        EXPECT_FALSE(available)
+            << "the probe says this host can decode through DXVA, but the "
+               "decoder refused to open — the registry would select a "
+               "backend that cannot decode";
+        return;
+    }
+
+    // The decoder opened.  Then the probe must have said "yes", and the
+    // decoder must really be on the hardware path.
+    EXPECT_TRUE(available)
+        << "the decoder opened on a host the probe reported as incapable — "
+           "the probe is wrong, and the registry would skip a working "
+           "decoder";
+    EXPECT_TRUE(codec->is_hardware_accelerated())
+        << "the decoder opened but is not running on the hardware path";
+}
+
+// ---------------------------------------------------------------------------
 // The decoder instance
 // ---------------------------------------------------------------------------
 
@@ -255,12 +368,12 @@ TEST(DxvaHardware, DecoderIsDecoderOnlyAndNamesItsBackend) {
     cfg.width  = kWidth;
     cfg.height = kHeight;
 
-    if (!be->available(cfg)) GTEST_SKIP() << "no DXVA decoder on this host";
+    SKIP_WITHOUT_DXVA(be, cfg);
 
     auto codec = be->create(cfg);
     ASSERT_NE(codec, nullptr);
 
-    // DXVA is a decode-only backend -- the split seam makes that a\n    // *type* fact (IVideoDecoder), not a runtime predicate.\r\n    EXPECT_EQ(codec->kind(), plugins::VideoCodecKind::kH264);
+    // DXVA is a decode-only backend -- the split seam makes that a\n    // *type* fact (IVideoDecoder), not a runtime predicate.\n    EXPECT_EQ(codec->kind(), plugins::VideoCodecKind::kH264);
     EXPECT_EQ(codec->codec_name(), "h264");
     EXPECT_EQ(codec->backend_id(), "dxva");
     EXPECT_NE(codec->backend_id(), "software-stub");
@@ -286,7 +399,7 @@ TEST(DxvaHardware, DecodesARealH264Bitstream) {
     cfg.pixel_format  = plugins::VideoPixelFormat::kI420;
     cfg.payload_type  = 102;
 
-    if (!be->available(cfg)) GTEST_SKIP() << "no DXVA decoder on this host";
+    SKIP_WITHOUT_DXVA(be, cfg);
 
     // ---- Produce the bitstream with the software encoder ------------------
     const plugins::VideoFrame source = make_source_frame(kWidth, kHeight);
@@ -366,7 +479,7 @@ TEST(DxvaHardware, DecodesALengthPrefixedBitstream) {
     cfg.fps          = 30;
     cfg.pixel_format = plugins::VideoPixelFormat::kI420;
 
-    if (!be->available(cfg)) GTEST_SKIP() << "no DXVA decoder on this host";
+    SKIP_WITHOUT_DXVA(be, cfg);
 
     const plugins::VideoFrame source = make_source_frame(kWidth, kHeight);
     plugins::EncodedVideoFrame encoded;
@@ -438,7 +551,7 @@ TEST(DxvaHardware, CropsTheMacroblockPaddingOffTheVisiblePicture) {
     cfg.fps          = 30;
     cfg.pixel_format = plugins::VideoPixelFormat::kI420;
 
-    if (!be->available(cfg)) GTEST_SKIP() << "no DXVA decoder on this host";
+    SKIP_WITHOUT_DXVA(be, cfg);
 
     const plugins::VideoFrame source = make_source_frame(kOddWidth, kOddHeight);
     plugins::EncodedVideoFrame encoded;
@@ -499,7 +612,7 @@ TEST(DxvaHardware, AllocatesItsOwnOutputBuffer) {    const plugins::VideoDecoder
     cfg.fps          = 30;
     cfg.pixel_format = plugins::VideoPixelFormat::kI420;
 
-    if (!be->available(cfg)) GTEST_SKIP() << "no DXVA decoder on this host";
+    SKIP_WITHOUT_DXVA(be, cfg);
 
     const plugins::VideoFrame source = make_source_frame(kWidth, kHeight);
     plugins::EncodedVideoFrame encoded;

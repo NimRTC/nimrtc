@@ -112,6 +112,14 @@ rules:
     action: deny
     basis: "policy.yaml#protect-agents"
     reason: "Project instructions are read-only"
+  - id: allow-write-changelog
+    match:
+      path: "CHANGELOG.md"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-changelog"
+    reason: "Root-level changelog — agents may append release notes"
+
 
 # 策略哈希锚点不在这里 —— 它独立存放在 policy/lock.json（C5）。
 # 锚点写在策略文件里是自证：改策略的人顺手把哈希也改掉，事后就看不出

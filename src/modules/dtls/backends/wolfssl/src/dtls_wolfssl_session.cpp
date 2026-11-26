@@ -164,12 +164,26 @@ std::string join_path(const char* dir, const char* name) {
 std::string find_wolfssl_cert_file(const char* basename) {
     // Build-output copies seeded by CMake's copy_if_different rule
     // (see cmake/NimRTCTest.cmake and friends) — relative to the CWD.
+    //
+    // The wolfSSL cert tree (`src/third_party/wolfssl/src/certs/`) is
+    // deliberately NOT a candidate any more.  It used to be, and it used to
+    // be where `scripts/build_dtls_cert.py` mirrored the generated pair.
+    // Two reasons it had to go:
+    //
+    //   1. `server-ecc.pem` is **tracked** inside that submodule, so
+    //      overwriting it left the submodule permanently `-dirty` (and the
+    //      main repo showing `m src/third_party/wolfssl/src`).
+    //   2. Leaving it in the candidate list was actively harmful: the
+    //      upstream copy is the SAN-less `CN=www.wolfssl.com` cert, so in
+    //      any CWD where it resolves, it would *win* over the generated
+    //      one and Chrome would reject the handshake with alert 46.
+    //
+    // The generated pair now lives in `tests/wolfssl_dtls/certs/` (which
+    // is gitignored — a pure build artefact) and is staged into the build
+    // dir by CMake.  `NIMRTC_WOLFSSL_CERT_DIR` points at that directory.
     const char* relative_candidates[] = {
         "certs/",
         "tests/wolfssl_dtls/certs/",
-        "src/third_party/wolfssl/src/certs/",
-        "../../src/third_party/wolfssl/src/certs/",
-        "../src/third_party/wolfssl/src/certs/",
     };
     for (auto dir : relative_candidates) {
         const std::string p = join_path(dir, basename);

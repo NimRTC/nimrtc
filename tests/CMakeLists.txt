@@ -3926,3 +3926,40 @@ if(NIMRTC_BUILD_TESTS)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# The v1-n5-turn-server acceptance file's own mutation test.
+#
+# The acceptance file is the only thing that verifies the STUN/TURN
+# client implementation in that slice.  An acceptance file whose
+# assertions cannot fail is worse than no acceptance file: it reads as
+# coverage.
+#
+# This re-introduces each defect the acceptance file claims to catch --
+# the three STUN/TURN protocol bugs from the 2026-11-20 handover list
+# (the RFC 3489 message-type layout, the REQUESTED-TRANSPORT protocol
+# byte, the XOR-RELAYED-ADDRESS family offset), the deployment defects
+# (the TLS listener on the plain port, the compose file used as a CI
+# prerequisite), and the attribute-padding defect -- and requires the
+# acceptance run to go RED.
+#
+# It needs `node` (preinstalled on every GitHub-hosted runner) and the
+# tree it copies.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_program(NIMRTC_NODE_EXECUTABLE node)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(NIMRTC_NODE_EXECUTABLE AND Python3_Interpreter_FOUND)
+        add_test(NAME test_turn_server_acceptance_selftest
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_turn_server_acceptance_selftest.py")
+        set_tests_properties(test_turn_server_acceptance_selftest PROPERTIES
+            TIMEOUT 300
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "node or python3 not found — skipping the TURN-server acceptance "
+            "mutation test (tools/check_turn_server_acceptance_selftest.py).  "
+            "CI runs it as a dedicated step.")
+    endif()
+endif()
+

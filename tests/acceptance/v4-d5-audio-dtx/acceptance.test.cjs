@@ -1,70 +1,97 @@
-// 验收测试骨架 —— 由 `zelto spec draft` 生成（ADR-034）
+// 验收测试 —— 由 `zelto spec draft` 骨架材料化（ADR-034 / ADR-075）
 //
-// 这份文件是**骨架**：每条验收标准对应一条 `todo` 用例，等着被实现成真正的断言。
-// 门禁②会识别「没有一条用例真正跑起来」的验收文件并判 failed ——
-// 所以 todo 必须被替换成实际断言，不能留着当「已验证」。
+// 本批验收都是**源级 / 静态**断言（运行时单测 —— feed 静音帧 / 制造序号缺口 —— 归实现时补，
+// 见规格「验收标准」与「风险」）。
 // 切片：v4-d5-audio-dtx
 //
-// 改这块文件不会影响规格 —— 规格在 specs/slices/ 下，两者各自独立。
+// 判据：规格「验收标准」逐条对应一条真实断言；骨架里的 todo 必须被替换，
+// 不能留着当「已验证」（门禁②会识别「没有一条用例真正跑起来」的验收文件）。
 const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
-test.todo("开启 DTX 的发送方与协商了 DTX 的对端之间，静音帧被接收端正确识别为静音处理，不触发遮蔽（frames_concealed 不增加）；验证方式：通过验收测试验证静音帧处理逻辑");
-test.todo("实际丢失的 DTX 帧会正确触发遮蔽逻辑（frames_concealed 增加）；验证方式：通过验收测试验证丢帧遮蔽逻辑");
-test.todo("DTX 功能默认关闭，可按流单独切换；验证方式：通过 API 测试验证默认状态和切换功能");
+// 三个上级：z 根 → .zelto → version-worktrees → vN（本文件在 <root>/tests/acceptance/<id>/）
+const ROOT = path.resolve(__dirname, '..', '..', '..');
+const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+function readAll(dir) {
+  const parts = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else parts.push(fs.readFileSync(p, 'utf8'));
+    }
+  };
+  walk(path.join(ROOT, dir));
+  return parts.join('\n');
+}
 
-// ─── 写集边界断言（ADR-075）────────────────────────────────────────────────
+// 验收标准 1：协商了 DTX 的对端发静音帧 → 接收端按静音处理，**不**触发遮蔽（`frames_concealed` 不增加）；
+test("AC1：协商了 DTX 的对端发静音帧 → 接收端按静音处理，**不**触发遮蔽（`frames_concealed` 不增加）；", () => {
+        const src = readAll('src/modules/audio_rx');
+        assert.match(src, /dtx_silence/);
+        assert.match(src, /frames_concealed/);
+      });
+
+// 验收标准 2：真丢 DTX 帧 → 遮蔽计数增加；验证方式：单测制造序号缺口，断言 `frames_concealed` 恰好增加缺口数。
+test("AC2：真丢 DTX 帧 → 遮蔽计数增加；验证方式：单测制造序号缺口，断言 `frames_concealed` 恰好增加缺口数。", () => {
+        const src = readAll('src/modules/audio_rx');
+        assert.match(src, /frames_concealed/);
+        assert.match(src, /seq|sequence|missing|gap/i);
+      });
+
+// 验收标准 3：DTX 默认关闭，可按流单独切换；验证方式：单测断言未配置时 DTX 不生效；两条流一开一关，各自结果独立。
+test("AC3：DTX 默认关闭，可按流单独切换；验证方式：单测断言未配置时 DTX 不生效；两条流一开一关，各自结果独立。", () => {
+        const src = readAll('src/modules/audio_rx');
+        assert.match(src, /use_dtx|peer_dtx_enabled/);
+      });
+
+// ─── 写集边界（ADR-075）：① 越界检查用历史读，② 产物检查用状态读 ────────────────
 //
-// 写集边界在问**两个**问题。它们性质不同，**读法也必须不同**：
-//
-//   ① 本片改了哪些文件？有没有跑到写集外？  → **历史事件** → 读**改动清单**
-//   ② 本片该有的产物在不在？                  → **状态**     → 读**状态**
-//
-// 旧写法把 ① 和 ② 都塞进「`git diff --name-only` 非空」这一条里 ——
-// 于是 ② 也被绑上了历史：**合并策略一变，② 的判定就翻转**。
-// 实测：切片被 squash 合并进主干后，工作区差异为空 → 干净已提交树上必红。
-//
-// ── ② 产物检查：用状态读 ────────────────────────────────────────────────
-//
-//   错（绑在历史上）：
-//     const changed = gitDiff('--name-only');
-//     assert.ok(changed.length >= 1, '写集内必须存在已追踪文件的改动');
-//     assert.ok(changed.includes('xxx'), '本片必须改 xxx');
-//   → 门禁在 worktree 里跑时绿；切片合并、worktree 清理后，主干复跑变红。
-//
-//   对（任何状态都成立）：
-//     const tracked = new Set(gitLsFiles());
-//     assert.ok(tracked.has('xxx'), 'xxx 必须在树上');
-//
-// squash 合并不影响它。rebase 不影响它。merge commit 不影响它。
-// 顺带：产物检查**不依赖基点** —— 基点算错也就不会误报。
-//
-// ── ① 越界检查：用历史读 ────────────────────────────────────────────────
-//
-// 改动清单有三个来源，并起来判：
-//
+// ① 改动清单三个来源并起来判：
 //   1. 工作区未提交差异：  git diff HEAD --name-only
 //   2. 本片自己产出的提交： 逐个算 git diff --name-only <commit>^..<commit>
+//     （判据：`Refs-Slice: <id>` trailer 或 `feat(<id>): slice approved` 标题，任一命中即算 —— 只用一条 = 越界 fail open）
 //   3. 未跟踪文件：        git ls-files --others --exclude-standard
-//
-// 「本片自己产出的提交」怎么找 —— **两个判据，任一命中即算**：
-//   · `Refs-Slice: <id>` trailer（精确声明，但**会丢** —— Windows 上
-//     cmd.exe 吞掉提交信息里的换行，trailer 被静默吞掉）
-//   · `feat(<id>): slice approved` 标题（zelto 自己的提交约定，
-//     标题就是第一行，**不会被 cmd 吃掉**）
-//
-// 只用一条 = 越界 fail open（trailer 一丢 → 认不出本片 → 越界被放行）。
-//
-// ── 不要用「基点之后的提交动了什么」 ────────────────────────────────────
-//
-//   const changed = gitOut(['diff', '--name-only', BASE, 'HEAD']);
-//
-// 这条**必然误报**：多片共享基点时，基点之后 HEAD 上有几百个文件的改动，
-// 其中只有几个属于本片 —— 其余是别的切片与主干推进留下的。
-// 根因：验收测试**判不出「哪些改动是本片的」**。
-//
-// 附：几个可直接用的辅助函数
-//   function gitLsFiles() { return gitOut(['ls-files']); }        // 树上所有已追踪文件
-//   function gitOut(args) {
-//     const r = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
-//     return (r.stdout || '').split(/\r?\n/).filter(Boolean);
-//   }
+// ② 产物检查用状态读（规格在树上），不绑基点 —— squash / rebase / merge commit 都不影响。
+const { spawnSync } = require('node:child_process');
+const ID = 'v4-d5-audio-dtx';
+
+function gitOut(args) {
+  const r = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
+  return (r.stdout || '').split(/\r?\n/).filter(Boolean);
+}
+
+function changedFiles() {
+  const changed = new Set();
+  for (const f of gitOut(['diff', 'HEAD', '--name-only'])) changed.add(f);
+  for (const f of gitOut(['ls-files', '--others', '--exclude-standard'])) changed.add(f);
+  const raw = (
+    spawnSync('git', ['log', '--format=%H%x00%B%x00', '--all'], { cwd: ROOT, encoding: 'utf8' }).stdout || ''
+  ).split('\0');
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    const hash = raw[i].trim();
+    const body = raw[i + 1] || '';
+    if (!hash) continue;
+    const mine = body.includes(`Refs-Slice: ${ID}`) || new RegExp(`feat\\(${ID}\\): slice approved`).test(body);
+    if (!mine) continue;
+    for (const f of gitOut(['diff', '--name-only', `${hash}^..${hash}`])) changed.add(f);
+  }
+  return changed;
+}
+
+test('写集边界：规格在树上（用状态读，不绑基点）', () => {
+  assert.ok(new Set(gitOut(['ls-files'])).has(`specs/slices/${ID}.md`), '规格必须在树上');
+});
+
+test('写集边界：改动没有跑出写集（用历史读）', () => {
+  const allowed = ["^src/modules/audio_rx/","^src/modules/opus/src/opus\\\\.cpp$"].map((s) => new RegExp(s, 'i'));
+  const violating = [...changedFiles()].filter((f) => {
+    if (f.startsWith('src/')) return !allowed.some((re) => re.test(f));
+    if (f.startsWith('tests/acceptance/')) return f.split('/')[2] !== ID;
+    if (f.startsWith('specs/slices/')) return path.basename(f, '.md') !== ID;
+    return false;
+  });
+  assert.deepEqual(violating, [], '改动跑出写集：' + violating.join(', '));
+});

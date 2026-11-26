@@ -1,0 +1,467 @@
+{
+  "id": "plan-1795166129234",
+  "designId": "dsg-1795166053036",
+  "title": "NimRTC v1.4 端到端连通性增强版本计划",
+  "versions": [
+    {
+      "version": "v1",
+      "dependsOn": [],
+      "description": "Wave 1 — N5 参考 TURN 部署 / D3+D4 默认设备策略与热插拔 / D5 音频 P2。都不碰 engine 头文件，也不碰 CI，可与 v1.3 收尾并行。",
+      "slices": [
+        {
+          "id": "v1-device-policy",
+          "module": "设备管理层 (device)",
+          "title": "D3+D4：默认设备策略与摄像头热插拔",
+          "writes": [
+            "src/modules/video_capture/**",
+            "src/modules/audio_device/**",
+            "examples/remote-desktop/**"
+          ],
+          "specPath": "specs/slices/v1-d3-d4-device-policy.md",
+          "state": "draft"
+        },
+        {
+          "id": "v1-audio-p2",
+          "module": "设备管理层 (device)",
+          "title": "D5：音频 P2（DTX 耦合 + 3A 契约）",
+          "writes": [
+            "src/modules/opus/**",
+            "src/modules/audio_rx/**"
+          ],
+          "specPath": "specs/slices/v1-d5-audio-p2.md",
+          "state": "draft"
+        },
+        {
+          "id": "v1-n5-turn-server",
+          "module": "参考实现 (examples)",
+          "title": "N5：examples/turn-server/ 参考 TURN 部署（含 --require-tls）",
+          "writes": [
+            "examples/turn-server/**"
+          ],
+          "specPath": "specs/slices/v1-n5-turn-server.md",
+          "state": "draft"
+        },
+        {
+          "id": "v1-ice-recovery",
+          "title": "N3：重连策略（ICE 重启状态机：退避/上限/终态）",
+          "module": "引擎 (engine)",
+          "writes": [
+            "src/engine/**",
+            "src/core/include/nimrtc/core/engine_errors.hpp",
+            "tests/acceptance/v1-ice-recovery/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-ice-recovery.md",
+          "state": "draft",
+          "note": "ADR-031；version/v3 8abb815a"
+        },
+        {
+          "id": "v1-turn-credentials",
+          "title": "N7：TURN 凭据作为一等 seam（宿主提供、引擎拉取）",
+          "module": "引擎 (engine)",
+          "writes": [
+            "src/engine/**",
+            "tests/acceptance/v1-turn-credentials/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-turn-credentials.md",
+          "state": "draft",
+          "note": "ADR-032；version/v3 3529b44a"
+        },
+        {
+          "id": "v1-path-change-report",
+          "title": "N8：路径切换报告（old pair → new pair + 原因）",
+          "module": "引擎 (engine)",
+          "writes": [
+            "src/engine/**",
+            "tests/acceptance/v1-path-change-report/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-path-change-report.md",
+          "state": "draft",
+          "note": "ADR-033；version/v3 b4aa77ec"
+        },
+        {
+          "id": "v1-macos-install-proof",
+          "title": "N9：库打包（macOS install + 下游 find_package 证明）",
+          "module": "构建与分发 (cmake/ci)",
+          "writes": [
+            ".github/workflows/ci.yml",
+            "cmake/**",
+            "docs/api/public_headers.manifest",
+            "tests/acceptance/v1-macos-install-proof/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-macos-install-proof.md",
+          "state": "draft",
+          "note": "ADR-034；version/v3 18775f73"
+        },
+        {
+          "id": "v1-sdk-sample",
+          "title": "N6：≤200 行样例（几行代码跑完一通话 + 行数预算进入 CI）",
+          "module": "参考实现 (examples)",
+          "writes": [
+            "examples/**",
+            ".github/workflows/ci.yml",
+            "tools/**",
+            "tests/acceptance/v1-sdk-sample/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-sdk-sample.md",
+          "state": "draft",
+          "note": "ADR-036；version/v3 657941be"
+        },
+        {
+          "id": "v1-install-tree-video-deps",
+          "title": "N6 缺口①：安装树补上视频依赖（nvcodec + OpenH264 顺序 + d3d11/dxgi）",
+          "module": "构建与分发 (cmake/ci)",
+          "writes": [
+            "cmake/**",
+            "docs/api/engine_api.md",
+            "tests/acceptance/v1-install-tree-video-deps/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-install-tree-video-deps.md",
+          "state": "draft",
+          "note": "ADR-038；version/v3 85f142c9"
+        },
+        {
+          "id": "v1-install-tree-module-closure",
+          "title": "N6 缺口②：安装树链上引擎链接闭包里的每个模块",
+          "module": "构建与分发 (cmake/ci)",
+          "writes": [
+            "cmake/**",
+            "docs/api/engine_api.md",
+            "tests/acceptance/v1-install-tree-module-closure/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-install-tree-module-closure.md",
+          "state": "draft",
+          "note": "ADR-039；version/v3（后补，见版本计划外记录）"
+        }
+      ],
+      "integrationTestDir": "tests/acceptance/v1/",
+      "status": "integrated",
+      "baseCommit": "ff9d64b0bd4b2150ebd02fc41a39b5e962c07c71"
+    },
+    {
+      "version": "v2",
+      "dependsOn": [
+        "v1"
+      ],
+      "description": "Wave 2 — N2 ICE-over-TCP（RFC 6544）：IceTransport 收集 TCP 候选（active/passive tcptype）+ SDP writer 发 a=candidate:… tcp … typ host tcptype passive。TCP 在 UDP 失败后才尝试（N2-1）。",
+      "slices": [
+        {
+          "id": "v2-ice",
+          "module": "网络适配层 (ice)",
+          "title": "N2：ICE-over-TCP 候选（RFC 6544）",
+          "writes": [
+            "src/modules/ice/**",
+            "src/modules/sdp/**"
+          ],
+          "specPath": "specs/slices/v2-n2-ice-tcp.md",
+          "state": "draft"
+        }
+      ],
+      "integrationTestDir": "tests/acceptance/v2/",
+      "status": "integrated",
+      "baseCommit": "628df8c974d5bebbcce661454370895478b1ac3c"
+    },
+    {
+      "version": "v3",
+      "dependsOn": [
+        "v2"
+      ],
+      "description": "Wave 3 — N4 连通性诊断（Stats::transport 增字段：ice_gathering_state / ice_failure_reason / turn_transport_used）+ D6 连通性 profile（EngineConfig 的 connectivity_profile 键）。",
+      "slices": [
+        {
+          "id": "v3-n4-d6-connectivity",
+          "module": "网络适配层 (ice)",
+          "title": "N4+D6：连通性诊断字段与连通性 profile",
+          "writes": [
+            "src/modules/ice/**",
+            "src/modules/video_stats/**",
+            "src/engine/**",
+            "profiles/**"
+          ],
+          "specPath": "specs/slices/v3-n4-d6-connectivity.md",
+          "state": "draft"
+        },
+        {
+          "id": "v1-audio-device-engine",
+          "title": "D1：引擎驱动音频设备层（默认麦克风/扬声器 + Stats 可查）",
+          "module": "引擎 (engine)",
+          "writes": [
+            "src/engine/**",
+            "src/core/**",
+            "src/modules/audio_device/**",
+            "docs/api/engine_api.md",
+            "tests/acceptance/v1-audio-device-engine/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-audio-device-engine.md",
+          "state": "draft",
+          "note": "ADR-029；version/v3 6a1e3a6e"
+        },
+        {
+          "id": "v1-video-render-engine",
+          "title": "D2：引擎驱动渲染器（video_sink_name=auto，起不来就降级）",
+          "module": "引擎 (engine)",
+          "writes": [
+            "src/engine/**",
+            "src/modules/video_sink/**",
+            "tests/acceptance/v1-video-render-engine/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-video-render-engine.md",
+          "state": "draft",
+          "note": "ADR-030；version/v3 dbef30f9"
+        },
+        {
+          "id": "v1-call-state-surface",
+          "title": "D7：call-state 表面（状态枚举 + 失败枚举 + 一通话生命周期）",
+          "module": "引擎 (engine)",
+          "writes": [
+            "src/engine/**",
+            "tests/acceptance/v1-call-state-surface/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-call-state-surface.md",
+          "state": "draft",
+          "note": "ADR-035；version/v3 5524165f"
+        },
+        {
+          "id": "v1-turn-tls-trust",
+          "title": "N6 缺口③：TURN/TLS 信任策略上到引擎公共 API（verify_peer + ca_file）",
+          "module": "引擎 (engine)",
+          "writes": [
+            "src/engine/**",
+            "src/modules/ice/**",
+            "src/plugins/include/nimrtc/plugins/ice_transport.hpp",
+            "docs/api/engine_api.md",
+            "tests/acceptance/v1-turn-tls-trust/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v1-turn-tls-trust.md",
+          "state": "draft",
+          "note": "ADR-037；version/v3 ac2eeac0"
+        }
+      ],
+      "integrationTestDir": "tests/acceptance/v3/",
+      "status": "delivered",
+      "baseCommit": "dd396cd5cf27c950e98e27b6d68ff6a05e89f284"
+    },
+    {
+      "version": "v4",
+      "dependsOn": [
+        "v3"
+      ],
+      "description": "Wave 1 (模块内): N2 ICE-over-TCP 候选收集与 tcptype 解析（transport 层，不动 engine.hpp）；D4 视频采集热插拔；D5 音频 DTX 与 3A 契约。三片写集互不相交、均不碰引擎公共头文件，可并行；它们是后续 v5 的前置。",
+      "slices": [
+        {
+          "id": "v4-d4-camera-hotplug",
+          "module": "video_capture",
+          "title": "D4：视频采集设备热插拔（增删事件，引擎可订阅）",
+          "writes": [
+            "src/modules/video_capture/**",
+            "tests/acceptance/v4-d4-camera-hotplug/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v4-d4-camera-hotplug.md",
+          "state": "draft"
+        },
+        {
+          "id": "v4-d5-audio-dtx",
+          "module": "audio",
+          "title": "D5：音频 DTX 与 3A 契约（opus DTX + audio_rx 耦合）",
+          "writes": [
+            "src/modules/opus/**",
+            "src/modules/audio_rx/**",
+            "tests/acceptance/v4-d5-audio-dtx/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v4-d5-audio-dtx.md",
+          "state": "draft"
+        },
+        {
+          "id": "v4-n2-ice-tcp",
+          "module": "transport",
+          "title": "N2：ICE-over-TCP 候选（RFC 6544，transport 层 tcptype）",
+          "writes": [
+            "src/modules/ice/**",
+            "src/modules/transport/**",
+            "tests/acceptance/v4-n2-ice-tcp/acceptance.test.cjs"
+          ],
+          "specPath": "specs/slices/v4-n2-ice-tcp.md",
+          "state": "draft"
+        }
+      ],
+      "integrationTestDir": "tests/version/v4",
+      "status": "in_progress",
+      "baseCommit": "e9388dcd7e0817ebdd6b151e7e99d25d8b6b6a40"
+    },
+    {
+      "version": "v5",
+      "dependsOn": [
+        "v4"
+      ],
+      "description": "波 2：模块内 —— 只在各自模块里加能力，不碰 engine.hpp 的公开面（N2/D4/D5 已在 v4 排定，这里不重复）。",
+      "slices": [
+        {
+          "id": "v5-d3-default-device-policy",
+          "module": "device",
+          "title": "D3：引擎交付 default device policy（不再由样例实现）",
+          "writes": [
+            "src/modules/device/**",
+            "src/engine/src/engine_media.cpp",
+            "src/engine/include/nimrtc/engine/engine.hpp",
+            "examples/remote-desktop/**",
+            "tests/acceptance/v5-d3-default-device-policy/**",
+            "specs/slices/v5-d3-default-device-policy.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v5-d3-default-device-policy.md",
+          "state": "draft"
+        },
+        {
+          "id": "v5-d1-engine-audio-device",
+          "module": "audio",
+          "title": "D1：引擎零引用音频设备 → 接上音频采集/播放设备",
+          "writes": [
+            "src/engine/src/engine_media.cpp",
+            "src/engine/src/engine.cpp",
+            "src/engine/include/nimrtc/engine/engine.hpp",
+            "src/modules/audio_rx/**",
+            "src/modules/audio_tx/**",
+            "tests/acceptance/v5-d1-engine-audio-device/**",
+            "specs/slices/v5-d1-engine-audio-device.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v5-d1-engine-audio-device.md",
+          "state": "draft"
+        },
+        {
+          "id": "v5-n6-conference-sample",
+          "module": "examples",
+          "title": "N6：conference 样例（多方通话参考实现）",
+          "writes": [
+            "examples/conference/**",
+            "tests/acceptance/v5-n6-conference-sample/**",
+            "specs/slices/v5-n6-conference-sample.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v5-n6-conference-sample.md",
+          "state": "draft"
+        },
+        {
+          "id": "v5-n9-macos-install",
+          "module": "cmake/ci",
+          "title": "N9：macOS 腿补 NIMRTC_INSTALL=ON 与 downstream find_package 证据",
+          "writes": [
+            ".github/workflows/ci.yml",
+            "cmake/**",
+            "tests/acceptance/v5-n9-macos-install/**",
+            "specs/slices/v5-n9-macos-install.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v5-n9-macos-install.md",
+          "state": "draft"
+        }
+      ],
+      "integrationTestDir": "tests/version/v5",
+      "status": "planned"
+    },
+    {
+      "version": "v6",
+      "dependsOn": [
+        "v5"
+      ],
+      "description": "波 3：engine.hpp 公开面 —— 先立 N4 词汇，再接线 N3/N7/N8/D7/D6（同区域，必须顺序做）。",
+      "slices": [
+        {
+          "id": "v6-n4-failure-vocab",
+          "module": "transport",
+          "title": "N4：ICE/TURN 失败与传输词汇进统计面",
+          "writes": [
+            "src/engine/src/engine_transport_stats.cpp",
+            "src/engine/include/nimrtc/engine/engine.hpp",
+            "src/engine/tests/test_engine_transport_stats.cpp",
+            "tests/acceptance/v6-n4-failure-vocab/**",
+            "specs/slices/v6-n4-failure-vocab.md",
+            "docs/api/engine_api.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v6-n4-failure-vocab.md",
+          "state": "draft"
+        },
+        {
+          "id": "v6-n3-reconnect-policy",
+          "module": "engine",
+          "title": "N3：引擎自带的自动重连策略（5s 宽限 / 1-2-4-8s 退避 / 5 次每 10min）",
+          "writes": [
+            "src/engine/src/engine.cpp",
+            "src/engine/src/engine_ice_recovery.**",
+            "tests/acceptance/v6-n3-reconnect-policy/**",
+            "specs/slices/v6-n3-reconnect-policy.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v6-n3-reconnect-policy.md",
+          "state": "draft"
+        },
+        {
+          "id": "v6-n7-turn-credentials",
+          "module": "engine",
+          "title": "N7：turn_credentials / 凭据 provider 接缝",
+          "writes": [
+            "src/engine/src/engine.cpp",
+            "src/modules/ice/**",
+            "tests/acceptance/v6-n7-turn-credentials/**",
+            "specs/slices/v6-n7-turn-credentials.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v6-n7-turn-credentials.md",
+          "state": "draft"
+        },
+        {
+          "id": "v6-n8-path-change-report",
+          "module": "engine",
+          "title": "N8：本端路径变化上报（旧 pair → 新 pair → 原因）",
+          "writes": [
+            "src/engine/src/engine_transport.cpp",
+            "src/engine/src/engine.cpp",
+            "tests/acceptance/v6-n8-path-change-report/**",
+            "specs/slices/v6-n8-path-change-report.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v6-n8-path-change-report.md",
+          "state": "draft"
+        },
+        {
+          "id": "v6-d7-call-state",
+          "module": "engine",
+          "title": "D7：call-state 回调 + 失败枚举 + 生命周期 start/stop/hangup",
+          "writes": [
+            "src/engine/src/engine_call_state.**",
+            "src/engine/src/engine.cpp",
+            "src/engine/src/engine_transport.cpp",
+            "src/engine/src/engine_session_state.hpp",
+            "tests/acceptance/v6-d7-call-state/**",
+            "specs/slices/v6-d7-call-state.md",
+            "docs/adr/ADR-035-call-state-surface.md",
+            "docs/api/engine_api.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v6-d7-call-state.md",
+          "state": "draft"
+        },
+        {
+          "id": "v6-d6-connectivity-profile",
+          "module": "engine",
+          "title": "D6：connectivity_profile 配置词汇与默认策略收口（N1/N2/N3 落地后才有意义）",
+          "writes": [
+            "src/engine/src/engine.cpp",
+            "src/engine/include/nimrtc/engine/engine.hpp",
+            "src/modules/ice/**",
+            "tests/acceptance/v6-d6-connectivity-profile/**",
+            "specs/slices/v6-d6-connectivity-profile.md",
+            "CHANGELOG.md"
+          ],
+          "specPath": "specs/slices/v6-d6-connectivity-profile.md",
+          "state": "draft"
+        }
+      ],
+      "integrationTestDir": "tests/version/v6",
+      "status": "planned"
+    }
+  ],
+  "status": "confirmed",
+  "createdAt": "2026-11-20T09:15:29.234Z",
+  "confirmedAt": "2026-11-20T09:39:07.490Z"
+}

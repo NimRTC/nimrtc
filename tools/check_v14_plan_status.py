@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -41,6 +42,16 @@ ROOT = Path(__file__).resolve().parent.parent
 # recognised.  A plan that says "this does not exist" and a tree that
 # has it is a plan that is out of date -- and the row says so rather
 # than quietly passing.
+#
+# The consequence is that **a row's expectation flips when its item
+# lands**.  N1, N5 and D2 all closed on 2026-11-24, and their rows
+# were flipped from "absent" to "present" at that point: the claim
+# they were checking ("this does not exist") had stopped being true,
+# and the row's job became to *confirm* the thing that replaced it.
+# The claim text in the table below is kept in the plan's own past
+# tense where the plan still reads that way, so a reader can match
+# the row against §10's wording; what the row asserts is the tree's
+# current state.
 
 PROBES: list[tuple[str, str, str, str, str]] = [
     # -- N1: real TURN/TLS ---------------------------------------------
@@ -73,7 +84,14 @@ PROBES: list[tuple[str, str, str, str, str]] = [
      "src/engine", "turn_transport_used"),
 
     # -- N5: the reference TURN deployment -----------------------------
-    ("N5", "there is no TURN server in the tree", "absent",
+    #
+    # N5 closed on 2026-11-24, so the claim flipped: the deployment
+    # now EXISTS, and the probe asks for it rather than for its
+    # absence.  The wording below is the *historical* claim -- the
+    # table in the plan still reads this way -- and what the row
+    # asserts now is that the tree carries the thing the claim said
+    # was missing.
+    ("N5", "the reference TURN deployment exists", "present",
      "examples", "turn-server"),
 
     # -- N6: the SDK sample ---------------------------------------------
@@ -97,7 +115,13 @@ PROBES: list[tuple[str, str, str, str, str]] = [
      "src/engine", "audio_sink_name"),
 
     # -- D2: the engine runs the renderer ------------------------------
-    ("D2", "the renderer is the host's job", "absent",
+    #
+    # D2 closed on 2026-11-24: the engine owns the sink, so the claim
+    # flipped the same way N5's did.  "present" is how a *finished*
+    # item is recognised -- a plan that says "this does not exist" and
+    # a tree that has it is a plan that is out of date, and the row
+    # says so rather than quietly passing.
+    ("D2", "the engine owns the video sink", "present",
      "src/engine", "video_sink_name"),
 
     # -- D3: the default device policy ---------------------------------
@@ -128,11 +152,15 @@ def search(where: str, pattern: str) -> list[str]:
     return [ln for ln in proc.stdout.splitlines() if ln.strip()]
 
 
-def report_lines() -> tuple[list[str], list[str]]:
+def report_lines(
+    probes: list[tuple[str, str, str, str, str]] | None = None,
+) -> tuple[list[str], list[str]]:
     """The verdict per row, and the list of rows that no longer hold."""
     lines: list[str] = []
     stale: list[str] = []
-    for item, claim, expect, where, pattern in PROBES:
+    for item, claim, expect, where, pattern in (
+        PROBES if probes is None else probes
+    ):
         hits = search(where, pattern)
         found = bool(hits)
         ok = (expect == "present") == found
@@ -146,7 +174,31 @@ def report_lines() -> tuple[list[str], list[str]]:
 
 
 def self_test() -> int:
-    """The report must be able to say 'stale'."""
+    """The report must be able to say 'stale', and must not say it wrongly.
+
+    The checker's whole value is that it *can* report a stale row.  A
+    checker that always passes is worse than no checker, because the
+    next reader trusts it.  So the self-test pins the **verdict
+    machinery** -- the four cases of (expectation x found) -- rather
+    than any particular row:
+
+      - "present" + found     -> ok
+      - "present" + not found -> stale
+      - "absent"  + found     -> stale
+      - "absent"  + not found -> ok
+
+    It also pins the one property that makes the table *true*: an item
+    the plan declares CLOSED must have its row flipped to "present".
+    A row left at "absent" after its item landed reports "STALE"
+    forever -- a permanent false alarm, which is how a checker teaches
+    people to ignore it.
+
+    What it deliberately does **not** pin is the currency of the open
+    items: the table drifts as items land, and that is the whole point
+    of the checker.  A self-test that said "D2 must be stale" would
+    fail the moment D2 landed, and a self-test that fails when the
+    tree improves is a self-test that trains people to ignore it.
+    """
     failures = []
 
     def check(condition: bool, message: str) -> None:
@@ -171,15 +223,57 @@ def self_test() -> int:
     check(isinstance(stale, list),
           "the report must return the stale list")
 
-    # A stale row is a row whose expectation no longer holds.  The
-    # current tree has D2's `video_sink_name`, so the plan's claim
-    # "the renderer is the host's job" is *not* what the tree says
-    # any more -- and the report has to be able to say so.  If this
-    # check ever fails, the tree changed, and the plan's §10 is the
-    # thing that has to be updated with it.
-    check(any(row.startswith("D2") for row in stale),
-          "the D2 row must be reported as stale: the engine has a "
-          "video_sink_name now, so the plan's claim is out of date")
+    # The verdict machinery: all four cases, each with the verdict
+    # written out by hand.  "video_sink_name" is in the tree;
+    # "zzz_no_such_symbol_zzz" is not.
+    present_symbol = "video_sink_name"
+    missing_symbol = "zzz_no_such_symbol_zzz"
+    cases = [
+        # (expect, pattern, must_be_stale)
+        ("present", present_symbol, False),
+        ("present", missing_symbol, True),
+        ("absent", present_symbol, True),
+        ("absent", missing_symbol, False),
+    ]
+    for expect, pattern, must_be_stale in cases:
+        probes = [("ZZ", "synthetic", expect, "src/engine", pattern)]
+        case_lines, case_stale = report_lines(probes)
+        check(len(case_lines) == 1,
+              "the synthetic probe must produce exactly one row")
+        reported_stale = bool(case_stale)
+        check(reported_stale == must_be_stale,
+              "expect=%s, pattern=%r: the row must be %s, but the "
+              "checker reported %s"
+              % (expect, pattern,
+                 "stale" if must_be_stale else "ok",
+                 "stale" if reported_stale else "ok"))
+        # The row's own printed marker must agree with the stale list.
+        marker_stale = case_lines[0].lstrip().startswith("STALE")
+        check(marker_stale == reported_stale,
+              "the printed marker and the stale list must agree "
+              "(expect=%s, pattern=%r)" % (expect, pattern))
+
+    # The table must agree with the plan.  This is the check that
+    # catches the failure mode the checker exists for: an item the plan
+    # declares CLOSED but whose row still asserts the *absence* of the
+    # thing that closed it.
+    plan = ROOT / "docs" / "plan" / "v1.4-plan.md"
+    if plan.exists():
+        text = plan.read_text(encoding="utf-8")
+        closed = set(re.findall(
+            r"\|\s*\*\*([A-Z]\d+)\*\*[^|]*\|[^|]*\|\s*\*\*CLOSED",
+            text))
+        for item in sorted(closed):
+            rows = [p for p in PROBES if p[0] == item]
+            check(bool(rows),
+                  "the plan declares %s CLOSED, but the checker has no "
+                  "row for it" % item)
+            for _, _, expect, _, _ in rows:
+                check(expect == "present",
+                      "the plan declares %s CLOSED, so its row must "
+                      "expect the feature to be 'present'; a row that "
+                      "still expects 'absent' reports a permanent "
+                      "false alarm" % item)
 
     if failures:
         print("FAIL -- the self-test caught a misclassification:")

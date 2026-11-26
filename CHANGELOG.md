@@ -19,6 +19,51 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > Shipping it as `1.3.2` would promise a compatibility the tree no
 > longer has.
 
+### Changed
+
+- **The v1.4 plan's drift detector reported two rows as stale forever,
+  and a permanent false alarm is how a checker teaches people to ignore
+  it (2026-11-26).**
+  `tools/check_v14_plan_status.py` executes the v1.4 plan's §10
+  verification table against the tree.  Each row asserts either the
+  **absence** of a thing ("the engine never opens an audio device") or
+  its **presence** ("the ICE module carries a TURN/TLS client") — and
+  a row's expectation has to *flip* when its item lands.
+
+  **N1, N5 and D2 had all landed by 2026-11-24**, but only N1's row had
+  been flipped.  N5's ("there is no TURN server in the tree") and D2's
+  ("the renderer is the host's job") still asserted the absence of
+  things that now exist, so the report carried two permanent `STALE`
+  rows — and `docs/plan/post-v1.4-gap-inventory.md` cited those two
+  rows as *evidence*.  The rows are flipped to `present` now, and the
+  report is clean: **20 of 20 `ok`, no STALE.**
+
+  The self-test is what makes the flip stick, and it was rewritten to
+  stop pinning the *wrong* thing.  It used to assert "the D2 row must
+  be reported as stale" — a check that passes only while D2 is
+  unfinished, and that would have started failing the moment D2
+  landed.  A self-test that fails when the tree improves is a
+  self-test that trains people to ignore it.  It now pins:
+
+  - the **verdict machinery**, all four cases of (expectation × found),
+    each written out by hand — so the checker is still known to be
+    able to report `STALE`;
+  - the **table's agreement with the plan**: every item the plan marks
+    `CLOSED` must have its row expecting `present`.  This is the
+    mechanical form of "a row flips when its item lands", and it is
+    what catches a permanent false alarm the next time one is about to
+    be created.
+
+  The second check is read out of `docs/plan/v1.4-plan.md` §0a, so it
+  has no hardcoded item list to go stale.
+
+- **The v1.4 plan's §0a and the gap inventory quoted a report that no
+  longer exists.**
+  Both documents quoted the two `STALE` rows as current output.  They
+  now quote the clean report, and say *why* it is clean — a row's
+  expectation flips when its item lands, and a row left asserting the
+  absence of something that now exists reports `STALE` forever.
+
 ### Fixed
 
 - **The DTLS test certificate was written into the wolfSSL submodule, and

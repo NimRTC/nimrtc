@@ -152,6 +152,9 @@
             "context": "gmssl-vendored / msvc"
           },
           {
+            "context": "windows / dxva"
+          },
+          {
             "context": "linux-apm / real 3A"
           },
           {
@@ -162,7 +165,7 @@
           }
         ],
         "_comment": [
-          "The thirteen checks the CI matrix produces on `main` and on",
+          "The fourteen checks the CI matrix produces on `main` and on",
           "every pull request into `main`.",
           "",
           "Strict mode is on: the pull request head has to be up to date",
@@ -192,7 +195,24 @@
           "something that is not TLS.  This leg starts a real coturn",
           "and asserts the behaviour: a TLS handshake that verifies, a",
           "real TURN allocation over that TLS session, and the negative",
-          "control on the *same* port that gets no allocation."
+          "control on the *same* port that gets no allocation.",
+          "",
+          "`windows / dxva` compiles the Windows Media Foundation",
+          "hardware H.264 decoder.  `NIMRTC_PLUGINS_DXVA` is OFF by",
+          "default, and no other leg turned it on, so",
+          "`src/modules/h264/src/dxva_decoder.cpp` was never compiled",
+          "by CI at all -- which is how a file could sit in the tree",
+          "targeting the *deleted* pre-split codec seam (`VideoFrameType`,",
+          "`EncodedImage`, `VideoEncoderConfig`, `VideoCodecOptions`,",
+          "`decode(const uint8_t*, int, ...)`) and leave the whole",
+          "matrix green.  A Windows host that asked for the hardware",
+          "backend got a build failure, not a degraded picture.  The",
+          "leg needs no GPU: the DXVA backend compiles against",
+          "`d3d11.h` from the Windows SDK, and the decode tests",
+          "`GTEST_SKIP()` on a host with no Media Foundation H.264",
+          "decoder (correctly -- a host without the capability is not a",
+          "bug).  Correctness on real hardware is `hardware.yml`'s job,",
+          "on the self-hosted GPU runner."
         ]
       }
     }

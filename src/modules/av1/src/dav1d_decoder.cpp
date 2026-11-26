@@ -214,11 +214,6 @@ public:
         return status;
     }
 
-    plugins::Status force_keyframe() noexcept override {
-        // Decoder-only: nothing to force.
-        return plugins::kOk;
-    }
-
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
 
     plugins::Status update_config(plugins::VideoCodecConfig cfg) noexcept override {
@@ -227,12 +222,6 @@ public:
     }
 
     plugins::VideoCodecStats stats() const noexcept override { return stats_; }
-
-    std::uint8_t payload_type() const noexcept override {
-        // AV1 has no statically-assigned payload type in RFC 3551; 45 is
-        // the value the AV1 RTP payload specification uses.
-        return cfg_.payload_type ? cfg_.payload_type : std::uint8_t{45};
-    }
 
     // ---- Telemetry ---------------------------------------------------------
 

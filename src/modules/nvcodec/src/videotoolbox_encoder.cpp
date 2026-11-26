@@ -906,8 +906,6 @@ public:
         return opened_ && session_.is_open();
     }
 
-    bool supports_zero_copy_decode() const noexcept override { return false; }
-
     plugins::Status encode_zero_copy(const plugins::GpuBuffer& gpu,
                                      plugins::EncodedVideoFrame& encoded_out) noexcept override {
         std::lock_guard<std::mutex> lock(mtx_);

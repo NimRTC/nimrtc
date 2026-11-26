@@ -591,7 +591,6 @@ public:
         return plugins::kOk;
     }
 
-    bool supports_zero_copy_encode() const noexcept override { return false; }
     bool supports_zero_copy_decode() const noexcept override { return false; }
 
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }

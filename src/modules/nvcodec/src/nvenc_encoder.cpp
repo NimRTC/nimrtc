@@ -1115,8 +1115,6 @@ public:
                NvEncLib::instance().fn.nvEncUnregisterResource != nullptr;
     }
 
-    bool supports_zero_copy_decode() const noexcept override { return false; }
-
     plugins::Status encode_zero_copy(
             const plugins::GpuBuffer& gpu,
             plugins::EncodedVideoFrame& encoded_out) noexcept override {

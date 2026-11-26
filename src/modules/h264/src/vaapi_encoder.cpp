@@ -1256,17 +1256,12 @@ public:
         return plugins::kOk;
     }
 
-    plugins::Status force_keyframe() noexcept override {
-        return plugins::kErrUnsupported;
-    }
-
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
     plugins::Status update_config(plugins::VideoCodecConfig cfg) noexcept override {
         cfg_ = std::move(cfg);
         return plugins::kOk;
     }
     plugins::VideoCodecStats stats() const noexcept override { return decoder_.stats(); }
-    std::uint8_t payload_type() const noexcept override { return cfg_.payload_type; }
 
 private:
     plugins::VideoCodecConfig cfg_;

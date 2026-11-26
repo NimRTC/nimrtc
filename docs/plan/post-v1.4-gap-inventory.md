@@ -1,6 +1,8 @@
 # v1.4 之后的能力缺口清单（Gap Inventory）
 
 > **状态**：`v1.4.0-dev` 周期开始时的能力盘点（2026-11-25）。
+> **勘误**：2026-11-26 复核，标注了三条已闭合的条目（§1 / §3 / §2.4.2）
+> 与 §10 的排期勘误。**核对结论来自树，不是记忆**——复核命令见 §11。
 > **基线**：`main` @ `cef0a0ab`（`v1.3.1` 之后的首个合并）。
 > **范围**：本文**只**记录 v1.4 计划（`docs/plan/v1.4-plan.md` §8 已声明的 out-of-scope）
 > **之外**的能力与架构缺口。v1.4 自身的交付项（N1–N9 / D1–D7）不在本文重复。
@@ -58,6 +60,15 @@
 ---
 
 ## 1. 【缺口】音频设备层没有被引擎编排
+
+> **✅ 已闭合（2026-11-26 勘误）：本节全部条目由 v1.4 D1
+> （`v1-audio-device-engine`，ADR-040）完成。**
+> `register_audio_source` / `register_audio_sink` 已进 `PluginRegistry`；
+> `EngineConfig` 已有两个键；引擎已创建/持有 `IAudioSource` / `IAudioSink`，
+> 并有设备 pump。**本节保留为决策前的现状记录**（它的价值是记录
+> 「模块写好了但引擎接不上」这个状态是如何被发现和量化的），
+> **不再代表当前缺口**。若要做 v1.4 之后的音频工作，请以
+> `docs/plan/d1-device-layer-implementation.md` 为准。
 
 **级别**：高（影响 D1 的可行性与 D5 的 3A 契约）
 
@@ -235,9 +246,20 @@ src/modules/CMakeLists.txt:389:    add_subdirectory(audio_device)
 | 部件 | 状态 |
 |---|---|
 | `dav1d_decoder.cpp` | ✅ **软件解码器完整实现**（`libdav1d`，BSD-2）——但 `NIMRTC_PLUGINS_DAV1D` **默认 OFF**，需显式开启 |
-| `svt_av1_encoder.cpp` | ⚠️ 有桩，但 `svt_av1_unavailable_reason()` 返回不可用 |
+| `svt_av1_encoder.cpp` | ✅ **已实现**（2026-11-26 核实）。真正调用 `svt_av1_enc_init_handle` / `svt_av1_enc_set_parameter` / `svt_av1_enc_get_packet`；`svt_av1_unavailable_reason()` 只在编译期开关关闭时返回原因。**这一行曾被本文错误地标成「桩 / v1.5 候选」，勘误见下** |
 | AMF AV1 编码 | ⚠️ 桩，日志明说 "the AMF AV1 encoder body is not implemented yet" |
 | VAAPI AV1 编码 | ✅ 硬件 |
+
+> **勘误（2026-11-26）**：本节初稿（基线 `cef0a0ab`）把 SVT-AV1 写成
+> 「有桩，但 `svt_av1_unavailable_reason()` 返回不可用」。**该结论已不成立**：
+> `src/modules/av1/src/svt_av1_encoder.cpp` 现在是一份完整实现，真正调用
+> SVT-AV1 编码器 API，不再是桩。之所以仍「看起来不可用」，是因为
+> `NIMRTC_VENDORED_SVT_AV1` **默认 OFF**（构建较重）——那是**发行策略**问题，
+> 与 §2.4.5 的 dav1d 默认值同类，**不是能力缺口**。
+>
+> 同类漂移在本清单还有两处，已一并标注：§1.2.x（D1 已接通）、§3.2.x（N9 已闭合）。
+> 教训：本文基线是 `v1.3.1` 之后，而 v1.4 的十六项与四个后续片已全部落地，
+> **任何「v1.5 候选」的结论在引用前都应先在树里复核一遍**。
 
 > **注意「默认 OFF」这件事。** `NIMRTC_PLUGINS_DAV1D` 默认关闭
 > （`CMakeLists.txt:96`），所以**默认构建里的 AV1 解码走的是 stub**，
@@ -260,14 +282,20 @@ current-track item」），所以 Android 编解码后端整体排在移动端�
 | # | 缺口 | 障碍类型 | 建议归属 |
 |---|---|---|---|
 | 2.4.1 | H.265 软件编码/解码 | **许可证（GPL-2.0）** | 需 owner 决策：维持策略则永久不做；否则需引入 LGPL/MIT HEVC 实现并做许可证审计 |
-| 2.4.2 | AV1 软件编码（SVT-AV1） | 无（纯工程量） | v1.5 候选 |
-| 2.4.3 | AMF AV1 编码器本体 | 需 AMD VCN 3.0/4.0 硬件验证 | 与 2.4.2 一起排在 v1.5 |
+| ~~2.4.2~~ | ~~AV1 软件编码（SVT-AV1）~~ | — | **✅ 已实现（2026-11-26 勘误）**。不再是缺口。剩下的只是 `NIMRTC_VENDORED_SVT_AV1` 默认 OFF 的策略问题，见 2.4.5 同类 |
+| 2.4.3 | AMF AV1 编码器本体 | 需 AMD VCN 3.0/4.0 硬件验证 | 需硬件后才可开工（`amf_av1_encoder.cpp:25` 自述） |
 | 2.4.4 | Android MediaCodec 后端 | 依赖 Android 平台整体 | 排在移动端之后 |
 | 2.4.5 | dav1d 软件解码默认 OFF（`NIMRTC_PLUGINS_DAV1D`） | 非缺口，是**发行策略**决策 | 若目标是「开箱即用的软件 AV1 解码」，需改默认值或拆发行变体 |
 
 ---
 
 ## 3. 【缺口】下游消费证明的平台覆盖不完整
+
+> **✅ 已闭合（2026-11-26 勘误）：本节三条由 v1.4 N9
+> （`v1-macos-install-proof`，ADR-034）完成。**
+> `ci.yml` 的 macOS 腿现在带 `-DNIMRTC_INSTALL=ON` 并跑
+> `find_package(NimRTC)` 消费者步骤，与 Windows / Linux 同形。
+> **本节保留为发现过程记录**，不再代表当前缺口。
 
 **级别**：中（发版可信度）
 
@@ -387,10 +415,15 @@ README 明确：
 
 | # | 缺口 | 风险 | 建议归属 |
 |---|---|---|---|
-| 5.2.1 | `VideoPipeline` 协作类 | 中（视频路径回归面大） | v1.5，独立 PR |
-| 5.2.2 | `AudioPipeline` 协作类 | 中（与 §1 的音频接线耦合） | v1.5，**建议在 §1 完成之后** |
-| 5.2.3 | `RtcpProcessor` 协作类 | 中（RTCP 反馈闭环） | v1.5，独立 PR |
-| 5.2.4 | `TransportManager` 协作类 | 中（与 N1–N3 网络轨耦合） | v1.5，与 v1.4 网络轨合并后 |
+| 5.2.1 | `VideoPipeline` 协作类 | 中（视频路径回归面大） | **1.4 线补充项**（`v1.4-plan.md` §11.4.1 A1），独立 PR |
+| 5.2.2 | `AudioPipeline` 协作类 | 中（与 §1 的音频接线耦合） | **1.4 线补充项**（A2）。§1 已完成，前置已满足 |
+| 5.2.3 | `RtcpProcessor` 协作类 | 中（RTCP 反馈闭环） | **1.4 线补充项**（A3），独立 PR |
+| 5.2.4 | `TransportManager` 协作类 | 中（与 N1–N3 网络轨耦合） | **1.4 线补充项**（A4）。N1–N3 已落地，前置已满足 |
+
+> **2026-11-26 归属变更**：本节初稿把这四项列为「v1.5，独立 PR」。
+> owner 已决定把它们收进 **1.4 线**作为补充项（`docs/plan/v1.4-plan.md`
+> §11.4.1）。四项都**无外部依赖**，两个前置（§1 音频接线、N1–N3 网络轨）
+> 均已在 v1.4 内落地。**版本号不抬高**：这些工作仍落在 `1.4.x` 上。
 
 > **排序建议**：`VideoPipeline` 和 `RtcpProcessor` 相对独立，可先做；
 > `AudioPipeline` 应排在 §1 音频接线之后（否则要搬两次）；
@@ -441,10 +474,13 @@ README 明确：
 
 > **版本影响提示**：按 `RELEASING.md` §1.1，**加枚举值不是破坏性改动**
 > （破坏性 = 要求下游改代码 / 换符号集 / 换编译标志）。
-> 所以 6.3.1 属于 `MINOR`，可以进 `1.5.0`，
-> **不需要**像「改已有函数签名」那样升 `MAJOR`。
+> 所以 6.3.1 属于 `MINOR`，**不需要**像「改已有函数签名」那样升 `MAJOR`。
 > 但新增的枚举值必须打 `NIMRTC_API_STABLE` 标记，并过
 > `scripts/api_freeze_scan.js` 的逐符号分类门禁。
+>
+> **它落在 `1.4.x`，不是 `1.5.0`（2026-11-26）**：`MINOR` 是相对**上一次
+> 已发布版本**（`1.3.1`）而言的；`1.4.0` 还没发布，所以这些都是 `1.4.0`
+> 的内容。理由见 `docs/plan/v1.4-plan.md` §11.6。
 
 **现状**：
 - `srtp::SecuritySuite` 的实际枚举值只有四个：`Aes128CmSha1_80` /
@@ -457,7 +493,7 @@ README 明确：
 
 | # | 缺口 | 落点 | 备注 |
 |---|---|---|---|
-| 6.3.1 | `SecuritySuite` 无 SM4-GCM 枚举值 | `src/modules/srtp/include/nimrtc/srtp/srtp.hpp` | **增量改动**（加枚举值），不是破坏性 → 属 `MINOR`，可进 `1.5.0` |
+| 6.3.1 | `SecuritySuite` 无 SM4-GCM 枚举值 | `src/modules/srtp/include/nimrtc/srtp/srtp.hpp` | **增量改动**（加枚举值），不是破坏性 → 属 `MINOR` 级但**落在 `1.4.x`**（`1.4.0` 未发布，见 §11.6） |
 | 6.3.2 | 无 SM4-GCM SRTP 后端实现 | `src/modules/srtp/`（新 backend 子目录） | 需 GmSSL 的 SM4-GCM SRTP profile |
 | 6.3.3 | 无 SM4-GCM 的 SRTP 测试向量 / 互通证明 | `src/modules/srtp/tests/` | 与 6.3.2 同一个 PR |
 | 6.3.4 | 引擎无「国密 SRTP profile」的配置面 | `EngineConfig` | 与 v1.4 D6 的 connectivity profile 并列 |
@@ -495,8 +531,8 @@ embedded Linux aarch64 三种形态，但每一项的 DoD 都散落在各自的�
 | `set_ref_frame()` 作为时间线载体 | **ADR-017**：时间线载体是 WebRTC abs-send-time + RTCP-SR；`set_ref_frame()` 保留为 ABI 兼容的 no-op | `src/plugins/include/nimrtc/plugins/video_pipeline.hpp:923-943` |
 | 信令服务进 `src/` | **RD-7**：SDK 不内置服务器；N6 消费 `examples/` 下的参考服务 | `docs/plan/v1.4-plan.md` §8 |
 | 信号服务「SDK 不发行」 | 产品定位，非技术限制 | 同上 |
-| FEC / ULPFEC / FlexFEC / RED | v1.5.0 线 | v1.4 §8 |
-| simulcast / SVC | v1.5.0 线 | v1.4 §8 |
+| FEC / ULPFEC / FlexFEC / RED | 不在 `v1.4.0`；之后**仍在 `1.4.x` 线**上做（版本号不抬） | v1.4 §8；归属见 v1.4-plan §11.6 |
+| simulcast / SVC | 同上 | v1.4 §8；归属见 v1.4-plan §11.6 |
 | ABI break | ADR-015 冻结（v1.4 全部为增量） | ADR-015 |
 | 引擎 include 具体模块头 | ADR-025 的 8 模块白名单 | `docs/adr/ADR-025-sdp-rtp-not-pluggable.md` |
 
@@ -525,14 +561,19 @@ embedded Linux aarch64 三种形态，但每一项的 DoD 都散落在各自的�
 
 ## 10. 建议的排期归属
 
+> **2026-11-26 勘误**：本节初稿把 §1 / §3 / §2.4.2 列为未完成或 v1.5 候选。
+> 三者**均已落地**（见 §1 / §3 / §2.4 的闭合标注）。
+> 当前真正开着的条目见下表「仍开着」两行。
+> **1.4 线的补充项归属**已写在 `docs/plan/v1.4-plan.md` §11.4，
+> 本节只保留「之后」的归属判断。
+
 | 归属 | 条目 | 理由 |
 |---|---|---|
-| **v1.4 内部** | §3.2.1–3.2.3（macOS install + 下游证明） | N9 的 DoD 明确要求「every platform leg」，这是 v1.4 内部的一致性问题 |
-| **v1.4 内部** | §1 中 D1 范围内的接线（§1.2.1–1.2.6） | D1 的定义就是「引擎运行设备层」。**决策已落定**：见 [ADR-040](../adr/ADR-040-audio-device-plugin-registry.md)；实施落点见 `docs/plan/d1-device-layer-implementation.md` |
-| **v1.5.0 候选** | §2.4.2（AV1 软件编码）、§5.2.1 / §5.2.3（两个协作类）、§6（国密 SRTP） | 无外部依赖，可并行推进 |
-| **v1.5.0 候选** | §5.2.2（`AudioPipeline`） | **依赖 §1 完成**（见 §5.2 的排序说明） |
-| **v1.5.0 候选（晚）** | §5.2.4（`TransportManager`） | 与网络轨耦合，待 v1.4 N1–N3 合并后 |
-| **需决策后再排** | §2.4.1（H.265 许可证）、§4.3.4–4.3.5（移动端）、§7（生产就绪判据） | 依赖 owner / 产品决策 |
+| **已闭合（原「v1.4 内部」）** | §3.2.1–3.2.3（macOS install + 下游证明） | ✅ N9 已做 |
+| **已闭合（原「v1.4 内部」）** | §1.2.1–1.2.6（音频设备层接线） | ✅ D1 已做（ADR-040） |
+| **已闭合（原「v1.5.0 候选」）** | §2.4.2（AV1 软件编码） | ✅ 已实现 |
+| **1.4 线补充项（见 v1.4-plan §11.4.1）** | §5.2.1–5.2.4（四个协作类）、§6.3.1–6.3.4（国密 SRTP） | 无外部依赖，owner 已选入 1.4 线 |
+| **需决策后再排** | §2.4.1（H.265 许可证）、§2.4.3（AMF 硬件）、§2.4.5（dav1d 默认值）、§4.3.4–4.3.5（移动端）、§7（生产就绪判据） | 依赖 owner / 产品 / 硬件决策 |
 | **用户动作后可推进** | §4.3.1–4.3.3（OHOS） | 装上 SDK 即可 |
 | **永久不做（除非改策略）** | §8 中标注的决策项 | 理由已归档 |
 
@@ -588,7 +629,7 @@ python tools/check_v14_plan_status.py
 
 | 文档 | 关系 |
 |---|---|
-| `docs/plan/v1.4-plan.md` | §8 是本文的**子集**；本文是扩充 + 勘误。§1 与其 D1 条目有交叠，边界见本文 §1.4 |
+| `docs/plan/v1.4-plan.md` | §8 是本文的**子集**；本文是扩充 + 勘误。§1 与其 D1 条目有交叠，边界见本文 §1.4。**1.4 线的补充项归属（本文 §5.2 / §6 的条目）见该文 §11.4** |
 | `docs/plan/d1-device-layer-implementation.md` | §1.2.1–1.2.6 的**实施拆解**。本文是决策前的缺口记录，那份是决策后的实施计划 |
 | `docs/adr/ADR-040-audio-device-plugin-registry.md` | §1.2.6 的**决策**（并入 `PluginRegistry`）。论证只在那一份里 |
 | `docs/plan/architecture-remediation-plan.md` | §5 引用其 D1 的状态 |

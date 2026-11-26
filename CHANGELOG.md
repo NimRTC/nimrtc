@@ -21,6 +21,50 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The DTLS test certificate was written into the wolfSSL submodule, and
+  it left the submodule permanently dirty (2026-11-26).**
+  `scripts/build_dtls_cert.py` generated the Chrome-friendly ECC pair
+  and then *mirrored* it into `src/third_party/wolfssl/src/certs/`,
+  because that is where CMake's `copy_if_different` rule used to read
+  it from.  But `certs/server-ecc.pem` is **tracked** inside that
+  submodule, so every run of the generator overwrote a tracked file of
+  a vendored dependency and left the submodule reporting `-dirty` --
+  and the main repository reporting `m src/third_party/wolfssl/src`
+  forever after.  A build artefact has no business dirtying a vendored
+  dependency's tracked files.
+
+  The pair now lives only in `tests/wolfssl_dtls/certs/`, which is
+  gitignored (`.gitignore:227`), and CMake sources it from there
+  (`cmake/NimRTCRuntime.cmake`, `cmake/NimRTCTest.cmake`,
+  `src/modules/dtls/CMakeLists.txt`).  The wolfSSL cert tree was also
+  **removed from the certificate lookup candidates** in
+  `dtls_wolfssl_session.cpp`, which was actively harmful rather than
+  merely untidy: the upstream copy is the SAN-less
+  `CN=www.wolfssl.com` certificate, so in any working directory where
+  it resolved it would *win* over the generated one, and Chrome would
+  reject the handshake with alert 46 ("certificate_unknown").
+
+  Because the pair is now purely a build artefact, it is **not** in a
+  fresh checkout, and CMake's copy rule runs unconditionally -- so a
+  build without it fails with
+
+  ```text
+  error MSB3073: "cmake.exe" -E copy_if_different
+      .../tests/wolfssl_dtls/certs/ecc-key.pem .../certs/
+  ```
+
+  The generation step therefore had to move into CI, in **every** job
+  whose build reaches that rule.  It was present in six jobs and
+  missing from nine, so the legs that build the test tree on Linux,
+  macOS, aarch64 and the sanitizer/fuzz legs would all have gone red
+  for a reason that has nothing to do with the tree.  The step is now
+  driven by `scripts/generate_dtls_certs_ci.py`, which knows each
+  platform's interpreter name and pip invocation (`python` vs
+  `python3`, and `--user` for the externally-managed PEP 668 Pythons on
+  the Linux and macOS runners), and it is present in all thirteen jobs
+  that need it -- and in none of the four release jobs, which build
+  neither the test tree nor the examples.
+
 - **A transient `503` from GitHub's artifact store made the soak
   window read "incomplete", and the whole soak leg red for a reason
   that had nothing to do with the tree (2026-11-24).**

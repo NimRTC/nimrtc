@@ -510,6 +510,14 @@ jobs:
           python tools/fetch_webrtc_apm.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # NOTE: the Chrome-friendly DTLS cert pair is NOT generated here.
+      # This job configures with NIMRTC_BUILD_TESTS=OFF and
+      # NIMRTC_BUILD_EXAMPLES=OFF, so it builds neither the test tree
+      # (whose `nimrtc_copy_wolfssl_certs()` rule copies the pair) nor
+      # the examples (whose `nimrtc_stage_runtime()` rule does the same).
+      # The pair is a build artefact in `tests/wolfssl_dtls/certs/`
+      # (gitignored, `.gitignore:227`), and no release-binary path reads
+      # it -- the shipped bundles carry their own certs.
       - name: Configure
         shell: pwsh
         run: |

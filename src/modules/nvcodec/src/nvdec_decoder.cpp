@@ -274,7 +274,7 @@ cudaVideoCodec nv_cuvid_codec(NvCodec codec) noexcept {
     return cudaVideoCodec_H264;
 }
 
-class NvDecDecoder final : public plugins::IVideoCodec {
+class NvDecDecoder final : public plugins::IVideoDecoder {
 public:
     /** @param cfg    The caller's configuration.
      *  @param codec  Which codec family this decoder consumes. */
@@ -363,21 +363,13 @@ public:
         NIMRTC_LOG_INFO("nvdec: decoder closed");
     }
 
-    // ---- plugins::IVideoCodec ----------------------------------------------
-
-    bool can_encode() const noexcept override { return false; }
-    bool can_decode() const noexcept override { return true; }
+    // ---- plugins::IVideoDecoder --------------------------------------------
 
     plugins::VideoCodecKind kind() const noexcept override {
         return desc_.kind;
     }
     std::string_view codec_name() const noexcept override {
         return desc_.rtpmap_encoding;
-    }
-
-    plugins::Status encode(const plugins::VideoFrame&, std::uint8_t*,
-                           std::size_t, plugins::EncodedVideoFrame&) noexcept override {
-        return plugins::kErrUnsupported;
     }
 
     plugins::Status decode(const plugins::EncodedVideoFrame& encoded,
@@ -599,12 +591,6 @@ public:
         return plugins::kOk;
     }
 
-    plugins::Status force_keyframe() noexcept override {
-        // A decoder never emits keyframes; the request is a no-op.
-        return plugins::kOk;
-    }
-
-    bool supports_zero_copy_encode() const noexcept override { return false; }
     bool supports_zero_copy_decode() const noexcept override { return false; }
 
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
@@ -631,10 +617,6 @@ public:
      *  before the first sequence. */
     std::optional<plugins::HevcPtsSummary> last_hevc_pts() const noexcept override {
         return pts_;
-    }
-
-    std::uint8_t payload_type() const noexcept override {
-        return cfg_.payload_type != 0 ? cfg_.payload_type : std::uint8_t{102};
     }
 
 private:
@@ -981,7 +963,27 @@ private:
  *
  *  The chroma format and bit depth are pinned to 4:2:0 / 8-bit because
  *  that is the only configuration this decoder implements — asking for
- *  a capability the backend cannot actually use would be a lie. */
+ *  a capability the backend cannot actually use would be a lie.
+ *
+ *  ## The three failures are not one failure
+ *
+ *  A `false` here has three possible causes, and they mean very different
+ *  things to the operator:
+ *
+ *    1. the GPU genuinely has no unit for this codec;
+ *    2. the CUDA context could not be pushed, so the query never ran
+ *       against a valid context;
+ *    3. the query ran and the driver rejected the call.
+ *
+ *  Causes 2 and 3 are *our* problem, not the GPU's, and the old code
+ *  reported all three with the same sentence — "H.264 / AVC 4:2:0 8-bit
+ *  decode is not supported by this GPU".  On a machine whose GPU
+ *  certainly does support H.264 that sentence is not merely vague, it
+ *  is false, and it sends the operator to update a driver that is
+ *  already fine.
+ *
+ *  So the failures are now reported separately: the push result and the
+ *  CUresult are both in the message. */
 bool probe_nvdec(NvCodec codec) noexcept {
     auto& lib = NvDecLib::instance();
     if (!lib.loaded()) return false;
@@ -996,11 +998,27 @@ bool probe_nvdec(NvCodec codec) noexcept {
     caps.eChromaFormat   = cudaVideoChromaFormat_420;
     caps.nBitDepthMinus8 = 0;
 
-    CudaContext::instance().push();
+    // The context push is *checked*.  `cuvidGetDecoderCaps` needs a
+    // current context; without one it fails, and that failure is ours,
+    // not the GPU's.
+    if (!CudaContext::instance().push()) {
+        NIMRTC_LOG_WARN("nvdec: could not push the CUDA context — the "
+                        << desc.display_name
+                        << " capability query did not run (this is a "
+                           "context failure, not a missing decoder unit)");
+        return false;
+    }
     CUresult r = lib.cuvid->cuvidGetDecoderCaps(&caps);
     CudaContext::instance().pop();
 
-    if (r != CUDA_SUCCESS || !caps.bIsSupported) {
+    if (r != CUDA_SUCCESS) {
+        NIMRTC_LOG_WARN("nvdec: the " << desc.display_name
+                        << " capability query failed (CUresult=" << int(r)
+                        << ") — this is a driver call failure, not a missing "
+                           "decoder unit");
+        return false;
+    }
+    if (!caps.bIsSupported) {
         NIMRTC_LOG_WARN("nvdec: " << desc.display_name
                         << " 4:2:0 8-bit decode is not supported by this GPU");
         return false;
@@ -1030,7 +1048,7 @@ bool nvdec_codec_available(NvCodec codec) noexcept {
 #endif
 }
 
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoDecoder>
 make_nvdec_codec(NvCodec codec, plugins::VideoCodecConfig cfg) {
 #if defined(NIMRTC_PLUGINS_NVDEC_ON) && defined(_WIN32)
     if (codec == NvCodec::kUnsupported) return nullptr;
@@ -1066,7 +1084,7 @@ make_nvdec_codec(NvCodec codec, plugins::VideoCodecConfig cfg) {
 namespace nimrtc::nvcodec {
 
 bool nvdec_codec_available(NvCodec) noexcept { return false; }
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoDecoder>
 make_nvdec_codec(NvCodec, plugins::VideoCodecConfig) { return nullptr; }
 
 } // namespace nimrtc::nvcodec

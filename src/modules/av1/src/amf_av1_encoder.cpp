@@ -94,8 +94,8 @@ std::string amf_av1_unavailable_reason() {
  *  Returns nullptr while the body is not implemented — which is what
  *  makes the registry fall through to the next backend (and eventually
  *  to the software stub). */
-std::unique_ptr<plugins::IVideoCodec>
-make_amf_av1_codec(plugins::VideoCodecConfig cfg) {
+std::unique_ptr<plugins::IVideoEncoder>
+make_amf_av1_encoder(plugins::VideoCodecConfig cfg) {
     (void)cfg;
     return nullptr;
 }
@@ -110,9 +110,9 @@ std::string amf_av1_unavailable_reason() {
     return amf_backend::amf_av1_unavailable_reason();
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_amf_av1_codec(plugins::VideoCodecConfig cfg) {
-    return amf_backend::make_amf_av1_codec(std::move(cfg));
+std::unique_ptr<plugins::IVideoEncoder>
+make_amf_av1_encoder(plugins::VideoCodecConfig cfg) {
+    return amf_backend::make_amf_av1_encoder(std::move(cfg));
 }
 
 } // namespace nimrtc::av1

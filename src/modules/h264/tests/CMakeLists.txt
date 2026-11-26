@@ -87,6 +87,41 @@ if(NIMRTC_PLUGINS_OPENH264 AND NIMRTC_VENDORED_OPENH264 AND
 endif()
 
 # -----------------------------------------------------------------------------
+# test_dxva_hardware — the Microsoft DXVA / Media Foundation decoder.
+#
+# Only built on Windows with NIMRTC_PLUGINS_DXVA=ON: the backend row
+# only exists in the registry when the plugin is compiled in, so on any
+# other host there is nothing to test.
+# -----------------------------------------------------------------------------
+if(WIN32 AND NIMRTC_PLUGINS_DXVA)
+    add_executable(test_dxva_hardware test_dxva_hardware.cpp)
+
+    set_target_properties(test_dxva_hardware PROPERTIES
+        VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+    nimrtc_apply_options(test_dxva_hardware LENIENT)
+
+    target_link_libraries(test_dxva_hardware PRIVATE
+        nimrtc::h264
+        nimrtc::video_frame
+        nimrtc::video_payload
+        nimrtc::core
+        nimrtc::plugins
+        GTest::gtest_main
+        GTest::gtest)
+
+    add_test(NAME modules_h264_tests_test_dxva_hardware
+             COMMAND test_dxva_hardware)
+    set_tests_properties(modules_h264_tests_test_dxva_hardware PROPERTIES TIMEOUT 60)
+
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(test_dxva_hardware
+            PROPERTIES TIMEOUT 60
+            DISCOVERY_TIMEOUT 10)
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
 # test_hw_backends — HW backend registry + helper unit tests
 # -----------------------------------------------------------------------------
 # This test file accesses the private header src/hw_backend_base.hpp via the

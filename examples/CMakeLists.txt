@@ -179,6 +179,35 @@ if(NIMRTC_MODULE_RD_INPUT)
 endif()
 
 # ---------------------------------------------------------------------------
+# `nv_diagnose` — the NVIDIA video backend diagnostic
+# ---------------------------------------------------------------------------
+#
+# The media binaries report *that* a hardware backend refused to open
+# ("the backend policy is 'hardware', but no hardware H.264 encoder is
+# available"), but they cannot report *which adapter* the driver picked
+# or what the NVDEC capability query actually answered.  On a machine
+# whose default D3D11 adapter is not the NVIDIA one — a laptop with an
+# Intel iGPU plus an NVIDIA dGPU — that is exactly the question the
+# operator needs answered, and it is the difference between "update
+# your driver" and "your laptop is wired wrong".
+#
+# This program answers it: the adapter list, which one is the default,
+# whether an NVENC session opens on each adapter, and what the NVDEC
+# capability query says for each codec on each CUDA device.
+#
+# It is a standalone diagnostic — no NimRTC library, no session, no
+# network — and it is read-only.
+if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/tools/nv_diagnose.cpp")
+    add_executable(nv_diagnose "${CMAKE_SOURCE_DIR}/tools/nv_diagnose.cpp")
+    nimrtc_apply_options(nv_diagnose)
+    target_include_directories(nv_diagnose PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/third_party/nv_codec_headers/include"
+        "${CMAKE_SOURCE_DIR}/src/third_party/nv_codec_headers/include/ffnvcodec"
+    )
+    target_link_libraries(nv_diagnose PRIVATE d3d11 dxgi)
+endif()
+
+# ---------------------------------------------------------------------------
 # `rd_verify` — the M1 sign-off program
 # ---------------------------------------------------------------------------
 #

@@ -371,6 +371,138 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
+  # DXVA (Windows Media Foundation H.264 hardware decoder).
+  #
+  # WHY THIS LEG EXISTS
+  #
+  # `NIMRTC_PLUGINS_DXVA` is OFF by default and **no other CI leg turned it
+  # on**, so `src/modules/h264/src/dxva_decoder.cpp` was never compiled by
+  # CI at all.  That is how a file could sit in the tree targeting the
+  # *pre-split* codec seam -- types that no longer exist
+  # (`VideoFrameType`, `EncodedImage`, `VideoEncoderConfig`,
+  # `VideoCodecOptions`, `decode(const uint8_t*, int, ...)`) -- and still
+  # leave the whole matrix green.  The rot was invisible precisely because
+  # the option was off: a Windows host that asked for `--backend hardware`
+  # got a *build failure*, not a degraded picture.
+  #
+  # The fix is not a code change; it is making the option's code path part
+  # of what CI compiles.  This leg does that.
+  #
+  # WHY IT IS ITS OWN JOB AND NOT A FLAG ON THE WINDOWS LEG
+  #
+  # Two reasons.  First, the failure this leg exists to catch is a
+  # *compile* failure in one file; folding it into the main Windows job
+  # would bury it in a 60-minute matrix where the first thing you read is
+  # "the Windows job failed", not "the DXVA backend does not compile".  A
+  # dedicated job names the defect in the check name itself.  Second, the
+  # two legs build different configurations (this one has
+  # `NIMRTC_PLUGINS_DXVA=ON`), so they cannot share a build directory;
+  # running both in one job would mean reconfiguring the same tree twice
+  # and losing the cache benefit of the first.
+  #
+  # WHAT IT PROVES, AND WHAT IT DOES NOT
+  #
+  # It proves the DXVA backend **compiles and links** against the current
+  # codec seam, and that its test binary builds and runs.  The decode tests
+  # themselves `GTEST_SKIP()` on a host with no Media Foundation H.264
+  # decoder (a Server Core container has the MFT but no usable media
+  # stack), so on a hosted runner they are reported as skipped rather than
+  # failed -- correctly: a host without the capability is not a bug.
+  #
+  # What it does NOT prove is that the decode is *correct* on hardware.
+  # That is the `hardware.yml` job's job, on the self-hosted GPU runner.
+  # This leg is the cheap half: it closes the compile-coverage hole, which
+  # is the hole that let the stale file survive.
+  # ---------------------------------------------------------------------------
+  dxva-hardware:
+    name: windows / dxva
+    runs-on: windows-2022
+    timeout-minutes: 45
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-dxva
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        run: python tools/check_vendor.py
+
+      - name: Install Ninja
+        run: choco install -y ninja
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # The DTLS test certificate pair.
+      #
+      # `scripts/build_dtls_cert.py` produces the Chrome-friendly ECC pair
+      # into `tests/wolfssl_dtls/certs/` — a *build artefact*, gitignored
+      # (`.gitignore:227`) — and CMake's copy rule reads it from there
+      # (`cmake/NimRTCTest.cmake`).  It is therefore absent from a fresh
+      # checkout, and every job whose build reaches that rule has to
+      # generate it first; without it the build fails with
+      #
+      #     error MSB3073: "cmake.exe" -E copy_if_different
+      #         .../tests/wolfssl_dtls/certs/ecc-key.pem .../certs/
+      #
+      # This leg builds the whole test tree, so it reaches that rule.
+      # Every other job that does the same carries the same step.
+      - name: Generate the DTLS test certificate pair
+        run: python scripts/generate_dtls_certs_ci.py
+
+      # NIMRTC_PLUGINS_DXVA=ON is the whole point of this leg.
+      #
+      # NIMRTC_PLUGINS_OPENH264=ON because the DXVA decode test produces
+      # its bitstream with the software encoder -- without it the test
+      # skips at "the software H.264 encoder is not available here" and
+      # the leg would prove nothing about the decode path even on a host
+      # that does have DXVA.
+      #
+      # NIMRTC_VENDORED_WEBRTC_APM=OFF because the WebRTC APM prebuilt
+      # archive is not present on a CI runner; every other leg passes the
+      # same flag.
+      #
+      # NIMRTC_BUILD_EXAMPLES=OFF: this leg is about the codec module,
+      # and the examples add build time for nothing.
+      - name: Configure (DXVA ON)
+        run: >
+          cmake --preset debug.msvc
+          -DNIMRTC_PLUGINS_DXVA=ON
+          -DNIMRTC_PLUGINS_OPENH264=ON
+          -DNIMRTC_BUILD_EXAMPLES=OFF
+          -DNIMRTC_VENDORED_WEBRTC_APM=OFF
+
+      # The build itself is the assertion.  Before this leg existed, this
+      # file was never compiled by CI, which is how it could reference a
+      # seam that had been deleted out from under it.
+      - name: Build (DXVA ON)
+        run: cmake --build --preset debug.msvc -j 2
+
+      # The DXVA test binary is built by the build step above (it is in the
+      # h264 module's test set), so running it proves the tests link too.
+      # The decode cases skip on a runner with no Media Foundation H.264
+      # decoder; that is a skip, not a failure, and the point of the leg
+      # was the compile.
+      - name: Run the DXVA tests
+        run: ctest --preset tests.msvc -R test_dxva_hardware --output-on-failure
+
+      - name: Upload build directory on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-dxva-windows-${{ github.run_id }}
+          path: build/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # GMSSL vendored opt-in (v1.1 X1, ADR-013 correction).
   # Windows/MSVC acceptance: submodule at src/third_party/gmssl/src
   # (pin v3.2.0) builds STATIC EXCLUDE_FROM_ALL when

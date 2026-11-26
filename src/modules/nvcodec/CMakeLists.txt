@@ -18,11 +18,6 @@
 # cross-module dependency pattern, the same shape as `modules/jb`
 # using `modules/jb_strategy`.
 #
-# The module also owns `HwCompositeCodec`, the adapter that pairs a
-# one-directional encoder with a one-directional decoder (the engine
-# holds a single IVideoCodec per session, but the HW backends are
-# naturally one-directional).
-#
 # ## Public surface
 #
 #   nimrtc/nvcodec/nv_codec_kind.hpp  — the codec descriptor table
@@ -30,8 +25,13 @@
 #                                        make_nvenc_codec() /
 #                                        nvdec_codec_available() /
 #                                        make_nvdec_codec()
-#   nimrtc/nvcodec/hw_composite_codec.hpp — the encoder+decoder adapter
 #   nimrtc/nvcodec/vt_backends.hpp    — the VideoToolbox (macOS) entry points
+#
+# The encoder+decoder adapter (`HwCompositeCodec`) lives in the **seam**
+# layer — `nimrtc/plugins/hw_composite_codec.hpp` — because it is glue
+# over the split codec interfaces rather than an implementation, and
+# because four codec modules need it (linking a sibling module for it
+# would break the self-containment rule, L3).
 #
 # The VideoToolbox integration is *codec-parameterised* the same way the
 # NVIDIA one is: one `VTCompressionSession` code path serves H.264 and
@@ -42,7 +42,6 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_nvcodec STATIC
     src/nv_codec_kind.cpp
-    src/hw_composite_codec.cpp
     # Q1b: the H.265 parameter-set summary both directions report.
     # Built on every platform — it parses the bitstream, it does not
     # talk to a driver — so the H.265 codec module can link it on a

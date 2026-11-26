@@ -593,7 +593,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         // advertising a synthetic pair would describe a stream nothing
         // produces.
         video.fmtp[vpt] = detail::default_fmtp_of(
-            family, /*with_sprop=*/video_codec_ != nullptr,
+            family, /*with_sprop=*/video_decoder_ != nullptr,
             detail::sdp_content_hint_of(config_.video_content_hint));
 
         // a=rtcp-fb:<vpt> nack pli  (RFC 4585 §6.2.1 + WebRTC §5.2)
@@ -1437,7 +1437,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // more decodable than a VP9 one.
     const detail::VideoCodecFamily our_family = impl_->video_state.video_codec_family;
     const auto video_encoding_decodable = [this, our_family](const std::string& enc) {
-        if (video_codec_ == nullptr) return false;
+        if (video_encoder_ == nullptr && video_decoder_ == nullptr) return false;
         const detail::VideoCodecFamily peer_family =
             detail::codec_family_from_sdp_encoding(enc);
         return peer_family != detail::VideoCodecFamily::kUnknown &&

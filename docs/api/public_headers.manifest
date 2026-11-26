@@ -9,7 +9,7 @@
 #
 # Regenerate with: python scripts/check_api_manifest.py --write
 #
-# count: 196
+# count: 197
 
 src/core/include/nimrtc/core/api_version.hpp
 src/core/include/nimrtc/core/bytes.hpp
@@ -69,7 +69,6 @@ src/modules/jb_strategy/include/nimrtc/jb_strategy/adaptive_delay.hpp
 src/modules/net_feedback/include/nimrtc/net_feedback/net_feedback.hpp
 src/modules/net_sim/include/nimrtc/net_sim/impairment.hpp
 src/modules/net_sim/include/nimrtc/net_sim/nat_relay.hpp
-src/modules/nvcodec/include/nimrtc/nvcodec/hw_composite_codec.hpp
 src/modules/nvcodec/include/nimrtc/nvcodec/nv_backends.hpp
 src/modules/nvcodec/include/nimrtc/nvcodec/nv_codec_kind.hpp
 src/modules/nvcodec/include/nimrtc/nvcodec/vt_backends.hpp
@@ -186,6 +185,7 @@ src/plugins/include/nimrtc/plugins/codec.hpp
 src/plugins/include/nimrtc/plugins/control_channel.hpp
 src/plugins/include/nimrtc/plugins/datachannel.hpp
 src/plugins/include/nimrtc/plugins/dtmf.hpp
+src/plugins/include/nimrtc/plugins/hw_composite_codec.hpp
 src/plugins/include/nimrtc/plugins/hw_seam.hpp
 src/plugins/include/nimrtc/plugins/hw_video_backend.hpp
 src/plugins/include/nimrtc/plugins/ice_transport.hpp
@@ -202,6 +202,7 @@ src/plugins/include/nimrtc/plugins/transport.hpp
 src/plugins/include/nimrtc/plugins/video_bitrate_controller.hpp
 src/plugins/include/nimrtc/plugins/video_capture.hpp
 src/plugins/include/nimrtc/plugins/video_codec.hpp
+src/plugins/include/nimrtc/plugins/video_codec_view.hpp
 src/plugins/include/nimrtc/plugins/video_pipeline.hpp
 src/plugins/include/nimrtc/plugins/video_sink.hpp
 src/plugins/include/nimrtc/plugins/video_source.hpp

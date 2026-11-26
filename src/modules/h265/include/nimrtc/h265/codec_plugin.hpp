@@ -14,7 +14,7 @@
  * are consulted first, and the software stub is the fallback.  Because the
  * hardware backends are one-directional (NVENC encodes, NVDEC decodes) and
  * the engine holds *one* codec instance per session, the factory pairs the
- * two into a `nvcodec::HwCompositeCodec` when they differ.
+ * two into a `plugins::HwCompositeCodec` when they differ.
  *
  * Registered as id `"h265"` (matches the `EngineConfig::video_codec_name`
  * override that selects this codec).
@@ -119,12 +119,26 @@ private:
  *  Registered as id "h265".  A host that ships its own HEVC codec
  *  registers a different factory and selects it via
  *  `EngineConfig::video_codec_name`. */
-class NIMRTC_API_STABLE H265PluginFactory : public plugins::IVideoCodecFactory {
+class NIMRTC_API_STABLE H265PluginFactory
+    : public plugins::IVideoEncoderFactory,
+      public plugins::IVideoDecoderFactory,
+      public plugins::IVideoCodecFactory {
 public:
     std::string_view id() const noexcept override { return NIMRTC_PLUGIN_ID("h265"); }
     std::string_view display_name() const noexcept override {
         return "H.265 / HEVC (RFC 7798) — NVIDIA NVENC/NVDEC first, stub fallback";
     }
+    // ---- The split seam ---------------------------------------------------
+    //
+    // The encoder half and the decoder half are chosen *independently*:
+    // the encoder table and the decoder table are separate, and a
+    // hardware encoder (NVENC) is not a hardware decoder (NVDEC).
+    plugins::IVideoEncoder* create_encoder(
+        plugins::VideoCodecConfig cfg) const override;
+    plugins::IVideoDecoder* create_decoder(
+        plugins::VideoCodecConfig cfg) const override;
+
+    // ---- The combined seam (kept for source compatibility) ---------------
     plugins::IVideoCodec* create(plugins::VideoCodecConfig cfg) const override;
 };
 

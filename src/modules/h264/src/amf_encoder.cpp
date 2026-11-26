@@ -774,21 +774,32 @@ bool amf_h264_available() noexcept {
  * @param direction ENCODE for encoder, DECODE for decoder
  * @return Unique pointer to video codec, or nullptr on failure
  */
-std::unique_ptr<plugins::IVideoCodec> make_amf_h264_codec(
-    const plugins::VideoCodecConfig& config,
-    plugins::VideoCodecDirection direction) noexcept {
+std::unique_ptr<plugins::IVideoEncoder> make_amf_h264_encoder(
+    const plugins::VideoCodecConfig& config) noexcept {
 #if defined(NIMRTC_PLUGINS_AMF_ON) && defined(_WIN32)
     try {
-        if (direction == plugins::VideoCodecDirection::ENCODE) {
-            return std::make_unique<amf_backend::AmfEncoder>();
-        } else {
-            return std::make_unique<amf_backend::AmfDecoder>();
-        }
+        return std::make_unique<amf_backend::AmfEncoder>();
     } catch (const std::exception& e) {
-        NIMRTC_LOG_ERROR("Failed to create AMF codec: " << e.what());
+        NIMRTC_LOG_ERROR("Failed to create AMF encoder: " << e.what());
         return nullptr;
     }
 #else
+    (void)config;
+    return nullptr;
+#endif
+}
+
+std::unique_ptr<plugins::IVideoDecoder> make_amf_h264_decoder(
+    const plugins::VideoCodecConfig& config) noexcept {
+#if defined(NIMRTC_PLUGINS_AMF_ON) && defined(_WIN32)
+    try {
+        return std::make_unique<amf_backend::AmfDecoder>();
+    } catch (const std::exception& e) {
+        NIMRTC_LOG_ERROR("Failed to create AMF decoder: " << e.what());
+        return nullptr;
+    }
+#else
+    (void)config;
     return nullptr;
 #endif
 }
@@ -803,9 +814,13 @@ bool amf_h264_available() noexcept {
     return false;
 }
 
-std::unique_ptr<plugins::IVideoCodec> make_amf_h264_codec(
-    const plugins::VideoCodecConfig&,
-    plugins::VideoCodecDirection) noexcept {
+std::unique_ptr<plugins::IVideoEncoder> make_amf_h264_encoder(
+    const plugins::VideoCodecConfig&) noexcept {
+    return nullptr;
+}
+
+std::unique_ptr<plugins::IVideoDecoder> make_amf_h264_decoder(
+    const plugins::VideoCodecConfig&) noexcept {
     return nullptr;
 }
 

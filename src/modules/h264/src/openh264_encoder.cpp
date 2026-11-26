@@ -56,8 +56,21 @@ namespace nimrtc::h264 {
 // ---------------------------------------------------------------------------
 class Openh264Codec final : public plugins::IVideoCodec {
 public:
-    explicit Openh264Codec(plugins::VideoCodecConfig cfg) noexcept
-        : cfg_(std::move(cfg)) {}
+    /**
+     * @param cfg       The configuration.
+     * @param encode    True for the encoder half, false for the decoder
+     *                  half.
+     *
+     * The split codec seam asks the encoder and the decoder for their
+     * own instance, so this class is told which half it is.  It still
+     * implements the combined `IVideoCodec` -- and therefore *both*
+     * split seams -- because the OpenH264 session code is shared; what
+     * the flag does is make `open()` bring up only the half that was
+     * asked for.  A receive-only host therefore never allocates an
+     * encoder session it will not use, and vice versa.
+     */
+    explicit Openh264Codec(plugins::VideoCodecConfig cfg, bool encode) noexcept
+        : cfg_(std::move(cfg)), encode_half_(encode) {}
 
     ~Openh264Codec() override { close(); }
 
@@ -84,25 +97,31 @@ public:
         width_  = w & ~1u;
         height_ = h & ~1u;
 
-        const plugins::Status enc_status = open_encoder();
-        if (enc_status != plugins::kOk) return enc_status;
-
-        const plugins::Status dec_status = open_decoder();
-        if (dec_status != plugins::kOk) {
-            close_encoder();
-            return dec_status;
+        // Only the half this instance was asked for is brought up.
+        // A receive-only host never allocates an encoder session it
+        // will not use, and vice versa.
+        if (encode_half_) {
+            const plugins::Status enc_status = open_encoder();
+            if (enc_status != plugins::kOk) return enc_status;
+        } else {
+            const plugins::Status dec_status = open_decoder();
+            if (dec_status != plugins::kOk) return dec_status;
         }
 
         open_ = true;
         core::log::Logger::instance().info(
             "openh264: opened " + std::to_string(width_) + "x" +
-            std::to_string(height_) + " software H.264 codec");
+            std::to_string(height_) + " software H.264 " +
+            (encode_half_ ? "encoder" : "decoder"));
         return plugins::kOk;
     }
 
     void close() noexcept override {
-        close_encoder();
-        close_decoder();
+        if (encode_half_) {
+            close_encoder();
+        } else {
+            close_decoder();
+        }
         open_ = false;
     }
 
@@ -702,6 +721,8 @@ private:
     std::uint32_t width_  = 0;
     std::uint32_t height_ = 0;
     bool open_ = false;
+    // Which half of the codec this instance serves (see the ctor).
+    bool encode_half_ = true;
 
     ISVCEncoder* encoder_ = nullptr;
     ISVCDecoder* decoder_ = nullptr;
@@ -720,17 +741,25 @@ bool openh264_h264_available() noexcept {
     return true;
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_openh264_h264_codec(plugins::VideoCodecConfig cfg) {
-    return std::make_unique<Openh264Codec>(std::move(cfg));
+std::unique_ptr<plugins::IVideoEncoder>
+make_openh264_h264_encoder(plugins::VideoCodecConfig cfg) {
+    return std::make_unique<Openh264Codec>(std::move(cfg), /*encode=*/true);
+}
+
+std::unique_ptr<plugins::IVideoDecoder>
+make_openh264_h264_decoder(plugins::VideoCodecConfig cfg) {
+    return std::make_unique<Openh264Codec>(std::move(cfg), /*encode=*/false);
 }
 
 #else   // NIMRTC_PLUGINS_OPENH264_ON not defined
 
 bool openh264_h264_available() noexcept { return false; }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_openh264_h264_codec(plugins::VideoCodecConfig) { return nullptr; }
+std::unique_ptr<plugins::IVideoEncoder>
+make_openh264_h264_encoder(plugins::VideoCodecConfig) { return nullptr; }
+
+std::unique_ptr<plugins::IVideoDecoder>
+make_openh264_h264_decoder(plugins::VideoCodecConfig) { return nullptr; }
 
 #endif
 

@@ -156,9 +156,9 @@ NimRTCEngine::StreamView NimRTCEngine::default_stream_view() const noexcept {
                                       : std::string();
     v.codec_name   = config_.video_codec_name;
     v.backend_id   = impl_ != nullptr
-        ? std::string{video_codec_ ? video_codec_->backend_id() : "unknown"}
+        ? std::string{video_encoder_ ? video_encoder_->backend_id() : "unknown"}
         : std::string("unknown");
-    v.codec      = video_codec_.get();
+    v.codec      = video_codec_view_ ? video_codec_view_.get() : nullptr;
     v.sender     = video_sender_.get();
     v.receiver   = video_receiver_.get();
     v.sink       = video_sink_.get();
@@ -185,7 +185,7 @@ bool NimRTCEngine::stream_view(std::string_view stream_id,
     out.mid          = s->mid;
     out.codec_name   = s->codec_name;
     out.backend_id   = s->backend_id;
-    out.codec        = s->codec.get();
+    out.codec        = s->codec_view ? s->codec_view.get() : nullptr;
     out.sender       = s->sender.get();
     out.receiver     = s->receiver.get();
     out.sink         = s->sink.get();
@@ -326,10 +326,22 @@ bool NimRTCEngine::add_video_stream(std::string_view stream_id,
         codec_name.empty() ? config_.video_codec_name : std::string(codec_name);
     if (codec_id.empty()) return false;
 
-    const auto* codec_factory = pal::resolve_video_codec(codec_id);
-    if (codec_factory == nullptr) {
+    // The codec seam is split (remote-desktop plan B1): the stream
+    // resolves an *encoder* and a *decoder* factory, not the combined
+    // one.  The encoder is the mandatory half — a stream that cannot
+    // encode has no picture to send.
+    //
+    // The **combined fallback**: the split slots are additional, not
+    // replacements.  A host that registered only the deprecated
+    // combined factory (which the seam still promises to support) has
+    // no split slot to resolve, so the stream falls back to it — and
+    // the combined instance serves both directions, because
+    // `IVideoCodec` derives from `IVideoEncoder` *and* `IVideoDecoder`.
+    const auto* encoder_factory = pal::resolve_video_encoder(codec_id);
+    const auto* combined_factory = pal::resolve_video_codec(codec_id);
+    if (encoder_factory == nullptr && combined_factory == nullptr) {
         core::log::Logger::instance().error(
-            "engine[video]: no video codec plugin named '" + codec_id +
+            "engine[video]: no video encoder plugin named '" + codec_id +
             "' — the stream was not created");
         return false;
     }
@@ -421,16 +433,65 @@ bool NimRTCEngine::add_video_stream(std::string_view stream_id,
         cfg.payload_type = stream->payload_type;
         cfg.name = codec_id;
 
-        plugins::IVideoCodec* codec = codec_factory->create(cfg);
-        if (codec == nullptr) return false;
-        if (codec->open() != plugins::kOk) {
-            codec->close();
-            delete codec;
+        // The codec seam is split (remote-desktop plan B1): the stream
+        // owns an encoder and a decoder, not one combined object.
+        //
+        // The **combined fallback** keeps a host that registered only
+        // the deprecated combined factory working: the combined instance
+        // serves both directions (`IVideoCodec` derives from both
+        // halves), and the two `shared_ptr`s below share one control
+        // block over it.
+        std::shared_ptr<plugins::IVideoEncoder> encoder;
+        std::shared_ptr<plugins::IVideoDecoder> decoder;
+
+        if (encoder_factory != nullptr) {
+            encoder.reset(encoder_factory->create_encoder(cfg));
+            if (encoder && encoder->open() != plugins::kOk) {
+                encoder->close();
+                encoder.reset();
+            }
+        }
+
+        const auto* decoder_factory = pal::resolve_video_decoder(codec_id);
+        if (decoder_factory != nullptr) {
+            decoder.reset(decoder_factory->create_decoder(cfg));
+            if (decoder && decoder->open() != plugins::kOk) {
+                decoder->close();
+                decoder.reset();
+            }
+        }
+
+        if (!encoder && combined_factory != nullptr) {
+            std::shared_ptr<plugins::IVideoCodec> combined{
+                combined_factory->create(cfg)};
+            if (combined) {
+                if (combined->open() != plugins::kOk) {
+                    core::log::Logger::instance().error(
+                        "engine[video]: the codec plugin '" + codec_id +
+                        "' could not be opened — the stream was not created");
+                    return false;
+                }
+                encoder = combined;
+                decoder = combined;
+            }
+        }
+
+        if (!encoder) {
+            core::log::Logger::instance().error(
+                "engine[video]: no usable video encoder for '" + codec_id +
+                "' — the stream was not created");
             return false;
         }
-        stream->codec.reset(codec);
+
+        stream->encoder = std::move(encoder);
+        stream->decoder = std::move(decoder);
+
+        // The borrowed combined view over the two halves.
+        stream->codec_view = std::make_unique<plugins::VideoCodecView>(
+            stream->encoder.get(), stream->decoder.get(), cfg);
+
         stream->codec_cfg = cfg;
-        stream->backend_id = std::string{codec->backend_id()};
+        stream->backend_id = std::string{stream->encoder->backend_id()};
     }
 
     // ---- The stream's sender and receiver -------------------------------
@@ -589,7 +650,8 @@ bool NimRTCEngine::remove_video_stream(std::string_view stream_id) noexcept {
         if ((*it)->sender)     (*it)->sender->close();
         if ((*it)->sink)       (*it)->sink->close();
         if ((*it)->receiver)   (*it)->receiver->close();
-        if ((*it)->codec)      (*it)->codec->close();
+        if ((*it)->encoder)    (*it)->encoder->close();
+        if ((*it)->decoder)    (*it)->decoder->close();
         if ((*it)->controller) (*it)->controller->close();
 
         core::log::Logger::instance().info(
@@ -675,7 +737,8 @@ void NimRTCEngine::shutdown_extra_video_streams() noexcept {
         if (s->sender)     s->sender->close();
         if (s->sink)       s->sink->close();
         if (s->receiver)   s->receiver->close();
-        if (s->codec)      s->codec->close();
+        if (s->encoder)    s->encoder->close();
+        if (s->decoder)    s->decoder->close();
         if (s->controller) s->controller->close();
     }
     set.streams.clear();
@@ -695,8 +758,6 @@ plugins::Status NimRTCEngine::set_video_codec(std::string_view stream_id,
 
     const std::string codec_id =
         codec_name.empty() ? config_.video_codec_name : std::string(codec_name);
-    const auto* factory = pal::resolve_video_codec(codec_id);
-    if (factory == nullptr) return plugins::kErrInvalidParam;
 
     plugins::VideoCodecConfig cfg{};
     cfg.width  = config_.video_width;
@@ -711,24 +772,68 @@ plugins::Status NimRTCEngine::set_video_codec(std::string_view stream_id,
     cfg.payload_type = view.payload_type;
     cfg.name = codec_id;
 
-    plugins::IVideoCodec* codec = factory->create(cfg);
-    if (codec == nullptr) return plugins::kErrInternal;
-    if (codec->open() != plugins::kOk) {
-        codec->close();
-        delete codec;
+    // The codec seam is split (remote-desktop plan B1): the engine
+    // resolves an encoder and a decoder separately.
+    //
+    // The **combined fallback**: a host that registered only the
+    // deprecated combined factory has no split slot, so the combined
+    // instance serves both directions (`IVideoCodec` derives from both
+    // halves) and the two `shared_ptr`s share one control block.
+    const auto* encoder_factory = pal::resolve_video_encoder(codec_id);
+    const auto* decoder_factory = pal::resolve_video_decoder(codec_id);
+    const auto* combined_factory = pal::resolve_video_codec(codec_id);
+    if (encoder_factory == nullptr && combined_factory == nullptr) {
         return plugins::kErrInternal;
     }
 
-    if (stream_id == detail::kDefaultVideoStreamId) {
-        if (video_codec_) {
-            video_codec_->close();
-            video_codec_.reset();
+    std::shared_ptr<plugins::IVideoEncoder> encoder;
+    std::shared_ptr<plugins::IVideoDecoder> decoder;
+
+    if (encoder_factory != nullptr) {
+        encoder.reset(encoder_factory->create_encoder(cfg));
+        if (encoder && encoder->open() != plugins::kOk) {
+            encoder->close();
+            encoder.reset();
         }
-        video_codec_.reset(codec);
+    }
+
+    if (decoder_factory != nullptr) {
+        decoder.reset(decoder_factory->create_decoder(cfg));
+        if (decoder && decoder->open() != plugins::kOk) {
+            decoder->close();
+            decoder.reset();
+        }
+    }
+
+    if (!encoder && combined_factory != nullptr) {
+        std::shared_ptr<plugins::IVideoCodec> combined{
+            combined_factory->create(cfg)};
+        if (combined) {
+            if (combined->open() != plugins::kOk) return plugins::kErrInternal;
+            encoder = combined;
+            decoder = combined;
+        }
+    }
+
+    if (!encoder) return plugins::kErrInternal;
+
+    if (stream_id == detail::kDefaultVideoStreamId) {
+        if (video_encoder_) {
+            video_encoder_->close();
+            video_encoder_.reset();
+        }
+        if (video_decoder_) {
+            video_decoder_->close();
+            video_decoder_.reset();
+        }
+        video_encoder_ = std::move(encoder);
+        video_decoder_ = std::move(decoder);
+        video_codec_view_ = std::make_unique<plugins::VideoCodecView>(
+            video_encoder_.get(), video_decoder_.get(), cfg);
         // The codec's own `kind()` is authoritative (the plugin id is
         // only a lookup hint) — see `video_codec_config.hpp`.
         impl_->video_state.video_codec_family =
-            detail::codec_family_from_codec_kind(codec->kind());
+            detail::codec_family_from_codec_kind(video_encoder_->kind());
         if (impl_->video_state.video_codec_family ==
             detail::VideoCodecFamily::kUnknown) {
             impl_->video_state.video_codec_family =
@@ -774,24 +879,31 @@ plugins::Status NimRTCEngine::set_video_codec(std::string_view stream_id,
     detail::VideoStream* s =
         impl_->video_state.video_streams.find(stream_id);
     if (s == nullptr) {
-        codec->close();
-        delete codec;
+        if (encoder) encoder->close();
+        if (decoder) decoder->close();
         return plugins::kErrInvalidParam;
     }
-    if (s->codec) {
-        s->codec->close();
-        s->codec.reset();
+    if (s->encoder) {
+        s->encoder->close();
+        s->encoder.reset();
     }
-    s->codec.reset(codec);
+    if (s->decoder) {
+        s->decoder->close();
+        s->decoder.reset();
+    }
+    s->encoder = std::move(encoder);
+    s->decoder = std::move(decoder);
+    s->codec_view = std::make_unique<plugins::VideoCodecView>(
+        s->encoder.get(), s->decoder.get(), cfg);
     s->codec_name = codec_id;
     // The codec's own `kind()` is the authoritative source of the family
     // (the plugin id is only a lookup hint) — see `video_codec_config.hpp`.
-    s->codec_family = detail::codec_family_from_codec_kind(codec->kind());
+    s->codec_family = detail::codec_family_from_codec_kind(s->encoder->kind());
     if (s->codec_family == detail::VideoCodecFamily::kUnknown) {
         s->codec_family = detail::codec_family_from_plugin_id(codec_id);
     }
     s->codec_cfg = cfg;
-    s->backend_id = std::string{codec->backend_id()};
+    s->backend_id = std::string{s->encoder->backend_id()};
     s->encoder_params_set = false;
 
     // The packetizer is codec-aware (the H.264 / H.265 paths differ), so
@@ -943,7 +1055,7 @@ plugins::Status NimRTCEngine::send_video(std::string_view stream_id,
 plugins::Status NimRTCEngine::encode_and_send_video_frame_for(
         const plugins::VideoSourceFrame& frame,
         const StreamView& stream) noexcept {
-    if (stream.codec == nullptr || stream.sender == nullptr) {
+    if (stream.sender == nullptr) {
         return plugins::kErrNotReady;
     }
 
@@ -962,9 +1074,10 @@ plugins::Status NimRTCEngine::encode_and_send_video_frame_for(
         in.width  = config_.video_width;
         in.height = config_.video_height;
         in.fps    = config_.video_fps;
-        in.bitrate_bps = stream.codec->config().bitrate_bps;
+        in.bitrate_bps = s->encoder ? s->encoder->config().bitrate_bps : 0;
         in.keyframe_interval = 60;
-        in.pixel_format = stream.codec->config().pixel_format;
+        in.pixel_format = s->encoder ? s->encoder->config().pixel_format
+                                      : plugins::VideoPixelFormat::kI420;
         in.content_hint = config_.video_content_hint;
         in.color = frame.color;
         in.roi = config_.video_roi;
@@ -998,7 +1111,7 @@ plugins::Status NimRTCEngine::encode_and_send_video_frame_for(
             s->encoder_params.content_hint == wanted.content_hint;
 
         if (!unchanged) {
-            (void)stream.codec->set_params(wanted);
+            if (s->encoder) (void)s->encoder->set_params(wanted);
             s->encoder_params = wanted;
             s->encoder_params_set = true;
         }
@@ -1096,7 +1209,7 @@ void NimRTCEngine::append_video_stream_stats(
                                               config_.video_sender_tuning.payload_type);
         s.mid          = impl_->session_state.base_video_mid;
         s.codec_name   = config_.video_codec_name;
-        s.backend_id   = video_codec_ ? std::string{video_codec_->backend_id()}
+        s.backend_id   = video_encoder_ ? std::string{video_encoder_->backend_id()}
                                        : std::string("unknown");
         s.ladder_level = video_bitrate_controller_
             ? video_bitrate_controller_->stats().level_index : 0u;
@@ -1105,14 +1218,14 @@ void NimRTCEngine::append_video_stream_stats(
         s.bitrate_bps = average_bitrate_bps(impl_->video_state.video_bytes_sent,
                                              session_elapsed_us);
         s.keyframe_rate_hz = average_keyframe_rate_hz(
-            video_codec_ ? video_codec_->stats().keyframes_encoded : 0ull,
+            video_encoder_ ? video_encoder_->stats().keyframes_encoded : 0ull,
             session_elapsed_us);
         s.frames_sent    = impl_->video_state.video_frames_sent;
         s.frames_received = impl_->video_state.video_frames_received;
         s.frames_encoded  = impl_->video_state.video_frames_sent;
         s.packets_sent  = impl_->video_state.video_packets_sent;
         s.bytes_sent    = impl_->video_state.video_bytes_sent;
-        s.keyframes_sent = video_codec_ ? video_codec_->stats().keyframes_encoded
+        s.keyframes_sent = video_encoder_ ? video_encoder_->stats().keyframes_encoded
                                          : 0ull;
         out.push_back(std::move(s));
     }

@@ -65,7 +65,7 @@ NIMRTC_API_STABLE bool nvenc_codec_available(NvCodec codec) noexcept;
  *  the encoder session fails to open.  The returned instance is
  *  *not* opened — the caller owns that step (the plugin factory
  *  contract is "created, then opened"). */
-NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoCodec>
+NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoEncoder>
 make_nvenc_codec(NvCodec codec, plugins::VideoCodecConfig cfg);
 
 /** Q1b (`1.3.x` line) — create an NVENC encoder for @p codec with an
@@ -81,7 +81,7 @@ make_nvenc_codec(NvCodec codec, plugins::VideoCodecConfig cfg);
  *  @p profile is ignored for every codec except H.265.  A host whose
  *  silicon has no MAIN10 encoder gets its probe's answer (nullptr on
  *  `kMain10`), never a silent MAIN session. */
-NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoCodec>
+NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoEncoder>
 make_nvenc_codec_for_profile(NvCodec codec, plugins::VideoCodecConfig cfg,
                              H265Profile profile);
 
@@ -92,7 +92,7 @@ NIMRTC_API_STABLE bool nvdec_codec_available(NvCodec codec) noexcept;
  *
  *  Returns nullptr when the codec is unavailable on this host or when
  *  the decoder session fails to open. */
-NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoCodec>
+NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoDecoder>
 make_nvdec_codec(NvCodec codec, plugins::VideoCodecConfig cfg);
 
 } // namespace nimrtc::nvcodec

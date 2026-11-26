@@ -63,9 +63,9 @@ namespace nimrtc::av1 {
 //
 // dav1d is decode-only, so this codec reports `can_encode() == false`.
 // The AV1 plugin factory pairs it with the stub encoder (or an NVENC
-// encoder) through `nvcodec::HwCompositeCodec`.
+// encoder) through `plugins::HwCompositeCodec`.
 // ---------------------------------------------------------------------------
-class Dav1dCodec final : public plugins::IVideoCodec {
+class Dav1dCodec final : public plugins::IVideoDecoder {
 public:
     explicit Dav1dCodec(plugins::VideoCodecConfig cfg) noexcept
         : cfg_(std::move(cfg)) {}
@@ -121,24 +121,10 @@ public:
     // session open yet" — the same contract the other backends follow
     // (see `plugins::IVideoCodec`).  The decode path itself checks the
     // decoder handle and reports kErrNotReady when it is not open yet.
-    bool can_encode() const noexcept override { return false; }
-    bool can_decode() const noexcept override { return true; }
-
     plugins::VideoCodecKind kind() const noexcept override {
         return plugins::VideoCodecKind::kAV1;
     }
     std::string_view codec_name() const noexcept override { return "av1"; }
-
-    plugins::Status encode(const plugins::VideoFrame&,
-                           std::uint8_t*, std::size_t,
-                           plugins::EncodedVideoFrame&) noexcept override {
-        // dav1d is a decoder only.  The registry pairs this codec with an
-        // encoder through HwCompositeCodec, so reaching this method means
-        // the composition went wrong.
-        stats_.encode_errors++;
-        return plugins::kErrUnsupported;
-    }
-
     plugins::Status decode(const plugins::EncodedVideoFrame& encoded,
                            plugins::VideoFrame& raw_out,
                            std::uint8_t* const* output_buffers) noexcept override {
@@ -228,11 +214,6 @@ public:
         return status;
     }
 
-    plugins::Status force_keyframe() noexcept override {
-        // Decoder-only: nothing to force.
-        return plugins::kOk;
-    }
-
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
 
     plugins::Status update_config(plugins::VideoCodecConfig cfg) noexcept override {
@@ -241,12 +222,6 @@ public:
     }
 
     plugins::VideoCodecStats stats() const noexcept override { return stats_; }
-
-    std::uint8_t payload_type() const noexcept override {
-        // AV1 has no statically-assigned payload type in RFC 3551; 45 is
-        // the value the AV1 RTP payload specification uses.
-        return cfg_.payload_type ? cfg_.payload_type : std::uint8_t{45};
-    }
 
     // ---- Telemetry ---------------------------------------------------------
 
@@ -357,8 +332,8 @@ bool dav1d_av1_available() noexcept {
     return true;
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_dav1d_av1_codec(plugins::VideoCodecConfig cfg) {
+std::unique_ptr<plugins::IVideoDecoder>
+make_dav1d_av1_decoder(plugins::VideoCodecConfig cfg) {
     return std::make_unique<Dav1dCodec>(std::move(cfg));
 }
 
@@ -366,8 +341,8 @@ make_dav1d_av1_codec(plugins::VideoCodecConfig cfg) {
 
 bool dav1d_av1_available() noexcept { return false; }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_dav1d_av1_codec(plugins::VideoCodecConfig) { return nullptr; }
+std::unique_ptr<plugins::IVideoDecoder>
+make_dav1d_av1_decoder(plugins::VideoCodecConfig) { return nullptr; }
 
 #endif
 

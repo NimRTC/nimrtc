@@ -38,6 +38,10 @@ include(FindPackageHandleStandardArgs)
 
 # --- NVENC --------------------------------------------------------------------
 function(_nimrtc_locate_nvenc)
+    # The cached "have we found it" flag is cleared first: it is a
+    # `CACHE INTERNAL ... FORCE` variable, so it survives a re-configure and
+    # would keep a *stale* TRUE after the option was turned off.
+    unset(NIMRTC_HW_HAVE_NVENC CACHE)
     if(NOT NIMRTC_PLUGINS_NVENC)
         return()
     endif()
@@ -55,6 +59,7 @@ endfunction()
 
 # --- AMF ----------------------------------------------------------------------
 function(_nimrtc_locate_amf)
+    unset(NIMRTC_HW_HAVE_AMF CACHE)
     if(WIN32 AND NIMRTC_PLUGINS_AMF)
         find_package(AMF QUIET)
         if(AMF_FOUND)
@@ -69,6 +74,7 @@ endfunction()
 
 # --- QSV / libvpl -------------------------------------------------------------
 function(_nimrtc_locate_qsv)
+    unset(NIMRTC_HW_HAVE_QSV CACHE)
     if(NOT NIMRTC_PLUGINS_QSV)
         return()
     endif()
@@ -88,6 +94,20 @@ endfunction()
 # trivial find_path.  We only consider it if we're on Windows AND the user
 # flipped NIMRTC_PLUGINS_DXVA on.
 function(_nimrtc_locate_dxva)
+    # The cached "have we found it" flag is cleared first.
+    #
+    # `NIMRTC_HW_HAVE_DXVA` is a `CACHE INTERNAL ... FORCE` variable, so it
+    # *survives* a re-configure.  Without this reset, turning the option
+    # back off left the flag TRUE in the cache, and `nimrtc_link_dxva()`
+    # kept compiling `dxva_decoder.cpp` into the module — with the
+    # `NIMRTC_PLUGINS_DXVA_ON` definition still on the compile line, so
+    # the *real* implementation was built even though the option was OFF.
+    #
+    # That is not a cosmetic problem: the DXVA decoder has to compile
+    # against the current codec seam (the split `IVideoDecoder` one), so
+    # a build that quietly compiled the *stale* implementation would
+    # break with the option visibly OFF.
+    unset(NIMRTC_HW_HAVE_DXVA CACHE)
     if(WIN32 AND NIMRTC_PLUGINS_DXVA)
         # d3d11.h lives in the Windows 8+ SDK; always present on Windows
         # builds that have C++ compilers installed.  We use a single test
@@ -112,6 +132,7 @@ endfunction()
 
 # --- VA-API --------------------------------------------------------------------
 function(_nimrtc_locate_vaapi)
+    unset(NIMRTC_HW_HAVE_VAAPI CACHE)
     if(UNIX AND NIMRTC_PLUGINS_VAAPI)
         find_package(LibVA QUIET)
         if(LIBVA_FOUND)
@@ -135,6 +156,7 @@ endfunction()
 # The vendored pack is preferred over any system SDK install: it pins the
 # struct layout to one known ABI (see the README next to the headers).
 function(_nimrtc_locate_nvdec)
+    unset(NIMRTC_HW_HAVE_NVDEC CACHE)
     if(NOT NIMRTC_PLUGINS_NVDEC)
         return()
     endif()
@@ -229,10 +251,20 @@ function(nimrtc_link_dxva target)
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src")
         target_sources(${target} PRIVATE
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src/dxva_decoder.cpp")
-        # d3d11.lib is in the default MSVC desktop link list, but we add it
-        # explicitly so /NODEFAULTLIB builds still link.
+        # The decoder is built on the Media Foundation H.264 MFT, so it
+        # needs mfplat (MFStartup / MFCreateMediaType) and mfreadwrite
+        # (the transform interface) — plus d3d11 for the D3D manager
+        # that turns the MFT into a DXVA decode.
+        #
+        # `mfuuid` carries the Media Foundation GUIDs (`MF_MT_SUBTYPE`,
+        # `MFVideoFormat_NV12`, `CLSID_MSH264DecoderMFT`, …).  Those
+        # are *referenced*, not defined, by the decoder translation
+        # unit, so the import library has to be on the link line.
+        #
+        # None of these three are in the default MSVC desktop link line,
+        # so they have to be named explicitly.
         if(MSVC)
-            target_link_libraries(${target} PRIVATE d3d11)
+            target_link_libraries(${target} PRIVATE d3d11 mfplat mfreadwrite mfuuid)
         endif()
     endif()
 endfunction()

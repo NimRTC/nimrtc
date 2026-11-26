@@ -705,7 +705,7 @@ NV_ENC_INITIALIZE_PARAMS build_init_params(NvCodec codec,
 // NvEncEncoder — implements plugins::IVideoCodec
 // ---------------------------------------------------------------------------
 
-class NvEncEncoder final : public plugins::IVideoCodec {
+class NvEncEncoder final : public plugins::IVideoEncoder {
 public:
     /** @param cfg    The caller's configuration.
      *  @param codec  Which codec family this encoder produces. */
@@ -785,10 +785,7 @@ public:
         NIMRTC_LOG_INFO("nvenc: encoder closed");
     }
 
-    // ---- plugins::IVideoCodec ----------------------------------------------
-
-    bool can_encode()   const noexcept override { return true; }
-    bool can_decode()   const noexcept override { return false; }
+    // ---- plugins::IVideoEncoder --------------------------------------------
 
     plugins::VideoCodecKind kind() const noexcept override {
         return desc_.kind;
@@ -1069,12 +1066,6 @@ public:
         return plugins::kOk;
     }
 
-    plugins::Status decode(const plugins::EncodedVideoFrame&,
-                          plugins::VideoFrame&,
-                          std::uint8_t* const*) noexcept override {
-        return plugins::kErrUnsupported;
-    }
-
     plugins::Status force_keyframe() noexcept override {
         force_keyframe_next_ = true;
         return plugins::kOk;
@@ -1123,8 +1114,6 @@ public:
                NvEncLib::instance().fn.nvEncUnmapInputResource != nullptr &&
                NvEncLib::instance().fn.nvEncUnregisterResource != nullptr;
     }
-
-    bool supports_zero_copy_decode() const noexcept override { return false; }
 
     plugins::Status encode_zero_copy(
             const plugins::GpuBuffer& gpu,
@@ -1824,7 +1813,7 @@ bool nvenc_codec_available_at_profile(NvCodec codec,
 #endif
 }
 
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoEncoder>
 make_nvenc_codec(NvCodec codec, plugins::VideoCodecConfig cfg) {
 #if defined(NIMRTC_PLUGINS_NVENC_ON) && defined(_WIN32)
     if (!nvenc_codec_available(codec)) {
@@ -1847,7 +1836,7 @@ make_nvenc_codec(NvCodec codec, plugins::VideoCodecConfig cfg) {
 #endif
 }
 
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoEncoder>
 make_nvenc_codec_for_profile(NvCodec codec, plugins::VideoCodecConfig cfg,
                              H265Profile profile) {
 #if defined(NIMRTC_PLUGINS_NVENC_ON) && defined(_WIN32)
@@ -1891,9 +1880,9 @@ bool nvenc_codec_available(NvCodec) noexcept { return false; }
 bool nvenc_codec_available_at_profile(NvCodec, H265Profile) noexcept {
     return false;
 }
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoEncoder>
 make_nvenc_codec(NvCodec, plugins::VideoCodecConfig) { return nullptr; }
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoEncoder>
 make_nvenc_codec_for_profile(NvCodec, plugins::VideoCodecConfig,
                              H265Profile) { return nullptr; }
 

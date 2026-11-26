@@ -89,7 +89,7 @@
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/h264/hw_backends.hpp>
-#include <nimrtc/nvcodec/hw_composite_codec.hpp>
+#include <nimrtc/plugins/hw_composite_codec.hpp>
 #include <nimrtc/plugins/hw_video_backend.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/rtp/packet.hpp>
@@ -440,27 +440,51 @@ np::IVideoCodec* create_hw_codec(const np::VideoCodecConfig& cfg) {
 
     // The selector honours cfg.backend_policy; kHardware excludes
     // software *and* the stub, which is what an honest Q7 run needs.
+    //
+    // The seam is split (remote-desktop plan B1), so the encoder table
+    // and the decoder table are consulted separately: a hardware
+    // encoder (NVENC / VAAPI / AMF / QSV) is not a hardware decoder
+    // (NVDEC / DXVA / VideoToolbox), and neither can serve the other's
+    // direction.
     const np::VideoEncoderBackend* enc_be =
         nimrtc::h264::select_encoder_backend(cfg);
     if (enc_be == nullptr || !enc_be->is_hw || enc_be->create == nullptr) {
         return nullptr;
     }
-    std::unique_ptr<np::IVideoCodec> encoder = enc_be->create(cfg);
+    std::unique_ptr<np::IVideoEncoder> encoder = enc_be->create(cfg);
     if (!encoder) return nullptr;
-
-    if (encoder->can_decode()) return encoder.release();
 
     const np::VideoDecoderBackend* dec_be =
         nimrtc::h264::select_decoder_backend(cfg);
-    std::unique_ptr<np::IVideoCodec> decoder;
+    std::unique_ptr<np::IVideoDecoder> decoder;
     if (dec_be != nullptr && dec_be->create != nullptr) {
         decoder = dec_be->create(cfg);
     }
-    if (!decoder) return encoder.release();
 
-    auto* composite = new nimrtc::nvcodec::HwCompositeCodec(
+    // One backend that serves *both* directions needs no composite: the
+    // encoder instance is already a decoder (the software stub is the
+    // one backend that is both), and the composite would only add an
+    // indirection.  The test is a type question, so it is asked as
+    // one: `dynamic_cast` to `IVideoDecoder` succeeds only for an
+    // instance that really is a decoder.
+    if (auto* both = dynamic_cast<np::IVideoDecoder*>(encoder.get())) {
+        (void)both;
+        // The encoder half already decodes, so it can serve the
+        // combined vocabulary on its own.
+        return new nimrtc::plugins::HwCompositeCodec(
+            cfg, std::move(encoder), nullptr);
+    }
+
+    if (!decoder) {
+        // An encoder without a decoder: the receive path is unusable,
+        // but the send path still works.  The composite carries the
+        // null decoder half.
+        return new nimrtc::plugins::HwCompositeCodec(
+            cfg, std::move(encoder), nullptr);
+    }
+
+    return new nimrtc::plugins::HwCompositeCodec(
         cfg, std::move(encoder), std::move(decoder));
-    return composite;
 }
 
 /**
@@ -1127,7 +1151,12 @@ Record run_hardware_e2e(const Options& opts) {
 // It is recorded, not asserted: the criterion is an end-to-end
 // hardware *encode*, and a host whose silicon decodes in software is
 // still a valid run — but the reader deserves to know.
-np::IVideoCodec* make_decoder_probe() {
+//
+// The probe is a *decoder* probe, so it is typed as one (the split seam,
+// remote-desktop plan B1): the decoder table hands out `IVideoDecoder`
+// instances, and asking the decoder table for a decoder is what keeps
+// the two directions apart.
+np::IVideoDecoder* make_decoder_probe() {
     np::VideoCodecConfig cfg{};
     cfg.width  = 16;
     cfg.height = 16;
@@ -1184,7 +1213,7 @@ int main(int argc, char** argv) {
         if (!rec.decoder_is_hardware && rec.status == "pass") {
             // Not a failure — the criterion is the encode side — but the
             // record says it, so a reader never has to guess.
-            std::unique_ptr<np::IVideoCodec> probe(make_decoder_probe());
+            std::unique_ptr<np::IVideoDecoder> probe(make_decoder_probe());
             if (probe) {
                 rec.decoder_backend = std::string{probe->backend_id()};
                 probe->close();

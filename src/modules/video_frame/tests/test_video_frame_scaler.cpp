@@ -563,12 +563,21 @@ TEST(VideoFrameScaler, ScaledFrameSurvivesTheOpenh264EncodeDecodeRoundTrip) {
     }
 
     nimrtc::h264::register_default_video_backends();
+
+    // The split codec seam keeps the two directions apart, so the
+    // round trip needs *both* halves: the OpenH264 encoder row and the
+    // OpenH264 decoder row.
+    const plugins::VideoEncoderBackend* enc_be = nullptr;
+    for (const auto* cand : plugins::HwVideoBackendRegistry::instance()
+                                .list_encoders(plugins::VideoCodecKind::kH264)) {
+        if (cand->id == "openh264_h264") { enc_be = cand; break; }
+    }
     const plugins::VideoDecoderBackend* be = nullptr;
     for (const auto* cand : plugins::HwVideoBackendRegistry::instance()
                                 .list_decoders(plugins::VideoCodecKind::kH264)) {
         if (cand->id == "openh264_h264") { be = cand; break; }
     }
-    if (be == nullptr) {
+    if (be == nullptr || enc_be == nullptr) {
         GTEST_SKIP() << "the openh264 software backend is not in this build";
     }
 
@@ -588,8 +597,11 @@ TEST(VideoFrameScaler, ScaledFrameSurvivesTheOpenh264EncodeDecodeRoundTrip) {
     cfg.pixel_format  = plugins::VideoPixelFormat::kI420;
     cfg.payload_type = 102;
 
+    auto encoder = enc_be->create(cfg);
     auto codec = be->create(cfg);
+    ASSERT_NE(encoder, nullptr);
     ASSERT_NE(codec, nullptr);
+    ASSERT_EQ(encoder->open(), plugins::kOk);
     ASSERT_EQ(codec->open(), plugins::kOk);
 
     // The encoder reads the frame's own buffer, so the frame has to carry
@@ -599,7 +611,7 @@ TEST(VideoFrameScaler, ScaledFrameSurvivesTheOpenh264EncodeDecodeRoundTrip) {
 
     std::vector<std::uint8_t> bitstream(1024 * 1024);
     plugins::EncodedVideoFrame encoded;
-    ASSERT_EQ(codec->encode(frame, bitstream.data(), bitstream.size(), encoded),
+    ASSERT_EQ(encoder->encode(frame, bitstream.data(), bitstream.size(), encoded),
               plugins::kOk);
     EXPECT_GT(encoded.payload.size(), 0u);
 

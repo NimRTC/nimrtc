@@ -1016,11 +1016,49 @@ public:
      *
      * The engine computes the whole set in one place and pushes it; the
      * encoder is passive (it never asks a rate controller for anything).
+     *
+     * The default implementation derives a configuration from the
+     * parameter set and forwards it to `update_config()`, so an encoder
+     * that only knows how to reconfigure through its configuration
+     * needs no code here.  An encoder that applies the parameters
+     * differently (a hardware session that has to be rebuilt, say)
+     * overrides this.
      */
-    virtual Status set_params(const VideoEncoderParams& params) noexcept = 0;
+    virtual Status set_params(const VideoEncoderParams& params) noexcept {
+        VideoCodecConfig cfg = config();
+        if (params.has_geometry()) {
+            cfg.width  = params.width;
+            cfg.height = params.height;
+        }
+        if (params.fps != 0)            cfg.fps = params.fps;
+        if (params.bitrate_bps != 0)    cfg.bitrate_bps = params.bitrate_bps;
+        if (params.keyframe_interval != 0) {
+            cfg.keyframe_interval = params.keyframe_interval;
+        }
+        cfg.pixel_format = params.pixel_format;
+        return update_config(cfg);
+    }
 
-    /** The encoder's current parameter set. */
-    virtual VideoEncoderParams params() const noexcept = 0;
+    /**
+     * @brief The encoder's current parameter set.
+     *
+     * The default implementation derives it from `config()`, so a codec
+     * that does not override `set_params()` still reports something
+     * coherent.  A codec that overrides `set_params()` should override
+     * this too, so the reported parameters match what was actually
+     * applied.
+     */
+    virtual VideoEncoderParams params() const noexcept {
+        const VideoCodecConfig cfg = config();
+        VideoEncoderParams p;
+        p.width            = cfg.width;
+        p.height           = cfg.height;
+        p.fps              = cfg.fps;
+        p.bitrate_bps      = cfg.bitrate_bps;
+        p.keyframe_interval = cfg.keyframe_interval;
+        p.pixel_format     = cfg.pixel_format;
+        return p;
+    }
 
     // ---- Incremental (dirty-rect) encode — remote-desktop plan B9 ---------
     //
@@ -1070,6 +1108,46 @@ public:
 
     /** Snapshot of the encoder's statistics. */
     virtual VideoCodecStats stats() const noexcept = 0;
+
+    // ---- Configuration ----------------------------------------------------
+    //
+    // The configuration a codec was *created* with is a property of the
+    // instance, and an adaptive-bitrate host needs to be able to change
+    // it live.  The split seam therefore carries the same two hooks the
+    // combined `IVideoCodec` has.
+    //
+    // They are **not** pure virtual: an implementation that genuinely
+    // cannot change its configuration (a decoder whose geometry comes
+    // from the bitstream, for instance) inherits the default, which
+    // reports the configuration it was created with and refuses the
+    // change with `kErrUnsupported` -- the honest answer, and one that
+    // keeps an existing implementation compiling unchanged.
+
+    /** The configuration this encoder currently runs with. */
+    virtual VideoCodecConfig config() const noexcept { return {}; }
+
+    /**
+     * @brief Update the configuration live (e.g. an adaptive-bitrate change).
+     *
+     * Default: `kErrUnsupported` -- the configuration is fixed at
+     * creation time.
+     */
+    virtual Status update_config(VideoCodecConfig cfg) noexcept {
+        (void)cfg;
+        return kErrUnsupported;
+    }
+
+    /**
+     * @brief The RTP payload type this encoder emits.
+     *
+     * The payload type belongs to the *outbound* stream, so it lives on
+     * the encoder half.  The default reads it out of the configuration;
+     * an encoder that negotiates its payload type dynamically overrides
+     * this.
+     */
+    virtual std::uint8_t payload_type() const noexcept {
+        return config().payload_type;
+    }
 
     /** The identifier of the backend this encoder runs on. */
     virtual std::string_view backend_id() const noexcept { return "unknown"; }
@@ -1152,6 +1230,23 @@ public:
 
     /** Snapshot of the decoder's statistics. */
     virtual VideoCodecStats stats() const noexcept = 0;
+
+    // ---- Configuration ----------------------------------------------------
+    //
+    // The same two hooks the encoder half carries.  A decoder that
+    // derives its geometry from the bitstream cannot change it live, so
+    // the default refuses the change with `kErrUnsupported` -- the
+    // honest answer, and one that keeps an existing implementation
+    // compiling unchanged.
+
+    /** The configuration this decoder currently runs with. */
+    virtual VideoCodecConfig config() const noexcept { return {}; }
+
+    /** Update the configuration live.  Default: `kErrUnsupported`. */
+    virtual Status update_config(VideoCodecConfig cfg) noexcept {
+        (void)cfg;
+        return kErrUnsupported;
+    }
 
     /** The identifier of the backend this decoder runs on. */
     virtual std::string_view backend_id() const noexcept { return "unknown"; }

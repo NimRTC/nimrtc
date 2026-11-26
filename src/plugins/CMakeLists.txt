@@ -22,6 +22,8 @@
 
 add_library(nimrtc_plugins STATIC
     src/hw_video_backend.cpp
+    src/hw_composite_codec.cpp
+    src/video_codec_view.cpp
 )
 add_library(nimrtc::plugins ALIAS nimrtc_plugins)
 
@@ -68,6 +70,8 @@ target_link_libraries(nimrtc_plugins
 # plugins/audio3a.hpp    — IAudio3A, IAudio3AFactory
 # plugins/codec.hpp      — ICodec, ICodecFactory
 # plugins/video_codec.hpp — IVideoCodec, IVideoCodecFactory
+# plugins/hw_composite_codec.hpp — the owning split-seam composite
+# plugins/video_codec_view.hpp — the borrowed split-seam view
 # plugins/video_source.hpp — IVideoSource, IVideoSourceFactory
 # plugins/video_sink.hpp — IVideoSink, IVideoSinkFactory
 # plugins/video_pipeline.hpp — IVideoReceiver, IVideoSender

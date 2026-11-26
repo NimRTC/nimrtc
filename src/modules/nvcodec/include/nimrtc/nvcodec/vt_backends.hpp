@@ -83,7 +83,7 @@ NIMRTC_API_STABLE bool vt_encoder_available(VtCodec codec) noexcept;
  *  the session fails to open.  The returned instance is *not* opened —
  *  the caller owns that step (the plugin factory contract is
  *  "created, then opened"). */
-NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoCodec>
+NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoEncoder>
 make_vt_encoder(VtCodec codec, plugins::VideoCodecConfig cfg);
 
 /** True iff this host can decode @p codec with VideoToolbox.
@@ -106,7 +106,7 @@ NIMRTC_API_STABLE bool vt_decoder_available(VtCodec codec) noexcept;
  *
  *  Returns nullptr when the codec is unavailable on this host or when
  *  the session fails to open. */
-NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoCodec>
+NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoDecoder>
 make_vt_decoder(VtCodec codec, plugins::VideoCodecConfig cfg);
 
 /** Why the VideoToolbox *encoder* for @p codec is unavailable.

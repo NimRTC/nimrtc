@@ -124,13 +124,36 @@ private:
 /** Factory producing CodecPluginAdapter instances.
  *  Registered as id "h264".  Replace by registering your own
  *  factory with a different id and selecting it via
- *  `EngineConfig::video_codec_name`. */
-class NIMRTC_API_STABLE H264PluginFactory : public plugins::IVideoCodecFactory {
+ *  `EngineConfig::video_codec_name`.
+ *
+ * The factory implements **both** halves of the split codec seam
+ * (`IVideoEncoderFactory` and `IVideoDecoderFactory`), so the engine
+ * resolves the encode and the decode direction independently.  It also
+ * still implements the combined `IVideoCodecFactory`, which a host
+ * that predates the split can still use.
+ */
+class NIMRTC_API_STABLE H264PluginFactory
+    : public plugins::IVideoEncoderFactory,
+      public plugins::IVideoDecoderFactory,
+      public plugins::IVideoCodecFactory {
 public:
     std::string_view id() const noexcept override { return NIMRTC_PLUGIN_ID("h264"); }
     std::string_view display_name() const noexcept override {
         return "H.264 (RFC 6184) — stub decoder; real decoder via host plugin";
     }
+
+    // ---- The split seam ---------------------------------------------------
+    //
+    // The encoder half and the decoder half are chosen *independently*:
+    // the encoder table and the decoder table are separate, and a
+    // hardware encoder (NVENC) is not a hardware decoder (NVDEC).  Each
+    // half answers for itself, and either may be absent -- a host that
+    // only sends video needs no decoder, and one that only receives
+    // needs no encoder.
+    plugins::IVideoEncoder* create_encoder(plugins::VideoCodecConfig cfg) const override;
+    plugins::IVideoDecoder* create_decoder(plugins::VideoCodecConfig cfg) const override;
+
+    // ---- The combined seam (kept for source compatibility) ----------------
     plugins::IVideoCodec* create(plugins::VideoCodecConfig cfg) const override;
 };
 

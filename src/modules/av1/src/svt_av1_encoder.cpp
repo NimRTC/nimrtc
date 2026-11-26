@@ -20,7 +20,7 @@
  * SVT-AV1 is encode-only.  The decode half of the AV1 path is served by
  * dav1d (`src/modules/av1/src/dav1d_decoder.cpp`), which is vendored
  * separately.  The AV1 registry composes the two through
- * `nvcodec::HwCompositeCodec` when they differ.
+ * `plugins::HwCompositeCodec` when they differ.
  *
  * ## The bitstream framing
  *
@@ -165,7 +165,7 @@ inline bool low_overhead_to_annex_b(const std::uint8_t* data,
 // ---------------------------------------------------------------------------
 // SvtAv1Codec — the real software AV1 encoder.
 // ---------------------------------------------------------------------------
-class SvtAv1Codec final : public plugins::IVideoCodec {
+class SvtAv1Codec final : public plugins::IVideoEncoder {
 public:
     explicit SvtAv1Codec(plugins::VideoCodecConfig cfg) noexcept
         : cfg_(std::move(cfg)) {}
@@ -313,9 +313,6 @@ public:
 
     // SVT-AV1 is encode-only.  `can_decode()` answers the *capability*
     // question, not "is the session open yet".
-    bool can_encode() const noexcept override { return true; }
-    bool can_decode() const noexcept override { return false; }
-
     plugins::VideoCodecKind kind() const noexcept override {
         return plugins::VideoCodecKind::kAV1;
     }
@@ -509,17 +506,6 @@ public:
         if (is_keyframe) stats_.keyframes_encoded++;
         return plugins::kOk;
     }
-
-    plugins::Status decode(const plugins::EncodedVideoFrame&,
-                           plugins::VideoFrame&,
-                           std::uint8_t* const*) noexcept override {
-        // SVT-AV1 is an encoder.  The AV1 registry pairs it with dav1d
-        // (or another decoder) through `nvcodec::HwCompositeCodec`, so
-        // reaching this method means the composition went wrong.
-        stats_.decode_errors++;
-        return plugins::kErrUnsupported;
-    }
-
     plugins::Status force_keyframe() noexcept override {
         if (!handle_ || !initialized_) return plugins::kErrNotReady;
         // SVT-AV1 has no explicit "force IDR" API, but the picture type
@@ -617,8 +603,8 @@ std::string svt_av1_unavailable_reason() {
  *  Returns nullptr when the encoder is not compiled in — which is what
  *  makes the registry fall through to the next backend (and eventually
  *  to the software stub). */
-std::unique_ptr<plugins::IVideoCodec>
-make_svt_av1_codec(plugins::VideoCodecConfig cfg) {
+std::unique_ptr<plugins::IVideoEncoder>
+make_svt_av1_encoder(plugins::VideoCodecConfig cfg) {
 #if defined(NIMRTC_PLUGINS_SVT_AV1_ON)
     return std::make_unique<SvtAv1Codec>(std::move(cfg));
 #else
@@ -637,9 +623,9 @@ std::string svt_av1_unavailable_reason() {
     return svt_backend::svt_av1_unavailable_reason();
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_svt_av1_codec(plugins::VideoCodecConfig cfg) {
-    return svt_backend::make_svt_av1_codec(std::move(cfg));
+std::unique_ptr<plugins::IVideoEncoder>
+make_svt_av1_encoder(plugins::VideoCodecConfig cfg) {
+    return svt_backend::make_svt_av1_encoder(std::move(cfg));
 }
 
 } // namespace nimrtc::av1

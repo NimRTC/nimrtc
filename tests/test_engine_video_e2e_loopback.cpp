@@ -116,6 +116,7 @@
 #include <nimrtc/dtls/dtls_session_factory.hpp>
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/h264/hw_backends.hpp>
+#include <nimrtc/plugins/hw_composite_codec.hpp>
 #include <nimrtc/plugins/hw_video_backend.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
 #include <nimrtc/plugins/video_capture.hpp>
@@ -665,8 +666,18 @@ private:
  *     NVENC (priority 450) and the test would silently stop being a
  *     software-codec test — and, worse, would no longer be
  *     deterministic across machines.
+ *
+ * The class implements the *split* seam (`IVideoEncoderFactory` +
+ * `IVideoDecoderFactory`) because that is what the engine resolves
+ * first (plan B1).  It still implements the deprecated combined
+ * `IVideoCodecFactory` so the registry's legacy slot keeps resolving
+ * for hosts that ask for it — but the combined `create()` builds the
+ * encoder half and hands back a borrowed view, which is exactly the
+ * shape the engine no longer needs.
  */
-class Openh264CodecFactory final : public np::IVideoCodecFactory {
+class Openh264CodecFactory final : public np::IVideoCodecFactory,
+                                   public np::IVideoEncoderFactory,
+                                   public np::IVideoDecoderFactory {
 public:
     std::string_view id() const noexcept override { return "h264-openh264"; }
     std::string_view display_name() const noexcept override {
@@ -678,15 +689,57 @@ public:
         // test skips (see `Openh264IsAvailable()`).
         nimrtc::h264::register_default_video_backends();
 
+        // The combined shim is built from the *split* halves: the
+        // encoder row and the decoder row of the OpenH264 backend.
+        // `HwCompositeCodec` is the *owning* variant — it takes the two
+        // halves and closes them in its destructor, which is what a
+        // `new`-ed combined codec has to do.
+        auto encoder = make_encoder(cfg);
+        auto decoder = make_decoder(cfg);
+        if (encoder == nullptr && decoder == nullptr) {
+            // The backend is not in this build: the caller checks
+            // `Openh264IsAvailable()` first, so this is a "cannot happen".
+            return nullptr;
+        }
+        return new np::HwCompositeCodec(cfg, std::move(encoder), std::move(decoder));
+    }
+
+    // -- the split seam (plan B1) --------------------------------------------
+
+    np::IVideoEncoder* create_encoder(np::VideoCodecConfig cfg) const override {
+        return make_encoder(cfg).release();
+    }
+
+    np::IVideoDecoder* create_decoder(np::VideoCodecConfig cfg) const override {
+        return make_decoder(cfg).release();
+    }
+
+private:
+    /** The OpenH264 encoder row of the backend registry (owning). */
+    std::unique_ptr<np::IVideoEncoder>
+    make_encoder(np::VideoCodecConfig cfg) const {
+        nimrtc::h264::register_default_video_backends();
+
         for (const auto* be : np::HwVideoBackendRegistry::instance()
                                  .list_encoders(np::VideoCodecKind::kH264)) {
             if (be->id == "openh264_h264" && be->create) {
-                auto codec = be->create(cfg);
-                if (codec) return codec.release();
+                return be->create(cfg);
             }
         }
-        // The backend is not in this build: the caller checks
-        // `Openh264IsAvailable()` first, so this is a "cannot happen".
+        return nullptr;
+    }
+
+    /** The OpenH264 decoder row of the backend registry (owning). */
+    std::unique_ptr<np::IVideoDecoder>
+    make_decoder(np::VideoCodecConfig cfg) const {
+        nimrtc::h264::register_default_video_backends();
+
+        for (const auto* be : np::HwVideoBackendRegistry::instance()
+                                 .list_decoders(np::VideoCodecKind::kH264)) {
+            if (be->id == "openh264_h264" && be->create) {
+                return be->create(cfg);
+            }
+        }
         return nullptr;
     }
 };
@@ -739,6 +792,10 @@ void RegisterE2EPlugins() {
     PluginRegistry::instance().register_video_capture(capture.id(), &capture);
     PluginRegistry::instance().register_video_sink(g_tx_sink.id(), &g_tx_sink);
     PluginRegistry::instance().register_video_sink(g_rx_sink.id(), &g_rx_sink);
+    // The engine resolves the *split* slots first (plan B1); the
+    // combined slot stays registered for hosts that still ask for it.
+    PluginRegistry::instance().register_video_encoder(codec.id(), &codec);
+    PluginRegistry::instance().register_video_decoder(codec.id(), &codec);
     PluginRegistry::instance().register_video_codec(codec.id(), &codec);
 }
 

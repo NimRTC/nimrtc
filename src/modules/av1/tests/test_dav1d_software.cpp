@@ -117,7 +117,7 @@ const plugins::VideoDecoderBackend* dav1d_backend() {
  *  ready yet), so the caller feeds the same access unit until the
  *  decoder produces one.  Returns kOk on the first picture, or the last
  *  error the decoder reported. */
-plugins::Status decode_with_retry(plugins::IVideoCodec* codec,
+plugins::Status decode_with_retry(plugins::IVideoDecoder* codec,
                                   const plugins::EncodedVideoFrame& encoded,
                                   plugins::VideoFrame& out,
                                   std::uint8_t* const* buffers) {
@@ -187,9 +187,11 @@ TEST(Dav1dSoftware, DecodesKeyFrameToNonZeroPixels) {
     auto codec = be->create(cfg);
     ASSERT_NE(codec, nullptr);
     ASSERT_EQ(codec->open(), plugins::kOk);
-    ASSERT_TRUE(codec->can_decode());
-    // dav1d is decode-only.
-    EXPECT_FALSE(codec->can_encode());
+    // The direction is in the type: a decoder backend hands out an
+    // `IVideoDecoder`, so there is no `can_decode()` / `can_encode()`
+    // flag left to consult — the split seam (ADR-015) replaced the
+    // combined codec's direction flags with the two interfaces
+    // themselves.
 
     plugins::EncodedVideoFrame encoded;
     encoded.codec       = plugins::VideoCodecKind::kAV1;
@@ -388,11 +390,10 @@ TEST(Dav1dSoftware, DecodeRejectsEmptyPayload) {
 // ---------------------------------------------------------------------------
 
 TEST(Dav1dSoftware, TheFactoryPairsTheStubEncoderWithTheDav1dDecoder) {
-    // The engine holds ONE codec per session and drives both directions
-    // through it.  The AV1 stub is encode-only (it cannot decode AV1),
-    // so the factory has to compose it with the real decoder — otherwise
-    // dav1d would sit in the registry and never be reached, no matter
-    // how high its priority is.
+    // The engine resolves the two directions *independently* (ADR-015):
+    // the encoder table and the decoder table are separate, and the
+    // AV1 stub is encode-only while dav1d is decode-only.  Each half
+    // must therefore be reachable on its own.
     nimrtc::av1::register_default_video_backends();
 
     plugins::VideoCodecConfig cfg;
@@ -402,18 +403,34 @@ TEST(Dav1dSoftware, TheFactoryPairsTheStubEncoderWithTheDav1dDecoder) {
     cfg.pixel_format = plugins::VideoPixelFormat::kI420;
 
     nimrtc::av1::Av1PluginFactory factory;
-    std::unique_ptr<plugins::IVideoCodec> codec(factory.create(cfg));
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
 
-    EXPECT_TRUE(codec->can_encode()) << "the stub encoder must still encode";
-    EXPECT_TRUE(codec->can_decode()) << "the real decoder must be reachable";
+    // ---- The encoder half ------------------------------------------------
+    std::unique_ptr<plugins::IVideoEncoder> encoder(factory.create_encoder(cfg));
+    ASSERT_NE(encoder, nullptr);
+    ASSERT_EQ(encoder->open(), plugins::kOk);
 
-    // The composite names the *encoder* — that is the half the engine's
-    // codec telemetry describes — and the AV1 encoder is still the
-    // synthetic stub, so the id says so.
-    EXPECT_EQ(codec->backend_id(), "software-stub");
+    // The encoder half must be *reachable* — that is what the old
+    // `can_encode()` assertion meant.  Its identity is deliberately not
+    // asserted: on a host with an NVIDIA GPU the selector hands back
+    // NVENC (priority 450) rather than the synthetic stub (priority 0),
+    // and the stub is not the point of this test — the *pairing* of the
+    // two halves is.
 
-    codec->close();
-    codec.reset();
+    encoder->close();
+    encoder.reset();
+
+    // ---- The decoder half ------------------------------------------------
+    std::unique_ptr<plugins::IVideoDecoder> decoder(factory.create_decoder(cfg));
+    ASSERT_NE(decoder, nullptr);
+    ASSERT_EQ(decoder->open(), plugins::kOk);
+
+    // The decoder half must be *reachable* — that is what the old
+    // `can_decode()` assertion meant.  Its identity is deliberately not
+    // asserted: the selector may hand back NVDEC on a host with an
+    // NVIDIA GPU, and NVDEC outranks dav1d in the decoder table.  (The
+    // test above, `BackendIdDistinguishesRealCodecFromStub`, looks the
+    // dav1d row up *by id* for exactly that reason.)
+
+    decoder->close();
+    decoder.reset();
 }

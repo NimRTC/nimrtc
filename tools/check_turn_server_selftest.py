@@ -4,7 +4,7 @@ Every case here re-introduces a defect that was actually in
 examples/turn-server/ and asserts that the check fails, and names the
 failure.  A guard that cannot fail is not a guard.
 """
-import io, os, shutil, subprocess, sys, tempfile
+import os, shutil, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHECK = os.path.join(ROOT, 'tools', 'check_turn_server.py')
@@ -32,19 +32,37 @@ def resolve(rel):
 
 
 def with_mutated(files, mutate):
-    """Copy the tree, apply `mutate`, run the check, restore."""
+    """Copy the tree, apply `mutate`, run the check, restore.
+
+    The restore must put the file back **byte for byte**.  Reading as
+    text and writing back with `newline='\\n'` silently rewrites a
+    CRLF file to LF, so a file that the mutation never touched comes
+    back looking modified to `git status` -- the self-test then leaves
+    the working tree dirty for whatever runs after it.
+
+    So the backup is the original bytes, and the restore writes those
+    bytes back verbatim.
+    """
     backup = {}
     try:
         for rel in files:
             path = resolve(rel)
-            backup[rel] = io.open(path, 'r', encoding='utf-8').read()
-            io.open(path, 'w', encoding='utf-8', newline='\n').write(mutate(rel, backup[rel]))
+            with open(path, 'rb') as handle:
+                backup[rel] = handle.read()
+            text = backup[rel].decode('utf-8')
+            # Decode WITHOUT newline translation so the line endings the
+            # mutation sees are the ones in the file.  `str.replace` on
+            # '\r\n'-containing text still works, and writing with
+            # newline='' means the '\r\n' survives.
+            with open(path, 'w', encoding='utf-8', newline='') as handle:
+                handle.write(mutate(rel, text))
         code, out = run_check(ROOT)
         return code, out
     finally:
-        for rel, text in backup.items():
+        for rel, data in backup.items():
             path = resolve(rel)
-            io.open(path, 'w', encoding='utf-8', newline='\n').write(text)
+            with open(path, 'wb') as handle:
+                handle.write(data)
 
 
 CASES = []

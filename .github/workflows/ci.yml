@@ -674,6 +674,24 @@ jobs:
       - name: Self-test the TURN-server deployment guard
         run: python tools/check_turn_server_selftest.py
 
+      # The v1-n5-turn-server **acceptance file** is the only thing that
+      # verifies that slice's STUN/TURN client implementation.  An
+      # acceptance file whose assertions cannot fail is worse than no
+      # acceptance file: it reads as coverage.
+      #
+      # So the acceptance file gets the same treatment the deployment
+      # guard gets: each defect it claims to catch is re-introduced into
+      # a scratch copy of the tree and the acceptance run is required to
+      # go red.
+      #
+      # The defects are the three protocol bugs from the 2026-11-20
+      # handover list (the RFC 3489 message-type layout, the
+      # REQUESTED-TRANSPORT protocol byte, the XOR-RELAYED-ADDRESS
+      # family offset), the deployment defects, and the attribute-padding
+      # defect the three share as a premise.
+      - name: Self-test the TURN-server acceptance file
+        run: python tools/check_turn_server_acceptance_selftest.py
+
       # Architecture-remediation D2: "either wire it in, or delete it."
       # A module under src/modules/ with a complete implementation and
       # passing tests, but no path from the composition root, is the

@@ -415,10 +415,15 @@ README 明确：
 
 | # | 缺口 | 风险 | 建议归属 |
 |---|---|---|---|
-| 5.2.1 | `VideoPipeline` 协作类 | 中（视频路径回归面大） | v1.5，独立 PR |
-| 5.2.2 | `AudioPipeline` 协作类 | 中（与 §1 的音频接线耦合） | v1.5，**建议在 §1 完成之后** |
-| 5.2.3 | `RtcpProcessor` 协作类 | 中（RTCP 反馈闭环） | v1.5，独立 PR |
-| 5.2.4 | `TransportManager` 协作类 | 中（与 N1–N3 网络轨耦合） | v1.5，与 v1.4 网络轨合并后 |
+| 5.2.1 | `VideoPipeline` 协作类 | 中（视频路径回归面大） | **1.4 线补充项**（`v1.4-plan.md` §11.4.1 A1），独立 PR |
+| 5.2.2 | `AudioPipeline` 协作类 | 中（与 §1 的音频接线耦合） | **1.4 线补充项**（A2）。§1 已完成，前置已满足 |
+| 5.2.3 | `RtcpProcessor` 协作类 | 中（RTCP 反馈闭环） | **1.4 线补充项**（A3），独立 PR |
+| 5.2.4 | `TransportManager` 协作类 | 中（与 N1–N3 网络轨耦合） | **1.4 线补充项**（A4）。N1–N3 已落地，前置已满足 |
+
+> **2026-11-26 归属变更**：本节初稿把这四项列为「v1.5，独立 PR」。
+> owner 已决定把它们收进 **1.4 线**作为补充项（`docs/plan/v1.4-plan.md`
+> §11.4.1）。四项都**无外部依赖**，两个前置（§1 音频接线、N1–N3 网络轨）
+> 均已在 v1.4 内落地。**版本号不抬高**：这些工作仍落在 `1.4.x` 上。
 
 > **排序建议**：`VideoPipeline` 和 `RtcpProcessor` 相对独立，可先做；
 > `AudioPipeline` 应排在 §1 音频接线之后（否则要搬两次）；
@@ -469,10 +474,13 @@ README 明确：
 
 > **版本影响提示**：按 `RELEASING.md` §1.1，**加枚举值不是破坏性改动**
 > （破坏性 = 要求下游改代码 / 换符号集 / 换编译标志）。
-> 所以 6.3.1 属于 `MINOR`，可以进 `1.5.0`，
-> **不需要**像「改已有函数签名」那样升 `MAJOR`。
+> 所以 6.3.1 属于 `MINOR`，**不需要**像「改已有函数签名」那样升 `MAJOR`。
 > 但新增的枚举值必须打 `NIMRTC_API_STABLE` 标记，并过
 > `scripts/api_freeze_scan.js` 的逐符号分类门禁。
+>
+> **它落在 `1.4.x`，不是 `1.5.0`（2026-11-26）**：`MINOR` 是相对**上一次
+> 已发布版本**（`1.3.1`）而言的；`1.4.0` 还没发布，所以这些都是 `1.4.0`
+> 的内容。理由见 `docs/plan/v1.4-plan.md` §11.6。
 
 **现状**：
 - `srtp::SecuritySuite` 的实际枚举值只有四个：`Aes128CmSha1_80` /
@@ -485,7 +493,7 @@ README 明确：
 
 | # | 缺口 | 落点 | 备注 |
 |---|---|---|---|
-| 6.3.1 | `SecuritySuite` 无 SM4-GCM 枚举值 | `src/modules/srtp/include/nimrtc/srtp/srtp.hpp` | **增量改动**（加枚举值），不是破坏性 → 属 `MINOR`，可进 `1.5.0` |
+| 6.3.1 | `SecuritySuite` 无 SM4-GCM 枚举值 | `src/modules/srtp/include/nimrtc/srtp/srtp.hpp` | **增量改动**（加枚举值），不是破坏性 → 属 `MINOR` 级但**落在 `1.4.x`**（`1.4.0` 未发布，见 §11.6） |
 | 6.3.2 | 无 SM4-GCM SRTP 后端实现 | `src/modules/srtp/`（新 backend 子目录） | 需 GmSSL 的 SM4-GCM SRTP profile |
 | 6.3.3 | 无 SM4-GCM 的 SRTP 测试向量 / 互通证明 | `src/modules/srtp/tests/` | 与 6.3.2 同一个 PR |
 | 6.3.4 | 引擎无「国密 SRTP profile」的配置面 | `EngineConfig` | 与 v1.4 D6 的 connectivity profile 并列 |
@@ -523,8 +531,8 @@ embedded Linux aarch64 三种形态，但每一项的 DoD 都散落在各自的�
 | `set_ref_frame()` 作为时间线载体 | **ADR-017**：时间线载体是 WebRTC abs-send-time + RTCP-SR；`set_ref_frame()` 保留为 ABI 兼容的 no-op | `src/plugins/include/nimrtc/plugins/video_pipeline.hpp:923-943` |
 | 信令服务进 `src/` | **RD-7**：SDK 不内置服务器；N6 消费 `examples/` 下的参考服务 | `docs/plan/v1.4-plan.md` §8 |
 | 信号服务「SDK 不发行」 | 产品定位，非技术限制 | 同上 |
-| FEC / ULPFEC / FlexFEC / RED | v1.5.0 线 | v1.4 §8 |
-| simulcast / SVC | v1.5.0 线 | v1.4 §8 |
+| FEC / ULPFEC / FlexFEC / RED | 不在 `v1.4.0`；之后**仍在 `1.4.x` 线**上做（版本号不抬） | v1.4 §8；归属见 v1.4-plan §11.6 |
+| simulcast / SVC | 同上 | v1.4 §8；归属见 v1.4-plan §11.6 |
 | ABI break | ADR-015 冻结（v1.4 全部为增量） | ADR-015 |
 | 引擎 include 具体模块头 | ADR-025 的 8 模块白名单 | `docs/adr/ADR-025-sdp-rtp-not-pluggable.md` |
 

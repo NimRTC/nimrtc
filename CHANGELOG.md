@@ -228,6 +228,52 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   delimiter alone on its closing line, and the delimiter absent from
   the value.
 
+- **The v1.4 plan said libjuice is not patched, and the tree carries a
+  patch (2026-11-26).**
+  `docs/plan/v1.4-plan.md`'s §5 **N1-2** and §7's decision row both
+  said "libjuice is pinned (L5) and a vendor patch needs its own PR +
+  ADR amendment" — as a *default*, for a decision that had in fact
+  been taken and recorded.  **ADR-027** decides it (**Option A**), the
+  patch is in the tree
+  (`src/third_party/libjuice/patches/0002-turn-tls-transport.patch`),
+  and `src/third_party/vendor.json`'s libjuice note records where it
+  came from and how to regenerate it.  The plan was the one thing
+  still saying otherwise.
+
+  The default was not merely out of date; it was **not implementable**.
+  Upstream libjuice *has* the `JUICE_TURN_TRANSPORT_TLS` enum value,
+  but its handling of it is a **downgrade**:
+
+  ```c
+  if (turn_server->transport == JUICE_TURN_TRANSPORT_TLS) {
+      JLOG_WARN("TURN over TLS is not supported, falling back to TCP");
+      entry->turn->transport = JUICE_TURN_TRANSPORT_TCP;
+  }
+  ```
+
+  So "no patch" could only have meant "no real TLS": a client that
+  wanted TURN-over-TLS would have had to reimplement the TURN
+  protocol itself, next to libjuice's — a second TURN stack, a second
+  set of credential handling, a second set of refresh timers.
+
+  The patch is a **seam**, which is the answer to L5: libjuice still
+  owns the TURN protocol and its RFC 8656 §12.4/§12.5 framing, still
+  carries **no TLS stack**, and still does not know what a certificate
+  is.  The host hands it five function pointers (`connect` /
+  `handshake` / `read` / `write` / `close`) over a byte-oriented
+  stream, and the framing never has to understand a TURN message.
+
+  **The seam removes the downgrade, and that is why it exists.**  A
+  `JUICE_TURN_TRANSPORT_TLS` server with no usable TLS client now
+  **fails the allocation** instead of quietly opening a plain TCP
+  control connection and sending the TURN long-term credential in the
+  clear.  The observable outcome is "no relay candidate", never "a
+  relay candidate obtained over an unencrypted control connection".
+
+  The plan's §5 and §7 now record the decision and its reasoning, and
+  §5 carries a dated note saying which part changed and why.
+
+
 ### Added
 
 - **`tools/check_workflow_powershell.py` — a guard against PowerShell

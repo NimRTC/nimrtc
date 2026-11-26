@@ -441,6 +441,23 @@ jobs:
         with:
           arch: x64
 
+      # The DTLS test certificate pair.
+      #
+      # `scripts/build_dtls_cert.py` produces the Chrome-friendly ECC pair
+      # into `tests/wolfssl_dtls/certs/` — a *build artefact*, gitignored
+      # (`.gitignore:227`) — and CMake's copy rule reads it from there
+      # (`cmake/NimRTCTest.cmake`).  It is therefore absent from a fresh
+      # checkout, and every job whose build reaches that rule has to
+      # generate it first; without it the build fails with
+      #
+      #     error MSB3073: "cmake.exe" -E copy_if_different
+      #         .../tests/wolfssl_dtls/certs/ecc-key.pem .../certs/
+      #
+      # This leg builds the whole test tree, so it reaches that rule.
+      # Every other job that does the same carries the same step.
+      - name: Generate the DTLS test certificate pair
+        run: python scripts/generate_dtls_certs_ci.py
+
       # NIMRTC_PLUGINS_DXVA=ON is the whole point of this leg.
       #
       # NIMRTC_PLUGINS_OPENH264=ON because the DXVA decode test produces

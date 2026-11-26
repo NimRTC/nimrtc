@@ -21,6 +21,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The build wrote its DTLS test certificate into a vendored submodule,
+  leaving `src/third_party/wolfssl/src` permanently `-dirty` (2026-11-22,
+  landed on `version/v3` 2026-11-25).**
+  `scripts/build_dtls_cert.py` mirrored the generated pair into wolfSSL's own
+  cert tree.  `certs/server-ecc.pem` is **tracked** upstream, so overwriting it
+  made the submodule report `-dirty` forever, and the main repo showed
+  `m src/third_party/wolfssl/src` — for a build artefact, in someone else's
+  repository.  The pair now lives only in `tests/wolfssl_dtls/certs/`
+  (gitignored, a pure build artefact), and CMake's four cert lookups point
+  there.
+
+  The runtime lookup table also dropped the submodule path, and that part is
+  the *fix*, not a simplification: the upstream copy is the SAN-less
+  `CN=www.wolfssl.com` cert, so in any CWD where it resolved it would **win**
+  over the generated one and Chrome would reject the handshake with alert 46 —
+  a symptom (handshake refused) very far from its cause (the cert has no SAN).
+
+  Because a fresh checkout has no cert in `tests/wolfssl_dtls/certs/`, every CI
+  job that runs DTLS now generates the pair explicitly (`cryptography<42`:
+  42+ ships a Rust-backed Windows wheel without `cryptography_rust.dll`, so
+  `import cryptography` fails with "DLL load failed while importing _rust").
+
 - **A transient `503` from GitHub's artifact store made the soak
   window read "incomplete", and the whole soak leg red for a reason
   that had nothing to do with the tree (2026-11-24).**

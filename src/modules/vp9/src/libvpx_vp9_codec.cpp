@@ -66,7 +66,7 @@ namespace libvpx_backend {
 // ---------------------------------------------------------------------------
 // LibvpxVp9Codec — the real software VP9 encoder.
 // ---------------------------------------------------------------------------
-class LibvpxVp9Codec final : public plugins::IVideoCodec {
+class LibvpxVp9Codec final : public plugins::IVideoEncoder {
 public:
     explicit LibvpxVp9Codec(plugins::VideoCodecConfig cfg) noexcept
         : cfg_(std::move(cfg)) {}
@@ -176,10 +176,6 @@ public:
     }
 
     // ---- plugins::IVideoCodec ----------------------------------------------
-
-    bool can_encode() const noexcept override { return true; }
-    bool can_decode() const noexcept override { return false; }
-
     plugins::VideoCodecKind kind() const noexcept override {
         return plugins::VideoCodecKind::kVP9;
     }
@@ -317,17 +313,6 @@ public:
         if (is_keyframe) stats_.keyframes_encoded++;
         return plugins::kOk;
     }
-
-    plugins::Status decode(const plugins::EncodedVideoFrame&,
-                           plugins::VideoFrame&,
-                           std::uint8_t* const*) noexcept override {
-        // This backend is the encoder half.  The VP9 registry pairs it
-        // with a decoder through `nvcodec::HwCompositeCodec` when one
-        // exists; reaching this method means the composition went wrong.
-        stats_.decode_errors++;
-        return plugins::kErrUnsupported;
-    }
-
     plugins::Status force_keyframe() noexcept override {
         if (!open_) return plugins::kErrNotReady;
         // libvpx's "force a key frame" request is a *frame property*, not
@@ -418,8 +403,8 @@ std::string libvpx_vp9_unavailable_reason() {
  *  Returns nullptr when the encoder is not compiled in — which is what
  *  makes the registry fall through to the next backend (and eventually
  *  to the software stub). */
-std::unique_ptr<plugins::IVideoCodec>
-make_libvpx_vp9_codec(plugins::VideoCodecConfig cfg) {
+std::unique_ptr<plugins::IVideoEncoder>
+make_libvpx_vp9_encoder(plugins::VideoCodecConfig cfg) {
 #if defined(NIMRTC_PLUGINS_LIBVPX_ON)
     return std::make_unique<LibvpxVp9Codec>(std::move(cfg));
 #else
@@ -438,9 +423,9 @@ std::string libvpx_vp9_unavailable_reason() {
     return libvpx_backend::libvpx_vp9_unavailable_reason();
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_libvpx_vp9_codec(plugins::VideoCodecConfig cfg) {
-    return libvpx_backend::make_libvpx_vp9_codec(std::move(cfg));
+std::unique_ptr<plugins::IVideoEncoder>
+make_libvpx_vp9_encoder(plugins::VideoCodecConfig cfg) {
+    return libvpx_backend::make_libvpx_vp9_encoder(std::move(cfg));
 }
 
 } // namespace nimrtc::vp9

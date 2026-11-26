@@ -50,11 +50,10 @@
 #include "hevc_profile.hpp"   // nvcodec::H265Profile
 #include "hevc_pts.hpp"
 
-// The backends are reached through the compatibility shim (`IVideoCodec`),
-// which is what `make_nvenc_codec()` / `make_nvdec_codec()` still return.
-// The shim is deprecated on purpose (B1 / ADR-015 Decision 3); the
-// suppression is the same one the module's own headers use, scoped to
-// this file.
+// The backends are reached through the *split* codec seam:
+// `make_nvenc_codec()` returns an `IVideoEncoder` and
+// `make_nvdec_codec()` an `IVideoDecoder` (remote-desktop plan B1).
+// The deprecated combined shim (`IVideoCodec`) is not used here.
 NIMRTC_SUPPRESS_DEPRECATION_BEGIN
 
 namespace plugins = nimrtc::plugins;
@@ -461,7 +460,7 @@ public:
     plugins::IVideoDecoder& codec() noexcept { return *dec_; }
 
 private:
-    std::unique_ptr<plugins::IVideoCodec> dec_;
+    std::unique_ptr<plugins::IVideoDecoder> dec_;
     std::uint64_t                         keyframe_requests_ = 0;
 };
 

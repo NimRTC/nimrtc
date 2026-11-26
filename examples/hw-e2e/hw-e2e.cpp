@@ -89,7 +89,7 @@
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/h264/hw_backends.hpp>
-#include <nimrtc/nvcodec/hw_composite_codec.hpp>
+#include <nimrtc/plugins/hw_composite_codec.hpp>
 #include <nimrtc/plugins/hw_video_backend.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/rtp/packet.hpp>
@@ -458,7 +458,7 @@ np::IVideoCodec* create_hw_codec(const np::VideoCodecConfig& cfg) {
     }
     if (!decoder) return encoder.release();
 
-    auto* composite = new nimrtc::nvcodec::HwCompositeCodec(
+    auto* composite = new nimrtc::plugins::HwCompositeCodec(
         cfg, std::move(encoder), std::move(decoder));
     return composite;
 }

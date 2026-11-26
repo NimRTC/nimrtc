@@ -274,7 +274,7 @@ cudaVideoCodec nv_cuvid_codec(NvCodec codec) noexcept {
     return cudaVideoCodec_H264;
 }
 
-class NvDecDecoder final : public plugins::IVideoCodec {
+class NvDecDecoder final : public plugins::IVideoDecoder {
 public:
     /** @param cfg    The caller's configuration.
      *  @param codec  Which codec family this decoder consumes. */
@@ -363,21 +363,13 @@ public:
         NIMRTC_LOG_INFO("nvdec: decoder closed");
     }
 
-    // ---- plugins::IVideoCodec ----------------------------------------------
-
-    bool can_encode() const noexcept override { return false; }
-    bool can_decode() const noexcept override { return true; }
+    // ---- plugins::IVideoDecoder --------------------------------------------
 
     plugins::VideoCodecKind kind() const noexcept override {
         return desc_.kind;
     }
     std::string_view codec_name() const noexcept override {
         return desc_.rtpmap_encoding;
-    }
-
-    plugins::Status encode(const plugins::VideoFrame&, std::uint8_t*,
-                           std::size_t, plugins::EncodedVideoFrame&) noexcept override {
-        return plugins::kErrUnsupported;
     }
 
     plugins::Status decode(const plugins::EncodedVideoFrame& encoded,
@@ -599,11 +591,6 @@ public:
         return plugins::kOk;
     }
 
-    plugins::Status force_keyframe() noexcept override {
-        // A decoder never emits keyframes; the request is a no-op.
-        return plugins::kOk;
-    }
-
     bool supports_zero_copy_encode() const noexcept override { return false; }
     bool supports_zero_copy_decode() const noexcept override { return false; }
 
@@ -631,10 +618,6 @@ public:
      *  before the first sequence. */
     std::optional<plugins::HevcPtsSummary> last_hevc_pts() const noexcept override {
         return pts_;
-    }
-
-    std::uint8_t payload_type() const noexcept override {
-        return cfg_.payload_type != 0 ? cfg_.payload_type : std::uint8_t{102};
     }
 
 private:
@@ -1066,7 +1049,7 @@ bool nvdec_codec_available(NvCodec codec) noexcept {
 #endif
 }
 
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoDecoder>
 make_nvdec_codec(NvCodec codec, plugins::VideoCodecConfig cfg) {
 #if defined(NIMRTC_PLUGINS_NVDEC_ON) && defined(_WIN32)
     if (codec == NvCodec::kUnsupported) return nullptr;
@@ -1102,7 +1085,7 @@ make_nvdec_codec(NvCodec codec, plugins::VideoCodecConfig cfg) {
 namespace nimrtc::nvcodec {
 
 bool nvdec_codec_available(NvCodec) noexcept { return false; }
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoDecoder>
 make_nvdec_codec(NvCodec, plugins::VideoCodecConfig) { return nullptr; }
 
 } // namespace nimrtc::nvcodec

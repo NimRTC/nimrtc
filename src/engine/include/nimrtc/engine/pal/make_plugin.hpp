@@ -180,6 +180,12 @@ struct NIMRTC_API_STABLE MakePluginOpts {
  *                     If non-null, the callable is invoked as
  *                     `post_create(*slot)` between create() and open().
  *                     Used by audio3a (set_callbacks must precede open).
+ * @tparam CreateFn    The factory member that produces the instance.
+ *                     Defaults to `&Factory::create`.  The split codec
+ *                     seam needs the other two: `&Factory::create_encoder`
+ *                     and `&Factory::create_decoder` — the encode half
+ *                     and the decode half are separate factories with
+ *                     separate creation methods.
  *
  * @param factory           Resolved factory pointer (typically the
  *                          return of `pal::resolve_*()` or
@@ -196,14 +202,22 @@ struct NIMRTC_API_STABLE MakePluginOpts {
  * @return true iff a plugin was created AND opened successfully.
  */
 template <typename IPlugin, typename Config, typename Factory,
-          typename PostCreate = std::nullptr_t>
+          typename PostCreate = std::nullptr_t,
+          auto CreateFn = &Factory::create,
+          typename Slot = std::unique_ptr<IPlugin>>
 [[nodiscard]] NIMRTC_API_STABLE bool make_plugin(
     const Factory* factory,
     std::string_view plugin_id,
-    std::unique_ptr<IPlugin>& slot,
+    Slot& slot,
     Config&& config,
     const MakePluginOpts& opts,
     PostCreate&& post_create = nullptr) noexcept {
+
+    // The config is forwarded **by perfect forwarding**, so the caller
+    // keeps the choice of moving or copying it.  The *decayed* type is
+    // what the branch below tests against, because `Config` may be
+    // spelled with or without a reference.
+    using ConfigT = std::remove_cv_t<std::remove_reference_t<Config>>;
 
     // Helper: emit a "missing" diagnostic per the chosen mode.
     auto report_missing = [&]() noexcept {
@@ -259,11 +273,10 @@ template <typename IPlugin, typename Config, typename Factory,
     // Step 2: create.  Branch at compile time so plugins whose factory
     // takes no config (e.g. `IAudio3AFactory::create()`) can pass
     // `nullptr` as the config argument and still compile.
-    if constexpr (std::is_same_v<std::remove_cv_t<std::remove_reference_t<Config>>,
-                                 std::nullptr_t>) {
-        slot.reset(factory->create());
+    if constexpr (std::is_same_v<ConfigT, std::nullptr_t>) {
+        slot.reset((factory->*CreateFn)());
     } else {
-        slot.reset(factory->create(std::forward<Config>(config)));
+        slot.reset((factory->*CreateFn)(std::forward<Config>(config)));
     }
 
     // Step 3: create returned null?
@@ -313,6 +326,12 @@ template <typename IPlugin, typename Config, typename Factory,
  * @tparam Config    Factory config type. Pass `nullptr` for
  *                   config-less factories.
  * @tparam PostCreate  Optional post-create hook (audio3a use case).
+ *
+ * @note This overload cannot select a *different* creation method on the
+ *       factory (`create_encoder` / `create_decoder` on the split codec
+ *       seam) — the creation method is fixed to `Factory::create`.  A
+ *       caller that needs the split seam's halves resolves the factory
+ *       itself and uses the low-level overload.
  *
  * @param plugin_id   Plugin id (also the resolver key).
  * @param slot        Engine-owned `std::unique_ptr<IPlugin>`.

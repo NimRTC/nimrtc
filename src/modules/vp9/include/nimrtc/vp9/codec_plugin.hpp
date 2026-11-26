@@ -125,12 +125,26 @@ private:
  *  Registered as id "vp9".  A host that ships its own VP9 codec
  *  registers a different factory and selects it via
  *  `EngineConfig::video_codec_name`. */
-class NIMRTC_API_STABLE Vp9PluginFactory : public plugins::IVideoCodecFactory {
+class NIMRTC_API_STABLE Vp9PluginFactory
+    : public plugins::IVideoEncoderFactory,
+      public plugins::IVideoDecoderFactory,
+      public plugins::IVideoCodecFactory {
 public:
     std::string_view id() const noexcept override { return NIMRTC_PLUGIN_ID("vp9"); }
     std::string_view display_name() const noexcept override {
         return "VP9 (RFC 9559) — libvpx software encoder when vendored, stub fallback";
     }
+    // ---- The split seam ---------------------------------------------------
+    //
+    // The encoder half and the decoder half are chosen *independently*:
+    // the encoder table and the decoder table are separate, and a
+    // hardware encoder (NVENC) is not a hardware decoder (NVDEC).
+    plugins::IVideoEncoder* create_encoder(
+        plugins::VideoCodecConfig cfg) const override;
+    plugins::IVideoDecoder* create_decoder(
+        plugins::VideoCodecConfig cfg) const override;
+
+    // ---- The combined seam (kept for source compatibility) ---------------
     plugins::IVideoCodec* create(plugins::VideoCodecConfig cfg) const override;
 };
 

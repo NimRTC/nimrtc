@@ -116,6 +116,10 @@
 #include <nimrtc/plugins/video_bitrate_controller.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
+// The borrowed combined view over the split codec seam — it is what the
+// deprecated `video_codec()` accessor hands out (remote-desktop plan B1 /
+// ADR-015 Decision 3).
+#include <nimrtc/plugins/video_codec_view.hpp>
 // Remote-desktop plan A10: the capture-*device* seam.  The engine
 // resolves an `IVideoCaptureFactory` through the registry and pumps the
 // device's frames into the encoder on its tick thread.
@@ -4283,14 +4287,20 @@ public:
 
     // The deprecated compatibility shim, named from inside the library.
     // `plugins::IVideoCodec` is the deprecated shim of the split codec seam
-    // (remote-desktop plan B1 / ADR-015 Decision 3); the engine resolves
-    // the *combined* factory and drives one instance in both directions, so
-    // it has to name the type.  The suppression is scoped to these two
-    // accessors; the deprecation itself is untouched, so a host that
-    // names the shim still gets the warning.
+    // (remote-desktop plan B1 / ADR-015 Decision 3).  The engine itself
+    // drives the *split* halves (`IVideoEncoder` / `IVideoDecoder`); this
+    // accessor hands out a **borrowed view** over the two, so a host that
+    // still speaks the combined vocabulary keeps working for one MINOR
+    // cycle.  The suppression is scoped to these two accessors; the
+    // deprecation itself is untouched, so a host that names the shim
+    // still gets the warning.
     NIMRTC_SUPPRESS_DEPRECATION_BEGIN
-    NIMRTC_API_UNSTABLE plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
-    NIMRTC_API_UNSTABLE const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
+    NIMRTC_API_UNSTABLE plugins::IVideoCodec* video_codec() noexcept {
+        return video_codec_view_ ? video_codec_view_.get() : nullptr;
+    }
+    NIMRTC_API_UNSTABLE const plugins::IVideoCodec* video_codec() const noexcept {
+        return video_codec_view_ ? video_codec_view_.get() : nullptr;
+    }
     NIMRTC_SUPPRESS_DEPRECATION_END
 
 
@@ -5275,12 +5285,38 @@ private:
     int audio_bitrate_ceiling_bps_ = 0;
     std::chrono::steady_clock::time_point audio_bitrate_last_step_{};
 
-    // ---- Video codec plugin (ADR-001: resolved via PluginRegistry) ----
-    // The deprecated compatibility shim -- see the note on the
-    // `video_codec()` accessors above.
-    NIMRTC_SUPPRESS_DEPRECATION_BEGIN
-    std::unique_ptr<plugins::IVideoCodec> video_codec_;
-    NIMRTC_SUPPRESS_DEPRECATION_END
+    // ---- Video codec plugins (ADR-001: resolved via PluginRegistry) ----
+    //
+    // The codec seam is **split** (remote-desktop plan B1): the engine
+    // holds an *encoder* and a *decoder*, not one combined object.  The
+    // shape matches the hardware reality — NVENC and NVDEC are
+    // different devices — and it lets an asymmetric deployment (a
+    // camera gateway that never decodes, a viewer that never encodes)
+    // instantiate only the half it needs.
+    //
+    // `IVideoCodec` remains as the deprecated combined shim (ADR-015
+    // Decision 3), but the engine itself does not use it for any work:
+    // the two halves are resolved from the *split* registry slots
+    // (`IVideoEncoderFactory` / `IVideoDecoderFactory`).
+    //
+    // The halves are held by `shared_ptr` rather than `unique_ptr` for
+    // one reason: the **combined fallback**.  A host that registered
+    // only the deprecated combined factory (which the seam still
+    // promises to support) has no split slot to resolve, so the engine
+    // creates *one* combined instance and presents it as both halves.
+    // `IVideoCodec` derives from both `IVideoEncoder` and
+    // `IVideoDecoder`, so the two `shared_ptr`s can share one control
+    // block over one instance — the instance is destroyed exactly once,
+    // and the split semantics (two independent handles) are preserved.
+    std::shared_ptr<plugins::IVideoEncoder> video_encoder_;
+    std::shared_ptr<plugins::IVideoDecoder> video_decoder_;
+
+    // The borrowed combined view handed to `video_codec()`.  It is a
+    // *view*, not an owner: the two halves above own the state, and the
+    // view only forwards.  It exists purely so the deprecated
+    // `video_codec()` accessor keeps working for a host that still
+    // speaks the combined vocabulary.
+    std::unique_ptr<plugins::VideoCodecView> video_codec_view_;
 
     // ---- Public callbacks (no concrete deps) ----
     AudioFrameCallback  on_audio_frame_;

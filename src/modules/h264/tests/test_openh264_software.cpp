@@ -117,13 +117,25 @@ double mean_abs_error(const std::vector<std::uint8_t>& a,
     return sum / static_cast<double>(a.size());
 }
 
+/** The `openh264_h264` encoder backend.
+ *
+ *  The lookup is by *id* rather than through `select_encoder()` so the
+ *  test is deterministic on a host that also has a GPU: the NVENC
+ *  entries have a much higher priority and would win the generic
+ *  selection. */
+const plugins::VideoEncoderBackend* openh264_encoder_backend() {
+    nimrtc::h264::register_default_video_backends();
+    for (const auto* be : plugins::HwVideoBackendRegistry::instance()
+                             .list_encoders(plugins::VideoCodecKind::kH264)) {
+        if (be->id == "openh264_h264") return be;
+    }
+    return nullptr;
+}
+
 /** The `openh264_h264` decoder backend.
  *
- *  The lookup is by *id* rather than through `select_decoder_backend()`
- *  so the test is deterministic on a host that also has a GPU: the
- *  NVENC / NVDEC entries have a much higher priority and would win the
- *  generic selection. */
-const plugins::VideoDecoderBackend* openh264_backend() {
+ *  See `openh264_encoder_backend()` for why the lookup is by id. */
+const plugins::VideoDecoderBackend* openh264_decoder_backend() {
     nimrtc::h264::register_default_video_backends();
     for (const auto* be : plugins::HwVideoBackendRegistry::instance()
                              .list_decoders(plugins::VideoCodecKind::kH264)) {
@@ -132,6 +144,28 @@ const plugins::VideoDecoderBackend* openh264_backend() {
     return nullptr;
 }
 
+/**
+ * @brief An encoder + a decoder, the two halves of one OpenH264 pair.
+ *
+ * The codec seam is split (remote-desktop plan B1): the two directions
+ * are separate interfaces, and the OpenH264 backend registers itself in
+ * both registry tables.  A test that needs both directions therefore
+ * holds both halves.
+ */
+struct Openh264Pair {
+    std::unique_ptr<plugins::IVideoEncoder> encoder;
+    std::unique_ptr<plugins::IVideoDecoder> decoder;
+
+    /** The encoder's own statistics. */
+    plugins::VideoCodecStats encoder_stats() const {
+        return encoder ? encoder->stats() : plugins::VideoCodecStats{};
+    }
+    /** The decoder's own statistics. */
+    plugins::VideoCodecStats decoder_stats() const {
+        return decoder ? decoder->stats() : plugins::VideoCodecStats{};
+    }
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -139,16 +173,22 @@ const plugins::VideoDecoderBackend* openh264_backend() {
 // ---------------------------------------------------------------------------
 
 TEST(Openh264Software, BackendIsRegisteredAboveTheStub) {
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
-    EXPECT_EQ(be->id, "openh264_h264");
-    EXPECT_FALSE(be->is_hw);
-    EXPECT_GT(be->priority, 0);
-    EXPECT_TRUE(be->available(plugins::VideoCodecConfig{}));
+    const plugins::VideoEncoderBackend* enc = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec = openh264_decoder_backend();
+    ASSERT_NE(enc, nullptr);
+    ASSERT_NE(dec, nullptr);
+    EXPECT_EQ(enc->id, "openh264_h264");
+    EXPECT_EQ(dec->id, "openh264_h264");
+    EXPECT_FALSE(enc->is_hw);
+    EXPECT_FALSE(dec->is_hw);
+    EXPECT_GT(enc->priority, 0);
+    EXPECT_GT(dec->priority, 0);
+    EXPECT_TRUE(enc->available(plugins::VideoCodecConfig{}));
+    EXPECT_TRUE(dec->available(plugins::VideoCodecConfig{}));
 }
 
 TEST(Openh264Software, BackendIdDistinguishesRealCodecFromStub) {
-    const plugins::VideoDecoderBackend* be = openh264_backend();
+    const plugins::VideoEncoderBackend* be = openh264_encoder_backend();
     ASSERT_NE(be, nullptr);
 
     plugins::VideoCodecConfig cfg;
@@ -178,8 +218,10 @@ TEST(Openh264Software, StubStillReportsSoftwareStub) {
 // ---------------------------------------------------------------------------
 
 TEST(Openh264Software, EncodeDecodeRoundTripsPixels) {
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width        = kWidth;
@@ -189,17 +231,21 @@ TEST(Openh264Software, EncodeDecodeRoundTripsPixels) {
     cfg.pixel_format = plugins::VideoPixelFormat::kI420;
     cfg.payload_type = 102;
 
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
-    ASSERT_TRUE(codec->can_encode());
-    ASSERT_TRUE(codec->can_decode());
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
 
     // ---- Encode -----------------------------------------------------------
     const plugins::VideoFrame source = make_source_frame(kWidth, kHeight);
     std::vector<std::uint8_t> bitstream(512 * 1024);
     plugins::EncodedVideoFrame encoded;
-    ASSERT_EQ(codec->encode(source, bitstream.data(), bitstream.size(), encoded),
+    ASSERT_EQ(pair.encoder->encode(source, bitstream.data(), bitstream.size(), encoded),
               plugins::kOk);
 
     EXPECT_GT(encoded.payload.size(), 0u);
@@ -231,7 +277,7 @@ TEST(Openh264Software, EncodeDecodeRoundTripsPixels) {
     std::uint8_t* buffers[3] = {dec_y.data(), dec_u.data(), dec_v.data()};
 
     plugins::VideoFrame decoded;
-    ASSERT_EQ(codec->decode(encoded, decoded, buffers), plugins::kOk);
+    ASSERT_EQ(pair.decoder->decode(encoded, decoded, buffers), plugins::kOk);
 
     EXPECT_EQ(decoded.width(),  kWidth);
     EXPECT_EQ(decoded.height(), kHeight);
@@ -280,37 +326,47 @@ TEST(Openh264Software, EncodeDecodeRoundTripsPixels) {
     EXPECT_GT(corr, 0.95) << "decoded picture does not correlate with the source";
 
     // ---- Stats ------------------------------------------------------------
-    const plugins::VideoCodecStats s = codec->stats();
-    EXPECT_EQ(s.frames_encoded, 1u);
-    EXPECT_EQ(s.frames_decoded, 1u);
-    EXPECT_GT(s.bytes_encoded, 0u);
-    EXPECT_EQ(s.encode_errors, 0u);
-    EXPECT_EQ(s.decode_errors, 0u);
+    const plugins::VideoCodecStats es = pair.encoder_stats();
+    EXPECT_EQ(es.frames_encoded, 1u);
+    EXPECT_GT(es.bytes_encoded, 0u);
+    EXPECT_EQ(es.encode_errors, 0u);
 
-    codec->close();
-    codec.reset();
+    const plugins::VideoCodecStats ds = pair.decoder_stats();
+    EXPECT_EQ(ds.frames_decoded, 1u);
+    EXPECT_EQ(ds.decode_errors, 0u);
+
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 TEST(Openh264Software, DecodedPictureIsNotBlank) {
     // A decoder that returns an all-black frame would still satisfy a
     // loose round-trip check against a dark source; this test pins the
     // opposite direction: the decoded picture must carry real signal.
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;
     cfg.height = kHeight;
     cfg.bitrate_bps = 2000000;
 
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
 
     const plugins::VideoFrame source = make_source_frame(kWidth, kHeight);
     std::vector<std::uint8_t> bitstream(512 * 1024);
     plugins::EncodedVideoFrame encoded;
-    ASSERT_EQ(codec->encode(source, bitstream.data(), bitstream.size(), encoded),
+    ASSERT_EQ(pair.encoder->encode(source, bitstream.data(), bitstream.size(), encoded),
               plugins::kOk);
 
     std::vector<std::uint8_t> dec_y(static_cast<std::size_t>(kWidth) * kHeight);
@@ -319,7 +375,7 @@ TEST(Openh264Software, DecodedPictureIsNotBlank) {
     std::uint8_t* buffers[3] = {dec_y.data(), dec_u.data(), dec_v.data()};
 
     plugins::VideoFrame decoded;
-    ASSERT_EQ(codec->decode(encoded, decoded, buffers), plugins::kOk);
+    ASSERT_EQ(pair.decoder->decode(encoded, decoded, buffers), plugins::kOk);
 
     const auto [min_it, max_it] =
         std::minmax_element(dec_y.begin(), dec_y.end());
@@ -328,8 +384,10 @@ TEST(Openh264Software, DecodedPictureIsNotBlank) {
     // Real signal means the plane is not a constant.
     EXPECT_GT(*max_it - *min_it, 30u);
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 TEST(Openh264Software, EncodeAdaptsToAChangedGeometry) {
@@ -337,22 +395,28 @@ TEST(Openh264Software, EncodeAdaptsToAChangedGeometry) {
     // capture resolution can change at any time (and the engine's
     // configured default need not match the first frame the host
     // pushes).  A real codec must follow the picture, not reject it.
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;
     cfg.height = kHeight;
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
 
     // A smaller frame: the encoder must re-configure and encode it.
     const plugins::VideoFrame smaller = make_source_frame(160, 120);
 
     std::vector<std::uint8_t> bitstream(512 * 1024);
     plugins::EncodedVideoFrame encoded;
-    ASSERT_EQ(codec->encode(smaller, bitstream.data(), bitstream.size(), encoded),
+    ASSERT_EQ(pair.encoder->encode(smaller, bitstream.data(), bitstream.size(), encoded),
               plugins::kOk);
     EXPECT_GT(encoded.payload.size(), 0u);
     EXPECT_TRUE(encoded.is_keyframe);
@@ -360,28 +424,38 @@ TEST(Openh264Software, EncodeAdaptsToAChangedGeometry) {
     // And the original geometry must work again afterwards (the codec
     // follows the picture in both directions).
     const plugins::VideoFrame original = make_source_frame(kWidth, kHeight);
-    ASSERT_EQ(codec->encode(original, bitstream.data(), bitstream.size(), encoded),
+    ASSERT_EQ(pair.encoder->encode(original, bitstream.data(), bitstream.size(), encoded),
               plugins::kOk);
     EXPECT_GT(encoded.payload.size(), 0u);
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 TEST(Openh264Software, ForceKeyframeSucceeds) {
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;
     cfg.height = kHeight;
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
-    EXPECT_EQ(codec->force_keyframe(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
+    EXPECT_EQ(pair.encoder->force_keyframe(), plugins::kOk);
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -413,18 +487,23 @@ TEST(Openh264Software, TheFactorySelectsTheRealSoftwareCodec) {
     cfg.backend_preference = plugins::VideoCodecBackendPreference::kSoftware;
     cfg.backend_policy    = plugins::CodecBackend::kSoftware;
 
+    // The split seam (remote-desktop plan B1): the factory hands out an
+    // encoder and a decoder, and the test drives both.
     nimrtc::h264::H264PluginFactory factory;
-    std::unique_ptr<plugins::IVideoCodec> codec(factory.create(cfg));
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    std::unique_ptr<plugins::IVideoEncoder> encoder(factory.create_encoder(cfg));
+    std::unique_ptr<plugins::IVideoDecoder> decoder(factory.create_decoder(cfg));
+    ASSERT_NE(encoder, nullptr);
+    ASSERT_NE(decoder, nullptr);
+    ASSERT_EQ(encoder->open(), plugins::kOk);
+    ASSERT_EQ(decoder->open(), plugins::kOk);
 
-    EXPECT_TRUE(codec->can_encode());
-    EXPECT_TRUE(codec->can_decode());
-    EXPECT_EQ(codec->backend_id(), "openh264")
+    EXPECT_EQ(encoder->backend_id(), "openh264")
         << "the engine must run on the real software codec, not the stub";
 
-    codec->close();
-    codec.reset();
+    encoder->close();
+    decoder->close();
+    encoder.reset();
+    decoder.reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -437,15 +516,21 @@ TEST(Openh264Software, SetParamsAppliesTheGeometry) {
     // encoder — the encoder is configured for one geometry, so a
     // parameter set that names a different one and is silently ignored
     // would produce a picture at the wrong size.
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;
     cfg.height = kHeight;
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
 
     plugins::VideoEncoderParams params;
     params.width             = 640;
@@ -455,17 +540,19 @@ TEST(Openh264Software, SetParamsAppliesTheGeometry) {
     params.keyframe_interval = 30;
     params.pixel_format      = plugins::VideoPixelFormat::kI420;
 
-    ASSERT_EQ(codec->set_params(params), plugins::kOk);
+    ASSERT_EQ(pair.encoder->set_params(params), plugins::kOk);
 
-    const plugins::VideoEncoderParams now = codec->params();
+    const plugins::VideoEncoderParams now = pair.encoder->params();
     EXPECT_EQ(now.width, 640u);
     EXPECT_EQ(now.height, 480u);
     EXPECT_EQ(now.fps, 25u);
     EXPECT_EQ(now.bitrate_bps, 1'500'000u);
     EXPECT_EQ(now.keyframe_interval, 30u);
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 TEST(Openh264Software, SetParamsRestartsAndEmitsTheNewParameterSets) {
@@ -478,21 +565,27 @@ TEST(Openh264Software, SetParamsRestartsAndEmitsTheNewParameterSets) {
     //   1. the encoder follows the new geometry;
     //   2. the next frame is an IDR (a freshly initialised encoder
     //      starts with one), and an IDR carries the SPS / PPS.
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;
     cfg.height = kHeight;
     cfg.bitrate_bps = 2000000;
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
 
     // ---- The first frame, at the original geometry -----------------------
     std::vector<std::uint8_t> bitstream(512 * 1024);
     plugins::EncodedVideoFrame encoded;
-    ASSERT_EQ(codec->encode(make_source_frame(kWidth, kHeight),
+    ASSERT_EQ(pair.encoder->encode(make_source_frame(kWidth, kHeight),
                             bitstream.data(), bitstream.size(), encoded),
               plugins::kOk);
     ASSERT_TRUE(encoded.is_keyframe);
@@ -507,14 +600,14 @@ TEST(Openh264Software, SetParamsRestartsAndEmitsTheNewParameterSets) {
     params.fps          = 30;
     params.bitrate_bps  = 2000000;
     params.pixel_format = plugins::VideoPixelFormat::kI420;
-    ASSERT_EQ(codec->set_params(params), plugins::kOk);
+    ASSERT_EQ(pair.encoder->set_params(params), plugins::kOk);
 
-    const plugins::VideoEncoderParams now = codec->params();
+    const plugins::VideoEncoderParams now = pair.encoder->params();
     EXPECT_EQ(now.width, kNewWidth);
     EXPECT_EQ(now.height, kNewHeight);
 
     // ---- The next frame must carry the NEW parameter sets -----------------
-    ASSERT_EQ(codec->encode(make_source_frame(kNewWidth, kNewHeight),
+    ASSERT_EQ(pair.encoder->encode(make_source_frame(kNewWidth, kNewHeight),
                             bitstream.data(), bitstream.size(), encoded),
               plugins::kOk);
     EXPECT_TRUE(encoded.is_keyframe)
@@ -529,12 +622,14 @@ TEST(Openh264Software, SetParamsRestartsAndEmitsTheNewParameterSets) {
     std::uint8_t* buffers[3] = {dec_y.data(), dec_u.data(), dec_v.data()};
 
     plugins::VideoFrame decoded;
-    ASSERT_EQ(codec->decode(encoded, decoded, buffers), plugins::kOk);
+    ASSERT_EQ(pair.decoder->decode(encoded, decoded, buffers), plugins::kOk);
     EXPECT_EQ(decoded.width(), kNewWidth);
     EXPECT_EQ(decoded.height(), kNewHeight);
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 TEST(Openh264Software, SetParamsRejectsAnImpossibleGeometry) {
@@ -542,54 +637,70 @@ TEST(Openh264Software, SetParamsRejectsAnImpossibleGeometry) {
     // so rather than silently keeping the old one — the engine treats a
     // rejection as "keep the previous parameters" and needs to be able
     // to tell the two apart.
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;
     cfg.height = kHeight;
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
 
     // "480 rows, no width" — half a geometry is a contradiction.
     plugins::VideoEncoderParams half;
     half.width  = 0;
     half.height = 480;
-    EXPECT_NE(codec->set_params(half), plugins::kOk);
+    EXPECT_NE(pair.encoder->set_params(half), plugins::kOk);
 
     // The previous parameters survive the rejection.
-    EXPECT_EQ(codec->params().width, kWidth);
-    EXPECT_EQ(codec->params().height, kHeight);
+    EXPECT_EQ(pair.encoder->params().width, kWidth);
+    EXPECT_EQ(pair.encoder->params().height, kHeight);
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 TEST(Openh264Software, SetParamsWithoutAGeometryKeepsTheGeometry) {
     // A parameter set that leaves the geometry out entirely is a
     // legitimate partial update: the caller only wants to change, say,
     // the bitrate.  The geometry must survive it.
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;
     cfg.height = kHeight;
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
 
     plugins::VideoEncoderParams partial;
     partial.bitrate_bps = 3'000'000;
-    ASSERT_EQ(codec->set_params(partial), plugins::kOk);
+    ASSERT_EQ(pair.encoder->set_params(partial), plugins::kOk);
 
-    EXPECT_EQ(codec->params().width, kWidth);
-    EXPECT_EQ(codec->params().height, kHeight);
-    EXPECT_EQ(codec->params().bitrate_bps, 3'000'000u);
+    EXPECT_EQ(pair.encoder->params().width, kWidth);
+    EXPECT_EQ(pair.encoder->params().height, kHeight);
+    EXPECT_EQ(pair.encoder->params().bitrate_bps, 3'000'000u);
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -642,7 +753,7 @@ std::vector<std::uint8_t> extract_sps(nimrtc::core::ByteSpan bitstream) {
  *
  *  The buffers are sized for `expected_w` x `expected_h`; the codec
  *  copies the decoded picture into them. */
-plugins::Status decode_into(plugins::IVideoCodec& codec,
+plugins::Status decode_into(plugins::IVideoDecoder& decoder,
                             const plugins::EncodedVideoFrame& encoded,
                             std::uint32_t expected_w,
                             std::uint32_t expected_h,
@@ -651,7 +762,7 @@ plugins::Status decode_into(plugins::IVideoCodec& codec,
     std::vector<std::uint8_t> u(static_cast<std::size_t>(expected_w / 2) * (expected_h / 2));
     std::vector<std::uint8_t> v(static_cast<std::size_t>(expected_w / 2) * (expected_h / 2));
     std::uint8_t* buffers[3] = {y.data(), u.data(), v.data()};
-    return codec.decode(encoded, decoded, buffers);
+    return decoder.decode(encoded, decoded, buffers);
 }
 
 TEST(Openh264Software, AMidStreamParameterSetSwitchDecodesWithoutAnError) {
@@ -661,8 +772,10 @@ TEST(Openh264Software, AMidStreamParameterSetSwitchDecodesWithoutAnError) {
     // The decoder here is *warm*: it has already decoded a frame at the
     // old geometry, so it is holding the old parameter sets when the
     // new ones arrive.
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;      // 320 x 240
@@ -672,14 +785,18 @@ TEST(Openh264Software, AMidStreamParameterSetSwitchDecodesWithoutAnError) {
     cfg.pixel_format = plugins::VideoPixelFormat::kI420;
     cfg.payload_type = 102;
 
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
 
     // ---- 1. The original geometry: encode AND decode ------------------
     std::vector<std::uint8_t> bitstream(512 * 1024);
     plugins::EncodedVideoFrame first;
-    ASSERT_EQ(codec->encode(make_source_frame(kWidth, kHeight),
+    ASSERT_EQ(pair.encoder->encode(make_source_frame(kWidth, kHeight),
                             bitstream.data(), bitstream.size(), first),
               plugins::kOk);
     ASSERT_TRUE(first.is_keyframe);
@@ -690,11 +807,11 @@ TEST(Openh264Software, AMidStreamParameterSetSwitchDecodesWithoutAnError) {
     const std::vector<std::uint8_t> old_sps = extract_sps(first.payload);
 
     plugins::VideoFrame decoded_old;
-    ASSERT_EQ(decode_into(*codec, first, kWidth, kHeight, decoded_old),
+    ASSERT_EQ(decode_into(*pair.decoder, first, kWidth, kHeight, decoded_old),
               plugins::kOk);
     EXPECT_EQ(decoded_old.width(), kWidth);
     EXPECT_EQ(decoded_old.height(), kHeight);
-    EXPECT_EQ(codec->stats().decode_errors, 0u)
+    EXPECT_EQ(pair.decoder_stats().decode_errors, 0u)
         << "the first frame must decode cleanly — the switch test is only "
            "meaningful on a decoder that was already working";
 
@@ -708,11 +825,11 @@ TEST(Openh264Software, AMidStreamParameterSetSwitchDecodesWithoutAnError) {
     params.fps          = 30;
     params.bitrate_bps  = 2'000'000;
     params.pixel_format = plugins::VideoPixelFormat::kI420;
-    ASSERT_EQ(codec->set_params(params), plugins::kOk);
+    ASSERT_EQ(pair.encoder->set_params(params), plugins::kOk);
 
     // ---- 3. The new frame carries the new parameter sets ---------------
     plugins::EncodedVideoFrame second;
-    ASSERT_EQ(codec->encode(make_source_frame(kNewWidth, kNewHeight),
+    ASSERT_EQ(pair.encoder->encode(make_source_frame(kNewWidth, kNewHeight),
                             bitstream.data(), bitstream.size(), second),
               plugins::kOk);
     ASSERT_TRUE(second.is_keyframe)
@@ -735,7 +852,7 @@ TEST(Openh264Software, AMidStreamParameterSetSwitchDecodesWithoutAnError) {
     // return an error.
     plugins::VideoFrame decoded_new;
     const plugins::Status rc =
-        decode_into(*codec, second, kNewWidth, kNewHeight, decoded_new);
+        decode_into(*pair.decoder, second, kNewWidth, kNewHeight, decoded_new);
     ASSERT_EQ(rc, plugins::kOk)
         << "the mid-stream parameter-set change must decode without an "
            "error, on the first call — no key-frame round trip";
@@ -748,7 +865,7 @@ TEST(Openh264Software, AMidStreamParameterSetSwitchDecodesWithoutAnError) {
     // The codec's own error counter must not have moved: "decoded
     // without an error" is not the same as "decoded, after an error
     // was swallowed".
-    EXPECT_EQ(codec->stats().decode_errors, 0u);
+    EXPECT_EQ(pair.decoder_stats().decode_errors, 0u);
 
     // ---- 5. The stream keeps working afterwards -------------------------
     //
@@ -756,18 +873,20 @@ TEST(Openh264Software, AMidStreamParameterSetSwitchDecodesWithoutAnError) {
     // still decodes too, which is what a stream that switches back and
     // forth needs.
     plugins::EncodedVideoFrame third;
-    ASSERT_EQ(codec->encode(make_source_frame(kWidth, kHeight),
+    ASSERT_EQ(pair.encoder->encode(make_source_frame(kWidth, kHeight),
                             bitstream.data(), bitstream.size(), third),
               plugins::kOk);
     plugins::VideoFrame decoded_back;
-    ASSERT_EQ(decode_into(*codec, third, kWidth, kHeight, decoded_back),
+    ASSERT_EQ(decode_into(*pair.decoder, third, kWidth, kHeight, decoded_back),
               plugins::kOk);
     EXPECT_EQ(decoded_back.width(), kWidth);
     EXPECT_EQ(decoded_back.height(), kHeight);
-    EXPECT_EQ(codec->stats().decode_errors, 0u);
+    EXPECT_EQ(pair.decoder_stats().decode_errors, 0u);
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 TEST(Openh264Software, TheDecodedPictureAfterASwitchCarriesRealSignal) {
@@ -775,8 +894,10 @@ TEST(Openh264Software, TheDecodedPictureAfterASwitchCarriesRealSignal) {
     // parameter sets.  This one proves the *pixels* did too: a decoder
     // that produced a correctly-sized but blank frame would pass a
     // geometry-only assertion.
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;
@@ -785,13 +906,17 @@ TEST(Openh264Software, TheDecodedPictureAfterASwitchCarriesRealSignal) {
     cfg.bitrate_bps  = 2'000'000;
     cfg.pixel_format = plugins::VideoPixelFormat::kI420;
 
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
 
     std::vector<std::uint8_t> bitstream(512 * 1024);
     plugins::EncodedVideoFrame first;
-    ASSERT_EQ(codec->encode(make_source_frame(kWidth, kHeight),
+    ASSERT_EQ(pair.encoder->encode(make_source_frame(kWidth, kHeight),
                             bitstream.data(), bitstream.size(), first),
               plugins::kOk);
 
@@ -804,10 +929,10 @@ TEST(Openh264Software, TheDecodedPictureAfterASwitchCarriesRealSignal) {
     params.fps          = 30;
     params.bitrate_bps  = 2'000'000;
     params.pixel_format = plugins::VideoPixelFormat::kI420;
-    ASSERT_EQ(codec->set_params(params), plugins::kOk);
+    ASSERT_EQ(pair.encoder->set_params(params), plugins::kOk);
 
     plugins::EncodedVideoFrame second;
-    ASSERT_EQ(codec->encode(make_source_frame(kNewWidth, kNewHeight),
+    ASSERT_EQ(pair.encoder->encode(make_source_frame(kNewWidth, kNewHeight),
                             bitstream.data(), bitstream.size(), second),
               plugins::kOk);
 
@@ -820,7 +945,7 @@ TEST(Openh264Software, TheDecodedPictureAfterASwitchCarriesRealSignal) {
     std::uint8_t* buffers[3] = {y.data(), u.data(), v.data()};
 
     plugins::VideoFrame decoded;
-    ASSERT_EQ(codec->decode(second, decoded, buffers), plugins::kOk);
+    ASSERT_EQ(pair.decoder->decode(second, decoded, buffers), plugins::kOk);
 
     const auto [min_it, max_it] = std::minmax_element(y.begin(), y.end());
     EXPECT_GT(*max_it, 100u) << "the decoded luma has no bright pixels";
@@ -828,27 +953,35 @@ TEST(Openh264Software, TheDecodedPictureAfterASwitchCarriesRealSignal) {
     EXPECT_GT(static_cast<unsigned>(*max_it - *min_it), 30u)
         << "the decoded luma is a constant — the picture carries no signal";
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }
 
 TEST(Openh264Software, SetParamsKeepsTheDecoderAlive) {
     // The decoder takes its geometry from the bitstream's own parameter
     // sets, so it must survive a geometry change on the encoder side.
-    const plugins::VideoDecoderBackend* be = openh264_backend();
-    ASSERT_NE(be, nullptr);
+    const plugins::VideoEncoderBackend* enc_be = openh264_encoder_backend();
+    const plugins::VideoDecoderBackend* dec_be = openh264_decoder_backend();
+    ASSERT_NE(enc_be, nullptr);
+    ASSERT_NE(dec_be, nullptr);
 
     plugins::VideoCodecConfig cfg;
     cfg.width  = kWidth;
     cfg.height = kHeight;
     cfg.bitrate_bps = 2000000;
-    auto codec = be->create(cfg);
-    ASSERT_NE(codec, nullptr);
-    ASSERT_EQ(codec->open(), plugins::kOk);
+    Openh264Pair pair;
+    pair.encoder = enc_be->create(cfg);
+    pair.decoder = dec_be->create(cfg);
+    ASSERT_NE(pair.encoder, nullptr);
+    ASSERT_NE(pair.decoder, nullptr);
+    ASSERT_EQ(pair.encoder->open(), plugins::kOk);
+    ASSERT_EQ(pair.decoder->open(), plugins::kOk);
 
     std::vector<std::uint8_t> bitstream(512 * 1024);
     plugins::EncodedVideoFrame encoded;
-    ASSERT_EQ(codec->encode(make_source_frame(kWidth, kHeight),
+    ASSERT_EQ(pair.encoder->encode(make_source_frame(kWidth, kHeight),
                             bitstream.data(), bitstream.size(), encoded),
               plugins::kOk);
 
@@ -857,7 +990,7 @@ TEST(Openh264Software, SetParamsKeepsTheDecoderAlive) {
     params.width  = 320;
     params.height = 240;
     params.bitrate_bps = 2000000;
-    ASSERT_EQ(codec->set_params(params), plugins::kOk);
+    ASSERT_EQ(pair.encoder->set_params(params), plugins::kOk);
 
     // The old frame still decodes — the decoder was not re-initialised.
     std::vector<std::uint8_t> dec_y(static_cast<std::size_t>(kWidth) * kHeight);
@@ -866,8 +999,10 @@ TEST(Openh264Software, SetParamsKeepsTheDecoderAlive) {
     std::uint8_t* buffers[3] = {dec_y.data(), dec_u.data(), dec_v.data()};
 
     plugins::VideoFrame decoded;
-    EXPECT_EQ(codec->decode(encoded, decoded, buffers), plugins::kOk);
+    EXPECT_EQ(pair.decoder->decode(encoded, decoded, buffers), plugins::kOk);
 
-    codec->close();
-    codec.reset();
+    pair.encoder->close();
+    pair.decoder->close();
+    pair.encoder.reset();
+    pair.decoder.reset();
 }

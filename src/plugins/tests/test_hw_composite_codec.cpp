@@ -1,5 +1,5 @@
 /**
- * @file src/modules/nvcodec/tests/test_hw_composite_codec.cpp
+ * @file src/plugins/tests/test_hw_composite_codec.cpp
  * @brief The composite codec's telemetry forwarding (unit test).
  *
  * `HwCompositeCodec` pairs an encode-only codec with a decode-only one
@@ -41,7 +41,7 @@
 #include <string_view>
 #include <vector>
 
-#include <nimrtc/nvcodec/hw_composite_codec.hpp>
+#include <nimrtc/plugins/hw_composite_codec.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 
 // `plugins::IVideoCodec` is the deprecated compatibility shim, and the
@@ -56,7 +56,7 @@
 namespace {
 
 namespace np = nimrtc::plugins;
-using nimrtc::nvcodec::HwCompositeCodec;
+using nimrtc::plugins::HwCompositeCodec;
 
 /**
  * @brief A codec double that reports a fixed telemetry snapshot.

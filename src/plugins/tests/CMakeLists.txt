@@ -26,3 +26,9 @@ nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_scheduler_plugin_seam.cpp
 # HwVideoBackendRegistry contracts independently of any platform SDK.
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_zero_copy_surface_path.cpp
     DEPS nimrtc::plugins)
+
+# The split-seam composite (HwCompositeCodec) — pairs an encode-only and a
+# decode-only codec behind the deprecated combined shim.  It lives in the
+# seam layer, so the test does too.
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_hw_composite_codec.cpp
+    DEPS nimrtc::plugins)

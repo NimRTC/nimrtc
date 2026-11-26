@@ -87,6 +87,14 @@ class NIMRTC_API_STABLE IJBFactory;
 class NIMRTC_API_STABLE IAudio3AFactory;
 class NIMRTC_API_STABLE ICodecFactory;
 class NIMRTC_API_STABLE IVideoCodecFactory;
+// The split codec seam (v1.4, remote-desktop plan B1): the encode half
+// and the decode half have their own factory types, so a plugin that
+// implements only one direction registers only that one.  Forward-
+// declared like the other factory types so the registry's
+// TypedRegistry<> field can reference them without pulling the seam
+// header into core (Layout Invariant 1).
+class NIMRTC_API_STABLE IVideoEncoderFactory;
+class NIMRTC_API_STABLE IVideoDecoderFactory;
 class NIMRTC_API_STABLE IVideoSourceFactory;
 class NIMRTC_API_STABLE IVideoCaptureFactory;
 class NIMRTC_API_STABLE IVideoSinkFactory;
@@ -641,6 +649,41 @@ public:
         return video_codec_.list_ids();
     }
 
+    // -- Video Encoder / Video Decoder (the split codec seam) ---------------
+    //
+    // The engine drives the two directions separately: an encoder is
+    // only ever asked to `encode()`, a decoder only ever to `decode()`.
+    // A plugin that implements both registers the *same* id in both
+    // slots; a plugin that implements one registers only that one, and
+    // the engine then has no half for that direction -- which is the
+    // honest answer for an asymmetric deployment (a camera gateway
+    // encodes and never decodes).
+    //
+    // These are *additional* slots, not replacements: the combined
+    // `video_codec_` slot above still exists and still resolves, so a
+    // host that registered only a combined factory keeps working.  The
+    // engine prefers the split slots and falls back to the combined one
+    // when the split ones are empty.
+    void register_video_encoder(std::string_view id,
+                                const plugins::IVideoEncoderFactory* f);
+    [[nodiscard]] const plugins::IVideoEncoderFactory*
+    get_video_encoder(std::string_view id) const {
+        return video_encoder_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string> list_video_encoders() const {
+        return video_encoder_.list_ids();
+    }
+
+    void register_video_decoder(std::string_view id,
+                                const plugins::IVideoDecoderFactory* f);
+    [[nodiscard]] const plugins::IVideoDecoderFactory*
+    get_video_decoder(std::string_view id) const {
+        return video_decoder_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string> list_video_decoders() const {
+        return video_decoder_.list_ids();
+    }
+
     // -- Video Source -------------------------------------------------------
     void register_video_source(std::string_view id,
                                const plugins::IVideoSourceFactory* f);
@@ -1039,6 +1082,11 @@ private:
     // "dtmf".
     TypedRegistry<plugins::IDtmfCodecFactory>    dtmf_{"dtmf"};
     TypedRegistry<plugins::IVideoCodecFactory>   video_codec_{"video-codec"};
+    // The split codec seam (v1.4, remote-desktop plan B1): the encode
+    // half and the decode half have their own registry slots, so the
+    // engine can resolve one direction without instantiating the other.
+    TypedRegistry<plugins::IVideoEncoderFactory> video_encoder_{"video-encoder"};
+    TypedRegistry<plugins::IVideoDecoderFactory> video_decoder_{"video-decoder"};
     TypedRegistry<plugins::IVideoSourceFactory>  video_source_{"video-source"};
     // Remote-desktop plan A1: the capture-*device* seam.  Distinct from
     // the source seam above: a source produces frames, a capture produces
@@ -1277,6 +1325,34 @@ private:
         NIMRTC_UNIQUE_NAME(_reg_video_codec_){                           \
             ::nimrtc::core::PluginRegistry::instance(),                \
             ::nimrtc::core::detail::Registrar::Category::kVideoCodec,     \
+            #id, factory_ptr }
+
+/**
+ * Register the *encode half* of a video codec plugin.
+ *
+ * A plugin that implements both directions registers the same id in
+ * both this macro and NIMRTC_REGISTER_VIDEO_DECODER; a plugin that
+ * implements only one registers only that one.
+ */
+#define NIMRTC_REGISTER_VIDEO_ENCODER(id, factory_ptr)                   \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_encoder_){                         \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoEncoder,  \
+            #id, factory_ptr }
+
+/**
+ * Register the *decode half* of a video codec plugin.
+ *
+ * @see NIMRTC_REGISTER_VIDEO_ENCODER
+ */
+#define NIMRTC_REGISTER_VIDEO_DECODER(id, factory_ptr)                   \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_decoder_){                         \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoDecoder,  \
             #id, factory_ptr }
 
 /** Register a video source plugin by ID and factory pointer. */
@@ -1538,6 +1614,12 @@ class Registrar {
 public:
     enum class Category {
         kTransport, kICETransport, kRTP, kSDP, kJB, kAudio3A, kCodec, kVideoCodec,
+        // v1.4 (remote-desktop plan B1): the split codec seam -- the
+        // encode half and the decode half.  They have their own
+        // categories because a hardware encoder (NVENC) and a hardware
+        // decoder (NVDEC) are different libraries on different devices,
+        // and an asymmetric deployment has only one of them.
+        kVideoEncoder, kVideoDecoder,
         // v1.2.0 (audio pipeline): the two new audio seams -- the
         // codec-side decoder and the pipeline-side receiver.
         kAudioDecoder, kAudioReceiver,
@@ -1641,6 +1723,14 @@ public:
             case Category::kVideoCodec:
                 reg.register_video_codec(id,
                     static_cast<const plugins::IVideoCodecFactory*>(factory));
+                break;
+            case Category::kVideoEncoder:
+                reg.register_video_encoder(id,
+                    static_cast<const plugins::IVideoEncoderFactory*>(factory));
+                break;
+            case Category::kVideoDecoder:
+                reg.register_video_decoder(id,
+                    static_cast<const plugins::IVideoDecoderFactory*>(factory));
                 break;
             case Category::kVideoSource:
                 reg.register_video_source(id,

@@ -48,8 +48,10 @@ namespace nimrtc::h264 {
 
 #if defined(NIMRTC_PLUGINS_AMF_ON) && defined(_WIN32)
 extern bool amf_h264_available() noexcept;
-extern std::unique_ptr<plugins::IVideoCodec>
-make_amf_h264_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_amf_h264_encoder(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoDecoder>
+make_amf_h264_decoder(plugins::VideoCodecConfig cfg);
 #define HAS_AMF 1
 #else
 #define HAS_AMF 0
@@ -57,8 +59,10 @@ make_amf_h264_codec(plugins::VideoCodecConfig cfg);
 
 #if defined(NIMRTC_PLUGINS_QSV_ON)
 extern bool qsv_h264_available() noexcept;
-extern std::unique_ptr<plugins::IVideoCodec>
-make_qsv_h264_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_qsv_h264_encoder(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoDecoder>
+make_qsv_h264_decoder(plugins::VideoCodecConfig cfg);
 #define HAS_QSV 1
 #else
 #define HAS_QSV 0
@@ -66,8 +70,8 @@ make_qsv_h264_codec(plugins::VideoCodecConfig cfg);
 
 #if defined(NIMRTC_PLUGINS_DXVA_ON) && defined(_WIN32)
 extern bool dxva_h264_available() noexcept;
-extern std::unique_ptr<plugins::IVideoCodec>
-make_dxva_h264_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoDecoder>
+make_dxva_h264_decoder(plugins::VideoCodecConfig cfg);
 #define HAS_DXVA 1
 #else
 #define HAS_DXVA 0
@@ -75,8 +79,10 @@ make_dxva_h264_codec(plugins::VideoCodecConfig cfg);
 
 #if defined(NIMRTC_PLUGINS_VAAPI_ON) && defined(__linux__)
 extern bool vaapi_h264_available() noexcept;
-extern std::unique_ptr<plugins::IVideoCodec>
-make_vaapi_h264_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_vaapi_h264_encoder(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoDecoder>
+make_vaapi_h264_decoder(plugins::VideoCodecConfig cfg);
 #define HAS_VAAPI 1
 #else
 #define HAS_VAAPI 0
@@ -84,8 +90,10 @@ make_vaapi_h264_codec(plugins::VideoCodecConfig cfg);
 
 #if defined(NIMRTC_PLUGINS_OPENH264_ON)
 extern bool openh264_h264_available() noexcept;
-extern std::unique_ptr<plugins::IVideoCodec>
-make_openh264_h264_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_openh264_h264_encoder(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoDecoder>
+make_openh264_h264_decoder(plugins::VideoCodecConfig cfg);
 #define HAS_OPENH264 1
 #else
 #define HAS_OPENH264 0
@@ -112,7 +120,7 @@ plugins::VideoEncoderBackend make_stub_encoder_backend() {
     be.available = [](const plugins::VideoCodecConfig&)
                     noexcept -> bool { return true; };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         // The stub adapter is decode-first, but its encode() path also
         // synthesises an IDR-shaped bitstream so the engine loop works.
         return std::make_unique<CodecPluginAdapter>(std::move(cfg));
@@ -132,7 +140,7 @@ plugins::VideoDecoderBackend make_stub_decoder_backend() {
     be.available = [](const plugins::VideoCodecConfig&)
                     noexcept -> bool { return true; };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         // Decoder direction only —the existing adapter is decode-first.
         return std::make_unique<CodecPluginAdapter>(std::move(cfg));
     };
@@ -165,8 +173,8 @@ plugins::VideoEncoderBackend make_openh264_encoder_backend() {
                "available in this build";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_openh264_h264_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_openh264_h264_encoder(std::move(cfg));
     };
     return be;
 }
@@ -188,8 +196,8 @@ plugins::VideoDecoderBackend make_openh264_decoder_backend() {
                "available in this build";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_openh264_h264_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoDecoder> {
+        return make_openh264_h264_decoder(std::move(cfg));
     };
     return be;
 }
@@ -221,7 +229,7 @@ plugins::VideoEncoderBackend make_nvenc_encoder_backend() {
                "the session failed to open";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return nvcodec::make_nvenc_codec(nvcodec::NvCodec::kH264, std::move(cfg));
     };
     return be;
@@ -255,7 +263,7 @@ plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
                "the session failed to open";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         return nvcodec::make_nvdec_codec(nvcodec::NvCodec::kH264, std::move(cfg));
     };
     return be;
@@ -322,7 +330,7 @@ plugins::VideoEncoderBackend make_videotoolbox_encoder_backend() {
         return nvcodec::vt_encoder_unavailable_reason(nvcodec::VtCodec::kH264);
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return nvcodec::make_vt_encoder(nvcodec::VtCodec::kH264, std::move(cfg));
     };
     return be;
@@ -347,7 +355,7 @@ plugins::VideoDecoderBackend make_videotoolbox_decoder_backend() {
         return nvcodec::vt_decoder_unavailable_reason(nvcodec::VtCodec::kH264);
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         return nvcodec::make_vt_decoder(nvcodec::VtCodec::kH264, std::move(cfg));
     };
     return be;
@@ -376,8 +384,32 @@ plugins::VideoEncoderBackend make_vaapi_encoder_backend() {
                "opened, or the driver exposes no H.264 encoder entry point";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_vaapi_h264_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_vaapi_h264_encoder(std::move(cfg));
+    };
+    return be;
+}
+
+plugins::VideoDecoderBackend make_vaapi_decoder_backend() {
+    plugins::VideoDecoderBackend be;
+    be.id             = "vaapi_h264";
+    be.description    = "VA-API H.264 decoder (Linux Intel/AMD)";
+    be.backend        = plugins::HwBackend::Vaapi;
+    be.priority       = 360;
+    be.codec_kind     = plugins::VideoCodecKind::kH264;
+    be.is_hw          = true;
+    be.zero_copy_supported = true;
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return vaapi_h264_available();
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "vaapi: no usable VA-API H.264 decoder on this host — the "
+               "VA-API runtime is absent, no DRM render node could be "
+               "opened, or the driver exposes no H.264 decoder entry point";
+    };
+    be.create = [](plugins::VideoCodecConfig cfg)
+                -> std::unique_ptr<plugins::IVideoDecoder> {
+        return make_vaapi_h264_decoder(std::move(cfg));
     };
     return be;
 }
@@ -412,7 +444,7 @@ plugins::VideoEncoderBackend make_mediacodec_encoder_backend() {
                "available on any host";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return nullptr;   // TODO: wire Android MediaCodec when Android target
     };
     return be;
@@ -442,8 +474,32 @@ plugins::VideoEncoderBackend make_amf_encoder_backend() {
                "encoder component failed to initialise";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_amf_h264_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_amf_h264_encoder(std::move(cfg));
+    };
+    return be;
+}
+
+plugins::VideoDecoderBackend make_amf_decoder_backend() {
+    plugins::VideoDecoderBackend be;
+    be.id             = "amf_h264";
+    be.description    = "AMD AMF H.264 decoder (VCN)";
+    be.backend        = plugins::HwBackend::Amf;
+    be.priority       = 380;
+    be.codec_kind     = plugins::VideoCodecKind::kH264;
+    be.is_hw          = true;
+    be.zero_copy_supported = true;
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return amf_h264_available();
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "amf: no usable AMD AMF H.264 decoder on this host — the AMF "
+               "runtime is absent, no compatible AMD GPU was found, or the "
+               "decoder component failed to initialise";
+    };
+    be.create = [](plugins::VideoCodecConfig cfg)
+                -> std::unique_ptr<plugins::IVideoDecoder> {
+        return make_amf_h264_decoder(std::move(cfg));
     };
     return be;
 }
@@ -472,8 +528,32 @@ plugins::VideoEncoderBackend make_qsv_encoder_backend() {
                "with an H.264 encoder was found";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_qsv_h264_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_qsv_h264_encoder(std::move(cfg));
+    };
+    return be;
+}
+
+plugins::VideoDecoderBackend make_qsv_decoder_backend() {
+    plugins::VideoDecoderBackend be;
+    be.id             = "quicksync_h264";
+    be.description    = "Intel Quick Sync H.264 decoder";
+    be.backend        = plugins::HwBackend::Qsv;
+    be.priority       = 340;
+    be.codec_kind     = plugins::VideoCodecKind::kH264;
+    be.is_hw          = true;
+    be.zero_copy_supported = true;
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return qsv_h264_available();
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "quicksync: no usable Intel Quick Sync H.264 decoder on this "
+               "host — oneVPL / libvpl could not initialise, or no Intel iGPU "
+               "with an H.264 decoder was found";
+    };
+    be.create = [](plugins::VideoCodecConfig cfg)
+                -> std::unique_ptr<plugins::IVideoDecoder> {
+        return make_qsv_h264_decoder(std::move(cfg));
     };
     return be;
 }
@@ -508,8 +588,8 @@ plugins::VideoDecoderBackend make_dxva_decoder_backend() {
                "or activated";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_dxva_h264_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoDecoder> {
+        return make_dxva_h264_decoder(std::move(cfg));
     };
     return be;
 }
@@ -551,6 +631,7 @@ void register_default_video_backends() noexcept {
     reg.register_decoder(make_videotoolbox_decoder_backend());
 #if HAS_VAAPI
     reg.register_encoder(make_vaapi_encoder_backend());
+    reg.register_decoder(make_vaapi_decoder_backend());
 #endif
 
 #ifdef __ANDROID__
@@ -559,10 +640,12 @@ void register_default_video_backends() noexcept {
 
 #if HAS_AMF
     reg.register_encoder(make_amf_encoder_backend());
+    reg.register_decoder(make_amf_decoder_backend());
 #endif
 
 #if HAS_QSV
     reg.register_encoder(make_qsv_encoder_backend());
+    reg.register_decoder(make_qsv_decoder_backend());
 #endif
 
 #if HAS_DXVA

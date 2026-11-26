@@ -260,9 +260,7 @@ TEST(DxvaHardware, DecoderIsDecoderOnlyAndNamesItsBackend) {
     auto codec = be->create(cfg);
     ASSERT_NE(codec, nullptr);
 
-    EXPECT_FALSE(codec->can_encode()) << "DXVA is a decode-only backend";
-    EXPECT_TRUE(codec->can_decode());
-    EXPECT_EQ(codec->kind(), plugins::VideoCodecKind::kH264);
+    // DXVA is a decode-only backend -- the split seam makes that a\n    // *type* fact (IVideoDecoder), not a runtime predicate.\r\n    EXPECT_EQ(codec->kind(), plugins::VideoCodecKind::kH264);
     EXPECT_EQ(codec->codec_name(), "h264");
     EXPECT_EQ(codec->backend_id(), "dxva");
     EXPECT_NE(codec->backend_id(), "software-stub");

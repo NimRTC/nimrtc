@@ -77,6 +77,7 @@
 
 #include <nimrtc/plugins/video_bitrate_controller.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
+#include <nimrtc/plugins/video_codec_view.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_source.hpp>
@@ -146,8 +147,27 @@ struct VideoStream {
 
     // ---- The stream's own plugin instances -----------------------------
 
-    /** The stream's encoder / decoder (both directions). */
-    std::unique_ptr<plugins::IVideoCodec> codec;
+    /** The stream's encoder (the outbound direction).
+     *
+     *  Held by `shared_ptr` for the same reason the engine's own two
+     *  halves are: the **combined fallback**.  A host that registered
+     *  only the deprecated combined factory has no split slot to
+     *  resolve, and the combined instance serves both directions —
+     *  `IVideoCodec` derives from `IVideoEncoder` *and*
+     *  `IVideoDecoder`, so the two handles below can share one control
+     *  block over one instance, and it is destroyed exactly once. */
+    std::shared_ptr<plugins::IVideoEncoder> encoder;
+
+    /** The stream's decoder (the inbound direction). */
+    std::shared_ptr<plugins::IVideoDecoder> decoder;
+
+    /** The borrowed combined view over the two halves above.
+     *
+     *  The stream's *data path* uses the two split halves directly; the
+     *  view exists for the deprecated combined vocabulary (the public
+     *  `StreamView::codec` field, the codec-replacement path).  It
+     *  borrows — the halves above own the state. */
+    std::unique_ptr<plugins::VideoCodecView> codec_view;
 
     /** The stream's RTP packetizer. */
     std::unique_ptr<plugins::IVideoSender> sender;

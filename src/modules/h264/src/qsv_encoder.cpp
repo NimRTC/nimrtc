@@ -670,14 +670,12 @@ bool qsv_h264_available() noexcept {
     return false;
 }
 
-std::unique_ptr<plugins::IVideoCodec> make_qsv_h264_codec(const plugins::VideoCodecConfig& cfg) {
-    if (cfg.mode == plugins::VideoCodecMode::kVideoCodecModeEncoder) {
-        return std::make_unique<QsvEncoder>(cfg);
-    } else if (cfg.mode == plugins::VideoCodecMode::kVideoCodecModeDecoder) {
-        return std::make_unique<QsvDecoder>(cfg);
-    }
-    NIMRTC_LOG_ERROR("QSV H.264: unsupported codec mode");
-    return nullptr;
+std::unique_ptr<plugins::IVideoEncoder> make_qsv_h264_encoder(const plugins::VideoCodecConfig& cfg) {
+    return std::make_unique<QsvEncoder>(cfg);
+}
+
+std::unique_ptr<plugins::IVideoDecoder> make_qsv_h264_decoder(const plugins::VideoCodecConfig& cfg) {
+    return std::make_unique<QsvDecoder>(cfg);
 }
 
 } // namespace qsv_backend
@@ -686,8 +684,12 @@ bool qsv_h264_available() noexcept {
     return qsv_backend::qsv_h264_available();
 }
 
-std::unique_ptr<plugins::IVideoCodec> make_qsv_h264_codec(const plugins::VideoCodecConfig& cfg) {
-    return qsv_backend::make_qsv_h264_codec(cfg);
+std::unique_ptr<plugins::IVideoEncoder> make_qsv_h264_encoder(const plugins::VideoCodecConfig& cfg) {
+    return qsv_backend::make_qsv_h264_encoder(cfg);
+}
+
+std::unique_ptr<plugins::IVideoDecoder> make_qsv_h264_decoder(const plugins::VideoCodecConfig& cfg) {
+    return qsv_backend::make_qsv_h264_decoder(cfg);
 }
 
 } // namespace h264
@@ -702,7 +704,11 @@ bool qsv_h264_available() noexcept {
     return false;
 }
 
-std::unique_ptr<plugins::IVideoCodec> make_qsv_h264_codec(const plugins::VideoCodecConfig&) {
+std::unique_ptr<plugins::IVideoEncoder> make_qsv_h264_encoder(const plugins::VideoCodecConfig&) {
+    return nullptr;
+}
+
+std::unique_ptr<plugins::IVideoDecoder> make_qsv_h264_decoder(const plugins::VideoCodecConfig&) {
     return nullptr;
 }
 

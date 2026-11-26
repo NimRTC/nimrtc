@@ -10,7 +10,8 @@
  *       * id            — short name used in logs / EngineConfig
  *       * available()   — runtime capability probe (driver loaded? HW present?)
  *       * priority()    — higher value wins when multiple backends are usable
- *       * create()      — factory function (returns plugins::IVideoCodec*)
+ *       * create()      — factory function (returns plugins::IVideoEncoder*
+ *                                 or plugins::IVideoDecoder*, per direction)
  *       * backend_kind  — HwBackend enum (for IVideo*::hardware_backend())
  *
  *   - The HwBackendSelector owns a list of backends, sorted by priority.
@@ -54,24 +55,6 @@
 namespace nimrtc::plugins {
 
 // ---------------------------------------------------------------------------
-// The compatibility shim, named from inside the library
-//
-// `IVideoCodec` is the deprecated compatibility shim (remote-desktop plan
-// B1, ADR-015 Decision 3), and this header is the registry seam that
-// hands it out -- the engine resolves the *combined* factory and drives
-// one codec instance in both directions.  So the library has to name
-// the shim here, and naming it trips `-Wdeprecated-declarations`
-// (GCC/Clang) / `C4996` (MSVC).
-//
-// The suppression is scoped to the two backend descriptors and nothing
-// else, so a host that spells the symbol still gets the warning.  The
-// deprecation itself is untouched: it is still scheduled for removal
-// after one MINOR cycle.
-// ---------------------------------------------------------------------------
-
-NIMRTC_SUPPRESS_DEPRECATION_BEGIN
-
-// ---------------------------------------------------------------------------
 // Backend descriptor — a single (id, available, priority, create, kind) entry
 // ---------------------------------------------------------------------------
 
@@ -95,7 +78,7 @@ struct NIMRTC_API_STABLE VideoEncoderBackend {
     std::string_view description;
 
     /// HwBackend kind — propagates into the created codec's
-    /// `IVideoCodec::hardware_backend()`.
+    /// `IVideoEncoder::backend_id()` / `IVideoDecoder::backend_id()`.
     HwBackend backend;
 
     /// Higher = preferred. Hardware backends should be > 100; software
@@ -105,8 +88,8 @@ struct NIMRTC_API_STABLE VideoEncoderBackend {
     /// Selected codec family — selector matches this against cfg.codec.
     VideoCodecKind codec_kind = VideoCodecKind::kH264;
 
-    /// True iff this backend is hardware-accelerated (sets
-    /// `IVideoCodec::is_hardware_accelerated()` on the created instance).
+    /// True iff this backend is hardware-accelerated (the created
+    /// instance reports `is_hardware_accelerated() == true`).
     bool is_hw = false;
 
     /// Runtime probe — should NOT instantiate heavy resources; just
@@ -131,8 +114,15 @@ struct NIMRTC_API_STABLE VideoEncoderBackend {
     std::function<std::string(const VideoCodecConfig&)> unavailable_reason;
 
     /// Factory function — must return a fully-constructed (but not yet
-    /// `open()`-ed) IVideoCodec instance. Selector owns lifetime.
-    std::function<std::unique_ptr<IVideoCodec>(VideoCodecConfig)> create;
+    /// `open()`-ed) IVideoEncoder instance. Selector owns lifetime.
+    ///
+    /// The return type is the *encode half* of the split codec seam
+    /// (`IVideoEncoder`), not the old combined `IVideoCodec`.  That is
+    /// what makes the direction a compile-time fact: a decoder-only
+    /// backend (DXVA, NVDEC) cannot be wired into the encoder table,
+    /// and an encoder-only backend (NVENC) cannot be wired into the
+    /// decoder table.
+    std::function<std::unique_ptr<IVideoEncoder>(VideoCodecConfig)> create;
 
     // ---- Zero-copy capability (R3-batch) ----------------------------------
     //
@@ -160,9 +150,16 @@ struct NIMRTC_API_STABLE VideoEncoderBackend {
 };
 
 /**
- * @brief Same as VideoEncoderBackend but for decoders. (Currently the same
- *        IVideoCodec interface covers both directions, so we share `create`,
- *        but the selector maintains two separate tables for clarity.)
+ * @brief Same as VideoEncoderBackend but for decoders.
+ *
+ * The two tables are separate because the two directions are separate:
+ * a hardware encoder (NVENC) and a hardware decoder (NVDEC) are
+ * different libraries on different devices, and an asymmetric deployment
+ * (a camera gateway encodes and never decodes; a viewer decodes and
+ * never encodes) does not have the other half at all.
+ *
+ * `create` returns an `IVideoDecoder`, so a decoder backend cannot be
+ * handed an encoder by construction.
  */
 struct NIMRTC_API_STABLE VideoDecoderBackend {
     std::string_view id;
@@ -189,10 +186,10 @@ struct NIMRTC_API_STABLE VideoDecoderBackend {
     /// human-readable explanation of why this decoder is not usable.
     std::function<std::string(const VideoCodecConfig&)> unavailable_reason;
 
-    std::function<std::unique_ptr<IVideoCodec>(VideoCodecConfig)> create;
+    /// Factory function — must return a fully-constructed (but not yet
+    /// `open()`-ed) IVideoDecoder instance. Selector owns lifetime.
+    std::function<std::unique_ptr<IVideoDecoder>(VideoCodecConfig)> create;
 };
-
-NIMRTC_SUPPRESS_DEPRECATION_END
 
 // ---------------------------------------------------------------------------
 // Selector — ordered list of backends + selection policy

@@ -791,7 +791,8 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         return core::kEngineInvalidParam;
     }
 
-    if (!config_.video_codec_name.empty() && !video_codec_) {
+    if (!config_.video_codec_name.empty() && !video_encoder_ &&
+            !video_decoder_) {
         plugins::VideoCodecConfig cfg{};
         cfg.width = config_.video_width;
         cfg.height = config_.video_height;
@@ -830,22 +831,123 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         cfg.content_hint = config_.video_content_hint;
         cfg.color_range  = config_.video_color_range;
         cfg.color_matrix = config_.video_color_matrix;
-        const bool codec_created = pal::make_plugin<&pal::resolve_video_codec>(
-            config_.video_codec_name,
-            video_codec_,
-            std::move(cfg),
-            {.err_open_failed = core::kVideoCodecOpenFailed,
-             .err_missing = core::kVideoCodecPluginMissing,
-             .open_fail_mode = pal::PluginFailureMode::Error,
-             .missing_mode = pal::PluginFailureMode::Error,
-             .on_error = on_error_});
+        // The codec seam is split (remote-desktop plan B1): the engine
+        // resolves an *encoder* and a *decoder* separately, from the two
+        // split registry slots.  The two halves are independent — a
+        // deployment that only sends only needs the encoder, and one
+        // that only receives only needs the decoder.
+        //
+        // **The combined fallback.**  The split slots are *additional*,
+        // not replacements: a host that registered only the deprecated
+        // combined factory (which the seam still promises to support)
+        // has no split slot to resolve.  For that host the engine
+        // creates **one** combined instance and presents it as both
+        // halves — `IVideoCodec` derives from `IVideoEncoder` *and*
+        // `IVideoDecoder`, so the two `shared_ptr`s below share one
+        // control block over one instance, and it is destroyed exactly
+        // once.  The combined instance is opened once, too: the encoder
+        // half opens it, and the decoder half recognises that it is
+        // already open (see `IVideoCodec::open()`'s idempotence).
+        const auto* encoder_factory =
+            pal::resolve_video_encoder(config_.video_codec_name);
+        const auto* decoder_factory =
+            pal::resolve_video_decoder(config_.video_codec_name);
+
+        // The combined factory is the fallback source.  It is only
+        // consulted when a split slot is empty.
+        const auto* combined_factory =
+            pal::resolve_video_codec(config_.video_codec_name);
+
+        bool encoder_created = false;
+        bool decoder_created = false;
+
+        if (encoder_factory != nullptr) {
+            encoder_created =
+                pal::make_plugin<plugins::IVideoEncoder, plugins::VideoCodecConfig&,
+                                 plugins::IVideoEncoderFactory,
+                                 std::nullptr_t,
+                                 &plugins::IVideoEncoderFactory::create_encoder,
+                                 std::shared_ptr<plugins::IVideoEncoder>>(
+                    encoder_factory,
+                    config_.video_codec_name,
+                    video_encoder_,
+                    cfg,
+                    {.err_open_failed = core::kVideoCodecOpenFailed,
+                     .err_missing = core::kVideoCodecPluginMissing,
+                     .open_fail_mode = pal::PluginFailureMode::Error,
+                     .missing_mode = pal::PluginFailureMode::Error,
+                     .on_error = on_error_});
+        }
+
+        if (decoder_factory != nullptr) {
+            decoder_created =
+                pal::make_plugin<plugins::IVideoDecoder, plugins::VideoCodecConfig&,
+                                 plugins::IVideoDecoderFactory,
+                                 std::nullptr_t,
+                                 &plugins::IVideoDecoderFactory::create_decoder,
+                                 std::shared_ptr<plugins::IVideoDecoder>>(
+                    decoder_factory,
+                    config_.video_codec_name,
+                    video_decoder_,
+                    cfg,
+                    {.err_open_failed = core::kVideoCodecOpenFailed,
+                     .err_missing = core::kVideoCodecPluginMissing,
+                     .open_fail_mode = pal::PluginFailureMode::Error,
+                     .missing_mode = pal::PluginFailureMode::Error,
+                     .on_error = on_error_});
+        }
+
+        // ---- The combined fallback --------------------------------------
+        //
+        // A host that registered only the deprecated combined factory
+        // still has to work — that is the whole point of keeping the
+        // shim.  The combined instance serves both directions, so it is
+        // created once and shared.
+        if ((!encoder_created || !decoder_created) && combined_factory != nullptr) {
+            std::shared_ptr<plugins::IVideoCodec> combined{
+                combined_factory->create(cfg)};
+            if (combined) {
+                if (!encoder_created) {
+                    video_encoder_ = combined;   // the upcast keeps the
+                    encoder_created = true;      // one control block
+                }
+                if (!decoder_created) {
+                    video_decoder_ = combined;
+                    decoder_created = true;
+                }
+                // The combined instance is opened once — by the encoder
+                // half, which is the one that owns the outbound stream.
+                // `IVideoCodec::open()` is idempotent, so the second
+                // half's `open()` is a no-op.
+                if (combined->open() != plugins::kOk) {
+                    core::log::Logger::instance().error(
+                        std::string{"engine: the video codec plugin '"} +
+                        config_.video_codec_name + "' could not be opened");
+                    if (on_error_) {
+                        on_error_(core::kVideoCodecOpenFailed,
+                                  "the video codec plugin could not be opened");
+                    }
+                    video_encoder_.reset();
+                    video_decoder_.reset();
+                    encoder_created = false;
+                    decoder_created = false;
+                }
+            }
+        }
+
+        const bool codec_created = encoder_created || decoder_created;
+
+        // The borrowed combined view over the two halves — it is what the
+        // deprecated `video_codec()` accessor hands out.
+        video_codec_view_ = std::make_unique<plugins::VideoCodecView>(
+            video_encoder_.get(), video_decoder_.get(), cfg);
 
         // Plan B2: the codec could not be created.  When the host pinned
         // a backend class, the reason is almost always "no backend of
         // that class exists here" — and that deserves its own message,
         // because the generic "plugin missing" wording sends the reader
         // looking for a *registration* problem that does not exist.
-        if (!codec_created && !video_codec_ &&
+        if (!codec_created && !video_encoder_ && !video_decoder_ &&
             backend_pref != plugins::VideoCodecBackendPreference::kAuto) {
             const std::string msg =
                 std::string{"engine: the video codec backend class '"} +
@@ -905,8 +1007,10 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // resolved, so the failure is reported at the right place in the
     // sequence: the session does not start with a codec that cannot
     // deliver what was asked for.
-    if (video_codec_) {
-        const plugins::VideoCodecCapabilities caps = video_codec_->capabilities();
+    if (video_encoder_ || video_decoder_) {
+        const plugins::VideoCodecCapabilities caps =
+            video_encoder_ ? video_encoder_->capabilities()
+                           : video_decoder_->capabilities();
         const std::uint32_t want_w = config_.video_width;
         const std::uint32_t want_h = config_.video_height;
         const std::uint32_t want_fps = config_.video_fps;
@@ -970,7 +1074,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // It is diagnosed *outside* the capability check: the capability
     // check only runs when there *is* a codec, and this is precisely
     // the case where there is none.
-    if (video_codec_ == nullptr &&
+    if (video_encoder_ == nullptr && video_decoder_ == nullptr &&
         backend_pref == plugins::VideoCodecBackendPreference::kHardware) {
         const std::string msg =
             std::string{"engine: the video codec policy is 'hardware', "
@@ -989,8 +1093,9 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // *explicit* — `kind()` first, the plugin id only as a fallback,
     // and when neither yields a family the engine says so instead of
     // continuing with `kUnknown`.
-    if (video_codec_) {
-        const plugins::VideoCodecKind kind = video_codec_->kind();
+    if (video_encoder_ || video_decoder_) {
+        const plugins::VideoCodecKind kind =
+            video_encoder_ ? video_encoder_->kind() : video_decoder_->kind();
         const detail::VideoCodecFamily from_plugin =
             detail::codec_family_from_plugin_id(config_.video_codec_name);
         detail::VideoCodecFamily from_kind =
@@ -1101,7 +1206,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             // The sender's arbiter pushes the incremental request to the
             // encoder, so it needs the encoder's pointer.  The codec
             // plugin was created earlier in this function, so it exists.
-            video_sender_->set_incremental_encoder(video_codec_.get());
+            video_sender_->set_incremental_encoder(video_encoder_.get());
         }
     }
 
@@ -1132,7 +1237,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     {
         detail::VideoRenderPathInputs inputs;
         inputs.decoder_zero_copy =
-            video_codec_ && video_codec_->supports_zero_copy_decode();
+            video_decoder_ && video_decoder_->supports_zero_copy_decode();
         inputs.sink_gpu_render = video_sink_ && video_sink_->supports_gpu_render();
         inputs.sink_cpu_render = video_sink_ && video_sink_->supports_cpu_render();
 
@@ -1160,7 +1265,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             // cannot actually deliver a surface — the path is
             // downgraded to the CPU staging path rather than failing
             // on every frame.
-            impl_->video_state.video_decode_pool = video_codec_->output_pool();
+            impl_->video_state.video_decode_pool = video_decoder_->output_pool();
             if (impl_->video_state.video_decode_pool) {
                 core::log::Logger::instance().info(
                     "engine: the decoded-frame delivery path is the GPU "
@@ -1254,7 +1359,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 }
 
                 // Decode + render if the codec and sink are available.
-                if (!video_codec_ || !video_sink_) return;
+                if (!video_decoder_ || !video_sink_) return;
 
                 // ---- The render clock (remote-desktop plan E5) ---------------
                 //
@@ -1391,7 +1496,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 //
                 // Plan J1: the decode stage's own cost.
                 const auto decode_start = std::chrono::steady_clock::now();
-                const auto decode_rc = video_codec_->decode(enc, raw_out, nullptr);
+                const auto decode_rc = video_decoder_->decode(enc, raw_out, nullptr);
                 const auto decode_end = std::chrono::steady_clock::now();
                 impl_->video_state.stage_timings.record(
                     Stage::kDecode,
@@ -1573,7 +1678,7 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
         const plugins::EncodedVideoFrame& enc,
         std::int64_t capture_ts_us,
         std::int64_t present_at_us) noexcept {
-    if (!video_codec_ || !video_sink_) return plugins::kErrNotReady;
+    if (!video_decoder_ || !video_sink_) return plugins::kErrNotReady;
 
     // The surface comes from the codec's own output pool — the codec
     // knows the native geometry and the backend-specific allocation
@@ -1583,7 +1688,8 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
         impl_->video_state.video_decode_pool;
     if (!pool) return plugins::kErrUnsupported;
 
-    const plugins::VideoCodecConfig codec_cfg = video_codec_->config();
+    const plugins::VideoCodecConfig codec_cfg =
+        video_decoder_ ? video_decoder_->config() : plugins::VideoCodecConfig{};
     const std::uint32_t w = codec_cfg.width;
     const std::uint32_t h = codec_cfg.height;
     if (w == 0 || h == 0) return plugins::kErrUnsupported;
@@ -1601,7 +1707,7 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
     // Plan J1: the GPU decode's own cost.
     const auto gpu_decode_start = std::chrono::steady_clock::now();
     const plugins::Status decode_rc =
-        video_codec_->decode_zero_copy(enc, *surface);
+        video_decoder_->decode_zero_copy(enc, *surface);
     impl_->video_state.stage_timings.record(
         Stage::kDecode,
         static_cast<std::uint64_t>(
@@ -1664,7 +1770,9 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     close_all(video_sink_);
     close_all(video_receiver_);
     close_all(video_sender_);
-    close_all(video_codec_);
+    close_all(video_encoder_);
+    close_all(video_decoder_);
+    video_codec_view_.reset();
     // Remote-desktop plan D1: the rate controller closes with the rest
     // of the video plugins.
     close_all(video_bitrate_controller_);
@@ -2082,7 +2190,7 @@ void NimRTCEngine::stop_video() noexcept {
 plugins::Status NimRTCEngine::send_video(
     const plugins::VideoSourceFrame& frame) noexcept {
     if (!is_open()) return plugins::kErrNotReady;
-    if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
+    if (!video_encoder_ || !video_sender_) return plugins::kErrNotReady;
     return encode_and_send_video_frame(frame);
 }
 
@@ -2104,7 +2212,7 @@ plugins::Status NimRTCEngine::send_video(
 
 void NimRTCEngine::apply_video_encoder_params(
     const plugins::VideoSourceFrame& frame) noexcept {
-    if (!video_codec_) return;
+    if (!video_encoder_) return;
 
     auto& vstate = impl_->video_state;
 
@@ -2124,9 +2232,10 @@ void NimRTCEngine::apply_video_encoder_params(
     // plan item D1–D4, in M3), so the codec's current value *is* the
     // value in force.  Reading it back keeps this function from
     // clobbering a bitrate the host set on the codec directly.
-    in.bitrate_bps = video_codec_->config().bitrate_bps;
+    in.bitrate_bps = video_encoder_ ? video_encoder_->config().bitrate_bps : 0;
     in.keyframe_interval = 60;
-    in.pixel_format = video_codec_->config().pixel_format;
+    in.pixel_format = video_encoder_ ? video_encoder_->config().pixel_format
+                                       : plugins::VideoPixelFormat::kI420;
     in.content_hint = config_.video_content_hint;
     // The colour description comes from the *frame*: the picture's own
     // colour description is what the encoder has to code (plan C5).
@@ -2210,7 +2319,8 @@ void NimRTCEngine::apply_video_encoder_params(
         vstate.video_encoder_params_set &&
         detail::video_params_need_restart(vstate.video_encoder_params, wanted);
 
-    const plugins::Status rc = video_codec_->set_params(wanted);
+    const plugins::Status rc = video_encoder_ ? video_encoder_->set_params(wanted)
+                                                 : plugins::kErrUnsupported;
     if (rc != plugins::kOk) {
         core::log::Logger::instance().warn(
             "engine: the video codec rejected the parameter set "
@@ -2236,7 +2346,7 @@ void NimRTCEngine::apply_video_encoder_params(
     plugins::Status NimRTCEngine::encode_and_send_video_frame(
     const plugins::VideoSourceFrame& frame) noexcept {
     if (!is_open()) return plugins::kErrNotReady;
-    if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
+    if (!video_encoder_ || !video_sender_) return plugins::kErrNotReady;
 
     // ---- The parameter set (remote-desktop plan B12 / B13) ---------------
     //
@@ -2289,7 +2399,8 @@ void NimRTCEngine::apply_video_encoder_params(
     const bool surface_is_capture_contract =
         frame.capture_surface_contract && frame_has_gpu;
     const bool has_cpu_pixels  = frame.plane_y != nullptr;
-    const bool zero_copy_capable = video_codec_->supports_zero_copy_encode();
+    const bool zero_copy_capable =
+        video_encoder_ && video_encoder_->supports_zero_copy_encode();
 
     // Translate plugins::VideoSourceFrame -> plugins::VideoFrame for the codec.
     //
@@ -2345,7 +2456,7 @@ void NimRTCEngine::apply_video_encoder_params(
                                        frame.format);
 
             const plugins::Status zc_rc =
-                video_codec_->encode_zero_copy(gpu, encoded);
+                video_encoder_->encode_zero_copy(gpu, encoded);
             if (zc_rc == plugins::kOk) {
                 encoded_ok = true;
                 ++impl_->video_state.video_zero_copy_frames;
@@ -2395,7 +2506,7 @@ void NimRTCEngine::apply_video_encoder_params(
     if (!encoded_ok) {
         // Codec-facing pixel format comes from the codec's own config
         // (I420 for every backend today).
-        const auto codec_fmt = video_codec_->config().pixel_format;
+        const auto codec_fmt = video_encoder_->config().pixel_format;
         // Plan J1: the conversion stage — the colour transform and the
         // copy the engine does to get the source's pixels into a
         // codec-facing buffer.  On the zero-copy path this stage does
@@ -2452,7 +2563,7 @@ void NimRTCEngine::apply_video_encoder_params(
         std::uint64_t encode_ns = 0;
         {
             const auto enc_start = std::chrono::steady_clock::now();
-            const auto enc_rc = video_codec_->encode(raw,
+            const auto enc_rc = video_encoder_->encode(raw,
                                                      impl_->scratch.video_enc_buf.data(),
                                                      impl_->scratch.video_enc_buf.capacity(),
                                                      encoded);
@@ -2471,7 +2582,7 @@ void NimRTCEngine::apply_video_encoder_params(
                 }
                 impl_->scratch.video_enc_buf.reserve(needed);
                 const auto retry_start = std::chrono::steady_clock::now();
-                const auto retry_rc = video_codec_->encode(raw,
+                const auto retry_rc = video_encoder_->encode(raw,
                                                           impl_->scratch.video_enc_buf.data(),
                                                           impl_->scratch.video_enc_buf.capacity(),
                                                           encoded);
@@ -2583,8 +2694,8 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
             video_sender_->take_keyframe_requests();
         if (keyframe_requests > 0) {
             impl_->video_state.video_keyframes_applied += keyframe_requests;
-            if (video_codec_) {
-                (void)video_codec_->force_keyframe();
+            if (video_encoder_) {
+                (void)video_encoder_->force_keyframe();
             }
         }
     }
@@ -2805,7 +2916,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
 // ---------------------------------------------------------------------------
 
 void NimRTCEngine::retry_pending_keyframe() noexcept {
-    if (!video_sender_ || !video_codec_) return;
+    if (!video_sender_ || !video_encoder_) return;
 
     // The limiter *defers* a request that arrives too soon after the
     // last one, and it **holds** it rather than dropping it: the peer
@@ -2829,7 +2940,7 @@ void NimRTCEngine::retry_pending_keyframe() noexcept {
         video_sender_->take_keyframe_requests();
     if (keyframe_requests > 0) {
         impl_->video_state.video_keyframes_applied += keyframe_requests;
-        (void)video_codec_->force_keyframe();
+        (void)video_encoder_->force_keyframe();
     }
 }
 
@@ -3415,8 +3526,8 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // zero-copy path, how many were staged through the CPU) are the
     // engine's own, because only the engine knows which path a frame
     // took.
-    if (video_codec_) {
-        const plugins::VideoCodecStats cs = video_codec_->stats();
+    if (video_encoder_) {
+        const plugins::VideoCodecStats cs = video_encoder_->stats();
         out.video_codec_backend_id     = cs.backend_id;
         out.video_codec_hardware       = cs.hardware;
         out.video_codec_bitrate_bps    = cs.configured_bitrate_bps;
@@ -3572,14 +3683,19 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // The codec knows which backend it is, whether that backend is
     // hardware, and how long its encodes take.  The engine reports the
     // answers rather than guessing them from the plugin id.
-    if (video_codec_) {
-        out.video_codec_backend = std::string{video_codec_->backend_id()};
-        out.video_codec_hardware_accelerated = video_codec_->is_hardware_accelerated();
+    if (video_encoder_ || video_decoder_) {
+        out.video_codec_backend =
+            std::string{video_encoder_ ? video_encoder_->backend_id()
+                                   : video_decoder_->backend_id()};
+        out.video_codec_hardware_accelerated =
+            video_encoder_ ? video_encoder_->is_hardware_accelerated()
+                          : video_decoder_->is_hardware_accelerated();
         out.video_codec_backend_preference =
             std::string{plugins::video_codec_backend_preference_name(
                 impl_->video_state.video_codec_backend_preference)};
 
-        const plugins::VideoCodecStats cs = video_codec_->stats();
+        const plugins::VideoCodecStats cs =
+            video_encoder_ ? video_encoder_->stats() : video_decoder_->stats();
         out.video_codec_frames_zero_copy = cs.frames_encoded_zero_copy;
         out.video_codec_frames_staged   = cs.frames_encoded_staged;
         out.video_codec_keyframes       = cs.keyframes_encoded;

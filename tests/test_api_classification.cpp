@@ -342,7 +342,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - nvcodec/nv_codec_kind.hpp (the codec descriptor table)
     //     - nvcodec/nv_backends.hpp (the codec-generic NVENC / NVDEC
     //       entry points)
-    //     - nvcodec/hw_composite_codec.hpp (the encoder+decoder adapter)
+    //     - plugins/hw_composite_codec.hpp (the encoder+decoder adapter)
     //
     // v1.3 bump: +6 public headers (126 -> 132) for the H.265 and AV1
     //   codec modules (video plan C4 / C8) — the codec-specific halves
@@ -370,7 +370,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - nvcodec/nv_codec_kind.hpp (the codec descriptor table)
     //     - nvcodec/nv_backends.hpp (the codec-generic NVENC / NVDEC
     //       entry points)
-    //     - nvcodec/hw_composite_codec.hpp (the encoder+decoder adapter)
+    //     - plugins/hw_composite_codec.hpp (the encoder+decoder adapter)
     //
     // v1.3 bump: +2 public headers (125 -> 127) for the H.265 / AV1 RTP
     //   payload formats (video plan C4 / C6):
@@ -672,11 +672,18 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   - video_sync/video_sync.hpp (the module's public API -- the
     //     registration entry point the default-registrar table calls)
     //
+    // v1.3 bump: +1 public header (196 -> 197) for the *borrowed* combined
+    //   view over the split codec seam (remote-desktop plan B1).  The
+    //   owning composite (`plugins/hw_composite_codec.hpp`) already
+    //   counted; this one is the non-owning counterpart the engine hands
+    //   out through the deprecated `Engine::video_codec()` accessor:
+    //     - plugins/video_codec_view.hpp (the borrowed encoder+decoder view)
+    //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 196;
+    constexpr std::size_t kBaselineHeaderCount = 197;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -1161,14 +1161,10 @@ bool VaapiDecoder::decode(const plugins::EncodedVideoFrame& encoded,
 // IVideoCodec wrappers
 // ===========================================================================
 
-class VaapiEncoderCodec : public plugins::IVideoCodec {
+class VaapiEncoderCodec : public plugins::IVideoEncoder {
 public:
     explicit VaapiEncoderCodec(plugins::VideoCodecConfig cfg)
         : cfg_(std::move(cfg)) {}
-
-    bool can_encode() const noexcept override { return true; }
-    bool can_decode() const noexcept override { return false; }
-
     plugins::VideoCodecKind kind() const noexcept override {
         return plugins::VideoCodecKind::kH264;
     }
@@ -1207,13 +1203,6 @@ public:
         }
         return plugins::kOk;
     }
-
-    plugins::Status decode(const plugins::EncodedVideoFrame&,
-                          plugins::VideoFrame&,
-                          std::uint8_t* const*) noexcept override {
-        return plugins::kErrUnsupported;
-    }
-
     plugins::Status force_keyframe() noexcept override {
         // Will be picked up on next encode
         return plugins::kOk;
@@ -1233,14 +1222,10 @@ private:
     bool opened_ = false;
 };
 
-class VaapiDecoderCodec : public plugins::IVideoCodec {
+class VaapiDecoderCodec : public plugins::IVideoDecoder {
 public:
     explicit VaapiDecoderCodec(plugins::VideoCodecConfig cfg)
         : cfg_(std::move(cfg)) {}
-
-    bool can_encode() const noexcept override { return false; }
-    bool can_decode() const noexcept override { return true; }
-
     plugins::VideoCodecKind kind() const noexcept override {
         return plugins::VideoCodecKind::kH264;
     }
@@ -1260,13 +1245,6 @@ public:
         decoder_ = VaapiDecoder{};
         opened_ = false;
     }
-
-    plugins::Status encode(const plugins::VideoFrame&,
-                          std::uint8_t*, std::size_t,
-                          plugins::EncodedVideoFrame&) noexcept override {
-        return plugins::kErrUnsupported;
-    }
-
     plugins::Status decode(const plugins::EncodedVideoFrame& encoded,
                           plugins::VideoFrame& raw_out,
                           std::uint8_t* const* output_buffers) noexcept override {
@@ -1389,10 +1367,16 @@ bool vaapi_h264_available() noexcept {
     }
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_vaapi_h264_codec(plugins::VideoCodecConfig cfg) {
-    // Return an encoder codec (supports encode)
+std::unique_ptr<plugins::IVideoEncoder>
+make_vaapi_h264_encoder(plugins::VideoCodecConfig cfg) {
+    // The encoder half of the VA-API backend.
     return std::make_unique<vaapi_backend::VaapiEncoderCodec>(std::move(cfg));
+}
+
+std::unique_ptr<plugins::IVideoDecoder>
+make_vaapi_h264_decoder(plugins::VideoCodecConfig cfg) {
+    // The decoder half of the VA-API backend.
+    return std::make_unique<vaapi_backend::VaapiDecoderCodec>(std::move(cfg));
 }
 
 } // namespace nimrtc::h264
@@ -1408,8 +1392,13 @@ bool vaapi_h264_available() noexcept {
     return false;
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_vaapi_h264_codec(plugins::VideoCodecConfig) {
+std::unique_ptr<plugins::IVideoEncoder>
+make_vaapi_h264_encoder(plugins::VideoCodecConfig) {
+    return nullptr;
+}
+
+std::unique_ptr<plugins::IVideoDecoder>
+make_vaapi_h264_decoder(plugins::VideoCodecConfig) {
     return nullptr;
 }
 

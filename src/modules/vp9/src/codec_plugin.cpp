@@ -25,6 +25,8 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/vp9/hw_backends.hpp>
 
+// The combined `IVideoCodec` view of a split encoder/decoder pair.
+#include <nimrtc/plugins/hw_composite_codec.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 
 namespace nimrtc::vp9 {
@@ -254,35 +256,121 @@ std::uint8_t CodecPluginAdapter::payload_type() const noexcept {
 // Vp9PluginFactory
 // ---------------------------------------------------------------------------
 
-plugins::IVideoCodec* Vp9PluginFactory::create(plugins::VideoCodecConfig cfg) const {
-    // Delegate to the backend selector.  On hosts where the optional
-    // libvpx row is not compiled in, the selector returns the stub
-    // backend (which this very file implements).
+plugins::IVideoEncoder* Vp9PluginFactory::create_encoder(
+        plugins::VideoCodecConfig cfg) const {
+    // The encoder table is consulted on its own: NVENC is an encoder,
+    // NVDEC is a decoder, and neither can serve the other's direction.
+    // That separation is the whole point of the split seam.
+    std::unique_ptr<plugins::IVideoEncoder> encoder;
     const plugins::VideoEncoderBackend* enc_be = select_encoder_backend(cfg);
     if (enc_be && enc_be->create) {
-        auto codec = enc_be->create(cfg);
-        if (codec) {
+        encoder = enc_be->create(cfg);
+        if (encoder) {
+            const std::string hw_str = enc_be->is_hw ? "yes" : "no";
+            const std::string zc_str = enc_be->zero_copy_supported ? "yes" : "no";
+            const std::string id_str{enc_be->id};
+            const std::string be_str{plugins::hw_backend_name(enc_be->backend)};
+            core::log::Logger::instance().info(
+                std::string{"vp9: selected encoder backend '"} + id_str +
+                "' (" + be_str + ", hw=" + hw_str +
+                ", zero_copy=" + zc_str + ")");
+        }
+    }
+
+    if (!encoder) {
+        // Last-resort fallback (the selector normally always returns at
+        // least the stub row).
+        core::log::Logger::instance().warn(
+            "vp9: no encoder backend available — falling back to the "
+            "software stub encoder");
+        return new CodecPluginAdapter(std::move(cfg));
+    }
+    return encoder.release();
+}
+
+plugins::IVideoDecoder* Vp9PluginFactory::create_decoder(
+        plugins::VideoCodecConfig cfg) const {
+    // The decoder table is consulted on its own.
+    std::unique_ptr<plugins::IVideoDecoder> decoder;
+    const plugins::VideoDecoderBackend* dec_be = select_decoder_backend(cfg);
+    if (dec_be && dec_be->create) {
+        decoder = dec_be->create(cfg);
+        if (decoder) {
+            const std::string id_str{dec_be->id};
+            const std::string be_str{plugins::hw_backend_name(dec_be->backend)};
+            core::log::Logger::instance().info(
+                std::string{"vp9: selected decoder backend '"} + id_str +
+                "' (" + be_str + ")");
+        }
+    }
+
+    if (!decoder) {
+        core::log::Logger::instance().warn(
+            "vp9: no decoder backend available — falling back to the "
+            "software stub decoder");
+        return new CodecPluginAdapter(std::move(cfg));
+    }
+    return decoder.release();
+}
+
+plugins::IVideoCodec* Vp9PluginFactory::create(plugins::VideoCodecConfig cfg) const {
+    // The combined seam, kept for source compatibility with a host that
+    // predates the split.
+    //
+    // The two halves are created *independently* — the encoder table and
+    // the decoder table are separate, and a hardware encoder (NVENC) is
+    // not a hardware decoder (NVDEC).
+    std::unique_ptr<plugins::IVideoEncoder> encoder;
+    std::unique_ptr<plugins::IVideoDecoder> decoder;
+
+    const plugins::VideoEncoderBackend* enc_be = select_encoder_backend(cfg);
+    if (enc_be && enc_be->create) {
+        encoder = enc_be->create(cfg);
+        if (encoder) {
             const std::string id_str{enc_be->id};
             const std::string be_str{plugins::hw_backend_name(enc_be->backend)};
             core::log::Logger::instance().info(
                 std::string{"vp9: selected encoder backend '"} + id_str +
                 "' (" + be_str + ", hw=" +
                 (enc_be->is_hw ? "yes" : "no") + ")");
-            return codec.release();
+        }
+    }
+
+    const plugins::VideoDecoderBackend* dec_be = select_decoder_backend(cfg);
+    if (dec_be && dec_be->create) {
+        decoder = dec_be->create(cfg);
+        if (decoder) {
+            const std::string id_str{dec_be->id};
+            const std::string be_str{plugins::hw_backend_name(dec_be->backend)};
+            core::log::Logger::instance().info(
+                std::string{"vp9: selected decoder backend '"} + id_str +
+                "' (" + be_str + ")");
         }
     }
 
     // The backend preference could not be satisfied (plan B2).
-    if (cfg.backend_preference != plugins::VideoCodecBackendPreference::kAuto) {
+    if (!encoder && !decoder &&
+        cfg.backend_preference != plugins::VideoCodecBackendPreference::kAuto) {
         core::log::Logger::instance().error(
             "vp9: no codec backend is available on this machine — the "
             "requested backend class cannot be satisfied");
         return nullptr;
     }
 
-    // Last-resort fallback (the selector should always return at least
-    // the stub).
-    return new CodecPluginAdapter(std::move(cfg));
+    if (!encoder && !decoder) {
+        // Last-resort fallback (the selector should always return at least
+        // the stub).
+        return new CodecPluginAdapter(std::move(cfg));
+    }
+
+    // The two halves are paired.  `HwCompositeCodec` is the combined
+    // `IVideoCodec` view of a split pair, and it accepts a null half.
+    auto* composite = new plugins::HwCompositeCodec(std::move(cfg),
+                                                    std::move(encoder),
+                                                    std::move(decoder));
+    core::log::Logger::instance().info(
+        "vp9: combined the encoder and the decoder into a composite codec");
+    return composite;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +386,10 @@ void do_register_default_plugins() noexcept {
             // EngineConfig::video_codec_name == "vp9" picks it up.
             static nimrtc::vp9::Vp9PluginFactory s_factory{};
             nimrtc::core::PluginRegistry::instance().register_video_codec(
+                std::string_view{s_factory.id()}, &s_factory);
+            nimrtc::core::PluginRegistry::instance().register_video_encoder(
+                std::string_view{s_factory.id()}, &s_factory);
+            nimrtc::core::PluginRegistry::instance().register_video_decoder(
                 std::string_view{s_factory.id()}, &s_factory);
             // 2. Populate the per-platform HW backend table.
             nimrtc::vp9::register_default_video_backends();

@@ -64,18 +64,18 @@ namespace nimrtc::h265 {
 
 extern bool amf_h265_available() noexcept;
 extern std::string amf_h265_unavailable_reason();
-extern std::unique_ptr<plugins::IVideoCodec>
-make_amf_h265_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_amf_h265_encoder(plugins::VideoCodecConfig cfg);
 
 extern bool vaapi_h265_available() noexcept;
 extern std::string vaapi_h265_unavailable_reason();
-extern std::unique_ptr<plugins::IVideoCodec>
-make_vaapi_h265_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_vaapi_h265_encoder(plugins::VideoCodecConfig cfg);
 
 extern bool qsv_h265_available() noexcept;
 extern std::string qsv_h265_unavailable_reason();
-extern std::unique_ptr<plugins::IVideoCodec>
-make_qsv_h265_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_qsv_h265_encoder(plugins::VideoCodecConfig cfg);
 
 namespace {
 
@@ -100,7 +100,7 @@ plugins::VideoEncoderBackend make_stub_encoder_backend() {
         return true;
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return std::make_unique<CodecPluginAdapter>(std::move(cfg));
     };
     return be;
@@ -119,7 +119,7 @@ plugins::VideoDecoderBackend make_stub_decoder_backend() {
         return true;
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         return std::make_unique<CodecPluginAdapter>(std::move(cfg));
     };
     return be;
@@ -150,7 +150,7 @@ plugins::VideoEncoderBackend make_nvenc_encoder_backend() {
                "or the session failed to open";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return nvcodec::make_nvenc_codec(nvcodec::NvCodec::kH265, std::move(cfg));
     };
     return be;
@@ -183,7 +183,7 @@ plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
                "or the session failed to open";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         return nvcodec::make_nvdec_codec(nvcodec::NvCodec::kH265, std::move(cfg));
     };
     return be;
@@ -230,7 +230,7 @@ plugins::VideoEncoderBackend make_mediacodec_encoder_backend() {
                "the HwBackend::MediaCodec kind stay stable)";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         (void)cfg;
         return nullptr;
     };
@@ -266,7 +266,7 @@ plugins::VideoEncoderBackend make_videotoolbox_encoder_backend() {
         return nvcodec::vt_encoder_unavailable_reason(nvcodec::VtCodec::kH265);
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return nvcodec::make_vt_encoder(nvcodec::VtCodec::kH265, std::move(cfg));
     };
     return be;
@@ -289,7 +289,7 @@ plugins::VideoDecoderBackend make_videotoolbox_decoder_backend() {
         return nvcodec::vt_decoder_unavailable_reason(nvcodec::VtCodec::kH265);
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         return nvcodec::make_vt_decoder(nvcodec::VtCodec::kH265, std::move(cfg));
     };
     return be;
@@ -318,8 +318,8 @@ plugins::VideoEncoderBackend make_amf_encoder_backend() {
         return amf_h265_unavailable_reason();
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_amf_h265_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_amf_h265_encoder(std::move(cfg));
     };
     return be;
 }
@@ -348,8 +348,8 @@ plugins::VideoEncoderBackend make_vaapi_encoder_backend() {
         return vaapi_h265_unavailable_reason();
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_vaapi_h265_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_vaapi_h265_encoder(std::move(cfg));
     };
     return be;
 }
@@ -377,8 +377,8 @@ plugins::VideoEncoderBackend make_qsv_encoder_backend() {
         return qsv_h265_unavailable_reason();
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_qsv_h265_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_qsv_h265_encoder(std::move(cfg));
     };
     return be;
 }

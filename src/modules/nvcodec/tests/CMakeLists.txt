@@ -160,40 +160,6 @@ if(COMMAND gtest_discover_tests)
 endif()
 
 # -----------------------------------------------------------------------------
-# test_hw_composite_codec — the composite adapter's telemetry forwarding
-# -----------------------------------------------------------------------------
-# A *pure unit* test: the composite is a forwarding adapter, so it is
-# tested with codec doubles rather than with a GPU.  That keeps the
-# "is the hardware flag reported?" question answerable on a machine with
-# no NVIDIA card at all — which matters because the J5 capture/encode
-# benchmark reads that flag to tell a hardware encode from a software
-# one.
-# -----------------------------------------------------------------------------
-add_executable(test_hw_composite_codec test_hw_composite_codec.cpp)
-
-set_target_properties(test_hw_composite_codec PROPERTIES
-    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
-
-nimrtc_apply_options(test_hw_composite_codec LENIENT)
-
-target_link_libraries(test_hw_composite_codec PRIVATE
-    nimrtc::nvcodec
-    nimrtc::video_frame
-    nimrtc::core
-    nimrtc::plugins
-    GTest::gtest_main
-    GTest::gtest)
-
-add_test(NAME modules_nvcodec_tests_test_hw_composite_codec
-         COMMAND test_hw_composite_codec)
-
-if(COMMAND gtest_discover_tests)
-    gtest_discover_tests(test_hw_composite_codec
-        PROPERTIES TIMEOUT 60
-        DISCOVERY_TIMEOUT 10)
-endif()
-
-# -----------------------------------------------------------------------------
 # test_hevc_pts — Q1b: H.265 parameter-set parsing + the mid-stream switch
 # -----------------------------------------------------------------------------
 # Two halves, both in this module's private `src/` tree:

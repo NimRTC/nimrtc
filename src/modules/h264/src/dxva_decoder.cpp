@@ -12,7 +12,7 @@
  * It is a **decode-only** backend, so it implements the codec seam with
  * `can_encode() == false`: the send path is not served, and the codec
  * module pairs it with an encoder through the `HwCompositeCodec`
- * adapter (see `src/modules/nvcodec/src/hw_composite_codec.cpp`).
+ * adapter (see `src/plugins/src/hw_composite_codec.cpp`).
  *
  * ## Why it matters: the fallback chain
  *
@@ -148,11 +148,10 @@
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 
-// The decoder implements the *deprecated* combined codec seam, which is
-// what the backend registry hands out (`VideoDecoderBackend::create`
-// returns a `std::unique_ptr<IVideoCodec>`).  The suppression is scoped
-// to this file's use of the name.
-NIMRTC_SUPPRESS_DEPRECATION_BEGIN
+// The decoder implements the *decode half* of the split codec seam
+// (`plugins::IVideoDecoder`), so the deprecated combined `IVideoCodec`
+// is not named anywhere in this file and no deprecation suppression is
+// needed.
 
 using Microsoft::WRL::ComPtr;
 
@@ -446,7 +445,7 @@ SpsCrop parse_sps_crop(const std::uint8_t* nalu, std::size_t nalu_size) noexcept
         if (!bits.read_ue(crop_bottom)) return out;
     }
 
-    // The crop units (ITU-T H.264 §7.4.2.1.1).  For the common 4:2:0
+    // The crop units (ITU-T H.264 Â§7.4.2.1.1).  For the common 4:2:0
     // case they are 2x2 (and 2x1 for a field-coded picture).
     std::uint32_t sub_width_c = 2, sub_height_c = 2;
     if (chroma_format_idc == 0) {
@@ -719,7 +718,23 @@ private:
 // DxvaDecoder
 // ---------------------------------------------------------------------------
 
-class DxvaDecoder final : public plugins::IVideoCodec {
+/**
+ * @brief The DXVA H.264 decoder.
+ *
+ * It implements the **decode half** of the split codec seam
+ * (`plugins::IVideoDecoder`) and nothing else.  The class used to
+ * implement the combined `IVideoCodec`, which meant it had to carry a
+ * set of encode-side methods that answered "unsupported" -- `can_encode()`
+ * returning false, `encode()` refusing, `force_keyframe()` refusing.  A
+ * decoder that is *typed* as a decoder does not need them: the
+ * direction is in the type, not in a flag.
+ *
+ * The send path is served by a different backend (NVENC, AMF, QSV, the
+ * OpenH264 software encoder), and the engine pairs the two halves
+ * itself -- see `H264PluginFactory::create_encoder()` and
+ * `create_decoder()`.
+ */
+class DxvaDecoder final : public plugins::IVideoDecoder {
 public:
     explicit DxvaDecoder(plugins::VideoCodecConfig cfg) noexcept
         : cfg_(std::move(cfg)) {}
@@ -745,6 +760,12 @@ public:
         if (FAILED(hr)) {
             NIMRTC_LOG_ERROR("dxva: the H.264 decoder MFT could not be created (hr="
                              << hr_text(hr) << ")");
+            // The COM objects have to go **before** the apartment is
+            // torn down — `create_transform()` may have left a live
+            // `transform_` behind (the MFT was created, the output type
+            // was not accepted).  Releasing it after `CoUninitialize` is
+            // an access violation, so the order here is load-bearing.
+            release_com_state();
             mf_.shutdown();
             return plugins::kErrHardwareError;
         }
@@ -755,45 +776,31 @@ public:
 
     void close() noexcept override {
         std::lock_guard<std::mutex> lock(mtx_);
-        if (!opened_) return;
 
-        if (transform_) {
-            transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-            transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
-            transform_.Reset();
-        }
-        input_type_.Reset();
-        output_type_.Reset();
-        device_manager_.Reset();
-        d3d_device_.Reset();
-        device_context_.Reset();
-
+        // The COM objects are released **before** the apartment is torn
+        // down, and they are released even when the decoder never
+        // finished opening.  Both halves matter:
+        //
+        //  - A COM pointer released after `CoUninitialize` is an access
+        //    violation.  The apartment is torn down here, so every
+        //    `ComPtr` has to go first.
+        //  - `opened_` is false when `open()` failed half-way through
+        //    (the MFT was created but the output type was rejected).  The
+        //    early `if (!opened_) return;` that used to guard this block
+        //    therefore skipped the release, and the decoder's destructor
+        //    released a dead-apartment pointer — an access violation
+        //    that took the whole process down.
+        release_com_state();
         mf_.shutdown();
         opened_ = false;
     }
 
-    // ---- plugins::IVideoCodec ----------------------------------------------
-
-    // Decode only.  The send path is served by another backend, and the
-    // codec module pairs the two through the composite adapter.
-    bool can_encode() const noexcept override { return false; }
-    bool can_decode() const noexcept override { return true; }
+    // ---- plugins::IVideoDecoder --------------------------------------------
 
     plugins::VideoCodecKind kind() const noexcept override {
         return plugins::VideoCodecKind::kH264;
     }
     std::string_view codec_name() const noexcept override { return "h264"; }
-
-    plugins::Status encode(const plugins::VideoFrame&, std::uint8_t*,
-                           std::size_t,
-                           plugins::EncodedVideoFrame&) noexcept override {
-        return plugins::kErrUnsupported;
-    }
-
-    plugins::Status force_keyframe() noexcept override {
-        // A decoder never emits keyframes.
-        return plugins::kErrUnsupported;
-    }
 
     plugins::Status decode(const plugins::EncodedVideoFrame& encoded,
                            plugins::VideoFrame& raw_out,
@@ -1006,16 +1013,6 @@ public:
         return plugins::kOk;
     }
 
-    plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
-
-    plugins::Status update_config(plugins::VideoCodecConfig cfg) noexcept override {
-        // The geometry is the bitstream's; only the descriptive fields
-        // are taken.  Changing the geometry would need a new MFT
-        // session, which the caller gets by closing and reopening.
-        cfg_ = std::move(cfg);
-        return plugins::kOk;
-    }
-
     plugins::VideoCodecStats stats() const noexcept override {
         std::lock_guard<std::mutex> lock(mtx_);
         plugins::VideoCodecStats s = stats_;
@@ -1024,9 +1021,7 @@ public:
         return s;
     }
 
-    std::uint8_t payload_type() const noexcept override {
-        return cfg_.payload_type;
-    }
+    plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
 
     std::string_view backend_id() const noexcept override { return "dxva"; }
 
@@ -1039,6 +1034,39 @@ public:
 
 private:
     // ---- The MFT plumbing --------------------------------------------------
+
+    /**
+     * @brief Release every COM object this decoder holds.
+     *
+     * The caller must hold `mtx_`.  The order is the whole point: a COM
+     * pointer released after `CoUninitialize` is an access violation,
+     * so this has to run *before* the apartment is torn down.
+     *
+     * It is deliberately *not* guarded by `opened_`: a half-open decoder
+     * (the MFT was created, the output type was rejected) still owns a
+     * live `transform_`, and skipping the release there leaked the
+     * pointer into a dead apartment.
+     */
+    void release_com_state() noexcept {
+        // The locked output buffer and the MFT-allocated sample are
+        // COM objects too, and they have to go before the apartment as
+        // well — the sample in particular holds a slice of the decoder's
+        // DXGI surface pool.
+        release_picture();
+
+        if (transform_) {
+            if (opened_) {
+                transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+                transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            }
+            transform_.Reset();
+        }
+        input_type_.Reset();
+        output_type_.Reset();
+        device_manager_.Reset();
+        d3d_device_.Reset();
+        device_context_.Reset();
+    }
 
     /**
      * @brief One access unit that is in flight inside the MFT.
@@ -1218,7 +1246,7 @@ private:
      * @brief Attach a D3D11 device as the MFT's D3D manager.
      *
      * The MFT does not take the `ID3D11Device` itself: it takes an
-     * `IMFDXGIDeviceManager` — the DXGI↔MF bridge object that owns the
+     * `IMFDXGIDeviceManager` — the DXGI§MF bridge object that owns the
      * reset token and hands out the device to the transform.  Handing
      * the MFT the raw device is rejected with `E_NOTIMPL`, which is
      * exactly the "the decode will run on the CPU" path this method
@@ -1809,8 +1837,8 @@ bool dxva_h264_available() noexcept {
 #endif
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_dxva_h264_codec(plugins::VideoCodecConfig config) {
+std::unique_ptr<plugins::IVideoDecoder>
+make_dxva_h264_decoder(plugins::VideoCodecConfig config) {
 #if defined(NIMRTC_PLUGINS_DXVA_ON) && defined(_WIN32)
     auto codec = std::make_unique<dxva_backend::DxvaDecoder>(std::move(config));
     if (codec->open() != plugins::kOk) {
@@ -1826,8 +1854,6 @@ make_dxva_h264_codec(plugins::VideoCodecConfig config) {
 
 } // namespace nimrtc::h264
 
-NIMRTC_SUPPRESS_DEPRECATION_END
-
 #else // NIMRTC_PLUGINS_DXVA_ON && _WIN32
 
 namespace nimrtc::h264 {
@@ -1836,8 +1862,8 @@ bool dxva_h264_available() noexcept {
     return false;
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_dxva_h264_codec(plugins::VideoCodecConfig) {
+std::unique_ptr<plugins::IVideoDecoder>
+make_dxva_h264_decoder(plugins::VideoCodecConfig) {
     return nullptr;
 }
 

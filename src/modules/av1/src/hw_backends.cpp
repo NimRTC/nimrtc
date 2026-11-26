@@ -43,8 +43,8 @@ namespace nimrtc::av1 {
 
 #if defined(NIMRTC_PLUGINS_DAV1D_ON)
 extern bool dav1d_av1_available() noexcept;
-extern std::unique_ptr<plugins::IVideoCodec>
-make_dav1d_av1_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoDecoder>
+make_dav1d_av1_decoder(plugins::VideoCodecConfig cfg);
 #define HAS_DAV1D 1
 #else
 #define HAS_DAV1D 0
@@ -65,13 +65,13 @@ make_dav1d_av1_codec(plugins::VideoCodecConfig cfg);
 
 extern bool amf_av1_available() noexcept;
 extern std::string amf_av1_unavailable_reason();
-extern std::unique_ptr<plugins::IVideoCodec>
-make_amf_av1_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_amf_av1_encoder(plugins::VideoCodecConfig cfg);
 
 extern bool vaapi_av1_available() noexcept;
 extern std::string vaapi_av1_unavailable_reason();
-extern std::unique_ptr<plugins::IVideoCodec>
-make_vaapi_av1_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_vaapi_av1_encoder(plugins::VideoCodecConfig cfg);
 
 // The optional software AV1 encoder (remote-desktop plan B11).  The
 // entry points exist on every platform, but the *row* is only registered
@@ -80,8 +80,8 @@ make_vaapi_av1_codec(plugins::VideoCodecConfig cfg);
 // absent", not "the plug-in is present but unavailable".
 extern bool svt_av1_available() noexcept;
 extern std::string svt_av1_unavailable_reason();
-extern std::unique_ptr<plugins::IVideoCodec>
-make_svt_av1_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_svt_av1_encoder(plugins::VideoCodecConfig cfg);
 
 namespace {
 
@@ -126,7 +126,7 @@ plugins::VideoEncoderBackend make_stub_encoder_backend() {
         return true;
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return std::make_unique<EncodeOnlyStubCodec>(std::move(cfg));
     };
     return be;
@@ -145,7 +145,7 @@ plugins::VideoDecoderBackend make_stub_decoder_backend() {
         return true;
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         return std::make_unique<CodecPluginAdapter>(std::move(cfg));
     };
     return be;
@@ -175,8 +175,8 @@ plugins::VideoDecoderBackend make_dav1d_decoder_backend() {
         return dav1d_av1_available();
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_dav1d_av1_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoDecoder> {
+        return make_dav1d_av1_decoder(std::move(cfg));
     };
     return be;
 }
@@ -208,7 +208,7 @@ plugins::VideoEncoderBackend make_nvenc_encoder_backend() {
                "session failed to open";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return nvcodec::make_nvenc_codec(nvcodec::NvCodec::kAv1, std::move(cfg));
     };
     return be;
@@ -242,7 +242,7 @@ plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
                "session failed to open";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         return nvcodec::make_nvdec_codec(nvcodec::NvCodec::kAv1, std::move(cfg));
     };
     return be;
@@ -280,7 +280,7 @@ plugins::VideoEncoderBackend make_mediacodec_encoder_backend() {
                "the HwBackend::MediaCodec kind stay stable)";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         (void)cfg;
         return nullptr;
     };
@@ -321,7 +321,7 @@ plugins::VideoEncoderBackend make_videotoolbox_encoder_backend() {
         return nvcodec::vt_encoder_unavailable_reason(nvcodec::VtCodec::kAv1);
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return nvcodec::make_vt_encoder(nvcodec::VtCodec::kAv1, std::move(cfg));
     };
     return be;
@@ -345,7 +345,7 @@ plugins::VideoDecoderBackend make_videotoolbox_decoder_backend() {
         return nvcodec::vt_decoder_unavailable_reason(nvcodec::VtCodec::kAv1);
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         return nvcodec::make_vt_decoder(nvcodec::VtCodec::kAv1, std::move(cfg));
     };
     return be;
@@ -377,8 +377,8 @@ plugins::VideoEncoderBackend make_amf_encoder_backend() {
         return amf_av1_unavailable_reason();
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_amf_av1_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_amf_av1_encoder(std::move(cfg));
     };
     return be;
 }
@@ -408,8 +408,8 @@ plugins::VideoEncoderBackend make_vaapi_encoder_backend() {
         return vaapi_av1_unavailable_reason();
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_vaapi_av1_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_vaapi_av1_encoder(std::move(cfg));
     };
     return be;
 }
@@ -449,8 +449,8 @@ plugins::VideoEncoderBackend make_svt_av1_encoder_backend() {
         return svt_av1_unavailable_reason();
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_svt_av1_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_svt_av1_encoder(std::move(cfg));
     };
     return be;
 }

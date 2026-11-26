@@ -133,6 +133,24 @@ resolve_video_codec(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_video_codec(id);
 }
 
+/** Resolve an `IVideoEncoderFactory` by plugin id. Returns nullptr if not
+ *  registered.
+ *
+ *  The split codec seam (remote-desktop plan B1): the engine resolves
+ *  the *encode* half on its own, so a plugin that only implements one
+ *  direction is a legal answer for the other. */
+[[nodiscard]] inline const plugins::IVideoEncoderFactory*
+resolve_video_encoder(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_video_encoder(id);
+}
+
+/** Resolve an `IVideoDecoderFactory` by plugin id. Returns nullptr if not
+ *  registered.  See `resolve_video_encoder`. */
+[[nodiscard]] inline const plugins::IVideoDecoderFactory*
+resolve_video_decoder(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_video_decoder(id);
+}
+
 /** Resolve an `IVideoSinkFactory` by plugin id. Returns nullptr if not registered. */
 [[nodiscard]] inline const plugins::IVideoSinkFactory*
 resolve_video_sink(std::string_view id) noexcept {

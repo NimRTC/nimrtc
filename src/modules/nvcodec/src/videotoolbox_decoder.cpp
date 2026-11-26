@@ -640,7 +640,7 @@ private:
 // VtDecoder — implements plugins::IVideoCodec
 // ---------------------------------------------------------------------------
 
-class VtDecoder final : public plugins::IVideoCodec {
+class VtDecoder final : public plugins::IVideoDecoder {
 public:
     VtDecoder(plugins::VideoCodecConfig cfg, vt_detail::Codec codec) noexcept
         : cfg_(std::move(cfg)), codec_(codec) {}
@@ -668,44 +668,7 @@ public:
         opened_ = false;
     }
 
-    // ---- plugins::IVideoCodec ----------------------------------------------
-
-    bool can_encode()   const noexcept override { return false; }
-    bool can_decode()   const noexcept override { return true; }
-
-    // ---- The encoder half (not supported by this decoder) ----------------
-    //
-    // `IVideoCodec` is the *combined* seam: one instance may serve
-    // both directions, so the interface carries the encoder's pure
-    // virtuals as well.  This decoder never encodes, so the encoder
-    // half answers "unsupported" rather than being left abstract --
-    // an abstract class cannot be marked `final`.
-    plugins::Status encode(const plugins::VideoFrame& raw,
-                           std::uint8_t* output,
-                           std::size_t output_capacity,
-                           plugins::EncodedVideoFrame& encoded_out) noexcept override {
-        (void)raw;
-        (void)output;
-        (void)output_capacity;
-        (void)encoded_out;
-        return plugins::kErrUnsupported;
-    }
-
-    plugins::Status force_keyframe() noexcept override {
-        // A decoder never produces a key frame, so there is nothing to
-        // force.  "Unsupported" is the honest answer; the engine only
-        // asks an *encoder* for one.
-        return plugins::kErrUnsupported;
-    }
-
-    plugins::Status set_params(const plugins::VideoEncoderParams& params) noexcept override {
-        (void)params;
-        return plugins::kErrUnsupported;
-    }
-
-    plugins::VideoEncoderParams params() const noexcept override {
-        return {};
-    }
+    // ---- plugins::IVideoDecoder --------------------------------------------
 
     plugins::VideoCodecKind kind() const noexcept override {
         return vt_detail::codec_kind(codec_);
@@ -862,11 +825,6 @@ public:
     }
 
     plugins::VideoCodecStats stats() const noexcept override { return stats_; }
-
-    std::uint8_t payload_type() const noexcept override {
-        return cfg_.payload_type != 0 ? cfg_.payload_type
-                                      : vt_detail::default_payload_type(codec_);
-    }
 
     std::string_view backend_id() const noexcept override { return "videotoolbox"; }
 
@@ -1077,7 +1035,7 @@ bool vt_decoder_available(VtCodec codec) noexcept {
 #endif
 }
 
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoDecoder>
 make_vt_decoder(VtCodec codec, plugins::VideoCodecConfig cfg) {
 #if defined(__APPLE__)
     const vt_detail::Codec c = vt_detail::to_detail(codec);
@@ -1111,7 +1069,7 @@ namespace nimrtc::nvcodec {
 
 bool vt_decoder_available(VtCodec) noexcept { return false; }
 
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoDecoder>
 make_vt_decoder(VtCodec, plugins::VideoCodecConfig) { return nullptr; }
 
 std::string vt_decoder_unavailable_reason(VtCodec codec) {

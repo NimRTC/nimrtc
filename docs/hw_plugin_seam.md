@@ -1257,7 +1257,16 @@ Public surface:
 |------------------------------------------|----------|
 | `nimrtc/nvcodec/nv_codec_kind.hpp`       | the codec descriptor table (encode GUID, profile GUID, CUVID codec type) |
 | `nimrtc/nvcodec/nv_backends.hpp`         | `nvenc_codec_available()` / `make_nvenc_codec()` / `nvdec_codec_available()` / `make_nvdec_codec()` |
-| `nimrtc/nvcodec/hw_composite_codec.hpp`  | the encoder + decoder adapter |
+
+The encoder + decoder adapter lives in the **seam** layer, not in this
+module — it is glue over the split codec interfaces, and four codec
+modules (H.264 / H.265 / AV1 / VP9) need it, so a module that used it
+would have to link a *sibling* module:
+
+| Header                                   | Contents |
+|------------------------------------------|----------|
+| `nimrtc/plugins/hw_composite_codec.hpp`  | the encoder + decoder adapter (owning) |
+| `nimrtc/plugins/video_codec_view.hpp`    | the encoder + decoder view (borrowed) |
 
 The generic entry points are *always* present — they return `false` /
 `nullptr` when the NVIDIA SDK is not compiled in — so the codec modules

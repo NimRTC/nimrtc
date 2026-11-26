@@ -1087,13 +1087,15 @@ public:
 > (`IVideoEncoder` / `IVideoDecoder` / `IVideoEncoderFactory` /
 > `IVideoDecoderFactory`) **exist** in
 > `src/plugins/include/nimrtc/plugins/video_codec.hpp`, and the combined
-> `IVideoCodec` is marked `[[deprecated]]`. The engine, however, still
-> resolves the **video-codec** registry slot, whose type is
-> `IVideoCodecFactory*`. A plug-in that wants to be selected by
-> `EngineConfig::video_codec_name` today therefore implements
-> `IVideoCodecFactory` and uses the split interfaces *internally*, or
-> supplies a thin adapter. Both shapes are in the tree — see
-> `src/modules/nvcodec/include/nimrtc/nvcodec/hw_composite_codec.hpp`
+> `IVideoCodec` is marked `[[deprecated]]`. The engine resolves the
+> **video-encoder** and **video-decoder** registry slots, whose types are
+> `IVideoEncoderFactory*` and `IVideoDecoderFactory*`. A plug-in that
+> wants to be selected by `EngineConfig::video_codec_name` therefore
+> implements the two split factories and registers them in the two split
+> slots; the combined `IVideoCodecFactory` remains as a compatibility
+> shim for one MINOR cycle (ADR-015 Decision 3). Both shapes are in the
+> tree — see
+> `src/plugins/include/nimrtc/plugins/hw_composite_codec.hpp`
 > for the composite adapter that pairs a one-directional encoder with a
 > one-directional decoder.
 

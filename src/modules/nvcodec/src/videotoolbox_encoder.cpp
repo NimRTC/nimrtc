@@ -571,7 +571,7 @@ private:
 // VtEncoder — implements plugins::IVideoCodec
 // ---------------------------------------------------------------------------
 
-class VtEncoder final : public plugins::IVideoCodec {
+class VtEncoder final : public plugins::IVideoEncoder {
 public:
     VtEncoder(plugins::VideoCodecConfig cfg, vt_detail::Codec codec) noexcept
         : cfg_(std::move(cfg)), codec_(codec) {}
@@ -612,19 +612,8 @@ public:
         opened_ = false;
     }
 
-    // ---- plugins::IVideoCodec ----------------------------------------------
+    // ---- plugins::IVideoEncoder --------------------------------------------
 
-    bool can_encode()   const noexcept override { return true; }
-    bool can_decode()   const noexcept override { return false; }
-
-    // ---- The decoder half (not supported by this encoder) ----------------
-    //
-    // `IVideoCodec` is the *combined* seam: one instance may serve
-    // both directions, so the interface carries the decoder's pure
-    // virtuals as well.  This encoder never decodes, so the decoder
-    // half answers "unsupported" rather than being left abstract --
-    // an abstract class cannot be marked `final`.  (The `decode()`
-    // override lives further down, next to the zero-copy path.)
     // ---- The parameter set (remote-desktop plan B12 / B13) --------------
     //
     // A VideoToolbox session is bound to a fixed geometry, so a
@@ -898,12 +887,6 @@ public:
                                                        /*zero_copy=*/false);
         CVPixelBufferRelease(pixel_buffer);
         return st;
-    }
-
-    plugins::Status decode(const plugins::EncodedVideoFrame&,
-                           plugins::VideoFrame&,
-                           std::uint8_t* const*) noexcept override {
-        return plugins::kErrUnsupported;
     }
 
     plugins::Status force_keyframe() noexcept override {
@@ -1182,7 +1165,7 @@ bool vt_encoder_available(VtCodec codec) noexcept {
 #endif
 }
 
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoEncoder>
 make_vt_encoder(VtCodec codec, plugins::VideoCodecConfig cfg) {
 #if defined(__APPLE__)
     const vt_detail::Codec c = vt_detail::to_detail(codec);
@@ -1225,7 +1208,7 @@ namespace nimrtc::nvcodec {
 
 bool vt_encoder_available(VtCodec) noexcept { return false; }
 
-std::unique_ptr<plugins::IVideoCodec>
+std::unique_ptr<plugins::IVideoEncoder>
 make_vt_encoder(VtCodec, plugins::VideoCodecConfig) { return nullptr; }
 
 std::string vt_encoder_unavailable_reason(VtCodec codec) {

@@ -1661,7 +1661,7 @@ void NimRTCEngine::compute_video_stream_shares(
     std::uint32_t video_ceiling_total = 0;
     {
         std::uint32_t default_ceiling = 0;
-        if (video_codec_) default_ceiling = video_codec_->config().bitrate_bps;
+        if (video_encoder_) default_ceiling = video_encoder_->config().bitrate_bps;
 
         detail::BandwidthDemand video_demand;
         video_demand.reserved   = false;
@@ -1674,7 +1674,7 @@ void NimRTCEngine::compute_video_stream_shares(
             detail::BandwidthDemand d;
             d.reserved   = false;
             d.weight      = stream->weight;
-            d.ceiling_bps = stream->codec ? stream->codec->config().bitrate_bps : 0u;
+            d.ceiling_bps = stream->encoder ? stream->encoder->config().bitrate_bps : 0u;
             demands.push_back(d);
             video_ceiling_total += d.ceiling_bps;
         }
@@ -2243,8 +2243,8 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     //
     // `force_keyframe()` is the same door an inbound PLI uses, so the
     // encoder's own policy (the key-frame storm limiter) still applies.
-    if (video_codec_) {
-        (void)video_codec_->force_keyframe();
+    if (video_encoder_) {
+        (void)video_encoder_->force_keyframe();
         log.info("engine[dtls→srtp]: armed the video encoder for an IDR — "
                  "the first frame on the wire will carry the parameter sets");
     }

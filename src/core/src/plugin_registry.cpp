@@ -61,6 +61,12 @@
 
 #include <nimrtc/core/registry.hpp>
 
+// The split codec seam (plan B1): the combined registration bridges into
+// the split registry slots, and the `dynamic_cast` that decides whether
+// the bridge applies needs the *complete* factory types -- the registry
+// header only forward-declares them (Layout Invariant 1).
+#include <nimrtc/plugins/video_codec.hpp>
+
 namespace nimrtc::core {
 
 // ---------------------------------------------------------------------------
@@ -145,6 +151,43 @@ void PluginRegistry::register_dtmf(std::string_view id,
 void PluginRegistry::register_video_codec(std::string_view id,
                                           const plugins::IVideoCodecFactory* f) {
     video_codec_.register_one(id, f);
+
+    // The split codec seam (remote-desktop plan B1) has two registry
+    // slots, and the engine resolves *those* first.  A plugin that
+    // registers only the combined factory would therefore be invisible
+    // to the engine -- so the combined registration *also* fills the
+    // split slots, but only when the same object actually implements
+    // the split interfaces.
+    //
+    // The `dynamic_cast` is the honest test: a combined factory that
+    // does not implement `IVideoEncoderFactory` genuinely has no
+    // encode half to hand out, and the engine must see that (an
+    // asymmetric plugin is a legal answer).
+    //
+    // The slots are written only if they are still empty, so an
+    // explicit `register_video_encoder()` (the split-first path) always
+    // wins over this compatibility bridge.
+    if (f == nullptr) return;
+    if (const auto* enc = dynamic_cast<const plugins::IVideoEncoderFactory*>(f)) {
+        if (video_encoder_.get(id) == nullptr) {
+            video_encoder_.register_one(id, enc);
+        }
+    }
+    if (const auto* dec = dynamic_cast<const plugins::IVideoDecoderFactory*>(f)) {
+        if (video_decoder_.get(id) == nullptr) {
+            video_decoder_.register_one(id, dec);
+        }
+    }
+}
+
+void PluginRegistry::register_video_encoder(std::string_view id,
+                                            const plugins::IVideoEncoderFactory* f) {
+    video_encoder_.register_one(id, f);
+}
+
+void PluginRegistry::register_video_decoder(std::string_view id,
+                                            const plugins::IVideoDecoderFactory* f) {
+    video_decoder_.register_one(id, f);
 }
 
 void PluginRegistry::register_video_source(std::string_view id,

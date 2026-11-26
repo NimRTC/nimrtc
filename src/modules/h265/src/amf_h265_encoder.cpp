@@ -100,8 +100,8 @@ std::string amf_h265_unavailable_reason() {
  *  Returns nullptr while the body is not implemented — which is what
  *  makes the registry fall through to the next backend (and eventually
  *  to the software stub). */
-std::unique_ptr<plugins::IVideoCodec>
-make_amf_h265_codec(plugins::VideoCodecConfig cfg) {
+std::unique_ptr<plugins::IVideoEncoder>
+make_amf_h265_encoder(plugins::VideoCodecConfig cfg) {
     (void)cfg;
     return nullptr;
 }
@@ -116,9 +116,9 @@ std::string amf_h265_unavailable_reason() {
     return amf_backend::amf_h265_unavailable_reason();
 }
 
-std::unique_ptr<plugins::IVideoCodec>
-make_amf_h265_codec(plugins::VideoCodecConfig cfg) {
-    return amf_backend::make_amf_h265_codec(std::move(cfg));
+std::unique_ptr<plugins::IVideoEncoder>
+make_amf_h265_encoder(plugins::VideoCodecConfig cfg) {
+    return amf_backend::make_amf_h265_encoder(std::move(cfg));
 }
 
 } // namespace nimrtc::h265

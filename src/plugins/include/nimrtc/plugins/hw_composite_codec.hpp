@@ -1,5 +1,5 @@
 /**
- * @file nimrtc/nvcodec/hw_composite_codec.hpp
+ * @file nimrtc/plugins/hw_composite_codec.hpp
  * @brief HwCompositeCodec — pairs an encode-only and a decode-only codec.
  *
  * ## Why this exists
@@ -20,6 +20,18 @@
  * `HwCompositeCodec` is the adapter that makes the two fit the
  * single-instance contract: it *owns* an encoder instance and a decoder
  * instance and forwards each call to the one that can serve it.
+ *
+ * ## Why it lives in the seam layer (`src/plugins/`)
+ *
+ * The composite is **glue**: it composes two split-seam interfaces and
+ * implements nothing itself.  Its home therefore is the layer that
+ * *defines* the interfaces, not a concrete codec module — several codec
+ * modules (H.264, H.265, AV1, VP9) need it, and a module that needed
+ * it would have to link a *sibling* module, which is exactly the
+ * coupling `src/modules/<name>/` being self-contained forbids (L3).
+ *
+ * The engine may include it too: `src/plugins/` is the seam, and the
+ * layering rule (L4) exempts the seam itself.
  *
  * ## Codec awareness
  *
@@ -63,7 +75,14 @@
 #include <nimrtc/core/api_version.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 
-namespace nimrtc::nvcodec {
+namespace nimrtc::plugins {
+
+// The composite implements the *deprecated* combined shim on purpose: it
+// is the thing that presents a split encoder/decoder pair to a consumer
+// that still speaks the combined vocabulary.  The deprecation warning
+// itself is untouched — it is suppressed only for the declaration and
+// the definitions that have to name the shim.
+NIMRTC_SUPPRESS_DEPRECATION_BEGIN
 
 /**
  * @brief A bidirectional `plugins::IVideoCodec` built from two
@@ -73,25 +92,38 @@ namespace nimrtc::nvcodec {
  * its destructor.  `open()` opens both; if the decoder fails to open,
  * the encoder is closed again so a half-open session cannot leak a
  * hardware session.
+ *
+ * ## The sub-codec types
+ *
+ * The two halves are held as `IVideoEncoder` and `IVideoDecoder` -- the
+ * split seam -- rather than as the combined `IVideoCodec`.  The
+ * *direction* of each half is then in its type: the composite cannot
+ * accidentally call `decode()` on the encoder or `encode()` on the
+ * decoder, and a backend that only implements one direction is a legal
+ * argument here.
+ *
+ * The constructor still accepts a `std::unique_ptr<IVideoCodec>` from
+ * an outside caller: `IVideoCodec` derives from both halves, so the
+ * conversion to `unique_ptr<IVideoEncoder>` (resp. `unique_ptr<IVideoDecoder>`)
+ * is an ordinary upcast and the existing call sites keep compiling.
  */
-class NIMRTC_API_STABLE HwCompositeCodec final : public plugins::IVideoCodec {
+class NIMRTC_API_STABLE HwCompositeCodec final : public IVideoCodec {
 public:
     /**
      * @param cfg       Configuration handed to both sub-codecs.
      * @param encoder   Encode-only codec (may be null → no encode path).
      * @param decoder   Decode-only codec (may be null → no decode path).
      */
-    HwCompositeCodec(plugins::VideoCodecConfig cfg,
-                     std::unique_ptr<plugins::IVideoCodec> encoder,
-                     std::unique_ptr<plugins::IVideoCodec> decoder) noexcept;
-
+    HwCompositeCodec(VideoCodecConfig cfg,
+                     std::unique_ptr<IVideoEncoder> encoder,
+                     std::unique_ptr<IVideoDecoder> decoder) noexcept;
     ~HwCompositeCodec() override;
 
     // ---- plugins::IPlugin --------------------------------------------------
 
     const char* name() const noexcept override;
 
-    plugins::Status open() noexcept override;
+    Status open() noexcept override;
     void close() noexcept override;
 
     // ---- plugins::IVideoCodec ----------------------------------------------
@@ -99,25 +131,25 @@ public:
     bool can_encode() const noexcept override;
     bool can_decode() const noexcept override;
 
-    plugins::VideoCodecKind kind() const noexcept override;
+    VideoCodecKind kind() const noexcept override;
     std::string_view codec_name() const noexcept override;
 
-    plugins::Status encode(const plugins::VideoFrame& raw,
-                            std::uint8_t* output,
-                            std::size_t output_capacity,
-                            plugins::EncodedVideoFrame& encoded_out) noexcept override;
+    Status encode(const VideoFrame& raw,
+                  std::uint8_t* output,
+                  std::size_t output_capacity,
+                  EncodedVideoFrame& encoded_out) noexcept override;
 
-    plugins::Status decode(const plugins::EncodedVideoFrame& encoded,
-                            plugins::VideoFrame& raw_out,
-                            std::uint8_t* const* output_buffers) noexcept override;
+    Status decode(const EncodedVideoFrame& encoded,
+                  VideoFrame& raw_out,
+                  std::uint8_t* const* output_buffers) noexcept override;
 
-    plugins::Status force_keyframe() noexcept override;
+    Status force_keyframe() noexcept override;
 
     /** Push a live parameter set into the encoder (remote-desktop plan
      *  B12).  The decoder half is *not* reconfigured: its geometry is
      *  an upper bound set by the bitstream, not by the local capture. */
-    plugins::Status set_params(const plugins::VideoEncoderParams& params) noexcept override {
-        if (!encoder_ || !encoder_->can_encode()) return plugins::kErrUnsupported;
+    Status set_params(const VideoEncoderParams& params) noexcept override {
+        if (!encoder_) return kErrUnsupported;
         return encoder_->set_params(params);
     }
 
@@ -141,8 +173,8 @@ public:
      * mirror once the callback is attached) and the session would show
      * a picture that never moves.
      */
-    plugins::Status encode_zero_copy(const plugins::GpuBuffer& gpu,
-                                      plugins::EncodedVideoFrame& encoded_out) noexcept override;
+    Status encode_zero_copy(const GpuBuffer& gpu,
+                            EncodedVideoFrame& encoded_out) noexcept override;
 
     /**
      * @brief Decode into a GPU surface — forwarded to the *decoder*.
@@ -151,12 +183,12 @@ public:
      * reason: a composite whose decoder can consume a surface has to
      * say so *and* be able to do it.
      */
-    plugins::Status decode_zero_copy(const plugins::EncodedVideoFrame& encoded,
-                                      plugins::GpuBuffer& out_surface) noexcept override;
+    Status decode_zero_copy(const EncodedVideoFrame& encoded,
+                            GpuBuffer& out_surface) noexcept override;
 
-    plugins::VideoCodecConfig config() const noexcept override;
-    plugins::Status update_config(plugins::VideoCodecConfig cfg) noexcept override;
-    plugins::VideoCodecStats stats() const noexcept override;
+    VideoCodecConfig config() const noexcept override;
+    Status update_config(VideoCodecConfig cfg) noexcept override;
+    VideoCodecStats stats() const noexcept override;
     std::uint8_t payload_type() const noexcept override;
 
     /** The backend identity of the sub-codec that carries the *outbound*
@@ -191,10 +223,12 @@ public:
     bool is_hardware_accelerated() const noexcept override;
 
 private:
-    plugins::VideoCodecConfig            cfg_;
-    std::unique_ptr<plugins::IVideoCodec> encoder_;
-    std::unique_ptr<plugins::IVideoCodec> decoder_;
-    bool                                 opened_ = false;
+    VideoCodecConfig                  cfg_;
+    std::unique_ptr<IVideoEncoder>    encoder_;
+    std::unique_ptr<IVideoDecoder>    decoder_;
+    bool                              opened_ = false;
 };
 
-} // namespace nimrtc::nvcodec
+NIMRTC_SUPPRESS_DEPRECATION_END
+
+} // namespace nimrtc::plugins

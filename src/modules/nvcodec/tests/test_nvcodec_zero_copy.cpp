@@ -651,6 +651,8 @@ TEST(HwZeroCopy, TheEncoderAdvertisesTheZeroCopyPath) {
     auto encoder = nvcodec::make_nvenc_codec(nvcodec::NvCodec::kH264, cfg);
     ASSERT_NE(encoder, nullptr);
     EXPECT_TRUE(encoder->supports_zero_copy_encode());
-    EXPECT_FALSE(encoder->supports_zero_copy_decode())
-        << "NVDEC does not expose a GPU-output path in this tree";
+    // The encode half is an `IVideoEncoder` — it has no decode path at
+    // all, so there is no `supports_zero_copy_decode()` to ask.  The
+    // question "does NVDEC expose a GPU-output path?" belongs to the
+    // *decoder* half, and it is asked in the decoder test above.
 }

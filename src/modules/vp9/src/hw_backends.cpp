@@ -47,8 +47,8 @@ namespace nimrtc::vp9 {
 
 extern bool libvpx_vp9_available() noexcept;
 extern std::string libvpx_vp9_unavailable_reason();
-extern std::unique_ptr<plugins::IVideoCodec>
-make_libvpx_vp9_codec(plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoEncoder>
+make_libvpx_vp9_encoder(plugins::VideoCodecConfig cfg);
 
 namespace {
 
@@ -73,7 +73,7 @@ plugins::VideoEncoderBackend make_stub_encoder_backend() {
         return true;
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoEncoder> {
         return std::make_unique<CodecPluginAdapter>(std::move(cfg));
     };
     return be;
@@ -92,7 +92,7 @@ plugins::VideoDecoderBackend make_stub_decoder_backend() {
         return true;
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
+                -> std::unique_ptr<plugins::IVideoDecoder> {
         return std::make_unique<CodecPluginAdapter>(std::move(cfg));
     };
     return be;
@@ -127,8 +127,8 @@ plugins::VideoEncoderBackend make_libvpx_encoder_backend() {
         return libvpx_vp9_unavailable_reason();
     };
     be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_libvpx_vp9_codec(std::move(cfg));
+                -> std::unique_ptr<plugins::IVideoEncoder> {
+        return make_libvpx_vp9_encoder(std::move(cfg));
     };
     return be;
 }

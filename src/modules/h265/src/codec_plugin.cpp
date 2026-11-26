@@ -13,7 +13,7 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/h265/hw_backends.hpp>
 
-#include <nimrtc/nvcodec/hw_composite_codec.hpp>
+#include <nimrtc/plugins/hw_composite_codec.hpp>
 #include <nimrtc/plugins/hw_video_backend.hpp>
 
 namespace nimrtc::h265 {
@@ -304,18 +304,12 @@ std::uint8_t CodecPluginAdapter::payload_type() const noexcept {
 // H265PluginFactory
 // ---------------------------------------------------------------------------
 
-plugins::IVideoCodec* H265PluginFactory::create(plugins::VideoCodecConfig cfg) const {
-    // Delegate to the HW-first backend selector.  On hosts where no HW
-    // backend is available the selector returns the stub backend (which
-    // this very file implements).
-    //
-    // The engine holds ONE IVideoCodec per session and drives both
-    // directions through it, so the factory has to hand back something
-    // that can encode *and* decode.  The hardware backends are
-    // one-directional (NVENC encodes, NVDEC decodes), so when the two
-    // directions resolve to different backends they are wrapped in a
-    // HwCompositeCodec.
-    std::unique_ptr<plugins::IVideoCodec> encoder;
+plugins::IVideoEncoder* H265PluginFactory::create_encoder(
+        plugins::VideoCodecConfig cfg) const {
+    // The encoder table is consulted on its own: NVENC is an encoder,
+    // NVDEC is a decoder, and neither can serve the other's direction.
+    // That separation is the whole point of the split seam.
+    std::unique_ptr<plugins::IVideoEncoder> encoder;
     const plugins::VideoEncoderBackend* enc_be = select_encoder_backend(cfg);
     if (enc_be && enc_be->create) {
         encoder = enc_be->create(cfg);
@@ -331,14 +325,72 @@ plugins::IVideoCodec* H265PluginFactory::create(plugins::VideoCodecConfig cfg) c
         }
     }
 
-    // The encoder already serves both directions (the software stub) —
-    // no composite needed.
-    if (encoder && encoder->can_decode()) {
-        return encoder.release();
+    if (!encoder) {
+        // Last-resort fallback (the selector normally always returns at
+        // least the stub row).
+        core::log::Logger::instance().warn(
+            "h265: no encoder backend available — falling back to the "
+            "software stub encoder");
+        return new CodecPluginAdapter(std::move(cfg));
+    }
+    return encoder.release();
+}
+
+plugins::IVideoDecoder* H265PluginFactory::create_decoder(
+        plugins::VideoCodecConfig cfg) const {
+    // The decoder table is consulted on its own.
+    std::unique_ptr<plugins::IVideoDecoder> decoder;
+    const plugins::VideoDecoderBackend* dec_be = select_decoder_backend(cfg);
+    if (dec_be && dec_be->create) {
+        decoder = dec_be->create(cfg);
+        if (decoder) {
+            const std::string id_str{dec_be->id};
+            const std::string be_str{plugins::hw_backend_name(dec_be->backend)};
+            core::log::Logger::instance().info(
+                std::string{"h265: selected decoder backend '"} + id_str +
+                "' (" + be_str + ")");
+        }
     }
 
+    if (!decoder) {
+        core::log::Logger::instance().warn(
+            "h265: no decoder backend available — falling back to the "
+            "software stub decoder");
+        return new CodecPluginAdapter(std::move(cfg));
+    }
+    return decoder.release();
+}
+
+plugins::IVideoCodec* H265PluginFactory::create(plugins::VideoCodecConfig cfg) const {
+    // Delegate to the HW-first backend selector.  On hosts where no HW
+    // backend is available the selector returns the stub backend (which
+    // this very file implements).
+    //
+    // The engine holds ONE IVideoCodec per session and drives both
+    // directions through it, so the factory has to hand back something
+    // that can encode *and* decode.  The hardware backends are
+    // one-directional (NVENC encodes, NVDEC decodes), so when the two
+    // directions resolve to different backends they are wrapped in a
+    // HwCompositeCodec.
+    std::unique_ptr<plugins::IVideoEncoder> encoder;
+    const plugins::VideoEncoderBackend* enc_be = select_encoder_backend(cfg);
+    if (enc_be && enc_be->create) {
+        encoder = enc_be->create(cfg);
+        if (encoder) {
+            const std::string hw_str = enc_be->is_hw ? "yes" : "no";
+            const std::string zc_str = enc_be->zero_copy_supported ? "yes" : "no";
+            const std::string id_str{enc_be->id};
+            const std::string be_str{plugins::hw_backend_name(enc_be->backend)};
+            core::log::Logger::instance().info(
+                std::string{"h265: selected encoder backend '"} + id_str +
+                "' (" + be_str + ", hw=" + hw_str +
+                ", zero_copy=" + zc_str + ")");
+        }
+    }
+
+
     // Pick the decoder backend for the receive direction.
-    std::unique_ptr<plugins::IVideoCodec> decoder;
+    std::unique_ptr<plugins::IVideoDecoder> decoder;
     const plugins::VideoDecoderBackend* dec_be = select_decoder_backend(cfg);
     if (dec_be && dec_be->create) {
         decoder = dec_be->create(cfg);
@@ -381,7 +433,6 @@ plugins::IVideoCodec* H265PluginFactory::create(plugins::VideoCodecConfig cfg) c
         }
         core::log::Logger::instance().warn(
             "h265: no decoder backend available — the codec can encode only");
-        return encoder.release();
     }
 
     if (!encoder) {
@@ -397,11 +448,13 @@ plugins::IVideoCodec* H265PluginFactory::create(plugins::VideoCodecConfig cfg) c
         }
         core::log::Logger::instance().warn(
             "h265: no encoder backend available — the codec can decode only");
-        return decoder.release();
     }
 
-    // Two one-directional backends: pair them.
-    auto* composite = new nvcodec::HwCompositeCodec(std::move(cfg),
+    // The two halves are paired.  `HwCompositeCodec` is the combined
+    // `IVideoCodec` view of a split pair, and it accepts a null half --
+    // which is how the "encoder only" / "decoder only" cases above are
+    // represented.
+    auto* composite = new plugins::HwCompositeCodec(std::move(cfg),
                                                     std::move(encoder),
                                                     std::move(decoder));
     core::log::Logger::instance().info(
@@ -422,6 +475,10 @@ void do_register_default_plugins() noexcept {
             //    EngineConfig::video_codec_name == "h265" picks it up.
             static nimrtc::h265::H265PluginFactory s_factory{};
             nimrtc::core::PluginRegistry::instance().register_video_codec(
+                std::string_view{s_factory.id()}, &s_factory);
+            nimrtc::core::PluginRegistry::instance().register_video_encoder(
+                std::string_view{s_factory.id()}, &s_factory);
+            nimrtc::core::PluginRegistry::instance().register_video_decoder(
                 std::string_view{s_factory.id()}, &s_factory);
             // 2. Populate the per-platform HW backend table.
             nimrtc::h265::register_default_video_backends();

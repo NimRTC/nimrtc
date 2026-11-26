@@ -1,19 +1,21 @@
 /**
- * @file src/modules/nvcodec/src/hw_composite_codec.cpp
+ * @file src/plugins/src/hw_composite_codec.cpp
  * @brief HwCompositeCodec — implementation.
  *
- * See nimrtc/nvcodec/hw_composite_codec.hpp for the rationale.
+ * See nimrtc/plugins/hw_composite_codec.hpp for the rationale.
  */
 
-#include <nimrtc/nvcodec/hw_composite_codec.hpp>
+#include <nimrtc/plugins/hw_composite_codec.hpp>
 
 #include <nimrtc/core/log.hpp>
 
-namespace nimrtc::nvcodec {
+namespace nimrtc::plugins {
 
-HwCompositeCodec::HwCompositeCodec(plugins::VideoCodecConfig cfg,
-                                   std::unique_ptr<plugins::IVideoCodec> encoder,
-                                   std::unique_ptr<plugins::IVideoCodec> decoder) noexcept
+NIMRTC_SUPPRESS_DEPRECATION_BEGIN
+
+HwCompositeCodec::HwCompositeCodec(VideoCodecConfig cfg,
+                                   std::unique_ptr<IVideoEncoder> encoder,
+                                   std::unique_ptr<IVideoDecoder> decoder) noexcept
     : cfg_(std::move(cfg)),
       encoder_(std::move(encoder)),
       decoder_(std::move(decoder)) {}
@@ -23,27 +25,27 @@ HwCompositeCodec::~HwCompositeCodec() {
 }
 
 const char* HwCompositeCodec::name() const noexcept {
-    return "nimrtc::nvcodec::HwCompositeCodec (hardware encode + hardware decode)";
+    return "nimrtc::plugins::HwCompositeCodec (hardware encode + hardware decode)";
 }
 
-plugins::Status HwCompositeCodec::open() noexcept {
-    if (opened_) return plugins::kOk;
+Status HwCompositeCodec::open() noexcept {
+    if (opened_) return kOk;
 
     // The encoder goes first: it owns the GPU encode session, and
     // failing fast on it keeps the error message about the encoder.
     if (encoder_) {
-        const plugins::Status s = encoder_->open();
-        if (s != plugins::kOk) {
-            NIMRTC_LOG_ERROR("nvcodec: composite encoder open() failed (status="
+        const Status s = encoder_->open();
+        if (s != kOk) {
+            NIMRTC_LOG_ERROR("plugins: composite encoder open() failed (status="
                              << unsigned(s) << ")");
             return s;
         }
     }
 
     if (decoder_) {
-        const plugins::Status s = decoder_->open();
-        if (s != plugins::kOk) {
-            NIMRTC_LOG_ERROR("nvcodec: composite decoder open() failed (status="
+        const Status s = decoder_->open();
+        if (s != kOk) {
+            NIMRTC_LOG_ERROR("plugins: composite decoder open() failed (status="
                              << unsigned(s) << ")");
             // Do not leave the encoder's hardware session dangling.
             if (encoder_) encoder_->close();
@@ -52,7 +54,7 @@ plugins::Status HwCompositeCodec::open() noexcept {
     }
 
     opened_ = true;
-    return plugins::kOk;
+    return kOk;
 }
 
 void HwCompositeCodec::close() noexcept {
@@ -62,14 +64,18 @@ void HwCompositeCodec::close() noexcept {
 }
 
 bool HwCompositeCodec::can_encode() const noexcept {
-    return encoder_ && encoder_->can_encode();
+    // The encoder half is present *and* usable.  `IVideoEncoder` has no
+    // `can_encode()` of its own -- the direction is in the type -- so
+    // the question reduces to "is there an encoder half at all?".
+    return encoder_ != nullptr;
 }
 
 bool HwCompositeCodec::can_decode() const noexcept {
-    return decoder_ && decoder_->can_decode();
+    // Same for the decode half.
+    return decoder_ != nullptr;
 }
 
-plugins::VideoCodecKind HwCompositeCodec::kind() const noexcept {
+VideoCodecKind HwCompositeCodec::kind() const noexcept {
     // The encoder describes the outbound stream, which is the direction
     // the composite is nominally "for"; the decoder is the fallback for
     // a receive-only composite.
@@ -84,23 +90,23 @@ std::string_view HwCompositeCodec::codec_name() const noexcept {
     return cfg_.name;
 }
 
-plugins::Status HwCompositeCodec::encode(const plugins::VideoFrame& raw,
-                                         std::uint8_t* output,
-                                         std::size_t output_capacity,
-                                         plugins::EncodedVideoFrame& encoded_out) noexcept {
-    if (!encoder_ || !encoder_->can_encode()) return plugins::kErrUnsupported;
+Status HwCompositeCodec::encode(const VideoFrame& raw,
+                                std::uint8_t* output,
+                                std::size_t output_capacity,
+                                EncodedVideoFrame& encoded_out) noexcept {
+    if (!encoder_) return kErrUnsupported;
     return encoder_->encode(raw, output, output_capacity, encoded_out);
 }
 
-plugins::Status HwCompositeCodec::decode(const plugins::EncodedVideoFrame& encoded,
-                                         plugins::VideoFrame& raw_out,
-                                         std::uint8_t* const* output_buffers) noexcept {
-    if (!decoder_ || !decoder_->can_decode()) return plugins::kErrUnsupported;
+Status HwCompositeCodec::decode(const EncodedVideoFrame& encoded,
+                                VideoFrame& raw_out,
+                                std::uint8_t* const* output_buffers) noexcept {
+    if (!decoder_) return kErrUnsupported;
     return decoder_->decode(encoded, raw_out, output_buffers);
 }
 
-plugins::Status HwCompositeCodec::force_keyframe() noexcept {
-    if (!encoder_ || !encoder_->can_encode()) return plugins::kErrUnsupported;
+Status HwCompositeCodec::force_keyframe() noexcept {
+    if (!encoder_) return kErrUnsupported;
     return encoder_->force_keyframe();
 }
 
@@ -112,21 +118,21 @@ bool HwCompositeCodec::supports_zero_copy_decode() const noexcept {
     return decoder_ && decoder_->supports_zero_copy_decode();
 }
 
-plugins::Status HwCompositeCodec::encode_zero_copy(
-        const plugins::GpuBuffer& gpu,
-        plugins::EncodedVideoFrame& encoded_out) noexcept {
-    if (!encoder_ || !encoder_->can_encode()) return plugins::kErrUnsupported;
+Status HwCompositeCodec::encode_zero_copy(
+        const GpuBuffer& gpu,
+        EncodedVideoFrame& encoded_out) noexcept {
+    if (!encoder_) return kErrUnsupported;
     return encoder_->encode_zero_copy(gpu, encoded_out);
 }
 
-plugins::Status HwCompositeCodec::decode_zero_copy(
-        const plugins::EncodedVideoFrame& encoded,
-        plugins::GpuBuffer& out_surface) noexcept {
-    if (!decoder_ || !decoder_->can_decode()) return plugins::kErrUnsupported;
+Status HwCompositeCodec::decode_zero_copy(
+        const EncodedVideoFrame& encoded,
+        GpuBuffer& out_surface) noexcept {
+    if (!decoder_) return kErrUnsupported;
     return decoder_->decode_zero_copy(encoded, out_surface);
 }
 
-plugins::VideoCodecConfig HwCompositeCodec::config() const noexcept {
+VideoCodecConfig HwCompositeCodec::config() const noexcept {
     // The encoder's configuration is the one that describes the outbound
     // stream, which is what a caller inspecting `config()` wants.
     if (encoder_) return encoder_->config();
@@ -134,14 +140,14 @@ plugins::VideoCodecConfig HwCompositeCodec::config() const noexcept {
     return cfg_;
 }
 
-plugins::Status HwCompositeCodec::update_config(plugins::VideoCodecConfig cfg) noexcept {
+Status HwCompositeCodec::update_config(VideoCodecConfig cfg) noexcept {
     cfg_ = cfg;
 
-    plugins::Status status = plugins::kOk;
+    Status status = kOk;
 
     if (encoder_) {
         status = encoder_->update_config(cfg);
-        if (status != plugins::kOk) return status;
+        if (status != kOk) return status;
     }
 
     // The decoder's width/height are an *upper bound* on the picture it
@@ -151,22 +157,31 @@ plugins::Status HwCompositeCodec::update_config(plugins::VideoCodecConfig cfg) n
     // resolution changed, and a remote peer sending a larger picture
     // would be rejected.  Only the non-geometric knobs are forwarded.
     if (decoder_) {
-        plugins::VideoCodecConfig dcfg = decoder_->config();
+        VideoCodecConfig dcfg = decoder_->config();
         dcfg.fps               = cfg.fps;
         dcfg.bitrate_bps       = cfg.bitrate_bps;
         dcfg.keyframe_interval = cfg.keyframe_interval;
         dcfg.payload_type      = cfg.payload_type;
         dcfg.codec             = cfg.codec;
         dcfg.pixel_format      = cfg.pixel_format;
-        const plugins::Status s = decoder_->update_config(dcfg);
-        if (s != plugins::kOk && status == plugins::kOk) status = s;
+        const Status s = decoder_->update_config(dcfg);
+        // A decoder that refuses the change is **normal**, not a
+        // failure: its geometry comes from the bitstream, so the seam's
+        // default answer is `kErrUnsupported` (a DXVA decoder, for
+        // instance, has no live-configuration hook at all).  The
+        // *encoder* half is the one the caller asked to change, and it
+        // already answered — so the decoder's refusal must not turn a
+        // successful re-configuration into an error.  Only a decoder
+        // that fails for a *different* reason (a hardware error, say)
+        // is worth reporting.
+        if (s != kOk && s != kErrUnsupported && status == kOk) status = s;
     }
 
     return status;
 }
 
-plugins::VideoCodecStats HwCompositeCodec::stats() const noexcept {
-    plugins::VideoCodecStats out{};
+VideoCodecStats HwCompositeCodec::stats() const noexcept {
+    VideoCodecStats out{};
     if (encoder_) {
         const auto s = encoder_->stats();
         out.frames_encoded = s.frames_encoded;
@@ -207,8 +222,10 @@ plugins::VideoCodecStats HwCompositeCodec::stats() const noexcept {
 }
 
 std::uint8_t HwCompositeCodec::payload_type() const noexcept {
+    // The payload type describes the *outbound* stream, so the encoder
+    // half owns it.  A receive-only composite has no encoder half and
+    // falls back to the configured value.
     if (encoder_) return encoder_->payload_type();
-    if (decoder_) return decoder_->payload_type();
     return cfg_.payload_type != 0 ? cfg_.payload_type : std::uint8_t{102};
 }
 
@@ -233,4 +250,6 @@ bool HwCompositeCodec::is_hardware_accelerated() const noexcept {
     return false;
 }
 
-} // namespace nimrtc::nvcodec
+NIMRTC_SUPPRESS_DEPRECATION_END
+
+} // namespace nimrtc::plugins

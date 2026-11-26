@@ -56,7 +56,7 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     if (!is_open()) return false;
     if (!config_.video_capture_pump) return false;
     if (!video_capture_) return false;
-    if (!video_codec_ || !video_sender_) return false;
+    if (!video_encoder_ || !video_sender_) return false;
 
     auto& vstate = impl_->video_state;
 
@@ -414,7 +414,7 @@ void NimRTCEngine::drain_stale_cpu_frames() noexcept {
 }
 
 void NimRTCEngine::wire_capture_gpu_callback() noexcept {
-    if (!video_capture_ || !video_codec_) return;
+    if (!video_capture_ || !video_encoder_) return;
 
     // ---- Did the host ask for the zero-copy path at all? ------------------
     //
@@ -442,7 +442,7 @@ void NimRTCEngine::wire_capture_gpu_callback() noexcept {
     // The capability is queried on the *open* codec: an unopened codec
     // has no encode session, and NVENC's answer depends on the session
     // being there.
-    if (!video_codec_->supports_zero_copy_encode()) {
+    if (!video_encoder_->supports_zero_copy_encode()) {
         core::log::Logger::instance().info(
             "engine: the capture device can deliver GPU surfaces but the "
             "video codec cannot consume one — the frames take the CPU "
@@ -498,7 +498,7 @@ void NimRTCEngine::wire_capture_gpu_callback() noexcept {
 
 bool NimRTCEngine::pump_video_capture_gpu() noexcept {
     if (!is_open()) return false;
-    if (!video_capture_ || !video_codec_ || !video_sender_) return false;
+    if (!video_capture_ || !video_encoder_ || !video_sender_) return false;
 
     auto& vstate = impl_->video_state;
 
@@ -556,7 +556,7 @@ bool NimRTCEngine::pump_video_capture_gpu() noexcept {
     // colour conversion, no host round-trip.  The `GpuBuffer` owns the
     // texture and is alive for the whole call, which is the lifetime
     // `encode_zero_copy()` documents.
-    if (!video_codec_->supports_zero_copy_encode()) {
+    if (!video_encoder_->supports_zero_copy_encode()) {
         // The codec cannot take a surface.  The frame is lost — there
         // is no CPU mirror to fall back to, and manufacturing one would
         // defeat the path the host asked for.
@@ -568,7 +568,7 @@ bool NimRTCEngine::pump_video_capture_gpu() noexcept {
     }
 
     plugins::EncodedVideoFrame encoded{};
-    const plugins::Status rc = video_codec_->encode_zero_copy(
+    const plugins::Status rc = video_encoder_->encode_zero_copy(
         *frame.gpu_buffer, encoded);
     if (rc != plugins::kOk) {
         ++vstate.video_capture_gpu_errors;

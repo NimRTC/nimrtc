@@ -8,7 +8,7 @@
  *
  *   1. Build a synthetic I420 frame.
  *   2. Encode it with the NVENC backend through the public
- *      `plugins::IVideoCodec` interface.
+ *      `plugins::IVideoEncoder` interface.
  *   3. Assert the bitstream is a valid Annex-B access unit carrying
  *      SPS + PPS + an IDR slice.
  *   4. Decode it with the NVDEC backend and assert that:
@@ -97,26 +97,26 @@ std::size_t stride_of(const video_frame::VideoFrameLayout& layout, int plane) {
 /** Create the NVENC encoder for H.264, or nullptr when the backend was
  *  not compiled in (no NVIDIA SDK at build time) or is unavailable on
  *  this host. */
-std::unique_ptr<plugins::IVideoCodec> make_nvenc(
+std::unique_ptr<plugins::IVideoEncoder> make_nvenc(
     const plugins::VideoCodecConfig& cfg) {
     return nvcodec::make_nvenc_codec(nvcodec::NvCodec::kH264, cfg);
 }
 
 /** Create the NVDEC decoder for H.264, or nullptr when the backend was
  *  not compiled in or is unavailable on this host. */
-std::unique_ptr<plugins::IVideoCodec> make_nvdec(
+std::unique_ptr<plugins::IVideoDecoder> make_nvdec(
     const plugins::VideoCodecConfig& cfg) {
     return nvcodec::make_nvdec_codec(nvcodec::NvCodec::kH264, cfg);
 }
 
 /** Create the NVENC encoder for an arbitrary codec. */
-std::unique_ptr<plugins::IVideoCodec> make_nvenc_for(
+std::unique_ptr<plugins::IVideoEncoder> make_nvenc_for(
     nvcodec::NvCodec codec, const plugins::VideoCodecConfig& cfg) {
     return nvcodec::make_nvenc_codec(codec, cfg);
 }
 
 /** Create the NVDEC decoder for an arbitrary codec. */
-std::unique_ptr<plugins::IVideoCodec> make_nvdec_for(
+std::unique_ptr<plugins::IVideoDecoder> make_nvdec_for(
     nvcodec::NvCodec codec, const plugins::VideoCodecConfig& cfg) {
     return nvcodec::make_nvdec_codec(codec, cfg);
 }
@@ -248,8 +248,6 @@ TEST(HwRoundTrip, NvencEncodeThenNvdecDecode) {
     // ---- 2. Encoder ------------------------------------------------------
     auto encoder = make_nvenc(cfg);
     ASSERT_NE(encoder, nullptr) << "the NVENC backend failed to open";
-    ASSERT_TRUE(encoder->can_encode());
-    ASSERT_FALSE(encoder->can_decode());
 
     const TestFrame src = make_test_frame(kWidth, kHeight);
     const plugins::VideoFrame raw = make_video_frame(src, kWidth, kHeight);
@@ -313,8 +311,6 @@ TEST(HwRoundTrip, NvencEncodeThenNvdecDecode) {
     // ---- 4. Decoder ------------------------------------------------------
     auto decoder = make_nvdec(cfg);
     ASSERT_NE(decoder, nullptr) << "the NVDEC backend failed to open";
-    ASSERT_TRUE(decoder->can_decode());
-    ASSERT_FALSE(decoder->can_encode());
 
     // The decoder writes into caller-owned buffers.  Use the same layout
     // the engine uses (16-byte aligned strides).
@@ -824,8 +820,6 @@ TEST(HwRoundTrip, NvdecDecodesSelfContainedBitstream) {
 
     auto decoder = make_nvdec(cfg);
     ASSERT_NE(decoder, nullptr) << "the NVDEC backend failed to open";
-    ASSERT_TRUE(decoder->can_decode());
-    ASSERT_FALSE(decoder->can_encode());
 
     // The vector is 320x240, which matches kWidth / kHeight, so the
     // caller-supplied output buffers can be sized from the config.
@@ -1081,8 +1075,6 @@ static void round_trip_codec(nvcodec::NvCodec codec) {
     auto encoder = make_nvenc_for(codec, cfg);
     ASSERT_NE(encoder, nullptr)
         << "the NVENC backend failed to open for " << desc.rtpmap_encoding;
-    ASSERT_TRUE(encoder->can_encode());
-    ASSERT_FALSE(encoder->can_decode());
 
     const TestFrame src = make_test_frame(kWidth, kHeight);
     const plugins::VideoFrame raw = make_video_frame(src, kWidth, kHeight);
@@ -1119,7 +1111,6 @@ static void round_trip_codec(nvcodec::NvCodec codec) {
     auto decoder = make_nvdec_for(codec, cfg);
     ASSERT_NE(decoder, nullptr)
         << "the NVDEC backend failed to open for " << desc.rtpmap_encoding;
-    ASSERT_TRUE(decoder->can_decode());
 
     const auto layout = video_frame::compute_layout(video_frame::PixelFormat::kI420,
                                                     kWidth, kHeight);

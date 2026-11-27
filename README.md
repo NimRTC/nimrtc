@@ -164,7 +164,10 @@ No single feature here is brand new — but the **combination** is rare in the o
 
 > **Not a fit if:** you need a turnkey browser-grade SDK today, or you only target mobile (iOS/Android are roadmap, not a current-track item).
 
-## Download prebuilt v1.3.0
+## Download a prebuilt bundle
+
+The newest published bundle is **`v1.3.1`**; the notes below describe the
+`v1.3.x` bundle shape, and `v1.3.0` is the line they were first written for.
 
 Each platform bundle ships **NimRTC itself** — the public headers, the static libraries and
 the CMake package config — alongside the **vendored third-party dependency stack** for that
@@ -604,7 +607,7 @@ A pragmatic matrix for evaluators — read across the rows that matter to you:
 | **AI Agent / 3A-bypass hooks** | ✅ `pre/post-3a` PCM tap (P2) | ❌ APM is opaque | ❌ | ❌ | ❌ |
 | **ref_frame / frame-aligned timeline** | 🚧 P3 | ❌ | ❌ | ❌ | ❌ |
 | **Wire-level Chrome interop** | ✅ Case D green (media over DTLS-SRTP) + Case E green (data over Chrome WebTransport JS API) | ✅ | ✅ (Go-only) | ✅ via browser SDK | ✅ via browser SDK |
-| **Production maturity (2026)** | Stable (v1.3.0 published) | Production-grade | Production-grade | Production-grade | Production-grade |
+| **Production maturity (2026)** | Stable (v1.3.1 published) | Production-grade | Production-grade | Production-grade | Production-grade |
 
 **Where NimRTC wins outright:** aarch64 embedded, GM/T crypto path (DTLS layer), AI Agent hooks, single-trunk
 P2P+relay (where `relay` is the single-strategy gateway profile that compiles out L2 codecs; a from-scratch SFU module is not a deliverable — see `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19).

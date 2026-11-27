@@ -15,7 +15,18 @@ describes a plan that is out of date, and it is reported as such.
 
 Usage:
     python tools/check_v14_plan_status.py            # the report
+    python tools/check_v14_plan_status.py --json
+    python tools/check_v14_plan_status.py --strict   # non-zero on STALE
     python tools/check_v14_plan_status.py --self-test
+
+The flags are the same as `check_v15_plan_status.py`'s, and so is the
+meaning of every one of them: two checkers for two plans, one interface.
+CI runs both the same way -- `--self-test` and the plain report -- and
+neither is run with `--strict`, for the reason given at the CI step:
+a plan that has moved on is a documentation task, and a build that goes
+red for it teaches people to ignore the build.  `--strict` exists for
+the reader who wants the drift to be an error (a release preflight,
+say); it is a choice they make, not one the build makes for them.
 """
 
 from __future__ import annotations
@@ -325,25 +336,41 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true",
                         help="check the checker")
+    parser.add_argument("--json", action="store_true",
+                        help="machine-readable output")
+    parser.add_argument("--strict", action="store_true",
+                        help="exit non-zero on any STALE row")
     args = parser.parse_args()
 
     if args.self_test:
         return self_test()
 
     lines, stale = report_lines()
-    print("v1.4 plan status -- %d claim(s) checked against the tree"
-          % len(lines))
-    for line in lines:
-        print(line)
-    if stale:
-        print()
-        print("%d claim(s) in the plan no longer hold:" % len(stale))
-        for row in stale:
-            print("  - %s" % row)
-        print()
-        print("The plan's §1 and §10 describe a tree that has moved on.")
-        print("Update them (docs/plan/v1.4-plan.md) or the next reader")
-        print("follows a table that is not true.")
+
+    if args.json:
+        import json
+        print(json.dumps({
+            "claims": len(lines),
+            "stale": len(stale),
+            "rows": [ln.strip() for ln in lines],
+        }, indent=2))
+    else:
+        print("v1.4 plan status -- %d claim(s) checked against the tree"
+              % len(lines))
+        for line in lines:
+            print(line)
+        if stale:
+            print()
+            print("%d claim(s) in the plan no longer hold:" % len(stale))
+            for row in stale:
+                print("  - %s" % row)
+            print()
+            print("The plan's §1 and §10 describe a tree that has moved on.")
+            print("Update them (docs/plan/v1.4-plan.md) or the next reader")
+            print("follows a table that is not true.")
+
+    if stale and args.strict:
+        return 1
     return 0
 
 

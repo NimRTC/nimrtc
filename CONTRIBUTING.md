@@ -141,6 +141,42 @@ You **fix forward** in a new PR, you don't paper over it. Steps:
 This keeps `main` honest at every commit and avoids the "fix in flight"
 anti-pattern where a PR fixes a regression it didn't introduce.
 
+### Review documents: what stays in the tree and what does not
+
+Reviews are how findings become work, and the tree has to hold that work
+-- but a review document is not the machinery, and a tree that keeps
+every review accumulates process history nobody reads.  The history
+before 2026-11-25 had no rule at all, and the result was two PRs on the
+same subject that did opposite things: one **deleted** a review
+(`reviews/2026-11-24-nimrtc-feedback.md`, 291 lines, in #174) because
+"it is a document about the process, not part of the machinery"; three
+days later another **added** a 640-line plan derived from a review of
+the same kind (#189, `docs/plan/v1.5-plan.md`).  Neither was wrong on
+its own terms.  Without a rule, both could be.
+
+The rule, from 2026-11-27:
+
+| Document | Where it lives | Why |
+|---|---|---|
+| **A plan** -- work items with a writeset, a probe and a decision each | `docs/plan/<version>-plan.md`, committed | It is the contract the code is written against; the code and the plan are reviewed together. |
+| **A design record** -- a decision that constrains future code | `docs/adr/ADR-NNN-*.md`, committed | An ADR is cited by code and by the plan; it has to be in the tree. |
+| **A finding that fixes a defect** | Not a document: the fix, its test, and a `CHANGELOG.md` entry | The finding's value is the change it caused, and the changelog is where the *why* is kept. |
+| **A review of a plan or a PR** -- prose about a moment in time | outside the repository | It describes a tree that has moved on; nothing in the tree may cite it. |
+| **A survey that a plan quotes** | summarised in the plan, with the date it was made | A plan that depends on a document outside the tree must stand without it -- quote the claims, do not link the document. |
+
+The test is one question: **does the tree's code or its plans need to
+cite this file?**  If yes, it belongs in `docs/plan/` or `docs/adr/`.
+If no, it does not belong in the tree -- and the PR that removes it
+says so, in the commit message, so the *next* review author is not
+left guessing which kind theirs is.
+
+The existing documents under `docs/plan/` (`v0.11-preview.md`,
+`v0.15.0-self-review.md`, `dtls_chrome_interop_review.md`,
+`acceptance-mutation-test-review.md`) predate the rule.  They are kept
+as they are: they are cited by the plans and ADRs around them, which is
+the test above, and deleting them now would remove the citations.  The
+rule is forward-looking; it is not a retro-active sweep.
+
 ## Commit message format
 
 Follow [Conventional Commits](https://www.conventionalcommits.org/):

@@ -95,6 +95,16 @@ function(nimrtc_copy_wolfssl_certs target)
     if(TARGET _nimrtc_cert_copier_${target})
         return()
     endif()
+    # The pair is produced by the build, not by the caller: every CI job
+    # used to run `scripts/generate_dtls_certs_ci.py` by hand before
+    # configuring (fifteen copies of the step).  Now the build owns it
+    # -- one `nimrtc_dtls_certs` target per tree (cmake/NimRTCRuntime.cmake)
+    # -- and this test target only depends on it.  A test tree built
+    # without it still fails loudly below, which is the intent: better a
+    # red build than a silently SAN-less cert.
+    if(TARGET nimrtc_dtls_certs)
+        add_dependencies(${target} nimrtc_dtls_certs)
+    endif()
     # POST_BUILD copies the two wolfssl certs into <target-dir>/certs/ at build time.
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory

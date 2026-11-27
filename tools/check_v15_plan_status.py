@@ -23,8 +23,16 @@ The discipline is the one `tools/check_v14_plan_status.py` established:
 
 Usage:
     python tools/check_v15_plan_status.py            # the report
-    python tools/check_v15_plan_status.py --self-test
     python tools/check_v15_plan_status.py --json
+    python tools/check_v15_plan_status.py --strict   # non-zero on STALE
+    python tools/check_v15_plan_status.py --self-test
+
+Same flags, same meanings as `check_v14_plan_status.py`.  The two used
+to differ -- `--json` and `--strict` here, neither there -- which meant
+"run the plan checker" was two commands with different outcomes, and a
+CI step that ran one was not running the other.  CI runs both the same
+way now, and neither with `--strict`: a plan that has moved on is a
+documentation task, not a build failure.
 """
 
 from __future__ import annotations

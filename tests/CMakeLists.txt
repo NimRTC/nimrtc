@@ -3692,6 +3692,22 @@ if(NIMRTC_BUILD_TESTS)
         set_tests_properties(test_ci_ruleset PROPERTIES
             TIMEOUT 60
             LABELS "ci;guard")
+
+        # The *live*-ruleset half of the same guard
+        # (`tools/apply_ci_ruleset.py`) needs the network and a token, so
+        # it cannot be a ctest case -- but its `--self-test` is pure
+        # arithmetic over synthetic rulesets, and it pins the rule that
+        # matters most in CI: a field the API withheld is not a
+        # difference.  That self-test runs in the `docs / markdown
+        # links` leg; registering it here as well means a developer
+        # running `ctest` alone sees the same verdict CI does.
+        add_test(NAME test_apply_ci_ruleset_selftest
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/apply_ci_ruleset.py"
+                         --self-test)
+        set_tests_properties(test_apply_ci_ruleset_selftest PROPERTIES
+            TIMEOUT 60
+            LABELS "ci;guard")
     else()
         message(STATUS
             "Python3 interpreter not found — skipping the merge-gate guard "

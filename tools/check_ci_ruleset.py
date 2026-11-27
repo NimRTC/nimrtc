@@ -20,9 +20,23 @@ Two ways to drift, both observed in this repository:
      costs eleven minutes of runner time, and nobody looks at it.  A
      sanitizer leg that is not required catches nothing.
 
-This script reads the workflows and the ruleset, and asserts that the
+This script reads the workflows and the mirror, and asserts that the
 two sets are *equal*.  It needs no build and no network, so it runs on
 every push.
+
+It is one half of the gate guard, and the smaller half.  It cannot see
+the ruleset GitHub actually *applies*: the mirror is a file, and a file
+can disagree with the live ruleset while this check stays green.  That
+is exactly what happened after #181 -- `windows / dxva` was added to
+the mirror, the live ruleset stayed at thirteen checks, and this script
+reported "14/14" -- while the DXVA leg ran and went green without being
+part of the merge decision.
+
+The other half is `tools/apply_ci_ruleset.py --check`: it reads the
+live rulesets over the API and compares them with the mirrors.  CI
+runs both (the `docs / markdown links` leg); a `FAIL` from the
+live-ruleset check is fixed with `--apply`, never by editing the
+mirror to match a mistake.
 
 What counts as "produced on main"
 ----------------------------------

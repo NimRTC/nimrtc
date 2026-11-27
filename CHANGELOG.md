@@ -211,6 +211,40 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The merge-gate guard could not see the ruleset it was guarding
+  (2026-11-27).**
+  `tools/check_ci_ruleset.py` compares `.github/rulesets/protect-main.json`
+  with the checks the workflows produce, and it needs no network.  That is
+  also its blind spot: **the mirror is a file, and a file can disagree
+  with the ruleset GitHub actually applies.**  #181 added
+  `windows / dxva` to the mirror; the live ruleset stayed at thirteen
+  required checks for a day; the guard reported `14/14` the whole time --
+  and the DXVA leg ran and went green without participating in a single
+  merge decision.  A gate that cannot see the gate is not a gate.
+
+  The other half now runs in CI, on the `docs / markdown links` leg:
+  `tools/apply_ci_ruleset.py --check` reads the live rulesets over the
+  API and compares them with the mirrors, field by field.  A FAIL there
+  is fixed with `--apply` from a machine with write access -- **never by
+  editing the mirror to match a mistake.**  The script reports "could
+  not look" as a failure rather than a skip: a missing `gh` on PATH is
+  an ERROR now, and the read call gets `stdin=DEVNULL` instead of
+  inheriting the caller's stdin.
+
+  One detail decides whether the step can run in CI at all.  GitHub
+  withholds `bypass_actors` from a caller that has no **write** access
+  to the ruleset ("to prevent leaking sensitive information, the
+  bypass_actors property is only returned if the user making the API
+  request has write access"), and the repository's default workflow
+  permissions are `read` -- so the CI job's `GITHUB_TOKEN` sees the
+  field *absent*, while the mirror records it as `[]`.  Comparing them
+  directly would report a difference on every push, for a field the
+  caller was never allowed to see.  The script now compares the fields
+  the token could read and names the ones it could not: **an unseen
+  field is not a difference.**  `--self-test` pins that rule, because a
+  regression there would turn the step red on every push -- and a
+  permanently red step gets deleted, taking the guard with it.
+
 - **The v1.4.0 final-tag preflight was red by construction: it read the
   hardware evidence from a directory the evidence is never in
   (2026-11-27).**

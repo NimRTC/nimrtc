@@ -37,6 +37,7 @@ matrix in step reported 14/14 the whole time.
 
 Usage:
     python tools/apply_ci_ruleset.py --check
+    python tools/apply_ci_ruleset.py --self-test
     python tools/apply_ci_ruleset.py --apply
     python tools/apply_ci_ruleset.py --apply \
         --mirror .github/rulesets/protect-tags.json
@@ -44,6 +45,13 @@ Usage:
 Exit code 0 when the repository matches the mirrors, 1 otherwise.
 `--check` needs a token with read access (`gh auth login`, or
 `GH_TOKEN` set); without one it fails rather than skipping.
+
+One field is conditional.  GitHub withholds `bypass_actors` from a
+caller without write access to the ruleset, so a read-only token --
+which is what a CI job's `GITHUB_TOKEN` is -- sees the field absent
+while the mirror records it as a list.  The comparison then covers
+the fields the caller could actually read, and the summary names the
+ones it could not: an unseen field is not a difference.
 """
 
 from __future__ import annotations
@@ -127,13 +135,52 @@ def find_by_id(rulesets: list, wanted_id):
 FIELDS = ("name", "target", "enforcement", "bypass_actors",
           "conditions", "rules")
 
+# `bypass_actors` is only returned to a caller that has **write** access
+# to the ruleset: "to prevent leaking sensitive information, the
+# bypass_actors property is only returned if the user making the API
+# request has write access to the ruleset" (the REST documentation).
+#
+# So a read-only token -- which is what a CI job's `GITHUB_TOKEN` is,
+# since the repository's default workflow permissions are `read` -- sees
+# the field *absent*, and an absent field is not the same as an empty
+# list.  Comparing them directly would report a difference on every
+# run, for a field the caller was never allowed to see.
+#
+# The fix is to compare the fields the caller could actually read, and
+# to say which ones were skipped.  A skipped field is not a pass and
+# not a failure: it is a fact about what the caller could see, and the
+# summary says so.
+READ_ONLY_HIDDEN = ("bypass_actors",)
 
-def read_ruleset(ruleset_id) -> dict:
+
+def read_ruleset(ruleset_id) -> tuple[dict, list]:
+    """The ruleset as the API reports it, and the fields it withheld.
+
+    The second element is the list of fields the API did not return --
+    empty when the caller had write access and saw everything.
+    """
     out, err, rc = gh([API + "/rulesets/" + str(ruleset_id)])
     if rc != 0:
         raise SystemExit("ERROR reading the ruleset: " + err.strip()[:400])
     data = json.loads(out)
-    return strip({k: data.get(k) for k in FIELDS})
+    withheld = [k for k in READ_ONLY_HIDDEN if k not in data]
+    live = {k: data.get(k) for k in FIELDS if k not in withheld}
+    return strip(live), withheld
+
+
+def compare(live: dict, withheld: list, mirror: dict) -> list:
+    """The fields in which the live ruleset and the mirror differ.
+
+    A withheld field is left out of the comparison entirely -- the
+    caller cannot see it, so it cannot be a difference.
+    """
+    differences = []
+    for key in FIELDS:
+        if key in withheld:
+            continue
+        if live.get(key) != mirror.get(key):
+            differences.append(key)
+    return differences
 
 
 def ruleset_payload(mirror: dict) -> str:
@@ -223,17 +270,26 @@ def apply_one(rulesets, mirror, mirror_path, do_apply):
     # stripped the same way, so a mirror that records the ruleset id
     # (which is how a renamed ruleset keeps being found) still
     # compares equal.
-    live = read_ruleset(rs["id"])
+    live, withheld = read_ruleset(rs["id"])
 
-    if live == strip(mirror):
-        print("PASS -- the repository matches the mirror.")
+    differences = compare(live, withheld, strip(mirror))
+
+    if not differences:
+        if withheld:
+            print("PASS -- the repository matches the mirror on every "
+                  "field this token could read (%s withheld by the API: "
+                  "a read-only token is not shown it)."
+                  % ", ".join(withheld))
+        else:
+            print("PASS -- the repository matches the mirror.")
         return 0
 
-    print("FAIL -- the repository differs from the mirror:")
+    print("FAIL -- the repository differs from the mirror in: %s"
+          % ", ".join(differences))
     print("--- repository ---")
     print(json.dumps(live, indent=2, sort_keys=True))
     print("--- mirror ---")
-    print(json.dumps(mirror, indent=2, sort_keys=True))
+    print(json.dumps(strip(mirror), indent=2, sort_keys=True))
     if not do_apply:
         print("Run with --apply to make the repository match.")
     return 1
@@ -307,5 +363,76 @@ def main() -> int:
     return 0
 
 
+def self_test() -> int:
+    """Pin the comparison rules against synthetic rulesets.
+
+    The case that matters is the withheld field.  GitHub hides
+    `bypass_actors` from a caller without write access, and a CI job's
+    `GITHUB_TOKEN` is exactly such a caller -- so the script has to be
+    able to say "this token could not see that field" without calling it
+    a difference.  A regression there would make the check red on every
+    push, which is the kind of failure that gets the step deleted.
+    """
+    mirror = {
+        "name": "r",
+        "target": "branch",
+        "enforcement": "active",
+        "bypass_actors": [],
+        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+        "rules": [{"type": "deletion"}],
+    }
+
+    # 1. Everything visible and equal -> no difference.
+    live = dict(mirror)
+    differences = compare(strip(live), [], strip(mirror))
+    assert differences == [], differences
+
+    # 2. The field the API withheld -> not a difference, and reported.
+    visible = {k: v for k, v in mirror.items() if k != "bypass_actors"}
+    withheld = ["bypass_actors"]
+    differences = compare(strip(visible), withheld, strip(mirror))
+    assert differences == [], differences
+    assert withheld == ["bypass_actors"]
+
+    # 3. A field that *is* visible and differs -> a difference.
+    changed = dict(mirror)
+    changed["enforcement"] = "disabled"
+    differences = compare(strip(changed), [], strip(mirror))
+    assert differences == ["enforcement"], differences
+
+    # 4. A withheld field that differs in the mirror must not be
+    #    reported either -- the caller cannot see it, so it cannot be
+    #    a difference it is entitled to report.
+    other = dict(mirror)
+    other["bypass_actors"] = [{"actor_id": 1, "actor_type": "RepositoryRole"}]
+    differences = compare(strip(visible), withheld, strip(other))
+    assert differences == [], differences
+
+    # 5. The mirror's own `_comment` keys never reach the comparison.
+    commented = dict(mirror)
+    commented["_comment"] = ["documentation"]
+    differences = compare(strip(visible), withheld, strip(commented))
+    assert differences == [], differences
+
+    # 6. The withheld set is derived from the *response*, not from a
+    #    guess: a response that carries `bypass_actors` withholds
+    #    nothing, and one that does not withholds exactly that field.
+    #    This is the layer the read-only-token path depends on, and it
+    #    is the one a rename of the field would silently break.
+    response = {"id": 1, "name": "r", "target": "branch",
+                "enforcement": "active",
+                "conditions": mirror["conditions"], "rules": mirror["rules"]}
+    seen = [k for k in READ_ONLY_HIDDEN if k not in response]
+    assert seen == ["bypass_actors"], seen
+    response["bypass_actors"] = []
+    seen = [k for k in READ_ONLY_HIDDEN if k not in response]
+    assert seen == [], seen
+
+    print("PASS -- the self-test confirms every classification.")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     sys.exit(main())

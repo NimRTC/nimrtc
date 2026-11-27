@@ -944,6 +944,36 @@ jobs:
       - name: Self-test the merge-gate guard
         run: python tools/check_ci_ruleset.py --self-test
 
+      # The step above compares the ruleset *mirror* with the workflows,
+      # and it needs no network.  That is also its blind spot: the
+      # mirror is a file, and a file can disagree with the ruleset
+      # GitHub actually applies.  #181 added `windows / dxva` to the
+      # mirror, the live ruleset stayed at thirteen checks for a day,
+      # and this check reported 14/14 the whole time -- while the DXVA
+      # leg ran and went green without being part of a single merge
+      # decision.
+      #
+      # So the live ruleset is read too, over the API, and compared
+      # with the mirror field by field.  A FAIL here is fixed with
+      # `--apply` from a machine with write access -- never by editing
+      # the mirror to match a mistake.
+      #
+      # The token is the job's own `GITHUB_TOKEN`, which the
+      # repository's default workflow permissions (`read`) make
+      # read-only.  GitHub withholds `bypass_actors` from a caller
+      # without write access to the ruleset, so the script compares the
+      # fields the token could read and names the ones it could not --
+      # an unseen field is not a difference.  The self-test pins that
+      # rule, because a regression there would turn this step red on
+      # every push, and a red step gets deleted.
+      - name: Check the live ruleset against the mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/apply_ci_ruleset.py --check
+
+      - name: Self-test the live-ruleset guard
+        run: python tools/apply_ci_ruleset.py --self-test
+
       # The hardware-evidence reader (`tools/read_hardware_evidence.py`)
       # is what `scripts/check-release-freeze.sh` asks at tag-cut time:
       # "is there a PASS Q7 record on the tree being tagged?".  Its

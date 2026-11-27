@@ -34,6 +34,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -90,11 +91,31 @@ void ensure_winsock() {
 void ensure_winsock() {}
 #endif
 
+// The socket helpers below are cross-platform, and the spelling is
+// deliberately the *portable* one: `int` for the descriptor and
+// `::close` for the closer, with the Winsock spellings behind
+// `#ifdef _WIN32`.  The existing ICE suites (`test_turn_relay.cpp`)
+// use the same shape, and the reason is not stylistic: `SOCKET` and
+// `INVALID_SOCKET` do not exist on POSIX, and `closesocket` does not
+// either — a test that uses them compiles on Windows and fails to
+// compile on every other leg.
+#ifdef _WIN32
+using socket_t = SOCKET;
+constexpr socket_t kInvalidSocket = INVALID_SOCKET;
+
+void close_socket(socket_t s) noexcept { ::closesocket(s); }
+#else
+using socket_t = int;
+constexpr socket_t kInvalidSocket = -1;
+
+void close_socket(socket_t s) noexcept { ::close(s); }
+#endif
+
 std::uint16_t find_bindable_udp_port(int type) {
     ensure_winsock();
     for (int attempt = 0; attempt < 16; ++attempt) {
-        const SOCKET sock = ::socket(AF_INET, type, 0);
-        if (sock == INVALID_SOCKET) return 0;
+        const socket_t sock = ::socket(AF_INET, type, 0);
+        if (sock == kInvalidSocket) return 0;
 
         sockaddr_in addr{};
         addr.sin_family      = AF_INET;
@@ -112,12 +133,12 @@ std::uint16_t find_bindable_udp_port(int type) {
             if (::getsockname(sock, reinterpret_cast<sockaddr*>(&bound),
                                &len) == 0) {
                 const auto port = ntohs(bound.sin_port);
-                ::closesocket(sock);
+                close_socket(sock);
                 if (port != 0) return port;
                 continue;
             }
         }
-        ::closesocket(sock);
+        close_socket(sock);
     }
     return 0;
 }
@@ -145,15 +166,15 @@ std::uint16_t find_bindable_udp_port_run(std::uint16_t count) {
         bool all_free = true;
         for (std::uint16_t i = 0; i < count && all_free; ++i) {
             const std::uint16_t port = static_cast<std::uint16_t>(first + i);
-            const SOCKET fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-            if (fd == INVALID_SOCKET) { all_free = false; break; }
+            const socket_t fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd == kInvalidSocket) { all_free = false; break; }
             sockaddr_in addr{};
             addr.sin_family      = AF_INET;
             addr.sin_port        = htons(port);
             addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             all_free = ::bind(fd, reinterpret_cast<sockaddr*>(&addr),
                               sizeof(addr)) == 0;
-            ::closesocket(fd);
+            close_socket(fd);
         }
         if (all_free) return first;
     }

@@ -305,6 +305,13 @@ public:
             return plugins::kErrHardwareError;
         }
 
+        // The device id is negotiated like the format: the request may
+        // have left it empty ("the backend's default device"), and the
+        // backend knows which device it actually opened -- so it reports
+        // it.  A host that reads `config().device_id` gets the device
+        // it is really talking to.
+        cfg_.device_id = device_id_for(index);
+
         // The device may not support the requested rate / channel count.
         // PortAudio can convert, but the *seam* is explicit about what
         // is in force, so the device's native values win when the
@@ -588,6 +595,13 @@ public:
             close();
             return plugins::kErrHardwareError;
         }
+
+        // The device id is negotiated like the format: the request may
+        // have left it empty ("the backend's default device"), and the
+        // backend knows which device it actually opened -- so it reports
+        // it.  A host that reads `config().device_id` gets the device
+        // it is really talking to.
+        cfg_.device_id = device_id_for(index);
 
         const double rate = info->defaultSampleRate;
         if (rate > 0.0) {

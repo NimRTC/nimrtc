@@ -209,4 +209,44 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioDecoderMissing     = 0x1A
 inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioDecoderUnsupported = 0x1A47;
 inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioPayloadTypeUnknown = 0x1A48;
 
+// ---------------------------------------------------------------------------
+// Audio devices — 0x1A60..0x1A6F (v1.4 D1)
+// ---------------------------------------------------------------------------
+// The audio-device layer's own range, past the audio pipeline's
+// 0x1A40..0x1A4F and the video-capture's 0x1A50.  The four codes follow
+// the video-device pair's shape (`kVideoCaptureOpenFailed` /
+// `kVideoCapturePluginMissing`): "the plug-in does not exist" and "the
+// plug-in exists but the device would not open" are different
+// conditions, because the first is a typo and the second is a machine
+// with no sound card.
+//
+// Unlike the *capture* device's codes, these are reported as **warnings**
+// rather than errors: a machine with no sound card, or a revoked
+// microphone permission, must not take down a video call.
+
+/** No capture factory is registered under the configured id.
+ *
+ *  Reported when `EngineConfig::audio_source_name` names a factory
+ *  that does not exist.  Distinct from `kAudioSourceOpenFailed`: that
+ *  one means "the plug-in exists but the device would not open". */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioSourcePluginMissing = 0x1A60;
+
+/** The capture device exists but refused to open.
+ *
+ *  A machine with no sound card, a revoked microphone permission, or a
+ *  device that is busy in another application. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioSourceOpenFailed    = 0x1A61;
+
+/** No playback factory is registered under the configured id.
+ *
+ *  Reported when `EngineConfig::audio_sink_name` names a factory that
+ *  does not exist. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioSinkPluginMissing   = 0x1A62;
+
+/** The playback device exists but refused to open.
+ *
+ *  A machine with no sound card, or an output device that is busy in
+ *  another application. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioSinkOpenFailed      = 0x1A63;
+
 } // namespace nimrtc::core

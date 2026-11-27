@@ -97,6 +97,12 @@ SyntheticSystemAudioSource::SyntheticSystemAudioSource(
     plugins::AudioSourceConfig cfg) noexcept
     : cfg_(std::move(cfg)),
       queue_(queue_capacity(cfg_), effective_channels(cfg_.format.channels)) {
+    // The device id is negotiated like the format: an empty id means
+    // "the backend's default device", and the backend reports the
+    // concrete one it resolved.
+    if (cfg_.device_id.empty()) {
+        cfg_.device_id = kSyntheticDeviceId;
+    }
     cfg_.format.sample_rate_hz = effective_rate(cfg_.format.sample_rate_hz);
     cfg_.format.channels = effective_channels(cfg_.format.channels);
     cfg_.format.frames_per_buffer =

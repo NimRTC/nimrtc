@@ -182,6 +182,13 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
     // (Layout Invariant 4).
     &nimrtc::video_capture::register_default_plugins,
 #endif
+#ifdef NIMRTC_HAS_AUDIO_DEVICE
+    // v1.4 D1 (ADR-028): the audio-device module.  Its entry point
+    // populates the registry's audio-source / audio-sink slots, so the
+    // engine can resolve a device backend through the seam without
+    // naming a concrete module (Layout Invariant 4).
+    &nimrtc::audio_device::register_default_plugins,
+#endif
 #ifdef NIMRTC_HAS_VIDEO_BITRATE_CONTROL
     // Remote-desktop plan D1: the video rate controller.  Its entry
     // populates the registry's video-bitrate-controller slot

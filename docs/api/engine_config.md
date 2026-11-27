@@ -36,6 +36,14 @@ EngineConfig
 ├── Audio codec advertisement (SDP / send_audio)
 │   └── audio_codec: AudioCodecConfig
 │
+├── Audio devices (v1.4 D1)                          ← new in v1.4.0
+│   ├── audio_source_name              = "portaudio"
+│   ├── audio_sink_name                = "portaudio"
+│   ├── audio_source_config: plugins::AudioSourceConfig
+│   ├── audio_sink_config:   plugins::AudioSinkConfig
+│   ├── audio_source_pump              = true
+│   └── audio_sink_pump                = true
+│
 ├── Audio pipeline (receive path)                    ← new in v1.2.0
 │   ├── audio_decoder_name              = "opus"
 │   ├── audio_receiver_name             = "nimrtc_audio_rx"
@@ -328,6 +336,54 @@ always honoured — the engine clamps its scheduler budget, its pacing
 rates **and its audio encoder** to `peer_tmmbr_limit_bps()` and answers
 with a TMMBN (RFC 5104 section 4.2.2.2).  See
 [`engine_api.md` §8.7](./engine_api.md) for the details.
+
+### 2.4c Audio devices (v1.4 D1)
+
+The engine owns the audio **device** layer: it resolves the microphone
+and the loudspeaker by name through the registry, opens them, and pumps
+them itself (v1.4 plan D1, ADR-028).
+
+```cpp
+std::string audio_source_name = "portaudio";  // "none" = the explicit opt-out
+std::string audio_sink_name   = "portaudio";  // "none" = the explicit opt-out
+plugins::AudioSourceConfig audio_source_config{};
+plugins::AudioSinkConfig   audio_sink_config{};
+bool audio_source_pump = true;   // drive the capture device automatically
+bool audio_sink_pump   = true;   // play the decoded audio automatically
+```
+
+**The three values of a device name** are deliberately different from
+`audio_decoder_name`'s (where an empty string means "no audio track"):
+a *device* can only be **defaulted** or **explicitly declined**.
+
+| Value | Meaning |
+|---|---|
+| a backend id (`"portaudio"`, `"synthetic"`, `"system-audio"`) | the named backend; an empty `device_id` inside its config means the backend's own default device |
+| `""` (empty) | the default device - the backend picks its own default input / output |
+| `"none"` | the **explicit opt-out**: the engine opens no device, and a host that feeds PCM by hand through `send_audio()` keeps working unchanged |
+
+**A device that will not open is not fatal.**  A machine with no sound
+card, or a revoked microphone permission, must not take down a video
+call: the engine logs a warning and carries on, and the host can still
+feed PCM by hand.  (This is the same `Warn` policy the video sink uses.)
+
+**The capture pump** reads the device's bounded queue on the engine's
+tick thread and hands the frames to `send_audio()` - so the 3A, the
+encoder, the RTP packetiser and the send gate are reused exactly as
+they are for a host-driven capture.  **The playback path** writes the
+decoded PCM to the sink and reports the sink's *consumed* sample count
+to the 3A's render reference, which is what keeps the AEC reference
+aligned to the loudspeaker rather than to the callback.
+
+Two switches turn the automatic paths off (`audio_source_pump` /
+`audio_sink_pump`) for a host that wants to keep the explicit manual
+path.  The host's `set_on_audio_frame()` callback is **not** replaced by
+the device path - the two are parallel, and a host that installs the
+callback keeps receiving it.
+
+See [`engine_api.md`](./engine_api.md) for the matching statistics
+fields (`audio_capture_*`, `audio_playback_*`, `audio_source_device_id`,
+`audio_sink_device_id`).
 
 ### 2.5 Video plugins
 

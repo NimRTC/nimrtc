@@ -3,6 +3,8 @@
 
 #include <nimrtc/audio_device/audio_device.hpp>
 #include <nimrtc/audio_device/system_audio.hpp>
+#include <nimrtc/core/api_version.hpp>
+#include <nimrtc/core/registry.hpp>
 
 #include <string_view>
 
@@ -29,58 +31,74 @@ const SyntheticSystemAudioSourceFactory g_synthetic_system_audio_source_factory;
 
 } // namespace
 
+namespace detail {
+/** The registration shim (defined at the bottom of this file).
+ *
+ *  Forward-declared here because the deprecated lookup functions below
+ *  have to *ensure* the module's factories are in the registry before
+ *  they forward to it — see the comment there. */
+void do_register_default_plugins() noexcept;
+} // namespace detail
+
+// ---------------------------------------------------------------------------
+// The backend lookup (deprecated — ADR-028)
+//
+// These four functions are the module's *historical* entry points: they
+// predate the registry and they answered "which backends exist?" from
+// the module's own tables.  ADR-028 moved that answer to
+// `core::PluginRegistry`, and the two entry points must not disagree —
+// otherwise a third party that registered its own microphone would be
+// invisible through one of them.
+//
+// So all four now forward to the registry.  The module's own tables
+// (the `g_*_factory` statics above) are the *authority* for what the
+// module registers: `register_default_plugins()` puts exactly these
+// factories into the registry's audio-source / audio-sink slots, so the
+// registry's answer is the module's answer — plus whatever anybody
+// else registered.
+//
+// The definitions below *name* the deprecated functions, so the
+// deprecation warning is suppressed around them — the warning is for
+// the *callers*, not for the module's own forwarding shims.
+// ---------------------------------------------------------------------------
+
+NIMRTC_SUPPRESS_DEPRECATION_BEGIN
+
 std::vector<std::string> available_source_backends() noexcept {
-    std::vector<std::string> out;
-    if (portaudio_available()) {
-        out.emplace_back("portaudio");
-    }
-    out.emplace_back("synthetic");
-    // The system-audio backend is a *second* source, not a variant of
-    // the microphone: it has its own id, and it is always listed so a
-    // host can discover it (its `status()` says whether it is usable).
-    out.emplace_back("system-audio");
-    out.emplace_back("synthetic-system-audio");
-    return out;
+    // The registry's list is the answer.  It contains this module's
+    // factories once they are registered — and any third party's.
+    //
+    // The module's own list is *not* returned as a fallback: it would
+    // be a second answer to the same question, which is exactly what
+    // ADR-028 forbids.
+    detail::do_register_default_plugins();
+    return core::PluginRegistry::instance().list_audio_sources();
 }
 
 std::vector<std::string> available_sink_backends() noexcept {
-    std::vector<std::string> out;
-    if (portaudio_available()) {
-        out.emplace_back("portaudio");
-    }
-    out.emplace_back("synthetic");
-    return out;
+    detail::do_register_default_plugins();
+    return core::PluginRegistry::instance().list_audio_sinks();
 }
 
 const plugins::IAudioSourceFactory* source_factory(
     std::string_view id) noexcept {
-    if (id == "synthetic") {
-        return &g_synthetic_source_factory;
-    }
-    if (id == "portaudio" && portaudio_available()) {
-        return &g_portaudio_source_factory;
-    }
-    // The system-audio backends are resolved by their OWN ids, so a
-    // host that asks for the microphone never gets the system output
-    // by accident.
-    if (id == "system-audio") {
-        return &g_system_audio_source_factory;
-    }
-    if (id == "synthetic-system-audio") {
-        return &g_synthetic_system_audio_source_factory;
-    }
-    return nullptr;
+    // The registry owns the answer.  A backend that is not registered
+    // resolves to nullptr.
+    //
+    // The registration is ensured first, so the module's own backends
+    // are visible through *both* entry points even when the host never
+    // opened an engine (which is what runs
+    // `register_all_default_plugins()` in the normal case).
+    detail::do_register_default_plugins();
+    return core::PluginRegistry::instance().get_audio_source(id);
 }
 
 const plugins::IAudioSinkFactory* sink_factory(std::string_view id) noexcept {
-    if (id == "synthetic") {
-        return &g_synthetic_sink_factory;
-    }
-    if (id == "portaudio" && portaudio_available()) {
-        return &g_portaudio_sink_factory;
-    }
-    return nullptr;
+    detail::do_register_default_plugins();
+    return core::PluginRegistry::instance().get_audio_sink(id);
 }
+
+NIMRTC_SUPPRESS_DEPRECATION_END
 
 // ---------------------------------------------------------------------------
 // Playback progress (remote-desktop plan F3)
@@ -187,6 +205,56 @@ float aec_delay_confidence(const plugins::IAudioSink* sink) noexcept {
         return 0.0f;
     }
     return monitor->confidence();
+}
+
+// ---------------------------------------------------------------------------
+// Registration (v1.4 D1, ADR-028)
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+void do_register_default_plugins() noexcept {
+    // The `static` local guarantees the body runs exactly once, no
+    // matter how many times the entry point is called.  The factories
+    // are the module's immutable statics (L6: not global *mutable*
+    // state), so re-registering them is a late-binding overwrite of the
+    // same pointer.
+    static const struct Registrar {
+        Registrar() {
+            auto& reg = core::PluginRegistry::instance();
+
+            // The capture devices.  `system-audio` and
+            // `synthetic-system-audio` are their OWN ids rather than
+            // variants of "portaudio": a host that asks for the
+            // microphone never gets the system output by accident.
+            reg.register_audio_source(
+                g_synthetic_source_factory.id(), &g_synthetic_source_factory);
+            reg.register_audio_source(
+                g_system_audio_source_factory.id(), &g_system_audio_source_factory);
+            reg.register_audio_source(
+                g_synthetic_system_audio_source_factory.id(),
+                &g_synthetic_system_audio_source_factory);
+            if (portaudio_available()) {
+                reg.register_audio_source(
+                    g_portaudio_source_factory.id(), &g_portaudio_source_factory);
+            }
+
+            // The playback devices.
+            reg.register_audio_sink(
+                g_synthetic_sink_factory.id(), &g_synthetic_sink_factory);
+            if (portaudio_available()) {
+                reg.register_audio_sink(
+                    g_portaudio_sink_factory.id(), &g_portaudio_sink_factory);
+            }
+        }
+    } s_registrar;
+    (void)s_registrar;
+}
+
+} // namespace detail
+
+void register_default_plugins() noexcept {
+    detail::do_register_default_plugins();
 }
 
 } // namespace nimrtc::audio_device

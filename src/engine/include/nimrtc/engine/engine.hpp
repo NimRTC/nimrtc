@@ -102,6 +102,13 @@
 #include <nimrtc/plugins/audio3a.hpp>
 #include <nimrtc/plugins/audio_decoder.hpp>
 #include <nimrtc/plugins/audio_receiver.hpp>
+// v1.4 D1 (ADR-028): the two audio-device seams — the capture device
+// (microphone) and the playback device (loudspeaker).  The engine
+// resolves both through the registry's typed slots and pumps the frames
+// itself; it never includes the `audio_device` module's headers
+// (Layout Invariant 4).
+#include <nimrtc/plugins/audio_sink.hpp>
+#include <nimrtc/plugins/audio_source.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/dtmf.hpp>          // v1.2.0 (session plan D1/D2) — RFC 4733 seam
 #include <nimrtc/plugins/net_feedback.hpp>   // v1.2.0 M1 (F2) — feedback collector seam
@@ -1358,6 +1365,85 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  An empty string disables the audio track explicitly (no error is
      *  reported: the host asked for it). */
     std::string audio_receiver_name = "nimrtc_audio_rx";
+
+    // ---- Audio devices (v1.4 D1, ADR-028) -----------------------------
+    //
+    // The *device* half of the audio path.  The engine resolves the
+    // microphone and the loudspeaker through the registry's
+    // audio-source / audio-sink slots and pumps the frames itself, so a
+    // host that configures nothing gets a working capture-and-playback
+    // session.  The seams are stable and unchanged (ADR-028); what D1
+    // changes is *who drives them*.
+    //
+    // The three states of the two names below:
+    //
+    //   | value       | meaning                                          |
+    //   |-------------|--------------------------------------------------|
+    //   | empty       | the **default device** — the backend picks its own default input / output |
+    //   | "none"      | the **explicit opt-out** — the engine opens no device and the host feeds PCM by hand |
+    //   | a plugin id | a named registered backend                        |
+    //
+    // Empty means "default device" rather than "off" because D1's
+    // definition of done is "with no device ids configured, the engine
+    // captures and plays".  The "none" spelling is the opt-out, so a
+    // host that drives the seam by hand keeps working unchanged.
+    //
+    // Note the deliberate difference from `audio_decoder_name`, where an
+    // empty string means "no audio track": a *codec* can be switched
+    // off, but a *device* can only be defaulted or explicitly declined.
+
+    /** IAudioSource plugin id (e.g. "portaudio", "synthetic", "system-audio").
+     *
+     *  Empty = the default capture device; "none" = the explicit
+     *  opt-out (the host feeds PCM by hand).  Default = "portaudio". */
+    std::string audio_source_name = "portaudio";
+
+    /** IAudioSink plugin id (e.g. "portaudio", "synthetic").
+     *
+     *  Empty = the default playback device; "none" = the explicit
+     *  opt-out (the engine does not play).  Default = "portaudio". */
+    std::string audio_sink_name = "portaudio";
+
+    /** The capture request handed to the audio-source plugin.
+     *
+     *  Empty by default (the device picks its own default input and
+     *  format).  The negotiated format is read back from the device
+     *  after `open()` — the request is a request, not a grant. */
+    plugins::AudioSourceConfig audio_source_config;
+
+    /** The playback request handed to the audio-sink plugin.
+     *
+     *  Empty by default (the device picks its own default output and
+     *  format).  The negotiated format is read back from the device
+     *  after `open()`. */
+    plugins::AudioSinkConfig audio_sink_config;
+
+    /** Drive the encoder from the capture device automatically (v1.4 D1).
+     *
+     *  When true (the default) *and* a capture device was resolved, the
+     *  engine pops frames from the device's bounded queue **on the tick
+     *  thread** and feeds them to `send_audio()` — so the 3A, the
+     *  encoder, the RTP packetiser and the send gate are all reused
+     *  exactly as they are for a host-driven capture.
+     *
+     *  Set it to false to keep the explicit manual path: the host pulls
+     *  the frames itself and pushes them through `send_audio()`.
+     *  `send_audio()` stays available either way — the pump is an
+     *  *additional* source, not a replacement. */
+    bool audio_source_pump = true;
+
+    /** Play the decoded audio through the sink automatically (v1.4 D1).
+     *
+     *  When true (the default) *and* a playback device was resolved, the
+     *  engine writes the decoded PCM to the device and reports the
+     *  device's played-out sample count to the 3A's render reference
+     *  (the alignment F3/F4 built, now wired by the engine rather than
+     *  by the host).
+     *
+     *  Set it to false to keep the explicit manual path: the host
+     *  receives the frames through `set_on_audio_frame()` and plays
+     *  them itself. */
+    bool audio_sink_pump = true;
 
     // ---- Audio pipeline behaviour (v1.2.0, audio pipeline WP-10) -------
     //
@@ -3744,6 +3830,60 @@ public:
     /** Replace the video source at runtime. Same semantics as set_video_sink. */
     NIMRTC_API_STABLE void set_video_source(std::unique_ptr<plugins::IVideoSource> source) noexcept;
 
+    // ---- The audio devices (v1.4 D1, ADR-028) -----------------------------
+    //
+    // The device half of the audio path: the microphone the engine
+    // captures from and the loudspeaker it plays through.  Both are
+    // resolved through the registry's audio-source / audio-sink slots
+    // and driven by the engine itself, so a host that configures
+    // nothing gets a working capture-and-playback session.
+    //
+    // The accessors are deliberately *parallel* to the host callbacks
+    // rather than a replacement for them: `set_on_audio_frame()` still
+    // delivers the decoded PCM to the host, and the device path is an
+    // *additional* consumer of the same frames.  A host that installs
+    // the callback keeps receiving it.
+
+    /** The capture device (microphone) the engine resolved and opened.
+     *
+     *  Returns nullptr when `EngineConfig::audio_source_name` was
+     *  "none" (the explicit opt-out) or when the device could not be
+     *  opened.  The latter is *not* fatal: a machine with no sound card
+     *  still runs the session, and the host can feed PCM by hand.
+     *
+     *  UNSTABLE: this is a plugin-seam handle; the audio-device ABI is
+     *  still evolving as the platform backends land (v1.4 D1). */
+    NIMRTC_API_UNSTABLE plugins::IAudioSource* audio_source() noexcept;
+    NIMRTC_API_UNSTABLE const plugins::IAudioSource* audio_source() const noexcept;
+
+    /** The playback device (loudspeaker) the engine resolved and opened.
+     *
+     *  Returns nullptr when `EngineConfig::audio_sink_name` was "none"
+     *  or when the device could not be opened.
+     *
+     *  UNSTABLE: this is a plugin-seam handle (v1.4 D1). */
+    NIMRTC_API_UNSTABLE plugins::IAudioSink* audio_sink() noexcept;
+    NIMRTC_API_UNSTABLE const plugins::IAudioSink* audio_sink() const noexcept;
+
+    /** The capture devices the resolved audio source can see.
+     *
+     *  An empty list is a legitimate answer (a CI machine with no
+     *  sound card, or no capture device configured at all) — it is not
+     *  an error.
+     *
+     *  The enumeration is the *instance* method on the device the
+     *  engine holds, so the engine needs no concrete module header to
+     *  answer it (Layout Invariant 4). */
+    NIMRTC_API_STABLE std::vector<plugins::AudioDevice>
+    audio_capture_devices() const noexcept;
+
+    /** The playback devices the resolved audio sink can see.
+     *
+     *  An empty list is a legitimate answer (see
+     *  `audio_capture_devices()`). */
+    NIMRTC_API_STABLE std::vector<plugins::AudioDevice>
+    audio_playback_devices() const noexcept;
+
     // ---- The render / presentation plane (remote-desktop plan E5-E9) ------
     //
     // Four features live here, and they are one concern: **what the
@@ -4687,6 +4827,27 @@ public:
         // It equals `Config::audio_bitrate_bps` until the BWE-linked
         // adaptation lowers it (or raises it back towards that ceiling).
         std::uint32_t audio_encoder_bitrate_bps  = 0;
+        // ---- Audio device counters (v1.4 D1, additive) -----------------
+        //
+        // The capture / playback devices' own counters, republished the
+        // same way the video capture device's are: the device owns the
+        // detailed bookkeeping and the engine republishes the numbers a
+        // host watching a live session needs.
+        //
+        // All cumulative since open(); all zero when no device is
+        // configured.
+        std::uint64_t audio_capture_frames         = 0;  // frames pulled from the device
+        std::uint64_t audio_capture_frames_sent    = 0;  // frames handed to the encoder
+        std::uint64_t audio_capture_dropped        = 0;  // queue-overflow drops
+        std::uint64_t audio_capture_device_errors  = 0;  // device-lost / read errors
+        std::uint64_t audio_capture_restarts       = 0;  // times the device was reopened
+        std::uint64_t audio_playback_frames_written= 0;  // frames handed to the sink
+        std::uint64_t audio_playback_frames_dropped= 0;  // sink-queue overflow drops
+        std::uint64_t audio_playback_samples_played= 0;  // samples the device consumed
+        /** The id of the capture device the engine resolved ("" = none). */
+        std::string audio_source_device_id;
+        /** The id of the playback device the engine resolved ("" = none). */
+        std::string audio_sink_device_id;
         // ---- Transport gate (Q5 finding, additive) ----------------------
         /**
          * How many times the engine has stopped sending because the
@@ -6203,6 +6364,90 @@ private:
      *  The error is also routed through `on_error_` before the
      *  return, matching the other `init_*` failure paths. */
     uint32_t init_datachannel_registry() noexcept;
+
+    // ---- Audio device plane (v1.4 D1, ADR-028) ----------------------
+    //
+    // The device half of the audio path.  These live in
+    // `src/engine/src/engine_audio_pump.cpp`; they are declared here so
+    // the lifecycle hooks (`open()` / `close()`) and the tick thread can
+    // reach them.
+
+    /** Resolve, open and start the capture + playback devices.
+     *
+     *  Both devices come from the registry's audio-source /
+     *  audio-sink slots (`core::PluginRegistry`), keyed by
+     *  `EngineConfig::audio_source_name` / `audio_sink_name`.
+     *
+     *  A device that cannot be opened is *not* fatal: the engine logs
+     *  it, leaves the slot empty and keeps running, because a headless
+     *  machine is a normal deployment.  The host can still feed PCM by
+     *  hand or attach a device later.
+     *
+     *  Idempotent: calling it twice without an intervening
+     *  `shutdown_audio_devices()` is a no-op. */
+    void init_audio_devices() noexcept;
+
+    /** Stop and release the capture + playback devices.
+     *
+     *  Safe to call when no device was ever opened. */
+    void shutdown_audio_devices() noexcept;
+
+    /** Pull one block of PCM from the capture device and feed it into
+     *  the outbound audio path.
+     *
+     *  Called from the tick thread.  A no-op when no capture device is
+     *  configured or when the device's negotiated format does not match
+     *  the engine's PCM format (`pcm_sample_rate_hz` /
+     *  `pcm_channels`) — a mismatch would silently corrupt the
+     *  stream, so the pump refuses to run instead.
+     *
+     *  A device error is recovered once via `recover_audio_device()`;
+     *  if that fails too the device is dropped and the capture pump
+     *  stays off for the rest of the session. */
+    void pump_audio_capture() noexcept;
+
+    /** Republish the devices' own counters into the engine's `Stats`.
+     *
+     *  Called from the tick thread.  The device owns the detailed
+     *  bookkeeping; the engine only republishes the numbers a host
+     *  watching a live session needs. */
+    void publish_audio_device_counters() noexcept;
+
+    /** Try to bring a failed capture device back.
+     *
+     *  Closes the broken device, reopens it from the same id and
+     *  restarts the capture pump.  Returns false when the device could
+     *  not be reopened — the caller then stops the pump for good. */
+    bool recover_audio_device() noexcept;
+
+    /** Write the decoded PCM to the playback device.
+     *
+     *  Called from the receive path, right after the host's own
+     *  callbacks.  A no-op when no playback device is configured, when
+     *  the host disabled the device path
+     *  (`EngineConfig::audio_sink_pump`), or when the device refuses
+     *  the block.
+     *
+     *  The write is **additional** to the host callbacks, not a
+     *  replacement: `set_on_audio_frame()` keeps firing. */
+    void write_audio_to_sink(const float* pcm,
+                             std::size_t samples_per_channel,
+                             std::uint16_t channels) noexcept;
+
+    /** Report the playback device's progress to the 3A's render
+     *  reference.
+     *
+     *  The echo canceller needs to know where in the *played-out*
+     *  signal the capture sits, so the reference has to follow the
+     *  device's **cumulative played-sample count** — not "the samples
+     *  were handed over".  The device's count is cumulative and the
+     *  3A's `set_render_delivered()` accumulates, so the engine
+     *  reports the **delta** since the last report.
+     *
+     *  A no-op when no playback device is configured: without a device
+     *  the host's own callback path reports the reference, which is
+     *  the pre-D1 behaviour. */
+    void report_playback_progress_to_3a() noexcept;
 
     // ---- DTMF (v1.2.0, session capability plan D1–D4) ----------------
     //

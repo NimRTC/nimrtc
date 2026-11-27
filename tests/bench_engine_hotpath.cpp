@@ -71,12 +71,29 @@
 // ---------------------------------------------------------------------------
 namespace alloc_probe {
 
+std::atomic<std::thread::id>   g_thread{};
 std::atomic<bool>          g_armed{false};
 std::atomic<std::uint64_t> g_alloc_count{0};
 std::atomic<std::uint64_t> g_alloc_bytes{0};
 
 inline void note(std::size_t n) noexcept {
     if (!g_armed.load(std::memory_order_relaxed)) return;
+    // The probe is a *process-wide* replacement of `operator new`, so
+    // every thread in the process passes through it -- including the
+    // threads a *device* owns.  With D1 the engine opens a real capture
+    // device by default, and that device's own thread allocates behind
+    // the engine's back: on macOS (the only CI leg with a Core Audio
+    // device) the budget was charged 286 allocations that had nothing
+    // to do with `send_video()`.
+    //
+    // The gate is about the engine's hot path, so the probe counts only
+    // the allocations made by the thread that armed the scope.  A
+    // background thread's allocation is not the hot path's allocation,
+    // and mixing the two makes the gate untestable rather than strict.
+    // This is the same rule `tests/test_engine_audio_alloc.cpp` uses.
+    if (std::this_thread::get_id() != g_thread.load(std::memory_order_relaxed)) {
+        return;   // not the measured thread
+    }
     g_alloc_count.fetch_add(1, std::memory_order_relaxed);
     g_alloc_bytes.fetch_add(n, std::memory_order_relaxed);
 }
@@ -95,6 +112,10 @@ struct Scope {
     Scope() noexcept {
         g_alloc_count.store(0, std::memory_order_relaxed);
         g_alloc_bytes.store(0, std::memory_order_relaxed);
+        // Publish the measuring thread *before* arming the probe, so a
+        // concurrent allocation on another thread is filtered out rather
+        // than counted against this scope.
+        g_thread.store(std::this_thread::get_id(), std::memory_order_relaxed);
         g_armed.store(true, std::memory_order_relaxed);
     }
     ~Scope() { g_armed.store(false, std::memory_order_relaxed); }

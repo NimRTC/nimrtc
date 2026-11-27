@@ -50,6 +50,16 @@ add_library(nimrtc_engine STATIC
     # host ever calling send_video().  RD-6: no new thread — the
     # capture device owns its own, the engine only polls it.
     src/engine_video_pump.cpp
+    # v1.4 D1 (ADR-028): the audio device plane — the capture pump, the
+    # playback write and the AEC reference alignment.  The engine pulls
+    # PCM from the capture device's bounded queue ON THE TICK THREAD and
+    # hands it to `send_audio()`, so the 3A, the encoder and the RTP
+    # packetiser are reused verbatim; and it writes the decoded PCM to
+    # the playback device, reporting the device's *played* sample count
+    # to the 3A's render reference.  The devices are reached through the
+    # `plugins::IAudioSource` / `IAudioSink` seams, so the engine never
+    # includes the `audio_device` module's headers — Layout Invariant 4.
+    src/engine_audio_pump.cpp
     # Remote-desktop plan G1 / G2 / G6: the remote-desktop control
     # channel.  This TU owns the channel's engine-side plumbing — the
     # registry resolution (the seam), the transport selection (the DTLS
@@ -264,6 +274,16 @@ if(NIMRTC_MODULE_VIDEO_CAPTURE)
 endif()
 if(NIMRTC_MODULE_VIDEO_SINK)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_sink)
+endif()
+# v1.4 D1 (ADR-028): the audio-device module.  The engine reaches the
+# capture / playback devices through the `plugins::IAudioSource` /
+# `IAudioSink` seams — it never includes this module's headers
+# (Layout Invariant 4).  The link exists so the module's registrar entry
+# point (in `kDefaultRegistrars[]`) resolves at link time and its static
+# initialiser is not stripped (same pattern as the video_source /
+# video_capture entries above).
+if(NIMRTC_MODULE_AUDIO_DEVICE)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::audio_device)
 endif()
 # v1.3 Q6 (remote-desktop plan R3): the render-clock module.  The engine
 # never includes its header -- the correction policy is reached through the

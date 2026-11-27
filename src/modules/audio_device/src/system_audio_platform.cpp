@@ -304,6 +304,15 @@ public:
             return plugins::kErrHardwareError;
         }
 
+        // The device id is negotiated like the format: the request may
+        // have left it empty ("the backend's default device"), and the
+        // backend knows which endpoint it actually opened -- so it
+        // reports it.  A host that reads `config().device_id` gets the
+        // device it is really talking to.
+        cfg_.device_id = use_default_endpoint_
+            ? std::string(kWindowsDevicePrefix) + "default"
+            : std::string(kWindowsDevicePrefix) + std::to_string(endpoint_index_);
+
         // ---- The audio client -------------------------------------------
         //
         // `IMMDevice::Activate` takes a `void**`, so the raw pointer is

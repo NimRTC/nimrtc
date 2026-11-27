@@ -28,6 +28,8 @@
 #include <nimrtc/audio_device/audio_device.hpp>
 #include <nimrtc/audio_device/ring_buffer.hpp>
 #include <nimrtc/audio_device/synthetic_device.hpp>
+#include <nimrtc/core/api_version.hpp>
+#include <nimrtc/core/registry.hpp>
 
 namespace {
 
@@ -413,10 +415,19 @@ TEST(synthetic_audio_sink, write_on_a_closed_device_is_refused) {
 // ---------------------------------------------------------------------------
 // 5. The module surface
 // ---------------------------------------------------------------------------
+//
+// The four lookup functions are **deprecated** (ADR-028): the registry
+// is the authority now.  The tests below therefore drive the *registry*
+// — and the deprecated shims are exercised separately, under a
+// suppression pragma, to pin the ADR's core constraint: the two entry
+// points must answer the same question with the same answer.
+// ---------------------------------------------------------------------------
 
 TEST(audio_device_module, the_synthetic_backend_is_always_available) {
-    const auto sources = nimrtc::audio_device::available_source_backends();
-    const auto sinks = nimrtc::audio_device::available_sink_backends();
+    nimrtc::audio_device::register_default_plugins();
+    const auto& reg = nimrtc::core::PluginRegistry::instance();
+    const auto sources = reg.list_audio_sources();
+    const auto sinks = reg.list_audio_sinks();
 
     EXPECT_NE(std::find(sources.begin(), sources.end(), "synthetic"),
               sources.end());
@@ -424,8 +435,10 @@ TEST(audio_device_module, the_synthetic_backend_is_always_available) {
 }
 
 TEST(audio_device_module, the_synthetic_factories_are_reachable) {
-    const auto* src = nimrtc::audio_device::source_factory("synthetic");
-    const auto* sink = nimrtc::audio_device::sink_factory("synthetic");
+    nimrtc::audio_device::register_default_plugins();
+    const auto& reg = nimrtc::core::PluginRegistry::instance();
+    const auto* src = reg.get_audio_source("synthetic");
+    const auto* sink = reg.get_audio_sink("synthetic");
     ASSERT_NE(src, nullptr);
     ASSERT_NE(sink, nullptr);
     EXPECT_EQ(src->id(), "synthetic");
@@ -433,16 +446,47 @@ TEST(audio_device_module, the_synthetic_factories_are_reachable) {
 }
 
 TEST(audio_device_module, an_unknown_backend_resolves_to_null) {
-    EXPECT_EQ(nimrtc::audio_device::source_factory("no-such-backend"), nullptr);
-    EXPECT_EQ(nimrtc::audio_device::sink_factory("no-such-backend"), nullptr);
+    nimrtc::audio_device::register_default_plugins();
+    const auto& reg = nimrtc::core::PluginRegistry::instance();
+    EXPECT_EQ(reg.get_audio_source("no-such-backend"), nullptr);
+    EXPECT_EQ(reg.get_audio_sink("no-such-backend"), nullptr);
 }
+
+// ADR-028's core constraint: the deprecated free functions and the
+// registry must agree.  A backend registered by a third party has to
+// be visible through *both* — otherwise the two entry points answer
+// the same question with two different answers.
+NIMRTC_SUPPRESS_DEPRECATION_BEGIN
+
+TEST(audio_device_module, the_deprecated_lookup_agrees_with_the_registry) {
+    nimrtc::audio_device::register_default_plugins();
+    const auto& reg = nimrtc::core::PluginRegistry::instance();
+
+    EXPECT_EQ(nimrtc::audio_device::source_factory("synthetic"),
+              reg.get_audio_source("synthetic"));
+    EXPECT_EQ(nimrtc::audio_device::sink_factory("synthetic"),
+              reg.get_audio_sink("synthetic"));
+    EXPECT_EQ(nimrtc::audio_device::source_factory("no-such-backend"),
+              nullptr);
+    EXPECT_EQ(nimrtc::audio_device::sink_factory("no-such-backend"),
+              nullptr);
+
+    const auto sources = nimrtc::audio_device::available_source_backends();
+    const auto sinks = nimrtc::audio_device::available_sink_backends();
+    EXPECT_EQ(sources, reg.list_audio_sources());
+    EXPECT_EQ(sinks, reg.list_audio_sinks());
+}
+
+NIMRTC_SUPPRESS_DEPRECATION_END
 
 TEST(audio_device_module, the_portaudio_backend_reports_its_availability) {
     // The test never *requires* an audio device: a CI machine with no
     // sound card must still pass.  What it checks is that the
     // availability flag and the backend list agree with each other.
+    nimrtc::audio_device::register_default_plugins();
     const bool available = nimrtc::audio_device::portaudio_available();
-    const auto sources = nimrtc::audio_device::available_source_backends();
+    const auto sources =
+        nimrtc::core::PluginRegistry::instance().list_audio_sources();
 
     const bool listed = std::find(sources.begin(), sources.end(), "portaudio") !=
                         sources.end();

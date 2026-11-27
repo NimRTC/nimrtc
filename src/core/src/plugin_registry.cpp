@@ -205,6 +205,18 @@ void PluginRegistry::register_video_sink(std::string_view id,
     video_sink_.register_one(id, f);
 }
 
+void PluginRegistry::register_audio_source(
+        std::string_view id,
+        const plugins::IAudioSourceFactory* f) {
+    audio_source_.register_one(id, f);
+}
+
+void PluginRegistry::register_audio_sink(
+        std::string_view id,
+        const plugins::IAudioSinkFactory* f) {
+    audio_sink_.register_one(id, f);
+}
+
 void PluginRegistry::register_video_bitrate_controller(
         std::string_view id,
         const plugins::IVideoBitrateControllerFactory* f) {

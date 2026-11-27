@@ -107,6 +107,13 @@ protected:
         // without touching the network.  See test_engine_timeline.cpp
         // for why the real stack cannot be used on CI runners.
         cfg.transport_strategy_name = "shell";
+        // The device layer is *off* in this fixture: the DTMF tests
+        // assert on the engine's own packet stream, and a real capture
+        // device would inject audio RTP packets into the same sequence
+        // space (see `EngineDtmfTx` below).  "none" is the explicit
+        // opt-out (plan D1-1, ADR-028).
+        cfg.audio_source_name = "none";
+        cfg.audio_sink_name   = "none";
         return cfg;
     }
 
@@ -727,6 +734,21 @@ protected:
         cfg.bwe_name                = "";
         cfg.scheduler_config.enabled = false;
         cfg.dtmf_enabled            = true;
+        // The device layer is *off* here, and it must be: a capture
+        // device (on a machine that has one -- macOS CI has a Core
+        // Audio input, Windows and Linux CI runners do not) pumps real
+        // audio frames into `send_audio()` on every `tick()`, and those
+        // frames land on the *same* RTP stream and sequence-number
+        // space as the telephone-event packets (RFC 4733 §2.1).  The
+        // interleaved audio packets would break the "the event packets
+        // share the audio sequence space" assertion below -- and the
+        // failure would only show on the legs that happen to have a
+        // sound card.
+        //
+        // "none" is the explicit opt-out (plan D1-1, ADR-028): the host
+        // feeds the PCM by hand, which is what these tests want.
+        cfg.audio_source_name = "none";
+        cfg.audio_sink_name   = "none";
         return cfg;
     }
 

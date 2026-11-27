@@ -25,6 +25,16 @@ answer different questions, and a script that only knew about the
 first would leave the other two unmanaged -- which is how the release
 lines ended up unprotected in the first place.
 
+`--check` runs in CI (the `docs / markdown links` leg), next to
+`tools/check_ci_ruleset.py`.  The two answer different questions and
+both are needed: `check_ci_ruleset.py` asks "does the mirror agree
+with the workflows?" without a network, and this script asks "does the
+live ruleset agree with the mirror?".  Without the second, a mirror
+change that nobody applied leaves the DXVA case behind: #181 added
+`windows / dxva` to the mirror, the live ruleset stayed at thirteen
+checks for a day, and the guard that claims to keep the gate and the
+matrix in step reported 14/14 the whole time.
+
 Usage:
     python tools/apply_ci_ruleset.py --check
     python tools/apply_ci_ruleset.py --apply
@@ -32,12 +42,15 @@ Usage:
         --mirror .github/rulesets/protect-tags.json
 
 Exit code 0 when the repository matches the mirrors, 1 otherwise.
+`--check` needs a token with read access (`gh auth login`, or
+`GH_TOKEN` set); without one it fails rather than skipping.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -58,8 +71,16 @@ def gh(args, payload=None):
     cmd = ["gh", "api"] + args
     if payload is not None:
         cmd += ["--input", "-"]
-    r = subprocess.run(cmd, input=payload, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+    if payload is None:
+        # No stdin feed: `capture_output=True` still gives `subprocess`
+        # a `None` stdin, so the child does not inherit the caller's
+        # and cannot consume input meant for it.
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    else:
+        r = subprocess.run(cmd, input=payload, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
     return r.stdout, r.stderr, r.returncode
 
 
@@ -248,10 +269,20 @@ def main() -> int:
         print("FAIL -- no ruleset mirrors found under .github/rulesets/")
         return 1
 
+    # A missing `gh`, or an `gh` with no token, is a FAIL and not a
+    # skip.  This script runs in CI precisely because the mirror-file
+    # check (`check_ci_ruleset.py`) cannot see the live ruleset, and a
+    # check that reports "could not look" as "looked, all good" is the
+    # defect it exists to catch.
+    if shutil.which("gh") is None:
+        print("ERROR -- the `gh` CLI is not on PATH; the live rulesets "
+              "cannot be read.")
+        return 1
     out, err, rc = gh([API + "/rulesets"])
     if rc != 0:
         print("ERROR reading the rulesets:", err.strip()[:400])
-        print("A GitHub token with read access is needed: `gh auth login`.")
+        print("A GitHub token with read access is needed: `gh auth login`, "
+              "or GH_TOKEN in the environment.")
         return 1
     rulesets = json.loads(out)
 

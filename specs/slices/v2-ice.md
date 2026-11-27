@@ -29,7 +29,8 @@
 所以：**NimRTC 侧自己建 TCP 传输层**，libjuice 继续管 UDP 那条路。
 两条路在 `IceTransport` 这一层汇合——谁提名了对，seam 就报谁。
 
-设计决策与理由见只读 `docs/adr/ADR-029-ice-over-tcp-nimrtc-side.md`。
+设计决策与理由见只读 `docs/adr/ADR-028-ice-over-tcp-nimrtc-side.md`。
+
 
 **SDP munger 不需要改。** 只读 `src/modules/sdp/src/munger.cpp` 的
 「ICE candidates」那段是把 `m.candidates` 里的候选体**原样**写回
@@ -45,7 +46,8 @@
 - `src/plugins/include/nimrtc/plugins/ice_transport.hpp`（**已授权**：加 `tcptype` 字段）
 
 只读参考（**不得修改**）：
-- 只读 `docs/adr/ADR-029-ice-over-tcp-nimrtc-side.md` —— 本片的设计依据
+- 只读 `docs/adr/ADR-028-ice-over-tcp-nimrtc-side.md` —— 本片的设计依据
+
 - 只读 `src/modules/raw_udp/src/udp_socket.cpp` —— TCP socket 照它的形状建
 - 只读 `src/engine/src/engine_signaling.cpp` —— 候选怎么进 SDP 的
 - 只读 `src/third_party/libjuice/src/src/ice.c` —— 只读参考：libjuice 的 UDP-only 事实

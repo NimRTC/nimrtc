@@ -145,7 +145,8 @@ struct AudioState {
 
     /** The Opus format parameters the peer sent for the selected
      *  payload type, parsed (B-4).  WP-7 feeds them into the receive
-     *  pipeline's configuration. */
+     *  pipeline's configuration; `usedtx` (D5) reaches the receiver as
+     *  `AudioReceiverConfig::peer_dtx_enabled`. */
     OpusFmtpParams negotiated_opus_fmtp;
 
     /** The format parameters the answer echoed back — the negotiated
@@ -367,7 +368,7 @@ struct AudioState {
     // See `engine_audio_stream_state.hpp`.
     AudioStreamState audio_streams;
 
-    // ---- The audio devices (v1.4 D1, ADR-028) ------------------------
+    // ---- The audio devices (v1.4 D1, ADR-040) ------------------------
     //
     // The capture device (microphone) and the playback device
     // (loudspeaker) the engine resolved and opened.  They live here
@@ -468,6 +469,24 @@ struct AudioState {
      *  so a device whose counter went backwards (a re-opened device
      *  restarts at zero) does not make the reference run backwards. */
     std::uint64_t audio_render_delivered_reported = 0;
+
+    /** The resolved audio capture backend id ("" = none).
+     *
+     *  The *backend* (the module that opened the device) is not the
+     *  same fact as the device id: a host may ask for a device by name
+     *  and the backend may answer with a different one. */
+    std::string audio_source_backend;
+
+    /** The resolved audio playback backend id ("" = none). */
+    std::string audio_sink_backend;
+
+    /** Frames the engine pulled from the capture device and ran through
+     *  the outbound path (cumulative). */
+    std::uint64_t audio_device_pumped_frames = 0;
+
+    /** Pump errors: a failed `read_samples()` (other than an empty
+     *  queue) or a failed `send_audio()` (cumulative). */
+    std::uint64_t audio_device_pump_errors = 0;
 };
 
 }  // namespace nimrtc::engine::detail

@@ -85,7 +85,7 @@ TEST(system_audio, the_factory_resolves_under_its_own_backend_id) {
     // The system-audio backend is a *second source*: it has its own id
     // and it does not shadow the microphone's backends.
     //
-    // ADR-028: the registry is the authority — the module's own
+    // ADR-040: the registry is the authority — the module's own
     // lookup functions are deprecated shims over it.
     nimrtc::audio_device::register_default_plugins();
     const auto& reg = nimrtc::core::PluginRegistry::instance();

@@ -335,6 +335,18 @@ target_link_libraries(nimrtc_vendor_openh264 INTERFACE
     nimrtc_vendor_openh264_common
 )
 
+# v1-install-tree-video-deps (ADR-038): publish the archive set + their
+# link order so the install logic (cmake/NimRTCInstall.cmake §2d) can ship
+# them into the installed bundle.  The order is the one this wrapper
+# verifies (see "WHY THE ARCHIVES ARE IN THIS ORDER" above): encoder and
+# decoder come first, common last.  Same shape as the WebRTC APM archives
+# (NIMRTC_APM_LINK_ARCHIVES global property, NimRTCInstall.cmake §2c).
+set_property(GLOBAL PROPERTY NIMRTC_OPENH264_LINK_ARCHIVES
+    nimrtc_vendor_openh264_encoder
+    nimrtc_vendor_openh264_decoder
+    nimrtc_vendor_openh264_common
+)
+
 find_package(Threads REQUIRED)
 target_link_libraries(nimrtc_vendor_openh264_common PUBLIC Threads::Threads)
 target_link_libraries(nimrtc_vendor_openh264_encoder PUBLIC Threads::Threads)

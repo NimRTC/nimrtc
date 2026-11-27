@@ -71,6 +71,23 @@ std::string_view default_stun_server() noexcept {
     return "stun.l.google.com";
 }
 
+StunResolution resolve_stun_server(std::string_view profile,
+                                   std::string_view explicit_host,
+                                   std::uint16_t explicit_port) noexcept {
+    if (!explicit_host.empty()) {
+        // The host's explicit key wins over the profile.
+        return {.host = std::string(explicit_host), .port = explicit_port};
+    }
+    const auto p = resolve_connectivity_profile(profile);
+    if (p.stun) {
+        return {.host = std::string(default_stun_server()),
+                .port = default_stun_port()};
+    }
+    // STUN turned off by the profile -- no built-in profile does this,
+    // but the resolution honours it.
+    return {};
+}
+
 std::uint16_t default_stun_port() noexcept {
     // The IANA-assigned STUN port (RFC 8489 §9).  The Google STUN
     // service also listens on 19302, which is what the in-tree

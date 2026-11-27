@@ -46,8 +46,20 @@ Write an ADR when a decision:
 | [ADR-025](ADR-025-sdp-rtp-not-pluggable.md) | SDP / RTP are not pluggable — and the engine's concrete includes are enumerated, not hidden | Phase 4 (v1.2.0) |
 | [ADR-026](ADR-026-scheduler-c-abi.md) | The scheduler's C ABI — a real `extern "C"` surface | Phase 4 (v1.2.0) |
 | [ADR-027](ADR-027-turn-over-tls-libjuice-seam.md) | TURN over TLS — a narrow TLS seam in the vendored libjuice, and no plaintext fallback | v1.4 (N1) |
-| [ADR-028](ADR-028-audio-device-plugin-registry.md) | 音频设备后端并入 PluginRegistry — 设备接缝与其它接缝同构 | v1.4 (D1) |
-| [ADR-029](ADR-029-ice-over-tcp-nimrtc-side.md) | ICE-over-TCP — a NimRTC-side TCP candidate layer, and libjuice stays UDP-only | v1.4 (N2) |
+| [ADR-028](ADR-028-ice-over-tcp-nimrtc-side.md) | ICE-over-TCP — a NimRTC-side TCP candidate layer, and libjuice stays UDP-only | v1.4 (N2) |
+| [ADR-029](ADR-029-engine-driven-audio-device-layer.md) | 引擎驱动音频设备层 — 音频设备的注册表槽位与引擎侧设备泵 | v1.4 (D1) |
+| [ADR-030](ADR-030-engine-driven-video-renderer.md) | 引擎驱动视频渲染器 — `video_sink_name = "auto"` 的平台解析与降级 | v1.4 (D2) |
+| [ADR-031](ADR-031-ice-recovery-policy-ownership.md) | ICE 恢复策略的归属 — 重连状态机在引擎侧 | v1.4 (N3) |
+| [ADR-032](ADR-032-turn-credentials-provider-seam.md) | TURN 凭据提供方接缝 — 引擎主动拉取而非宿主静态配置 | v1.4 (N7) |
+| [ADR-033](ADR-033-path-change-reporting.md) | 路径变更上报 — 旧 pair / 新 pair / 原因 | v1.4 (N8) |
+| [ADR-034](ADR-034-macos-install-downstream-proof.md) | macOS 安装树的下游证明 — `find_package` 在三个平台同样成立 | v1.4 (N9) |
+| [ADR-035](ADR-035-call-state-surface.md) | 通话状态面 — `on_call_state` 与失败枚举 | v1.4 (D7) |
+| [ADR-036](ADR-036-sdk-sample-line-budget.md) | SDK 样例的行数预算 — 一个能跑通两进程的最小样例 | v1.4 (N6) |
+| [ADR-037](ADR-037-turn-tls-trust-seam.md) | TURN/TLS 的信任策略接缝 | v1.4 (N1) |
+| [ADR-038](ADR-038-install-tree-video-dependencies.md) | 安装树的视频依赖闭包 | v1.4 (N9) |
+| [ADR-039](ADR-039-viewport-window-opt-in.md) | 渲染器自建窗口是显式 opt-in（修订 ADR-030 决策三） | v1.4 (D2) |
+| [ADR-040](ADR-040-audio-device-plugin-registry.md) | 音频设备后端并入 PluginRegistry — 设备接缝与其它接缝同构（原 ADR-028，撞号后重编） | v1.4 (D1) |
+| [ADR-041](ADR-041-install-tree-module-closure.md) | 安装树链接闭包 — 「装好的 SDK 永远链得上」 | v1.4 (N9) |
 
 ### Reserved numbers
 

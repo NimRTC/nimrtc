@@ -41,11 +41,11 @@ void do_register_default_plugins() noexcept;
 } // namespace detail
 
 // ---------------------------------------------------------------------------
-// The backend lookup (deprecated — ADR-028)
+// The backend lookup (deprecated — ADR-040)
 //
 // These four functions are the module's *historical* entry points: they
 // predate the registry and they answered "which backends exist?" from
-// the module's own tables.  ADR-028 moved that answer to
+// the module's own tables.  ADR-040 moved that answer to
 // `core::PluginRegistry`, and the two entry points must not disagree —
 // otherwise a third party that registered its own microphone would be
 // invisible through one of them.
@@ -70,7 +70,7 @@ std::vector<std::string> available_source_backends() noexcept {
     //
     // The module's own list is *not* returned as a fallback: it would
     // be a second answer to the same question, which is exactly what
-    // ADR-028 forbids.
+    // ADR-040 forbids.
     detail::do_register_default_plugins();
     return core::PluginRegistry::instance().list_audio_sources();
 }
@@ -208,7 +208,7 @@ float aec_delay_confidence(const plugins::IAudioSink* sink) noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// Registration (v1.4 D1, ADR-028)
+// Registration (v1.4 D1, ADR-040)
 // ---------------------------------------------------------------------------
 
 namespace detail {

@@ -198,6 +198,25 @@ struct NIMRTC_API_STABLE VideoSinkConfig {
      *  supplied — useful for a headless CI leg that wants to exercise
      *  the presenter's pacing and drop accounting. */
     bool offscreen = false;
+
+    /** Let the renderer create its own output window.
+     *
+     *  A presentation sink that was given no `native_window` still needs
+     *  *a* surface to present into.  The renderers can build one
+     *  themselves (a Win32 window, an `NSWindow`, a Wayland surface) —
+     *  but a *visible* window popping up in the middle of a test run is
+     *  never what the caller asked for, so the default is **off**: the
+     *  renderer falls back to its offscreen target, which still runs the
+     *  presentation clock and still counts frames.
+     *
+     *  Set it to true only when the picture is meant to reach a screen:
+     *  a viewer application that wants the decoder's output on the
+     *  desktop.  A headless CI leg, a benchmark, and a unit test all
+     *  want the default.
+     *
+     *  This is the *renderer's* own window, not the host's: the host's
+     *  window always wins and this flag is then irrelevant. */
+    bool create_viewport_window = false;
 };
 
 // ---------------------------------------------------------------------------

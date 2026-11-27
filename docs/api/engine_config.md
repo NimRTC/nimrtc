@@ -341,7 +341,7 @@ with a TMMBN (RFC 5104 section 4.2.2.2).  See
 
 The engine owns the audio **device** layer: it resolves the microphone
 and the loudspeaker by name through the registry, opens them, and pumps
-them itself (v1.4 plan D1, ADR-028).
+them itself (v1.4 plan D1, ADR-040).
 
 ```cpp
 std::string audio_source_name = "portaudio";  // "none" = the explicit opt-out
@@ -405,6 +405,11 @@ std::string video_receiver_name   = "reference";
 std::string video_sender_name     = "reference";
 std::string video_codec_name      = "h264";      // "" = no video codec
 std::string video_capture_name    = "";          // "" = capture disabled
+
+// Present the decoded picture in a real window.  Off by default: with the
+// viewport off the renderer works offscreen and never opens a window of
+// its own, so a test suite does not flash windows on the desktop.
+bool video_sink_viewport          = false;
 ```
 
 To select HW backends:

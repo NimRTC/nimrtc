@@ -111,7 +111,7 @@ protected:
         // assert on the engine's own packet stream, and a real capture
         // device would inject audio RTP packets into the same sequence
         // space (see `EngineDtmfTx` below).  "none" is the explicit
-        // opt-out (plan D1-1, ADR-028).
+        // opt-out (plan D1-1, ADR-040).
         cfg.audio_source_name = "none";
         cfg.audio_sink_name   = "none";
         return cfg;
@@ -745,7 +745,7 @@ protected:
         // failure would only show on the legs that happen to have a
         // sound card.
         //
-        // "none" is the explicit opt-out (plan D1-1, ADR-028): the host
+        // "none" is the explicit opt-out (plan D1-1, ADR-040): the host
         // feeds the PCM by hand, which is what these tests want.
         cfg.audio_source_name = "none";
         cfg.audio_sink_name   = "none";

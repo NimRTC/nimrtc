@@ -37,12 +37,14 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 
 #include <nimrtc/plugins/video_pipeline.hpp>
 
 #include "audio_routing.hpp"
 #include "engine_capture_cadence.hpp"
+#include "engine_capture_reconnect.hpp"
 #include "engine_feedback_guard.hpp"
 #include "engine_gpu_mailbox.hpp"
 #include "engine_rate_window.hpp"
@@ -180,6 +182,11 @@ struct VideoState {
     std::uint64_t video_capture_restarts      = 0;  // times the device was reopened
     std::uint64_t video_capture_format_changes = 0; // negotiated format changed
     std::uint64_t video_capture_bytes_copied  = 0;  // CPU<->GPU bytes (0 = zero-copy)
+    // v1-device-policy D4: device-list changes, cumulative since open().
+    // Each "removed" or "added" event counts once.  Distinct from
+    // `video_capture_restarts` — this counts the physical world changing;
+    // `restarts` counts the engine reopening the device.
+    std::uint64_t video_capture_device_changes = 0;
 
     // ---- Zero-copy rejection (remote-desktop plan B10) -----------------
     //
@@ -474,6 +481,27 @@ struct VideoState {
     std::uint32_t capture_negotiated_width  = 0;
     std::uint32_t capture_negotiated_height = 0;
     std::string   capture_negotiated_tag;
+
+    // ---- The reconnect state machine (v1-device-policy D4) ---------------
+    //
+    // Lives in the video state (a private engine member, not a global) so
+    // both the "device lost" path (`recover_capture_device()` on a
+    // `device_errors` growth) and the "device healthy" path observe the
+    // same machine.
+    detail::CaptureReconnect capture_reconnect;
+
+    /** The device-change poll's last run time (monotonic us).  Zero until
+     *  the first poll. */
+    std::int64_t capture_last_poll_us = 0;
+
+    /** The device-id set from the last poll (Route B — devices that do
+     *  not implement `ICaptureDeviceEventSource`).  Empty until the first
+     *  poll seeds it. */
+    std::set<std::string> capture_seen_device_ids;
+
+    /** True once the first poll has seeded `capture_seen_device_ids`.
+     *  The seed is not a change, so the first diff counts nothing. */
+    bool capture_device_ids_seeded = false;
 
     // ---- The GPU-frame mailbox (remote-desktop plan B10) ----------------
     //

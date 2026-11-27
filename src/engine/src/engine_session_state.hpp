@@ -40,6 +40,11 @@
 #include <nimrtc/sdp/session_description.hpp>
 #include <nimrtc/web_transport/web_transport_session_iface.hpp>
 
+#include "engine_call_state.hpp"
+#include "engine_ice_recovery.hpp"
+#include "engine_path_change.hpp"
+#include "engine_turn_credentials.hpp"
+
 namespace nimrtc::engine::detail {
 
 /** The session / transport-plane state. */
@@ -121,6 +126,45 @@ struct SessionState {
     bool ice_connected_once = false;
     bool ice_rehandshake_armed = false;
 
+    // ---- ICE recovery -> automatic restart (v1.4 N3, additive) ----------
+    // The engine-driven reconnection policy (ADR-031).  The machine is
+    // owned here and driven by poll_ice_recovery() on the tick thread — an
+    // independent state machine that shares only the `ice_connected_once`
+    // gate with the flap detector above.  `ice_recovery_last_state` is this
+    // machine's own observation register, so it never disturbs
+    // `last_ice_state` (the flap detector's).
+    IceRecovery ice_recovery;
+    IceRecoveryPolicy ice_recovery_policy = IceRecoveryPolicy::kAuto;
+    plugins::IceState ice_recovery_last_state = plugins::IceState::Disconnected;
+    bool ice_recovery_terminal_reported = false;
+
+    // ---- TURN credentials -> provider seam (v1.4 N7, ADR-032) ----------
+    // The bookkeeping for the host's `EngineConfig::turn_credentials`
+    // provider: what the last pull produced and how the transport answered
+    // it.  `has_static_turn_server` records that the host called
+    // `add_turn_server()` — a static server list wins over the provider,
+    // so the provider is never consulted for that engine.
+    TurnCredentialsState turn_credentials;
+    bool has_static_turn_server = false;
+
+    // ---- Path change -> report (v1.4 N8, additive) -----------------------
+    // The ledger and the flat `Stats` projection for "the last time the
+    // path changed".  `path_change` holds the pair the engine was on
+    // **before** the current restart (recorded at each report point, reset
+    // only at open()/close()); `last_path_change_*` is the flat-Stats
+    // projection of the last reported change, so a host that only polls
+    // `stats()` can still tell "the path changed since I last looked".
+    PathChangeTracker path_change;
+    std::string last_path_change_reason;
+    std::optional<IceCandidatePairInfo> last_path_change_new_pair;
+
+    // ---- Call state -> one lifecycle report (v1.4 D7, additive) ----------
+    // The D7 confluence point: a host sees the whole call lifecycle in one
+    // callback (`set_on_call_state`) instead of assembling it from
+    // `set_on_state_change` / `set_on_error` / `Stats` polling.  The machine
+    // is pure state (no clock / transport); the N3 / N8 details the reports
+    // carry are read from the collaborators above at report time.
+    CallStateMachine call_state;
     // ---- ICE failure -> stop sending (Q5 finding, v1.3 plan) -----------
     //
     // When ICE gives up (`Failed`), libjuice clears its selected pair and

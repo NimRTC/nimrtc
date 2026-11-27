@@ -1,7 +1,7 @@
 /**
  * @file src/engine/src/engine_audio_pump.cpp
  * @brief The audio device plane: capture pump, playback write, AEC alignment
- *        (v1.4 D1, ADR-028).
+ *        (v1.4 D1, ADR-040).
  *
  * ## What this file is
  *
@@ -51,6 +51,7 @@
  * when a device is present, the host path reports it when there is
  * none.  Reporting both would double the 3A's reference count.
  */
+#include "engine_device_policy.hpp"
 #include "engine_impl.hpp"
 
 #include <nimrtc/core/log.hpp>
@@ -75,19 +76,57 @@ namespace {
  *  without limit. */
 constexpr std::size_t kCaptureReadFrames = 4096;
 
+/** Resolve an audio device name down to a concrete backend id.
+ *
+ *  Empty (the host feeds / plays the PCM itself) and `"none"` (the
+ *  explicit opt-out) never reach here.  `"auto"` resolves through the
+ *  runtime registry (`detail::resolve_auto_audio_backend`); an empty
+ *  result is a *degrade* -- the engine warns and continues without a
+ *  device, because a machine with no sound card is a normal machine.
+ *
+ *  @param name          The configured name.
+ *  @param capture       true for the source side, false for the sink.
+ *  @param is_registered The registry-membership check for the side.
+ *  @param auto_what     The configuration field name, for the warn line.
+ *  @return The backend id to open, or "" to continue without a device. */
+std::string resolve_audio_device_name(std::string_view name,
+                                      bool capture,
+                                      bool (*is_registered)(
+                                          std::string_view id) noexcept,
+                                      std::string_view auto_what) noexcept {
+    std::string resolved{name};
+    if (resolved == "auto") {
+        resolved = detail::resolve_auto_audio_backend(capture, is_registered);
+        if (resolved.empty()) {
+            core::log::Logger::instance().warn(
+                std::string{"engine: "} + std::string{auto_what} +
+                "=\"auto\" did not resolve to a registered audio backend "
+                "on this platform; continuing without an audio device");
+        }
+    }
+    return resolved;
+}
+
 }  // anonymous namespace
 
 // ---------------------------------------------------------------------------
 // The device lifecycle
 // ---------------------------------------------------------------------------
 
-void NimRTCEngine::init_audio_devices() noexcept {
+uint32_t NimRTCEngine::init_audio_devices() noexcept {
     auto& astate = impl_->audio_state;
+    uint32_t first_error = 0;
+
+    // The backends the registry answered with, kept for the Stats
+    // (criterion 13): the host asked for a *name*, and the backend that
+    // opened is a fact of its own.
+    std::string resolved_source_backend;
+    std::string resolved_sink_backend;
 
     // Idempotent: a second `open()` (or a `pre_open()` that already
     // brought the plane up) must not resolve the devices again — the
     // host's "none" opt-out has to stay an opt-out.
-    if (astate.audio_devices_initialized) return;
+    if (astate.audio_devices_initialized) return 0;
     astate.audio_devices_initialized = true;
 
     // ---- The capture device --------------------------------------------
@@ -101,19 +140,39 @@ void NimRTCEngine::init_audio_devices() noexcept {
         // handed to the device verbatim: the device owns the
         // negotiation, and the engine must not second-guess which
         // microphone or which format the host meant.
-        (void)pal::make_plugin<&pal::resolve_audio_source>(
+        //
+        // The failure mode follows the *name*: an `"auto"` backend is a
+        // recommendation (a machine with no sound card is normal), so it
+        // degrades with a warn; an explicit id is a promise, so it is a
+        // hard error and `open()` fails (ADR-029 §2.4).
+        const bool is_auto = config_.audio_source_name == "auto";
+        const std::string resolved = resolve_audio_device_name(
             config_.audio_source_name,
-            astate.audio_source,
-            config_.audio_source_config,
-            // A device that will not open is **not** fatal: a machine
-            // with no sound card, or a revoked microphone permission,
-            // must not take down a video call.  The host can still
-            // feed PCM by hand or attach a device later.
-            {.err_open_failed = core::kAudioSourceOpenFailed,
-             .err_missing = core::kAudioSourcePluginMissing,
-             .open_fail_mode = pal::PluginFailureMode::Warn,
-             .missing_mode = pal::PluginFailureMode::Warn,
-             .on_error = on_error_});
+            /*capture=*/true,
+            [](std::string_view id) noexcept {
+                return pal::resolve_audio_source(id) != nullptr;
+            },
+            "audio_source_name");
+        if (!resolved.empty()) {
+            const bool opened = pal::make_plugin<&pal::resolve_audio_source>(
+                resolved,
+                astate.audio_source,
+                config_.audio_source_config,
+                {.err_open_failed = core::kAudioSourceOpenFailed,
+                 .err_missing = core::kAudioSourcePluginMissing,
+                 .open_fail_mode = is_auto
+                     ? pal::PluginFailureMode::Warn
+                     : pal::PluginFailureMode::Error,
+                 .missing_mode = is_auto
+                     ? pal::PluginFailureMode::Warn
+                     : pal::PluginFailureMode::Error,
+                 .on_error = on_error_});
+            if (!opened && !is_auto && first_error == 0) {
+                first_error = core::kAudioSourceOpenFailed;
+            } else if (opened) {
+                resolved_source_backend = resolved;
+            }
+        }
     }
 
     if (astate.audio_source) {
@@ -124,6 +183,11 @@ void NimRTCEngine::init_audio_devices() noexcept {
         astate.audio_source_negotiated = astate.audio_source->config();
         astate.audio_source_device_id =
             astate.audio_source_negotiated.device_id;
+        // The *backend* that answered the request is a separate fact
+        // from the device id (criterion 13): the host asked for a name,
+        // the registry answered with a backend, and the backend
+        // answered with a device.  The Stats report the middle one.
+        astate.audio_source_backend = resolved_source_backend;
 
         // The engine's PCM contract is fixed (`pcm_sample_rate_hz` /
         // `pcm_channels`), and there is no resampler in the stack, so a
@@ -155,21 +219,43 @@ void NimRTCEngine::init_audio_devices() noexcept {
     // ---- The playback device -------------------------------------------
     if (!config_.audio_sink_name.empty() &&
         config_.audio_sink_name != "none") {
-        (void)pal::make_plugin<&pal::resolve_audio_sink>(
+        const bool is_auto = config_.audio_sink_name == "auto";
+        const std::string resolved = resolve_audio_device_name(
             config_.audio_sink_name,
-            astate.audio_sink,
-            config_.audio_sink_config,
-            {.err_open_failed = core::kAudioSinkOpenFailed,
-             .err_missing = core::kAudioSinkPluginMissing,
-             .open_fail_mode = pal::PluginFailureMode::Warn,
-             .missing_mode = pal::PluginFailureMode::Warn,
-             .on_error = on_error_});
+            /*capture=*/false,
+            [](std::string_view id) noexcept {
+                return pal::resolve_audio_sink(id) != nullptr;
+            },
+            "audio_sink_name");
+        if (!resolved.empty()) {
+            const bool opened = pal::make_plugin<&pal::resolve_audio_sink>(
+                resolved,
+                astate.audio_sink,
+                config_.audio_sink_config,
+                {.err_open_failed = core::kAudioSinkOpenFailed,
+                 .err_missing = core::kAudioSinkPluginMissing,
+                 .open_fail_mode = is_auto
+                     ? pal::PluginFailureMode::Warn
+                     : pal::PluginFailureMode::Error,
+                 .missing_mode = is_auto
+                     ? pal::PluginFailureMode::Warn
+                     : pal::PluginFailureMode::Error,
+                 .on_error = on_error_});
+            if (!opened && !is_auto && first_error == 0) {
+                first_error = core::kAudioSinkOpenFailed;
+            } else if (opened) {
+                resolved_sink_backend = resolved;
+            }
+        }
     }
 
     if (astate.audio_sink) {
         astate.audio_sink_negotiated = astate.audio_sink->config();
         astate.audio_sink_device_id = astate.audio_sink_negotiated.device_id;
+        astate.audio_sink_backend = resolved_sink_backend;
     }
+
+    return first_error;
 }
 
 void NimRTCEngine::shutdown_audio_devices() noexcept {
@@ -188,6 +274,8 @@ void NimRTCEngine::shutdown_audio_devices() noexcept {
     }
     astate.audio_source_device_id.clear();
     astate.audio_sink_device_id.clear();
+    astate.audio_source_backend.clear();
+    astate.audio_sink_backend.clear();
     astate.audio_capture_scratch.clear();
     astate.audio_capture_scratch.shrink_to_fit();
     // The AEC reference resumes from zero with the next device: a
@@ -253,13 +341,19 @@ void NimRTCEngine::pump_audio_capture() noexcept {
     std::size_t frames = 0;
     const plugins::Status rc = astate.audio_source->read_samples(
         astate.audio_capture_scratch.data(), capacity, &frames);
-    if (rc != plugins::kOk || frames == 0) {
+    if (rc != plugins::kOk) {
         // `kErrNotReady` is the normal "the queue is empty" answer.
         // Anything else (a hardware error, a closed device) is visible
         // through the device's own error counter, which
-        // `recover_audio_device()` above already looked at.
+        // `recover_audio_device()` above already looked at -- and it is
+        // counted here too, so `audio_device_pump_errors` reports the
+        // pump's own failures.
+        if (rc != plugins::kErrNotReady) {
+            ++astate.audio_device_pump_errors;
+        }
         return;
     }
+    if (frames == 0) return;
 
     ++astate.audio_capture_frames;
 
@@ -268,8 +362,17 @@ void NimRTCEngine::pump_audio_capture() noexcept {
     // `send_audio()` takes *samples per channel* and knows the channel
     // count from `EngineConfig::pcm_channels` — the same count the
     // format check above verified.
-    (void)send_audio(astate.audio_capture_scratch.data(), frames);
+    if (send_audio(astate.audio_capture_scratch.data(), frames) != 0) {
+        ++astate.audio_device_pump_errors;
+        return;
+    }
     ++astate.audio_capture_frames_sent;
+    // The *published* pump counter: `Stats::audio_device_pumped_frames`
+    // is the proof that the pump actually moved, so it counts the frames
+    // that reached the outbound path -- the same event the engine's own
+    // `audio_capture_frames_sent` counts, under the name the public
+    // stats surface uses.
+    ++astate.audio_device_pumped_frames;
 }
 
 // ---------------------------------------------------------------------------

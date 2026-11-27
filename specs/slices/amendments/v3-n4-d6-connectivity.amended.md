@@ -182,6 +182,7 @@ frozen spec 的优先级表把 `no-pair`（第 4）排在 `checks-failed`（第 
 而一个已经放弃的会话不是在等。所以 `"no-pair"` 是**等待中**的答案，
 是五个失败原因里最轻的，排在最后。
 
+
 ## 范围
 
 写入：
@@ -190,6 +191,11 @@ frozen spec 的优先级表把 `no-pair`（第 4）排在 `checks-failed`（第 
 - `src/third_party/libjuice/**`（补丁 + 树内改动，见决定一）
 - `profiles/**`
 - `docs/api/**`
+
+- `src/modules/video_stats/**`
+- `src/engine/**`
+- `profiles/**`
+
 - `tests/acceptance/v3-n4-d6-connectivity/acceptance.test.cjs`
 
 只读参考（**不得修改**）：
@@ -210,6 +216,7 @@ frozen spec 的优先级表把 `no-pair`（第 4）排在 `checks-failed`（第 
 - **D6**：`profiles/` 下预置连通性 profile 模板。
 - **D6**：宿主显式设置的 STUN / TURN 键**优先于** profile 的默认值。
 - **D6**：默认 STUN 服务器是 `stun.l.google.com:3478`（决定三）。
+
 - **D6-1**（已定）：profile 默认**开**。
 
 ## 接口约定
@@ -279,6 +286,15 @@ virtual std::string_view turn_failure_reason() const noexcept { return {}; }
 
 ### 3. `EngineConfig` 的加法式扩展
 
+4. `no-pair` —— 有候选，但 `selected_pair` 为空（还没提名）
+5. `checks-failed` —— ICE agent 进了 `failed` 状态
+6. `none` —— 以上都不成立
+
+**没有失败时不编造理由**：一切正常时是 `"none"`。
+
+### 2. `EngineConfig` 的加法式扩展
+
+
 ```
 std::string connectivity_profile = "auto";
 ```
@@ -287,11 +303,17 @@ std::string connectivity_profile = "auto";
 它意味着：STUN 开（`stun.l.google.com:3478`）、凭据存在时开 TURN/TLS、
 UDP 失败后 TCP 兜底。
 
+它意味着：STUN 开、凭据存在时开 TURN/TLS、UDP 失败后 TCP 兜底。
+
+
 **profile 携带的是「策略默认值」，不是「seam 值」**：
 宿主显式设置的 STUN / TURN 服务器列表**优先**，
 profile 只在宿主**没设**的那些键上补默认值。
 
 ### 4. `profiles/` 下的连通性 profile 模板
+
+### 3. `profiles/` 下的连通性 profile 模板
+
 
 `profiles/connectivity/connectivity-profiles.json`（新文件），承载各 profile 的**默认值**：
 
@@ -383,3 +405,4 @@ profile 只在宿主**没设**的那些键上补默认值。
 - **默认 STUN 是公共服务器**（决定三）：`stun.l.google.com` 不可用时
   引擎仍然工作（只是没有 srflx 候选），N4 会报 `no-candidates`。
   这不是错误，是**如实报告**。
+

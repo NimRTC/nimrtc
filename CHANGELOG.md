@@ -21,7 +21,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **The engine now runs the audio device layer (v1.4 D1, ADR-028).**
+- **The engine now runs the audio device layer (v1.4 D1, ADR-029).**
   The audio device module was complete, buildable and tested — but the
   **engine never touched it**: there was no `IAudioSource` / `IAudioSink`
   anywhere in `src/engine/`, no `EngineConfig` key naming a device, and
@@ -466,6 +466,29 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the answer is already known to: it asks the build's interpreter
   first, and installs only when the pair is actually missing or
   unreadable.
+
+- **The build wrote its DTLS test certificate into a vendored submodule,
+  leaving `src/third_party/wolfssl/src` permanently `-dirty` (2026-11-22,
+  landed on `version/v3` 2026-11-25).**
+  `scripts/build_dtls_cert.py` mirrored the generated pair into wolfSSL's own
+  cert tree.  `certs/server-ecc.pem` is **tracked** upstream, so overwriting it
+  made the submodule report `-dirty` forever, and the main repo showed
+  `m src/third_party/wolfssl/src` — for a build artefact, in someone else's
+  repository.  The pair now lives only in `tests/wolfssl_dtls/certs/`
+  (gitignored, a pure build artefact), and CMake's four cert lookups point
+  there.
+
+  The runtime lookup table also dropped the submodule path, and that part is
+  the *fix*, not a simplification: the upstream copy is the SAN-less
+  `CN=www.wolfssl.com` cert, so in any CWD where it resolved it would **win**
+  over the generated one and Chrome would reject the handshake with alert 46 —
+  a symptom (handshake refused) very far from its cause (the cert has no SAN).
+
+  Because a fresh checkout has no cert in `tests/wolfssl_dtls/certs/`, every CI
+  job that runs DTLS now generates the pair explicitly (`cryptography<42`:
+  42+ ships a Rust-backed Windows wheel without `cryptography_rust.dll`, so
+  `import cryptography` fails with "DLL load failed while importing _rust").
+
 
 - **A transient `503` from GitHub's artifact store made the soak
   window read "incomplete", and the whole soak leg red for a reason
@@ -1225,6 +1248,273 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the GPU host.  See `docs/plan/v1.3-plan.md` §9.
 
 
+
+
+- **The shared write-set criterion now knows where a slice's work *ends*
+  (`slice v6-writeset-slice-boundary`, ADR-076).**  The boundary criterion
+  (`tests/acceptance/v5-writeset-acceptance/writeset-boundary.cjs`) decided
+  "this commit is the slice's work" from two things — the title
+  `feat(<id>): slice approved`, or a `Refs-Slice: <id>` trailer — and looked
+  at **neither** whether the commit happened *before* or *after* the slice was
+  signed.  So a **transactional** commit made after signing (this project's
+  habit is `docs(plan): X is signed`) that happened to carry a stray
+  `Refs-Slice:` trailer had its files counted as the slice's `changed` set —
+  and those files are usually *not* in the slice's write set, so the criterion
+  reported a **false** out-of-write-set violation.  N6's acceptance suite hit
+  exactly this (`docs/plan/v1.4-plan.md`, which N6 never touched); a scan of
+  the whole acceptance suite found **six** already-signed slices misjudged the
+  same way (`v1-sdk-sample` / `v1-ice-recovery` / `v1-path-change-report` /
+  `v1-turn-credentials` / `v1-video-render-engine` / `v1-turn-tls-trust`).
+  The rule is now "has the trailer **and** lies within the slice's signing
+  boundary", where the boundary is the slice's `Merge slice <id>` or
+  `feat(<id>): slice approved` commit (and all of its ancestors), found via a
+  deterministic fallback ladder (merge commit → sign-off commit → the
+  earliest `feat(<id>): ...` commit) so slices without a merge or sign-off
+  commit still get a boundary.  A **non-existent** slice id yields **no**
+  boundary at all, and the criterion then fails loudly instead of quietly
+  accepting everything.  Filtering only removes post-signing commits — it
+  does **not** weaken the judgement about commits inside the boundary.
+- **The renderer no longer flashes windows on your desktop (ADR-039, amends
+  ADR-030).**  With the default `EngineConfig` the engine resolves the
+  platform renderer, and the D3D11 / Metal renderers *built their own output
+  window* when the host supplied none — so every single engine unit test
+  popped a blank white window onto the screen, and a full `ctest` run did it
+  hundreds of times.  Window creation is now **opt-in**:
+  `EngineConfig::video_sink_viewport` (and the seam's
+  `plugins::VideoSinkConfig::create_viewport_window`) default to `false`, so
+  the renderer works offscreen — the presentation clock still ticks and the
+  frames are still counted, but nothing appears.  Hosts that *want* the
+  picture on the screen set the flag; `examples/remote-desktop/rd_viewer.cpp`
+  does exactly that for its real-renderer sinks.  Windows self-created
+  windows also carry `WS_EX_TOOLWINDOW` now, so they stay out of the taskbar
+  and the Alt-Tab list.
+  The same investigation turned up a second, independent bug: the D3D11 swap
+  chain description used `DXGI_SWAP_CHAIN_DESC{}`, whose `BufferCount` member
+  has no default and was therefore **0** — DXGI rejects the whole chain
+  (`0x887a0001`).  The self-window path had *never* actually presented a
+  frame; it opened a blank window and failed.  With `BufferCount = 1` the
+  swap chain is created and the viewport really does show the picture.
+
+- **The install tree's link closure is now a verified fact (`slice
+  v1-install-tree-module-closure`, ADR-041).**  The staged bundle used to
+  drift between what it *installs* (`_nimrtc_install_shorts`) and what the
+  installed config *chains* onto `nimrtc::engine` (`_nimrtc_module_shorts`);
+  N6's execution leg surfaced the cost: 14 unresolved externals — 9 module
+  registrars (`h265`/`av1`/`vp9`/`video_capture`/`video_bitrate_control`/
+  `rd_input`/`rd_qoe`/`video_sync`/`dtmf`) plus 5 `pacing::TokenBucket`
+  methods.  Both short lists now cover the full engine link closure (42
+  modules), including `pacing` and the eleven newly chained modules, in
+  static-link order (`pacing` after `sched`, codecs before `nvcodec`, the
+  rest grouped as the engine groups them).  `tools/check_install_tree_module_closure.py`
+  computes the closure from the repo tree alone (no build, no network,
+  deterministic) and fails the CI when either list misses a closure module —
+  naming the module and the list; its pinned self-test proves it can fail,
+  not just pass.  The acceptance test stages a clean prefix and links a
+  full-closure host against it (0 LNK2019).  Chaining the closure also
+  surfaced that the closure is not only module archives: a closure module's
+  own **private** system libraries are lost the same way, so the installed
+  config now re-attaches the Media Foundation group (`mf` / `mfplat` /
+  `mfreadwrite` / `mfuuid` / `windowsapp`, for `video_capture`) and `ole32`
+  (for `audio_device`) alongside the existing `d3d11`/`dxgi` — without them
+  the "the staged bundle always links" promise was false.
+
+- **The install tree ships the PortAudio archive too.**  The audio-device
+  module links the vendored PortAudio target **PRIVATE**, and the wrapper in
+  `src/third_party/portaudio/CMakeLists.txt` compiles upstream's sources
+  directly — so, unlike libsrtp / libjuice / wolfSSL / msquic, it has no
+  upstream `install()` rules of its own.  The staged bundle therefore shipped
+  `nimrtc_audio_device.lib` with no `Pa_*` symbols behind it: a downstream
+  host linking `nimrtc::engine` failed with 14 unresolved externals
+  (`Pa_GetHostApiCount`, `Pa_OpenStream`, `Pa_StartStream`, ...).  The
+  archive is now installed alongside `opus` and chained by the installed
+  config, and the Windows system-lib list gains `dsound` and `uuid` — the
+  DirectSound backend and the COM GUIDs the WASAPI / MME glue read.
+
+- **The install tree now links a video host (`slice v1-install-tree-video-deps`,
+  ADR-038).**  The staged bundle (installed by `cmake --install` and consumed
+  via `find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`) used to drop
+  the video path: `nimrtc_nvcodec` was never installed, the three OpenH264
+  archives were not chained, and `d3d11`/`dxgi` were missing from the Windows
+  system-lib list — so a host with `h264` + the headless sink failed with
+  31 LNK2019.  Now the bundle ships `nimrtc_nvcodec` (archive + public
+  headers), the OpenH264 archives in their correct static-link order
+  (encoder / decoder / common) behind a link-order manifest
+  (`openh264_link_order.txt`, the same shape as the WebRTC APM archives), and
+  `d3d11`/`dxgi` on Windows.  NVIDIA's driver import libs are *not* needed —
+  NVENC / NVDEC load the driver dynamically.  `tools/check_install_tree_video_deps.py`
+  (with a pinned self-test) verifies the source and the staged tree, and the
+  acceptance test links a real downstream video host against a clean prefix.
+
+- **The ≤200-line SDK sample (`slice v1-sdk-sample`).**
+  `examples/sdk-sample/` is an independent host project: two processes on one
+  machine complete one audio+video+control call through the reference
+  signalling service (`examples/remote-desktop/signalling.py`) and a TLS-only
+  TURN relay, with the host writing only signalling and four hooks
+  (`set_on_call_state` D7, `set_on_control_message`, `set_on_ice_recovery` N8,
+  `EngineConfig::turn_credentials` N7).  The line budget (200 + 10% drift =
+  220 hard limit) is re-measured on every CI run by
+  `tools/check_sample_line_budget.py` (with a pinned self-test) and
+  cross-checked by the acceptance test's own JS counter — a limit that drifts
+  is a claim that drifted (ADR-041).  The sample consumes only the install
+  tree via `find_package(NimRTC REQUIRED CONFIG)` + `nimrtc::engine`.
+
+- **ICE-over-TCP (RFC 6544) — the TCP candidate shape (`slice v2-ice`).**
+  NimRTC now gathers host TCP candidates (`tcptype active` / `passive`)
+  on top of the UDP-only libjuice ICE layer, and its SDP serialisation
+  emits the full `a=candidate:… tcp <pri> <host> <port> typ host tcptype`
+  line.  This adds one public header (`ice/tcp_candidate.hpp`), so the
+  ADR-015 baseline is bumped 197 → 198 and the frozen manifest grows by
+  that one path — an explicit, reviewed bump, not a silent drift.
+
+- **Connectivity diagnostics (N4) + connectivity profiles (D6) —
+  (`slice v3-n4-d6-connectivity`).**
+  `TransportStats` gains six diagnostic fields: `ice_gathering_state`
+  (`"new"` / `"gathering"` / `"complete"`, independent of the ICE agent
+  state machine), per-type candidate counts (`ice_host_candidates` /
+  `ice_srflx_candidates` / `ice_relay_candidates`, summing to the
+  gathered set), a closed-vocabulary `ice_failure_reason`
+  (`transport-unsupported` → `credentials-rejected` → `no-candidates` →
+  `no-pair` → `checks-failed` → `none`, first match reports first), and
+  `turn_transport_used` (`"udp"` / `"tcp"` / `"tls"`).  Separately,
+  `EngineConfig::connectivity_profile` defaults to `"auto"` — STUN on,
+  TURN/TLS when credentials exist, TCP after UDP — with an explicit
+  host STUN server always winning over the profile's default, and
+  `profiles/connectivity/connectivity-profiles.json` ships as the reviewed template.
+  Fields only — no new public headers — so the ADR-015 baseline stays at
+  198.
+
+- **The engine runs the renderer (`slice v1-video-render-engine`).**
+  `EngineConfig::video_sink_name` now defaults to `"auto"`: the engine
+  resolves the platform renderer (D3D11 on Windows, Metal on macOS, EGL on
+  Linux) and **degrades instead of failing** — a machine with no display is
+  a normal machine, not an error.  The degrade is never silent: the sink
+  falls back to `"headless"` and `Stats::video_sink_backend_reason` says
+  why (`no-platform-backend` / `backend-not-registered` /
+  `backend-open-failed`).  The value table adds `"none"` (an explicit
+  opt-out — no sink instance) alongside today's `""` / `"headless"` (both
+  the headless sink, verbatim), and an explicit backend id stays a
+  *promise*: unknown id → `kVideoSinkPluginMissing`, open failure →
+  `kVideoSinkOpenFailed`, never a silent degrade.  The platform renderers
+  now create their own window when the host hands over none
+  (`CreateWindowExW` / `ShowWindow(SW_SHOWNOACTIVATE)` on Windows, an
+  `NSWindow` with a `CAMetalLayer` on macOS), so a host that wants a
+  picture writes no window code.  Stats gains `video_sink_backend` and
+  `video_sink_backend_reason`.  Fields only — no new public headers — so
+  the ADR-015 baseline stays at 198.
+
+- **The engine runs the ICE reconnection policy (`slice v1-ice-recovery`,
+  N3 / ADR-031).**
+  `EngineConfig::ice_recovery_policy` defaults to `"auto"`: after a
+  session that *has* connected, a `Disconnected` observation enters a
+  5-second grace window and, when the grace lapses, the engine restarts
+  ICE on a 1 / 2 / 4 / 8 / 8 s backoff — capped at **5 restarts per
+  sliding 10-minute window** (`"off"` disables it; an unknown name
+  resolves to `"off"`, never a policy the host did not ask for).  Manual
+  `restart_ice()` draws from the *same* budget.  When the budget is
+  exhausted the engine reports once, in three places: `on_error_`
+  receives `kIceRecoveryExhausted` (0x1F01), a warn log line is written,
+  and `set_on_ice_recovery` receives a terminal `IceRecoveryReport`
+  (`reason` / `restart_count` / `remaining_budget` / `terminal` /
+  `terminal_reason`).  `reset_ice_recovery_budget()` tops the budget back
+  up.  `TransportStats` gains `ice_recovery_state`,
+  `ice_recovery_restarts`, and `ice_recovery_terminal_reason`.  Fields
+  and one new error code only — no new public headers — so the ADR-015
+  baseline stays at 198.
+
+- **TURN credentials as a provider seam (`slice v1-turn-credentials`,
+  N7 / ADR-032).**
+  `EngineConfig::turn_credentials` hands the engine a
+  `TurnCredentialsProvider` callback (a raw function pointer, not
+  `std::function` — ABI-stable per ADR-015) plus a `turn_credentials_ctx`
+  handle.  The engine *pulls* a fresh `TurnCredentials` set (host / port
+  / username / password / `plugins::TurnTransport` / `tls_server_name`)
+  at the two moments a TURN server is (re)configured: before candidate
+  gathering (`open()`), and after every N3 reconnection restart — real
+  credentials carry a TTL, so the engine must ask again.  A static
+  `add_turn_server()` list **wins** over the callback (explicit host
+  configuration is never overridden); a null provider or a failed pull
+  keeps the session going direct.  A transport-reported 401/403 now
+  surfaces as `"credentials-rejected"` in the failure-reason projection
+  (instead of a generic `"checks-failed"`), and the new flat
+  `Stats::turn_credentials_state` reports `""` / `"idle"` / `"ok"` /
+  `"unavailable"` / `"rejected"`.  Fields only — no new public headers —
+  so the ADR-015 baseline stays at 198.
+
+- **TURN/TLS trust policy on the public surface (`slice v1-turn-tls-trust`,
+  ADR-037).**
+  A host can now say how it wants a TURN/TLS relay's certificate treated:
+  `TurnCredentials` gains `turn_tls_verify_peer` (bool, default `true`)
+  and `turn_tls_ca_file` (a PEM trust-anchor path, default empty).  The
+  knobs ride on the credential set — a changed relay carries a changed
+  trust anchor ("换中继就换信任锚") — and `same_credentials()` treats
+  either trust-field change as a credential change, so N7 re-applies
+  instead of silently reusing a stale anchor.  The engine translates them
+  through a new additive 7-argument `plugins::IICETransport`
+  `add_turn_server_with_transport()` overload (the existing 5-argument
+  signature is untouched) into the ICE layer's existing `IceConfig`
+  knobs, so a host can actually run the N5 self-signed relay by handing
+  it a `ca_file` — or explicitly skipping verification.  Failures are no
+  longer silent: a missing / non-PEM `turn_tls_ca_file` fires
+  `set_on_error` with `core::kEngineInvalidParam` naming the file.
+  `NimRTCEngine::turn_tls_peer_verification()` exposes the state as a
+  queryable fact — `""` / `"verified"` / `"unverified"` / `"failed"` —
+  so "verified", "never verified" and "configured but broken" are
+  mutually distinguishable.  One new public method, no new public
+  headers — the ADR-015 baseline stays at 198.
+
+- **Path-change reporting (`slice v1-path-change-report`, N8 / ADR-033).**
+  The engine now tells the host *from where to where, and why* a path
+  switch happened — no polling, no diffing `selected_pair` strings.
+  `IceRecoveryReport` gains `old_pair` / `new_pair`
+  (`std::optional<IceCandidatePairInfo>`, empty = none selected yet /
+  still gathering) and a new `set_on_peer_restart(EnginePeerRestartCallback)`
+  fires **alongside** the unchanged `set_on_ice_restart` with a
+  `PeerRestartReport` when the *peer* restarts ICE.  The reason is a
+  closed vocabulary: `"local-address-changed"` / `"peer-restart"` /
+  `"relay-fallback"` (the pair flipped direct ↔ relay) / `"manual"` /
+  `"ice-failed"`.  Flat `Stats` gains `last_path_change_reason` and
+  `last_path_change_new_pair` (populated even when
+  `ice_recovery_policy == "off"`).  **Note:** the `Stats` struct is passed
+  by value and grows by two fields — hosts must recompile (allowed within
+  the v1.3 → v1.4 MINOR bump per ADR-015 Decision 4).  No new public
+  headers — the ADR-015 baseline stays at 198.
+
+- **macOS install + downstream proof (`slice v1-macos-install-proof`,
+  N9 / ADR-034).**
+  The `macos-clang` CI leg now installs the bundle into a staging dir
+  (`build/_install/macos-arm64`) and builds a minimal
+  `find_package(NimRTC 1.0 REQUIRED)` consumer against it **out-of-tree** —
+  including `<nimrtc/engine/engine.hpp>` and linking `nimrtc::engine`, with
+  no pinned `CMAKE_CXX_STANDARD` — the same proof Windows and Linux already
+  ran on every push, so macOS's export path (the `NimRTCConfig.cmake`
+  template, the `CMAKE_INSTALL_*` paths, the `nimrtc::engine` imported
+  target) is no longer unverified.  A new static check
+  (`tools/check_install_export.py`, with a self-test) runs on all three legs
+  and catches a config-template placeholder that would reach the installed
+  file as an empty string; the release workflow's macOS leg now asserts the
+  archive carries `NimRTCConfig.cmake` and the engine public header.  No C++
+  interface change — CI/export-config only — so the ADR-015 baseline stays
+  at 198.
+
+- **The call-state surface (`slice v1-call-state-surface`, D7 / ADR-035).**
+  One callback now spans a whole call's lifecycle — `connecting` →
+  `connected` → `reconnecting` → `failed` / `closed` — carrying the N3
+  (reconnection), N4 (failure) and N8 (path-change) details, so a host no
+  longer assembles the answer from `set_on_state_change` + `set_on_error`
+  + polling `Stats`.  New public types `CallState` (five states),
+  `CallFailure` (six kinds: `kIceFailed` / `kDtlsFailed` / `kTurnRefused` /
+  `kCredentialsRejected` / `kMediaFailed`), `CallStateReport` (the failure
+  **string** is the N4 vocabulary verbatim; `failure_from_reason()` maps it
+  onto the enum in one place) and `EngineCallStateCallback`, installed via
+  `set_on_call_state()`.  The callback fires on a real **migration** — the
+  same state is never reported twice; `failed` / `closed` are **absorbing**,
+  so a DTLS failure cannot oscillate the report between `kConnected` and
+  `kFailed`.  Three lifecycle methods wrap the defined teardown order:
+  `start(config)` (configure → `open()`), `stop()` (`close()` under its
+  lifecycle name), and `hangup(reason)` (notifies the peer first, then
+  closes in the same order).  `set_on_control_message` is declared next to
+  `set_on_call_state` — signature and semantics unchanged.  All new symbols
+  are additive, so the ADR-015 baseline stays at 198.
 
 ## [1.3.0] - 2026-11-20
 

@@ -69,6 +69,15 @@ using RegistrarFn = void(*)() noexcept;
 // Alphabetical order by namespace is preferred for new additions.
 constexpr RegistrarFn kDefaultRegistrars[] = {
     &nimrtc::audio3a::register_default_plugins,
+#ifdef NIMRTC_HAS_AUDIO_DEVICE
+    // v1.4 (remote-desktop plan D1): the audio *device* module.  Its
+    // entry point populates the registry's audio-source / audio-sink
+    // slots (register_audio_source / register_audio_sink) under the ids
+    // "portaudio" (when the PortAudio backend is usable) and "synthetic",
+    // so the engine can resolve an audio device through the seam without
+    // naming a concrete module (Layout Invariant 4).
+    &nimrtc::audio_device::register_default_plugins,
+#endif
     // v1.2.0 (audio pipeline, WP-7): the audio receive-pipeline module.
     // Its entry point populates the registry's audio-receiver slot
     // (register_audio_receiver) under the id "nimrtc_audio_rx", so the
@@ -183,7 +192,7 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
     &nimrtc::video_capture::register_default_plugins,
 #endif
 #ifdef NIMRTC_HAS_AUDIO_DEVICE
-    // v1.4 D1 (ADR-028): the audio-device module.  Its entry point
+    // v1.4 D1 (ADR-040): the audio-device module.  Its entry point
     // populates the registry's audio-source / audio-sink slots, so the
     // engine can resolve a device backend through the seam without
     // naming a concrete module (Layout Invariant 4).

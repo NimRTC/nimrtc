@@ -2,7 +2,7 @@
 
 > **状态**：**已落地**，2026-11-27。
 > **归属**：v1.4 Track D，波次 1。
-> **决策依据**：[ADR-028](../adr/ADR-028-audio-device-plugin-registry.md)（音频设备后端并入 `core::PluginRegistry`）。
+> **决策依据**：[ADR-040](../adr/ADR-040-audio-device-plugin-registry.md)（音频设备后端并入 `core::PluginRegistry`）。
 > **计划源**：`docs/plan/v1.4-plan.md` §4（D1）、§5（D1-1）、§6。
 > **缺口源**：`docs/plan/post-v1.4-gap-inventory.md` §1.2.1–1.2.6。
 >
@@ -52,7 +52,7 @@ gap inventory 的**编号体系**是这些缺口在项目里的身份标识，�
 | 1.2.3 | 引擎不从设备读帧喂给 `send_audio()` | §4.2（capture pump） |
 | 1.2.4 | 引擎不把接收到的音频送到设备播放 | §4.3（sink pump） |
 | 1.2.5 | 设备枚举 / 热插拔未暴露给宿主 | §4.5（枚举 API） |
-| 1.2.6 | 后端发现绕过 `PluginRegistry` | **ADR-028 已决**（路线 A） |
+| 1.2.6 | 后端发现绕过 `PluginRegistry` | **ADR-040 已决**（路线 A） |
 
 ---
 
@@ -126,7 +126,7 @@ never gets the system output by accident」）。注册表保持这个语义。
 
 ```cpp
 #ifdef NIMRTC_HAS_AUDIO_DEVICE
-    // v1.4 D1 (ADR-028): the audio-device module.  Its entry point
+    // v1.4 D1 (ADR-040): the audio-device module.  Its entry point
     // populates the registry's audio-source / audio-sink slots, so the
     // engine can resolve a device backend through the seam without
     // naming a concrete module (Layout Invariant 4).
@@ -411,7 +411,7 @@ std::string audio_sink_device_id;
 
 ### 4.5 设备枚举（gap 1.2.5）
 
-**`enumerate_capture_devices()` 不进注册表**（ADR-028 已决：注册表存
+**`enumerate_capture_devices()` 不进注册表**（ADR-040 已决：注册表存
 「工厂」，不存「查询」）。
 
 但引擎要把它暴露给宿主，又不能让引擎 include 模块头（同 ADR-025）。
@@ -491,7 +491,7 @@ plugins::AudioSinkConfig   audio_sink_config{};
 **(a) 镜像编译宏**（照 `NIMRTC_HAS_VIDEO_CAPTURE` 的形状）：
 
 ```cmake
-# v1.4 D1 (ADR-028): the audio-device module's registrar entry
+# v1.4 D1 (ADR-040): the audio-device module's registrar entry
 # materialises only when the module is built.  Same shape as the
 # video_capture entry above.
 if(NIMRTC_MODULE_AUDIO_DEVICE)
@@ -652,7 +652,7 @@ gap inventory §5.2.2 记着「`AudioPipeline` 与 §1 的音频接线耦合」�
 | 测试 | 位置 | 断言 |
 |---|---|---|
 | 注册表往返 | `src/modules/audio_device/tests/` | `register_audio_source("x", &f)` 后 `get_audio_source("x") == &f`；`list_audio_sources()` 含 `"x"` |
-| **两个入口一致**（ADR-028 的核心约束） | 同上 | 自由函数 `source_factory(id)` 与注册表 `get_audio_source(id)` 对同一 id 返回**同一指针** |
+| **两个入口一致**（ADR-040 的核心约束） | 同上 | 自由函数 `source_factory(id)` 与注册表 `get_audio_source(id)` 对同一 id 返回**同一指针** |
 | 默认注册 | 同上 | `register_default_plugins()` 后 `list_audio_sources()` 含 `"synthetic"`、`"system-audio"` |
 | 引擎接线 | `tests/test_engine_audio_device.cpp` | 引擎配 `"synthetic"` → `impl_->audio_state.audio_source` 非空、`open()` 成功、统计里 `audio_source_device_id` 非空 |
 | `"none"` opt-out | 同上 | 配 `"none"` → 引擎不打开设备，宿主手工 `send_audio()` 仍然工作 |
@@ -664,7 +664,7 @@ gap inventory §5.2.2 记着「`AudioPipeline` 与 §1 的音频接线耦合」�
 ### 7.2 复核命令
 
 ```console
-# ADR-028 的三条断言
+# ADR-040 的三条断言
 git grep -n "register_default_plugins" -- src/modules/audio_device/    # → 命中
 git grep -ln "IAudioSource\|IAudioSink" -- src/engine/                # → 命中
 git grep -n "register_audio_source\|register_audio_sink" -- src/core/  # → 命中
@@ -743,7 +743,7 @@ of one file. **Rebases, not redesigns**」。
 |---|---|
 | `docs/plan/v1.4-plan.md` §4（D1） | 本文的**上游**——D1 的 DoD、机制描述、决策项（D1-1） |
 | `docs/plan/v1.4-plan.md` §8a | D1 的**启动门槛与冲突面规则**，见本文 §8 |
-| `docs/adr/ADR-028-audio-device-plugin-registry.md` | 本文的**决策依据**——§3 步骤 1、2、7 与 §4.5 由它约束 |
+| `docs/adr/ADR-040-audio-device-plugin-registry.md` | 本文的**决策依据**——§3 步骤 1、2、7 与 §4.5 由它约束 |
 | `docs/plan/post-v1.4-gap-inventory.md` §1 | 本文的**缺口来源**——§2 的编号体系来自它的 §1.2；它的 §1 是决策前的同一份现状快照 |
 | `docs/adr/ADR-025-sdp-rtp-not-pluggable.md` | 约束引擎**不能**直接 include 模块头，本文 §6.1 的链接方向分析依赖它 |
 | `docs/adr/ADR-024-engineconfig-string-ownership.md` | 约束 §3 步骤 5 的 `EngineConfig` 字符串形态，见 §6.3 |

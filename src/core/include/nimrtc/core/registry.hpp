@@ -146,7 +146,7 @@ class NIMRTC_API_STABLE IAudioReceiverFactory;
 // The engine drives renegotiation through this interface and never
 // includes `src/modules/session/`'s headers (Layout Invariant 4).
 class NIMRTC_API_STABLE ISessionFactory;
-// v1.4 D1 (ADR-028): the two audio-device seams -- the capture device
+// v1.4 D1 (ADR-040): the two audio-device seams -- the capture device
 // (microphone) and the playback device (loudspeaker).  The engine
 // resolves them through the registry so it never includes
 // `src/modules/audio_device/`'s headers (Layout Invariant 4).
@@ -241,7 +241,7 @@ namespace video_source    { void register_default_plugins() noexcept; }
 #ifdef NIMRTC_HAS_VIDEO_CAPTURE
 namespace video_capture   { void register_default_plugins() noexcept; }
 #endif
-// v1.4 D1 (ADR-028): the audio-device module.  Its entry point
+// v1.4 D1 (ADR-040): the audio-device module.  Its entry point
 // populates the registry's audio-source / audio-sink slots, so the
 // engine can resolve a device backend through the seam without naming
 // a concrete module (Layout Invariant 4).
@@ -736,7 +736,7 @@ public:
     // -- Audio Source (v1.4 D1) --------------------------------------------
     //
     // The capture-device seam: the engine resolves the microphone
-    // through this slot (ADR-028), so it never names a concrete audio
+    // through this slot (ADR-040), so it never names a concrete audio
     // module (Layout Invariant 4).  The built-in module registers
     // "portaudio", "synthetic", "system-audio" and
     // "synthetic-system-audio"; the engine resolves it through
@@ -754,7 +754,7 @@ public:
     // -- Audio Sink (v1.4 D1) ----------------------------------------------
     //
     // The playback-device seam: the engine resolves the loudspeaker
-    // through this slot (ADR-028), so it never names a concrete audio
+    // through this slot (ADR-040), so it never names a concrete audio
     // module (Layout Invariant 4).  The built-in module registers
     // "portaudio" and "synthetic"; the engine resolves it through
     // `EngineConfig::audio_sink_name`.
@@ -1145,7 +1145,7 @@ private:
     // selection and dirty-rect metadata.
     TypedRegistry<plugins::IVideoCaptureFactory> video_capture_{"video-capture"};
     TypedRegistry<plugins::IVideoSinkFactory>    video_sink_{"video-sink"};
-    // v1.4 D1 (ADR-028): the audio-device slots.  They are separate
+    // v1.4 D1 (ADR-040): the audio-device slots.  They are separate
     // slots rather than variants of one, because a capture device is
     // not a playback device: a host that asks for the microphone never
     // gets the system output by accident.
@@ -1441,7 +1441,7 @@ private:
             #id, factory_ptr }
 
 /** Register an audio capture-device plugin by ID and factory pointer
- *  (v1.4 D1, ADR-028). */
+ *  (v1.4 D1, ADR-040). */
 #define NIMRTC_REGISTER_AUDIO_SOURCE(id, factory_ptr)                    \
     NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
@@ -1451,7 +1451,7 @@ private:
             #id, factory_ptr }
 
 /** Register an audio playback-device plugin by ID and factory pointer
- *  (v1.4 D1, ADR-028). */
+ *  (v1.4 D1, ADR-040). */
 #define NIMRTC_REGISTER_AUDIO_SINK(id, factory_ptr)                      \
     NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
@@ -1748,7 +1748,7 @@ public:
         // v1.2.0 (remediation plan B7 / Q3): the SRTP crypto backend
         // seam -- see register_srtp_backend().
         kSrtpBackend,
-        // v1.4 D1 (ADR-028): the two audio-device seams.  They have
+        // v1.4 D1 (ADR-040): the two audio-device seams.  They have
         // their own categories because a capture device and a playback
         // device are different devices: a host that asks for the
         // microphone must never get the system output by accident.

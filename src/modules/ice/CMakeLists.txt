@@ -17,6 +17,9 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_ice STATIC
     src/ice.cpp
+    src/tcp_framing.cpp
+    src/tcp_ice.cpp
+    src/tcp_socket.cpp
     src/turn_tls.cpp
     )
 

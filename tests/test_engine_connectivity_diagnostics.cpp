@@ -246,7 +246,7 @@ protected:
         // The device layer is off: a capture device on a machine that has
         // one would pump real frames into the send path, and none of this
         // test is about media.  ("none" is the explicit opt-out —
-        // ADR-028, plan D1-1.)
+        // ADR-040, plan D1-1.)
         cfg.audio_source_name = "none";
         cfg.audio_sink_name   = "none";
         return cfg;

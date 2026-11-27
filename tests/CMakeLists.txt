@@ -2956,7 +2956,7 @@ nimrtc_add_engine_test(test_engine_audio_loopback test_engine_audio_loopback.cpp
 nimrtc_add_engine_test(test_engine_audio_send test_engine_audio_send.cpp)
 
 # ---------------------------------------------------------------------------
-# v1.4 D1 (ADR-028) -- the engine's audio-device plane.
+# v1.4 D1 (ADR-040) -- the engine's audio-device plane.
 #
 # The engine resolves the capture / playback device through
 # `core::PluginRegistry` (never by naming the module -- Layout
@@ -2969,11 +2969,11 @@ nimrtc_add_engine_test(test_engine_audio_send test_engine_audio_send.cpp)
 # backend: it needs no sound card, so the suite runs on CI.
 # ---------------------------------------------------------------------------
 if(NIMRTC_MODULE_AUDIO_DEVICE)
-nimrtc_add_engine_test(test_engine_audio_device test_engine_audio_device.cpp)
+nimrtc_add_engine_test(test_engine_audio_device_integration test_engine_audio_device_integration.cpp)
 # The engine links the WebTransport seam, which pulls in msquic.dll.
 # The DLL must sit next to the .exe before the gtest discovery probe
 # runs, or the probe fails with STATUS_DLL_NOT_FOUND (0xC0000135).
-nimrtc_copy_msquic_dll(test_engine_audio_device)
+nimrtc_copy_msquic_dll(test_engine_audio_device_integration)
 endif()
 
 # ---------------------------------------------------------------------------

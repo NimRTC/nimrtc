@@ -229,6 +229,16 @@ bool ViewerSession::start() {
     cfg.video_codec_name    = opts_.codec_name;
     cfg.video_codec_backend = opts_.codec_backend;
 
+    // A presentation sink needs an output window, and the engine's
+    // default is *not* to let the renderer build one on its own (a
+    // window nobody asked for is a surprise).  The viewer is the one
+    // place where the picture is meant to reach the screen, so it asks
+    // for the viewport — but only for a sink that actually presents.
+    // "headless" counts frames and drops pixels, so a viewport would be
+    // a window showing nothing.
+    cfg.video_sink_viewport = (opts_.sink_name != "headless") &&
+                              !opts_.sink_name.empty();
+
     // The device encodes screen content, so the viewer expects the same
     // kind of picture (plan B7 / RD-3).  The hint is symmetric: it also
     // reaches the peer through the SDP's `a=content-hint` attribute.

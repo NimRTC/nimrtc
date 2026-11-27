@@ -1,8 +1,8 @@
-# ADR-028: 音频设备后端并入 PluginRegistry — 设备接缝与其它接缝同构
+# ADR-040: 音频设备后端并入 PluginRegistry — 设备接缝与其它接缝同构
 
 | | |
 |---|---|
-| Number | 028 |
+| Number | 040 (renumbered from 028 — collided with ADR-028-ice-over-tcp-nimrtc-side) |
 | Status | **Accepted** |
 | Date | 2026-11-25 |
 | Phase | v1.4 (D1) |

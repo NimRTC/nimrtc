@@ -1,8 +1,8 @@
-# ADR-029: ICE-over-TCP — a NimRTC-side TCP candidate layer, and libjuice stays UDP-only
+# ADR-028: ICE-over-TCP — a NimRTC-side TCP candidate layer, and libjuice stays UDP-only
 
 | | |
 |---|---|
-| Number | 029 |
+| Number | 028 |
 | Status | **Accepted** |
 | Date | 2026-11-21 |
 | Phase | v1.4 (N2) |

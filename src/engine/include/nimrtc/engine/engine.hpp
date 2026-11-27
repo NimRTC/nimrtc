@@ -102,7 +102,7 @@
 #include <nimrtc/plugins/audio3a.hpp>
 #include <nimrtc/plugins/audio_decoder.hpp>
 #include <nimrtc/plugins/audio_receiver.hpp>
-// v1.4 D1 (ADR-028): the two audio-device seams — the capture device
+// v1.4 D1 (ADR-040): the two audio-device seams — the capture device
 // (microphone) and the playback device (loudspeaker).  The engine
 // resolves both through the registry's typed slots and pumps the frames
 // itself; it never includes the `audio_device` module's headers
@@ -236,6 +236,77 @@ struct NIMRTC_API_STABLE AudioCodecConfig {
      *  Empty string means no a=fmtp line is emitted. */
     std::string   fmtp;
 };
+
+/** One TURN credential set, as the host's provider hands it to the engine.
+ *
+ *  This is the engine's own shape — deliberately **not** `nimrtc::ice::TurnServer`:
+ *  the engine's public header must not include the ICE module's concrete
+ *  headers (Layout Invariant 4 / ADR-025), so the seam the slice adds lives
+ *  here, and `src/engine/src` translates it to the plugin seam when it
+ *  applies the credentials.
+ */
+struct NIMRTC_API_STABLE TurnCredentials {
+    /** TURN server address (hostname or IP). */
+    std::string host;
+
+    /** TURN server port.  0 = the default (TURN/UDP 3478). */
+    std::uint16_t port = 3478;
+
+    /** Username.  Empty = anonymous allocation (RFC 5766 allows it). */
+    std::string username;
+
+    /** Password.  Empty = anonymous allocation. */
+    std::string password;
+
+    /** The transport the server is reached over.  Default `Udp` (every
+     *  TURN server supports it). */
+    plugins::TurnTransport transport = plugins::TurnTransport::Udp;
+
+    /** TURN/TLS SNI / certificate hostname.  Empty = use `host`. */
+    std::string tls_server_name;
+
+    /** TURN/TLS peer-certificate verification switch (v1-turn-tls-trust,
+     *  ADR-037).  Default `true`.
+     *
+     *  `false` = **explicitly** skip verifying the server's certificate.
+     *  Only for test relays / self-signed relays / a trusted network: the
+     *  host that switches it off gives up the "the relay is who it says
+     *  it is" guarantee and can never get it back for that credential set.
+     *  Setting `false` with a non-empty `turn_tls_ca_file` is
+     *  contradictory — the `ca_file` is ignored (verification is off, so
+     *  there is nothing to anchor it to). */
+    bool turn_tls_verify_peer = true;
+
+    /** TURN/TLS trust-anchor file (a PEM path, v1-turn-tls-trust,
+     *  ADR-037).  Empty = load no trust anchors.
+     *
+     *  With `turn_tls_verify_peer = true`, an empty value means "no
+     *  certificate is accepted" — the failure mode is a **rejected
+     *  handshake**, which is different from `verify_peer = false`
+     *  (which does not verify at all).  A host that wants to trust a
+     *  self-signed relay hands it a `ca_file` holding that relay's
+     *  certificate as a trust anchor. */
+    std::string turn_tls_ca_file;
+};
+
+/** The credentials-provider callback type (v1.4 N7, ADR-032).
+ *
+ *  The engine calls it when it **needs** credentials — before candidate
+ *  gathering (`open()`) and after every N3 reconnection restart.  Return
+ *  `false` to say "no credentials right now" (the engine continues without
+ *  TURN); return `true` with a non-empty `out->host` to hand one set over.
+ *
+ *  A raw function pointer (not `std::function`), because this public
+ *  header must stay ABI-stable across releases (ADR-015): the ABI of
+ *  `std::function` is not part of the stability promise.  This matches the
+ *  shape of the engine's other callback seams.
+ *
+ *  **Threading**: the callback runs on the engine's tick thread — the same
+ *  thread set_on_ice_recovery fires on.  It must not block, and must not
+ *  re-enter the engine.
+ */
+using NIMRTC_API_STABLE TurnCredentialsProvider = bool (*)(void* ctx,
+                                                           TurnCredentials* out) noexcept;
 
 struct NIMRTC_API_STABLE EngineConfig {
     // ---- Plugin selection (ADR-001: look up by string ID in PluginRegistry) ----
@@ -530,6 +601,42 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  session from starting. */
     std::string connectivity_profile = "auto";
 
+    /** Reconnection policy (v1.4 N3).
+     *
+     *  "auto" (default) — the engine manages reconnection: when ICE goes
+     *  down it restarts ICE on its own, bounded by a grace window, an
+     *  exponential backoff (1 / 2 / 4 / 8 s) and a sliding budget
+     *  (5 restarts per 10 minutes), and tells the host through
+     *  `set_on_ice_recovery` that a fresh offer should be sent.
+     *
+     *  "off" — the engine does nothing on an ICE drop; the host owns
+     *  reconnection and calls `restart_ice()` itself.
+     *
+     *  An unknown name is treated as "off" (ADR-031 §2.2) — the opposite
+     *  of `connectivity_profile`'s fallback, and deliberate: a mistyped
+     *  key must not arm the engine to restart ICE at a moment the host did
+     *  not expect. */
+    std::string ice_recovery_policy = "auto";
+
+    /** TURN credentials provider (v1.4 N7, ADR-032).
+     *
+     *  When set, the engine **pulls** a credential set from this callback
+     *  at the two moments a TURN server is (re)configured: before
+     *  candidate gathering (`open()`) and after every N3 reconnection
+     *  restart — because the issued credentials carry a TTL and may have
+     *  expired while the session was down.
+     *
+     *  The pull only happens when the host added **no static** TURN server
+     *  with `add_turn_server()`: an explicit server list wins over the
+     *  provider (the provider is not consulted).  A pull that yields
+     *  nothing leaves the session running without TURN.
+     *
+     *  Empty = the engine does not pull credentials (today's static
+     *  `add_turn_server()` path is unchanged).  `turn_credentials_ctx` is
+     *  passed back to the callback verbatim. */
+    TurnCredentialsProvider turn_credentials = nullptr;
+    void* turn_credentials_ctx = nullptr;
+
     /** Local UDP port range for ICE. 0 = OS picks.
      *
      *  Leave both at 0 (the default) unless you have a specific reason
@@ -583,6 +690,60 @@ struct NIMRTC_API_STABLE EngineConfig {
      */
     std::uint32_t audio_ssrc = 0;
 
+    // ---- Audio device config (remote-desktop plan D1) ----
+
+    /** IAudioSource plugin id — the audio *capture* device seam.
+     *
+     *  Empty = the host feeds PCM itself via `send_audio()` — today's
+     *  behavior, unchanged.  `"none"` = explicit opt-out (no device is
+     *  opened, and the engine does not fail for device reasons).
+     *  `"auto"` = the platform default audio backend, resolved at run
+     *  time ("portaudio" when usable, else "synthetic").  Any other
+     *  value names a specific registered backend id.
+     *
+     *  An `"auto"` backend whose `open()` fails is **not** an error:
+     *  the engine warns and degrades to "no capture device" — a host
+     *  with no microphone is a normal machine, not a misconfiguration.
+     *  An explicit id that fails to open is a hard error, exactly like
+     *  the video side's non-empty `video_capture_name`.
+     *
+     *  @see `plugins/audio_source.hpp`. */
+    std::string audio_source_name;
+
+    /** The capture request handed to the audio-source plugin.
+     *
+     *  Empty by default — the backend picks its default input device
+     *  and format.  After `open()` succeeds, the plugin reports the
+     *  *actually negotiated* configuration through `config()`; read it
+     *  back rather than assuming the request was granted.
+     *
+     *  @see `plugins::AudioSourceConfig`. */
+    plugins::AudioSourceConfig audio_source_config;
+
+    /** IAudioSink plugin id — the audio *playback* device seam.
+     *
+     *  Empty = the host plays decoded PCM itself (from the
+     *  `on_audio_frame()` callback) — today's behavior, unchanged.
+     *  `"none"` = explicit opt-out.  `"auto"` = the platform default
+     *  audio backend, resolved like `audio_source_name`.  Any other
+     *  value names a specific registered backend id.
+     *
+     *  The same degradation rule applies: an `"auto"` backend that
+     *  fails to open degrades to "no playback device" with a warn; an
+     *  explicit id that fails to open is a hard error.
+     *
+     *  @see `plugins/audio_sink.hpp`. */
+    std::string audio_sink_name;
+
+    /** The playback request handed to the audio-sink plugin.
+     *
+     *  Empty by default — the backend picks its default output device
+     *  and format.  Read back `config()` after `open()` for the
+     *  actually-negotiated configuration.
+     *
+     *  @see `plugins::AudioSinkConfig`. */
+    plugins::AudioSinkConfig audio_sink_config;
+
     // ---- JitterBuffer config ----
 
     /** JitterBuffer fixed delay (ms). */
@@ -624,6 +785,16 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  `IVideoSource` directly).  When non-empty, the engine resolves
      *  the factory at `open()` time and the resolved instance is
      *  reachable through the `video_capture()` accessor.
+     *
+     *  The literal `"auto"` is a *third* meaning added by the default
+     *  device policy (v1-device-policy D3): resolve through the
+     *  platform's default policy instead of naming one specific id.
+     *  Which default is chosen follows D3-1 — `video_content_hint ==
+     *  kText` selects the screen-capture backend, every other hint
+     *  selects the camera backend.  A policy backend that this build
+     *  does not register is **not** an error: the engine warns and
+     *  degrades to "no capture device", unlike an unknown *explicit* id,
+     *  which fires `kVideoCapturePluginMissing`.
      *
      *  The `IVideoCapture` seam is deliberately *separate* from
      *  `IVideoSource`: capture is a *device* (enumeration, format
@@ -673,8 +844,50 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  with no capture device there is nothing to pump. */
     bool video_capture_pump = true;
 
-    /** IVideoSink plugin id (e.g. "headless", "pinned", or HW renderer id). */
-    std::string video_sink_name   = "headless";
+    /** IVideoSink plugin id (v1-video-render-engine D2).
+     *
+     *  The value table (D2-4):
+     *    `""`        today's behaviour, verbatim: equivalent to
+     *                `"headless"` (count frames, drop pixels).
+     *    `"auto"`    the platform renderer, resolved through the
+     *                registry (Windows `d3d11` / macOS `metal` /
+     *                Linux `egl`).  "auto" is a *recommendation*, not a
+     *                requirement: when the platform backend cannot run
+     *                (not registered, `open()` fails, no platform
+     *                backend on this build) the engine degrades to
+     *                `"headless"`, warns, and reports the reason in
+     *                `Stats::video_sink_backend_reason` — `open()`
+     *                never fails for "auto".
+     *    `"none"`    explicit opt-out: no sink instance is created and
+     *                the engine renders nothing (`video_sink()` returns
+     *                null; `set_on_video_frame` still fires).
+     *    `"headless"`  explicit "count frames but drop pixels".
+     *    `"<id>"`    an explicit backend id (e.g. `"pinned"`, or any
+     *                registered renderer).  Explicit ids are promises:
+     *                an unknown id or an `open()` failure fails the
+     *                session (`kVideoSinkPluginMissing` /
+     *                `kVideoSinkOpenFailed`). */
+    std::string video_sink_name   = "auto";
+
+    /** Let the renderer put the decoded picture on the screen.
+     *
+     *  A presentation sink needs an output surface.  When the host
+     *  supplies none, the renderer *can* build one itself (a Win32
+     *  window, an `NSWindow`, a Wayland surface) — but that window is
+     *  visible, and a window the caller never asked for is a surprise.
+     *
+     *  False (the default) means: no host window and no renderer-built
+     *  one, so the sink runs offscreen — the presentation clock still
+     *  ticks and the frames are still counted, but nothing appears on
+     *  the desktop.  This is what a unit test, a benchmark, and a
+     *  headless CI leg want.
+     *
+     *  True means: the renderer creates its own output window and the
+     *  picture reaches the screen.  A viewer application sets this.
+     *
+     *  The flag is ignored when the host supplies its own window: the
+     *  host's window always wins. */
+    bool video_sink_viewport = false;
 
     /** IVideoBitrateController plugin id (remote-desktop plan D1).
      *
@@ -1393,58 +1606,6 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  An empty string disables the audio track explicitly (no error is
      *  reported: the host asked for it). */
     std::string audio_receiver_name = "nimrtc_audio_rx";
-
-    // ---- Audio devices (v1.4 D1, ADR-028) -----------------------------
-    //
-    // The *device* half of the audio path.  The engine resolves the
-    // microphone and the loudspeaker through the registry's
-    // audio-source / audio-sink slots and pumps the frames itself, so a
-    // host that configures nothing gets a working capture-and-playback
-    // session.  The seams are stable and unchanged (ADR-028); what D1
-    // changes is *who drives them*.
-    //
-    // The three states of the two names below:
-    //
-    //   | value       | meaning                                          |
-    //   |-------------|--------------------------------------------------|
-    //   | empty       | the **default device** — the backend picks its own default input / output |
-    //   | "none"      | the **explicit opt-out** — the engine opens no device and the host feeds PCM by hand |
-    //   | a plugin id | a named registered backend                        |
-    //
-    // Empty means "default device" rather than "off" because D1's
-    // definition of done is "with no device ids configured, the engine
-    // captures and plays".  The "none" spelling is the opt-out, so a
-    // host that drives the seam by hand keeps working unchanged.
-    //
-    // Note the deliberate difference from `audio_decoder_name`, where an
-    // empty string means "no audio track": a *codec* can be switched
-    // off, but a *device* can only be defaulted or explicitly declined.
-
-    /** IAudioSource plugin id (e.g. "portaudio", "synthetic", "system-audio").
-     *
-     *  Empty = the default capture device; "none" = the explicit
-     *  opt-out (the host feeds PCM by hand).  Default = "portaudio". */
-    std::string audio_source_name = "portaudio";
-
-    /** IAudioSink plugin id (e.g. "portaudio", "synthetic").
-     *
-     *  Empty = the default playback device; "none" = the explicit
-     *  opt-out (the engine does not play).  Default = "portaudio". */
-    std::string audio_sink_name = "portaudio";
-
-    /** The capture request handed to the audio-source plugin.
-     *
-     *  Empty by default (the device picks its own default input and
-     *  format).  The negotiated format is read back from the device
-     *  after `open()` — the request is a request, not a grant. */
-    plugins::AudioSourceConfig audio_source_config;
-
-    /** The playback request handed to the audio-sink plugin.
-     *
-     *  Empty by default (the device picks its own default output and
-     *  format).  The negotiated format is read back from the device
-     *  after `open()`. */
-    plugins::AudioSinkConfig audio_sink_config;
 
     /** Drive the encoder from the capture device automatically (v1.4 D1).
      *
@@ -2472,6 +2633,17 @@ struct NIMRTC_API_STABLE TransportStats {
      *  it is repeated here so a host that reads only the transport
      *  entry has the complete picture of the SRTP plane. */
     std::uint64_t srtp_drops = 0;
+
+    // ---- ICE recovery (v1.4 N3, ADR-031) ---------------------------------
+    //
+    // The three ICE-recovery fields live on the **flat `Stats`** (not on
+    // this nested transport entry): ADR-031 §3.2 and the slice spec §6(b)
+    // both name them `Stats::ice_recovery_state` /
+    // `Stats::ice_recovery_restarts` / `Stats::ice_recovery_terminal_reason`.
+    // A host that reads only `stats().ice_recovery_state` must not have to
+    // know that the reconnection policy sits behind `stats().transport`.
+    // (The ICE *transport* facts — gathering state, failure reason — do
+    // live here, because they describe the transport plane.)
 };
 
 // ---------------------------------------------------------------------------
@@ -2890,6 +3062,11 @@ struct NIMRTC_API_STABLE RemoteDesktopStats {
  * Per ADR-015 §Decision 3: v0.x → v1.0.0 may mark DEPRECATED
  * but does not REMOVE any symbol. */
 
+// The read-only device-policy value type, defined at the end of this
+// namespace (v1-device-policy D3).  Forward-declared here because the
+// class's static `default_device_policy()` returns it.
+struct NIMRTC_API_STABLE DevicePolicyInfo;
+
 class NIMRTC_API_STABLE NimRTCEngine {
 public:
     // STABLE: the four fundamental engine lifecycle entry points; every
@@ -2901,6 +3078,17 @@ public:
 
     NIMRTC_API_STABLE NimRTCEngine(const NimRTCEngine&)            = delete;
     NIMRTC_API_STABLE NimRTCEngine& operator=(const NimRTCEngine&) = delete;
+
+    /** The current platform's default device policy (read-only).
+     *
+     *  A host that wants to know what `video_capture_name = "auto"`
+     *  would resolve to reads this.  The four strings name the default
+     *  screen-capture backend, camera backend and the (reserved, empty
+     *  until D1) audio capture / playback backends for the current
+     *  platform.  See `DevicePolicyInfo` at the end of this header.
+     *
+     *  @note v1-device-policy D3.  Always available; never throws. */
+    static NIMRTC_API_STABLE DevicePolicyInfo default_device_policy() noexcept;
 
     // Lifecycle -----------------------------------------------------------
     //
@@ -2916,6 +3104,33 @@ public:
     /** Tear the engine down: close all plugins, drop ICE sockets, drain
      *  pending DTLS / SRTP records.  Safe to call multiple times. */
     NIMRTC_API_STABLE void     close() noexcept;
+
+    /** Start one call (v1.4 D7).
+     *
+     *  Wraps the "configure → open" sequence in one call.  Equivalent to
+     *  assigning `config` and calling `open()`; `open()` itself is
+     *  unchanged for existing hosts. */
+    NIMRTC_API_STABLE int start(const EngineConfig& config) noexcept;
+
+    /** End one call (v1.4 D7).
+     *
+     *  Closes in the **defined order**: the transport (ICE) first, then the
+     *  codecs and plugins, then the `TransportSession` (which itself tears
+     *  down ICE → DTLS → RTP → SCTP in that order).  The audio codecs are
+     *  closed after ICE — while the transport is still up the audio
+     *  pipeline must not die first, or in-flight frames would have nowhere
+     *  to go. */
+    NIMRTC_API_STABLE void     stop() noexcept;
+
+    /** Hang up (v1.4 D7).
+     *
+     *  The difference from `stop()`: `hangup()` **carries a reason** and
+     *  **notifies the peer first** (the reason is sent out), then closes in
+     *  the same defined order.
+     *
+     *  @param reason The hangup reason (a string the peer sees).
+     *  @return true when the hangup was performed. */
+    NIMRTC_API_STABLE bool     hangup(std::string_view reason) noexcept;
 
     /** True iff the engine is in the kOpen state. Cheap inline check;
      *  usable from any thread (reads an atomic state_). */
@@ -2973,6 +3188,91 @@ public:
      *  "checking", "connected", "completed", "disconnected", "failed",
      *  "closed").  Pass an empty std::function to clear. */
     NIMRTC_API_STABLE void set_on_state_change(EngineStateCallback cb) noexcept { on_state_change_ = std::move(cb); }
+
+    // ---- Call-state surface (v1.4 D7) -------------------------------------
+    //
+    // The confluence point for "how is this call doing": one callback that
+    // spans the whole stack — connecting → connected → reconnecting →
+    // failed / closed — carrying the N3 (reconnection), N4 (failure) and
+    // N8 (path-change) details.  `set_on_control_message` lives next to it
+    // because the two callbacks read as one surface (spec §五) — its
+    // signature and semantics are unchanged.
+
+    /** The call's state (v1.4 D7).
+     *
+     *  This is the **whole-stack** state, not just ICE's — a host asks
+     *  "can this call be used", not "what is the ICE layer doing right
+     *  now".
+     *
+     *  Migration order: `connecting` → `connected` → (`reconnecting` ↔
+     *  `connected`)* → `failed` / `closed`. */
+    enum class NIMRTC_API_STABLE CallState : std::uint8_t {
+        kConnecting = 0,   ///< establishing (gathering / connecting)
+        kConnected = 1,    ///< up
+        kReconnecting = 2, ///< down, the engine is recovering per the N3 policy
+        kFailed = 3,       ///< failed (has a failure_reason)
+        kClosed = 4,       ///< over (stop() / hangup() / destructor)
+    };
+
+    /** The failure's kind (v1.4 D7, plan §5 D7-1).
+     *
+     *  The **enum** is for `switch`ing, the **string** is for logs — the
+     *  two say the same thing: the enum is stable, the string is readable. */
+    enum class NIMRTC_API_STABLE CallFailure : std::uint8_t {
+        kNone = 0,
+        kIceFailed = 1,           ///< ICE layer failed (checks-failed / no-pair)
+        kDtlsFailed = 2,          ///< DTLS handshake failed
+        kTurnRefused = 3,         ///< TURN server refused (transport-unsupported)
+        kCredentialsRejected = 4, ///< credentials rejected (credentials-rejected)
+        kMediaFailed = 5,         ///< media layer failed (codec / render / capture)
+    };
+
+    /** One call-state migration report (v1.4 D7). */
+    struct NIMRTC_API_STABLE CallStateReport {
+        /** The new state. */
+        CallState state = CallState::kConnecting;
+
+        /** The failure's kind (`state == kFailed`; otherwise kNone). */
+        CallFailure failure = CallFailure::kNone;
+
+        /** The failure's **string** (the N4 vocabulary):
+         *  "transport-unsupported" / "credentials-rejected" /
+         *  "no-candidates" / "no-pair" / "checks-failed" / "none". */
+        std::string failure_reason;
+
+        /** The path-change detail (N8's shape): old pair / new pair /
+         *  reason.  Empty when no path change happened. */
+        std::optional<IceCandidatePairInfo> old_pair;
+        std::optional<IceCandidatePairInfo> new_pair;
+        std::string path_change_reason;
+
+        /** The reconnection detail (N3's shape): restarts used / budget
+         *  left / terminal.  0 / 0 / false when no reconnection happened. */
+        std::uint32_t restart_count = 0;
+        std::uint32_t remaining_budget = 0;
+        bool terminal = false;
+    };
+
+    using NIMRTC_API_STABLE EngineCallStateCallback =
+        std::function<void(const CallStateReport&)>;
+
+    /** Install the call-state callback (v1.4 D7).
+     *
+     *  Fires on the engine (tick) thread on a state **migration** — the
+     *  same state is never reported twice, so this is not a per-frame
+     *  event.  Pass an empty std::function to clear. */
+    NIMRTC_API_STABLE void set_on_call_state(EngineCallStateCallback cb) noexcept;
+
+    /** Install the callback that receives inbound control messages.
+     *
+     *  The callback fires on the engine's thread with one **whole**
+     *  message.  The bytes are valid only for the duration of the call.
+     *
+     *  Placed next to `set_on_call_state` because the two callbacks read as
+     *  one surface (v1.4 D7, spec §五) — this declaration's signature and
+     *  semantics are unchanged. */
+    NIMRTC_API_STABLE void set_on_control_message(
+        std::function<void(std::span<const std::uint8_t>)> cb) noexcept;
 
     // ---- DataChannel callbacks (forwarded to every channel create_data_channel() returns) -
     //
@@ -3672,6 +3972,104 @@ public:
      *  Pass a null callback to clear. */
     NIMRTC_API_STABLE void set_on_ice_restart(plugins::OnIceRestart cb) noexcept;
 
+    /** The result of a local ICE restart (v1.4 N3).
+     *
+     *  `old_pair` / `new_pair` are the N8 addition — the existing fields'
+     *  semantics do not change.
+     *
+     *  `reason` says why the restart happened: "local-address-changed"
+     *  (an ICE drop), "ice-failed" (the agent failed explicitly) or
+     *  "manual" (`restart_ice()` was called). */
+    struct NIMRTC_API_STABLE IceRecoveryReport {
+        /** Why the restart happened: "local-address-changed" /
+         *  "ice-failed" / "manual". */
+        std::string reason;
+        /** Restarts spent in the current sliding window (this one
+         *  included). */
+        std::uint32_t restart_count = 0;
+        /** Budget slots left in the window (0 = the budget is spent). */
+        std::uint32_t remaining_budget = 0;
+        /** Terminal: the budget is exhausted, reconnection has stopped. */
+        bool terminal = false;
+        /** Terminal reason (empty when not terminal): "budget-exhausted" /
+         *  "restart-failed" / "manual-blocked". */
+        std::string terminal_reason;
+
+        // ---- Path-change pair context (v1.4 N8) ---------------------------
+        // The N8 addition: the report now carries *which* path the session
+        // was on before the restart and *which* one it is on after it, so a
+        // host does not have to diff `Stats::transport.selected_pair`
+        // strings to learn "from where to where".
+
+        /** The pair in use **before** the switch.  Empty = no pair was
+         *  selected yet (the first connection). */
+        std::optional<IceCandidatePairInfo> old_pair;
+
+        /** The pair in use **after** the switch.  Empty = the new pair has
+         *  not been selected yet (the restart is still gathering). */
+        std::optional<IceCandidatePairInfo> new_pair;
+    };
+
+    /** The peer-restart path context (v1.4 N8). */
+    struct NIMRTC_API_STABLE PeerRestartReport {
+        /** The pair in use before the peer restart (empty = none was
+         *  selected yet). */
+        std::optional<IceCandidatePairInfo> old_pair;
+        /** The pair in use after the peer restart (empty = not selected
+         *  yet). */
+        std::optional<IceCandidatePairInfo> new_pair;
+        /** "peer-restart" (the only value this slice emits; the closed
+         *  vocabulary leaves room for more). */
+        std::string reason;
+    };
+
+    /** Fired after a local ICE restart (v1.4 N3).
+     *
+     *  The host's action is the *opposite* of `set_on_ice_restart`'s: a
+     *  peer restart needs an answer, a local restart needs a fresh offer —
+     *  the engine restarted ICE and regenerated its credentials, so the
+     *  host must send the peer a new offer that carries them.
+     *
+     *  Runs on the tick thread, the same thread rule as
+     *  `set_on_state_change`.  Pass a null callback to clear. */
+    using NIMRTC_API_STABLE EngineIceRecoveryCallback =
+        std::function<void(const IceRecoveryReport&)>;
+
+    /** Install the callback fired after a local ICE restart (v1.4 N3).
+     *
+     *  `restart_ice()` fires it too (reason "manual"), and the terminal
+     *  state is reported through it as well. */
+    NIMRTC_API_STABLE void set_on_ice_recovery(EngineIceRecoveryCallback cb) noexcept;
+
+    /** The peer-restart callback type (v1.4 N8). */
+    using NIMRTC_API_STABLE EnginePeerRestartCallback =
+        std::function<void(const PeerRestartReport&)>;
+
+    /** Install the callback fired when the *peer* restarts ICE (v1.4 N8).
+     *
+     *  `set_on_ice_restart()` keeps its original meaning (the peer's SDP
+     *  changed — the host must answer with new credentials); this callback
+     *  fires alongside it and additionally carries the path context: the
+     *  pair the session was on before the peer's restart and the pair it is
+     *  on after it.  A peer restart changes the *credentials*, not the local
+     *  path, so the two are typically the same pair — empty `new_pair`
+     *  means "not selected yet".
+     *
+     *  Runs on the same thread rule as `set_on_ice_restart`.  Pass a null
+     *  callback to clear. */
+    NIMRTC_API_STABLE void set_on_peer_restart(EnginePeerRestartCallback cb) noexcept;
+
+    /** Reset the reconnection budget (v1.4 N3).
+     *
+     *  After the terminal state the engine no longer restarts ICE on its
+     *  own.  A host that wants to give it another chance (the user clicked
+     *  "retry") calls this explicitly.
+     *
+     *  The budget window (10 minutes) is NOT cleared by it — the window is
+     *  sliding, and only the "restarts used" count and the terminal flag
+     *  are reset (ADR-031 §2.3). */
+    NIMRTC_API_STABLE void reset_ice_recovery_budget() noexcept;
+
     /** Inbound raw bytes — alternative entry point for test injection.
      *
      *  UNSTABLE: this is a test seam, not a general-purpose API.
@@ -3942,6 +4340,30 @@ public:
     NIMRTC_API_UNSTABLE plugins::IVideoCapture*     video_capture()     noexcept { return video_capture_.get(); }
     NIMRTC_API_UNSTABLE const plugins::IVideoCapture* video_capture() const noexcept { return video_capture_.get(); }
 
+    /** The audio *capture* device plugin (remote-desktop plan D1).
+     *
+     *  Returns nullptr when `EngineConfig::audio_source_name` was empty
+     *  (the host feeds PCM itself), `"none"` (explicit opt-out), or an
+     *  "auto" backend degraded at open time.  Otherwise it is the device
+     *  the engine resolved and opened at `open()` time.
+     *
+     *  UNSTABLE: plugin-seam handle; the audio-device ABI is still
+     *  evolving as the backend surface lands (remote-desktop plan M1-c). */
+    NIMRTC_API_UNSTABLE plugins::IAudioSource* audio_source() noexcept;
+    NIMRTC_API_UNSTABLE const plugins::IAudioSource* audio_source() const noexcept;
+
+    /** The audio *playback* device plugin (remote-desktop plan D1).
+     *
+     *  Returns nullptr when `EngineConfig::audio_sink_name` was empty
+     *  (the host plays decoded PCM itself), `"none"` (explicit opt-out),
+     *  or an "auto" backend degraded at open time.  Otherwise it is the
+     *  device the engine resolved and opened at `open()` time.
+     *
+     *  UNSTABLE: plugin-seam handle; the audio-device ABI is still
+     *  evolving as the backend surface lands (remote-desktop plan M1-c). */
+    NIMRTC_API_UNSTABLE plugins::IAudioSink* audio_sink() noexcept;
+    NIMRTC_API_UNSTABLE const plugins::IAudioSink* audio_sink() const noexcept;
+
     /** Replace the video sink at runtime (e.g. swap "headless" for an SDL
      *  renderer). Closes the previous sink and transfers ownership of @p sink.
      *  Safe to call before or after open(); if called before open(), the
@@ -3951,41 +4373,6 @@ public:
 
     /** Replace the video source at runtime. Same semantics as set_video_sink. */
     NIMRTC_API_STABLE void set_video_source(std::unique_ptr<plugins::IVideoSource> source) noexcept;
-
-    // ---- The audio devices (v1.4 D1, ADR-028) -----------------------------
-    //
-    // The device half of the audio path: the microphone the engine
-    // captures from and the loudspeaker it plays through.  Both are
-    // resolved through the registry's audio-source / audio-sink slots
-    // and driven by the engine itself, so a host that configures
-    // nothing gets a working capture-and-playback session.
-    //
-    // The accessors are deliberately *parallel* to the host callbacks
-    // rather than a replacement for them: `set_on_audio_frame()` still
-    // delivers the decoded PCM to the host, and the device path is an
-    // *additional* consumer of the same frames.  A host that installs
-    // the callback keeps receiving it.
-
-    /** The capture device (microphone) the engine resolved and opened.
-     *
-     *  Returns nullptr when `EngineConfig::audio_source_name` was
-     *  "none" (the explicit opt-out) or when the device could not be
-     *  opened.  The latter is *not* fatal: a machine with no sound card
-     *  still runs the session, and the host can feed PCM by hand.
-     *
-     *  UNSTABLE: this is a plugin-seam handle; the audio-device ABI is
-     *  still evolving as the platform backends land (v1.4 D1). */
-    NIMRTC_API_UNSTABLE plugins::IAudioSource* audio_source() noexcept;
-    NIMRTC_API_UNSTABLE const plugins::IAudioSource* audio_source() const noexcept;
-
-    /** The playback device (loudspeaker) the engine resolved and opened.
-     *
-     *  Returns nullptr when `EngineConfig::audio_sink_name` was "none"
-     *  or when the device could not be opened.
-     *
-     *  UNSTABLE: this is a plugin-seam handle (v1.4 D1). */
-    NIMRTC_API_UNSTABLE plugins::IAudioSink* audio_sink() noexcept;
-    NIMRTC_API_UNSTABLE const plugins::IAudioSink* audio_sink() const noexcept;
 
     /** The capture devices the resolved audio source can see.
      *
@@ -4343,15 +4730,6 @@ public:
     NIMRTC_API_STABLE plugins::Status send_input_event(
         std::span<const std::uint8_t> payload,
         std::uint64_t event_id) noexcept;
-
-    /**
-     * @brief Install the callback that receives inbound control messages.
-     *
-     * The callback fires on the engine's thread with one **whole**
-     * message.  The bytes are valid only for the duration of the call.
-     */
-    NIMRTC_API_STABLE void set_on_control_message(
-        std::function<void(std::span<const std::uint8_t>)> cb) noexcept;
 
     /**
      * @brief The control channel's counters.
@@ -4810,6 +5188,9 @@ public:
         std::uint64_t video_capture_restarts    = 0;  // times the device was reopened
         std::uint64_t video_capture_format_changes = 0;  // negotiated format changed
         std::uint64_t video_capture_bytes_copied = 0;  // CPU<->GPU bytes (0 = zero-copy)
+        // v1-device-policy D4: device-list changes (each "removed" or
+        // "added" event counts once, cumulative since open()).
+        std::uint64_t video_capture_device_changes = 0;
         // ---- Codec telemetry (remote-desktop plan B15, additive) ---------
         //
         // The numbers that make a live session *explainable*: which
@@ -4966,10 +5347,6 @@ public:
         std::uint64_t audio_playback_frames_written= 0;  // frames handed to the sink
         std::uint64_t audio_playback_frames_dropped= 0;  // sink-queue overflow drops
         std::uint64_t audio_playback_samples_played= 0;  // samples the device consumed
-        /** The id of the capture device the engine resolved ("" = none). */
-        std::string audio_source_device_id;
-        /** The id of the playback device the engine resolved ("" = none). */
-        std::string audio_sink_device_id;
         // ---- Transport gate (Q5 finding, additive) ----------------------
         /**
          * How many times the engine has stopped sending because the
@@ -5045,6 +5422,28 @@ public:
         std::uint64_t video_capture_pumped_frames   = 0;
         std::uint64_t video_capture_pump_errors     = 0;
         std::uint64_t video_capture_pumped_metadata = 0;
+
+        // ---- Audio device stats (remote-desktop plan D1) ------------------
+        //
+        // The two audio devices the engine opened, and the audio capture
+        // pump's counters.  The device ids are the *negotiated* values
+        // (the plugin reports what it actually opened after `open()`,
+        // which may differ from the host's request), and the backend is
+        // the factory id the engine resolved.  Empty strings mean no
+        // device is in use ("none" / "" config, or an "auto" backend
+        // that degraded at open time).
+        std::string audio_source_device_id;   // negotiated capture device id
+        std::string audio_source_backend;     // resolved capture backend id
+        std::string audio_sink_device_id;     // negotiated playback device id
+        std::string audio_sink_backend;       // resolved playback backend id
+        // The pump's own counters — the analog of
+        // `video_capture_pumped_frames` / `video_capture_pump_errors`.
+        // `audio_device_pumped_frames` moving is the proof that the
+        // automatic path works: a capture source plus the outbound audio
+        // path produce an RTP stream with no `send_audio()` call from
+        // the host.
+        std::uint64_t audio_device_pumped_frames = 0;
+        std::uint64_t audio_device_pump_errors   = 0;
 
         // ---- The zero-copy hand-off (remote-desktop plan B10) ------------
         //
@@ -5146,6 +5545,23 @@ public:
         std::uint64_t video_sink_frames_presented        = 0;
         std::uint64_t video_sink_render_errors          = 0;
         std::uint32_t video_sink_present_fps             = 0;
+
+        // ---- The negotiated sink backend (v1-video-render-engine D2) ----
+        //
+        // "auto" resolves to a platform renderer or degrades to
+        // headless; these two fields make the degradation observable
+        // (D2-1: "never a silent drop").
+        //
+        // `video_sink_backend` is the id of the sink that is actually
+        // installed ("d3d11" / "metal" / "egl" / "headless" / ...);
+        // empty = no sink ("none").  `video_sink_backend_reason` is
+        // non-empty only when the host's request was degraded:
+        // "no-platform-backend" (no default on this build),
+        // "backend-not-registered" (the platform backend is not in the
+        // registry), "backend-open-failed" (the backend's open() failed),
+        // "no-display" (the backend found no usable display).
+        std::string video_sink_backend;
+        std::string video_sink_backend_reason;
 
         // ---- The render clock (remote-desktop plan E5) ---------------------
         //
@@ -5361,11 +5777,112 @@ public:
          * definitions are in `RemoteDesktopStats` above.
          */
         RemoteDesktopStats remote_desktop{};
+
+        // ---- ICE recovery (v1.4 N3, ADR-031) -----------------------------
+        //
+        // These three fields answer "what is the reconnection policy
+        // doing right now" **from the stats alone** — a session that
+        // never recovers says why without the host having to subscribe
+        // to a callback (ADR-031 §3.2).
+        //
+        // They live on the **flat `Stats`**, not on the nested
+        // `Stats::transport`: the reconnection policy is a *policy* fact,
+        // not a transport-plane measurement, and the spec (§6(b)) names
+        // them `Stats::ice_recovery_state` / `Stats::ice_recovery_restarts`
+        // / `Stats::ice_recovery_terminal_reason`.
+
+        /** The reconnection-policy state (v1.4 N3): "idle" / "grace" /
+         *  "backoff" / "terminal" / "disabled".
+         *
+         *  "disabled" means `ice_recovery_policy` is not "auto" — the
+         *  engine is not managing reconnection.  "terminal" means the
+         *  budget is spent and no more automatic restarts happen. */
+        std::string ice_recovery_state;
+
+        /** Restarts spent in the current sliding window (v1.4 N3). */
+        std::uint32_t ice_recovery_restarts = 0;
+
+        /** Terminal reason (v1.4 N3) — empty when not terminal:
+         *  "budget-exhausted" / "restart-failed" / "manual-blocked". */
+        std::string ice_recovery_terminal_reason;
+
+        // ---- TURN credentials (v1.4 N7, ADR-032) ---------------------------
+        //
+        // Lives on the flat `Stats` next to the reconnection-policy fields
+        // for the same reason they do: it answers "what is the credentials
+        // seam doing right now" **from the stats alone**.  The value is ""
+        // when no provider is configured — the host uses the static
+        // `add_turn_server()` path and there is nothing to report.
+
+        /** The turn-credentials state (v1.4 N7): "" / "idle" / "ok" /
+         *  "unavailable" / "rejected".
+         *
+         *  "" — no provider configured (the static `add_turn_server()`
+         *  path is in use).
+         *
+         *  "idle" — a provider is configured but no credentials were
+         *  pulled yet.
+         *
+         *  "ok" / "unavailable" — the last pull produced / failed to
+         *  produce a credential set (a failed pull never configures TURN;
+         *  the session keeps going direct).
+         *
+         *  "rejected" — the transport reported a 401/403 on the applied
+         *  credentials.  Sticky for the engine's lifetime. */
+        std::string turn_credentials_state;
+
+        // ---- Last path change (v1.4 N8) -----------------------------------
+        //
+        // Lives on the flat `Stats` next to the reconnection-policy fields
+        // for the same reason they do: it answers "did the path change
+        // since I last looked" **from the stats alone**, without the host
+        // having subscribed to a callback.  Like `ice_recovery_*` and
+        // `turn_credentials_state`, it is a *policy* fact (a path change
+        // happened once), not a transport-plane measurement.
+
+        /** Reason of the last path change (v1.4 N8).  Empty = no path
+         *  change has happened yet.  Same closed vocabulary as
+         *  `IceRecoveryReport::reason`: "local-address-changed" /
+         *  "peer-restart" / "relay-fallback" / "manual" / "ice-failed". */
+        std::string last_path_change_reason;
+
+        /** The pair the session is on after the last path change (v1.4 N8).
+         *  Empty = no path change yet, or the new pair was not selected at
+         *  the time. */
+        std::optional<IceCandidatePairInfo> last_path_change_new_pair;
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
      *  UNSTABLE: the Stats struct fields may change before v1.0.0. */
     NIMRTC_API_UNSTABLE Stats stats() const noexcept;
+
+    /** The session's TURN/TLS peer-verification fact (v1-turn-tls-trust,
+     *  ADR-037).
+     *
+     *  Makes "did this call verify the relay's identity" a queryable
+     *  fact rather than something only readable in the source.  Values:
+     *
+     *    - `""` — no TURN/TLS credential set is in effect (the applied
+     *      credentials' transport is not `Tls`, or none were applied).
+     *    - `"verified"` — `turn_tls_verify_peer == true` and the trust
+     *      anchor is loadable (a `turn_tls_ca_file` passed the engine's
+     *      anchor check, or none was set).  The engine **will** verify
+     *      the relay's certificate; a certificate that fails is
+     *      rejected.
+     *    - `"unverified"` — `turn_tls_verify_peer == false`: the host
+     *      explicitly chose not to verify the relay's certificate.
+     *    - `"failed"` — `turn_tls_verify_peer == true` but the
+     *      `turn_tls_ca_file` is missing or not a valid PEM trust
+     *      anchor: verification is configured but cannot pass, and the
+     *      engine fired `on_error_` naming the file when the credentials
+     *      were applied.
+     *
+     *  The fact reflects the trust policy of the credentials most
+     *  recently applied through the credentials-provider seam — it does
+     *  not observe the wire itself.  Empty when the host configured a
+     *  static `add_turn_server()` list (that path carries no trust
+     *  policy). */
+    NIMRTC_API_STABLE std::string turn_tls_peer_verification() const noexcept;
 
     /**
      * @brief A named, timestamped reading of the session's statistics.
@@ -5522,11 +6039,41 @@ private:
     // reported through `on_error_`).
     std::unique_ptr<plugins::IAudioReceiver>     audio_receiver_;
 
+    // ---- Audio device layer (v1.4, remote-desktop plan D1) ----------------
+    //
+    // The engine drives the audio *device* half through the
+    // `plugins::IAudioSource` / `plugins::IAudioSink` seams: it resolves
+    // the factories through the registry's audio-source / audio-sink
+    // slots and pumps / sinks the device's PCM on its tick thread, so a
+    // host that configures `audio_source_name` / `audio_sink_name` never
+    // has to feed or drain PCM by hand.
+    //
+    // `nullptr` means "no device": either the host did not ask for one
+    // (empty name), opted out (`"none"`), or an "auto" backend degraded
+    // at open time.
+
     // ---- Video plugins (resolved from core::PluginRegistry) ----
     std::unique_ptr<plugins::IVideoSource>      video_source_;
     std::unique_ptr<plugins::IVideoSink>        video_sink_;
     std::unique_ptr<plugins::IVideoReceiver>    video_receiver_;
     std::unique_ptr<plugins::IVideoSender>      video_sender_;
+
+    // v1-video-render-engine D2: the sink backend that was actually
+    // negotiated, and the degradation reason.  They live here (not in a
+    // video-state collaborator) because they are plain strings the
+    // engine's public `Stats` mirrors — see the Stats fields of the same
+    // names.
+    std::string video_sink_backend_;
+    std::string video_sink_backend_reason_;
+
+    // v1-video-render-engine D2: the "auto" ladder.  `resolve_auto_sink()`
+    // resolves "auto" to the platform renderer through the private render
+    // policy; `degrade_sink()` installs the fallback and records why.
+    // Both are member helpers because they touch the sink slot, the
+    // config, the error callback and the negotiated-backend strings.
+    void resolve_auto_sink() noexcept;
+    void degrade_sink(std::string_view fallback_id,
+                      std::string_view reason) noexcept;
     // Remote-desktop plan A1 / A10: the capture-*device* plugin.  Present
     // only when `EngineConfig::video_capture_name` names a registered
     // factory; null otherwise (the normal case — the host feeds frames
@@ -5626,11 +6173,26 @@ private:
     EngineErrorCallback on_error_;
     EngineStateCallback on_state_change_;
 
+    /** Fired on a call-state migration (v1.4 D7).  Set by
+     *  `set_on_call_state()`; called on the tick thread by the engine's
+     *  call-state poll and the N3 / DTLS / media / close trigger points. */
+    EngineCallStateCallback on_call_state_;
+
     /** Fired when the peer restarts ICE (RFC 8445 §9.1.1.1).
      *  Installed on the ICE transport when the transport is created; the
      *  transport calls it when the peer's description carries new ICE
      *  credentials.  The host has to answer with the new credentials. */
     plugins::OnIceRestart on_ice_restart_;
+
+    /** Fired after a *local* ICE restart (v1.4 N3, ADR-031).  Set by
+     *  `set_on_ice_recovery()`; called on the tick thread by the
+     *  ICE-recovery poll and by `restart_ice()`. */
+    EngineIceRecoveryCallback on_ice_recovery_;
+
+    /** Fired when the *peer* restarts ICE (v1.4 N8).  Set by
+     *  `set_on_peer_restart()`; invoked alongside `on_ice_restart_` from
+     *  the transport's peer-restart callback, with the path context. */
+    EnginePeerRestartCallback on_peer_restart_;
 
     // ---- DTMF (v1.2.0, session capability plan D1 / D2) ----------------
     //
@@ -5912,6 +6474,47 @@ private:
      *  feedback messages all come from the same reporter. */
     std::uint32_t rtcp_reporter_ssrc() noexcept;
     void poll_ice_flap_for_rehandshake() noexcept;
+    /** Drive the ICE-recovery machine (v1.4 N3, ADR-031) and execute
+     *  automatic restarts.  Called from tick() after
+     *  `poll_ice_flap_for_rehandshake()`; an independent state machine that
+     *  shares only the `ice_connected_once` gate with the flap detector. */
+    void poll_ice_recovery() noexcept;
+    /** Execute one automatic ICE restart: book the budget, call
+     *  `ice_t_->restart()` directly (not the public `restart_ice()`, which
+     *  would recurse into the same bookkeeping), and report the outcome. */
+    void execute_ice_recovery_restart(std::int64_t now_us) noexcept;
+    /** The session's currently selected candidate pair, projected onto the
+     *  public `IceCandidatePairInfo` shape (v1.4 N8).  Empty when no pair
+     *  is selected yet — the same projection `Stats::transport.selected_pair`
+     *  uses. */
+    std::optional<IceCandidatePairInfo> current_pair() const noexcept;
+    /** Fire the `set_on_ice_recovery` callback with a filled report. */
+    void fire_ice_recovery_report(std::string_view reason, bool terminal,
+                                  std::string_view terminal_reason) noexcept;
+    /** The three-place terminal report (ADR-031 §2.4): `on_error_` +
+     *  one warn log line fire once per terminal episode, then the
+     *  `set_on_ice_recovery` callback. */
+    void report_ice_recovery_terminal(std::string_view reason,
+                                      std::string_view terminal_reason) noexcept;
+    /** True while the N3 machine is mid-recovery (grace / backoff).
+     *
+     *  During an active recovery the call-state absorbs down observations
+     *  and transient DTLS / media failures — the only outcomes while
+     *  recovering are `kReconnecting` or `kConnected`; the definitive
+     *  failure is the recovery's own terminal (v1.4 D7, ADR-035 §2). */
+    bool ice_recovery_active() const noexcept;
+    /** Drive the call-state machine from the ICE state (v1.4 D7).  Called
+     *  from tick() after `poll_ice_recovery()`; the N3-recovering gate
+     *  above decides which observations reach the machine. */
+    void poll_call_state() noexcept;
+    /** Enter `kFailed` through a `fail()` and fire the report. */
+    void fail_call_state(CallFailure failure, std::string_view reason) noexcept;
+    /** Fire the `set_on_call_state` callback with the N3 / N8 details
+     *  attached (spec §三's sketch). */
+    void fire_call_state(CallStateReport report) noexcept;
+    /** The N4 failure reason for the current transport state
+     *  (the same decision `Stats::transport.ice_failure_reason` projects). */
+    std::string current_ice_failure_reason() const noexcept;
     /** Q5: close the media-send gate when the transport is dead.
      *
      *  Called from `tick()` before anything produces media.  When the ICE
@@ -6170,6 +6773,53 @@ private:
     /** The SDP spelling of a TURN transport: "udp" / "tcp" / "tls". */
     static std::string_view turn_transport_name_of(
         plugins::TurnTransport transport) noexcept;
+
+    /** Whether the seam cannot speak the TURN transport this session
+     *  asked for.
+     *
+     *  Asked *here*, at the moment the stats are read: it is a property
+     *  of the build and the seam, not a snapshot of one moment in the
+     *  session's life.  A session that never configured a TURN server
+     *  supports every transport by definition, so the answer is false. */
+    bool turn_transport_unsupported() const noexcept;
+
+    /** Fill the ICE-recovery policy fields of the **flat** `Stats`
+     *  (v1.4 N3, ADR-031 §3.2).
+     *
+     *  The reconnection policy is a *policy* fact, not a transport-plane
+     *  measurement, so its three fields live on the flat `Stats`:
+     *  `ice_recovery_state` / `ice_recovery_restarts` /
+     *  `ice_recovery_terminal_reason`.
+     *
+     *  When `ice_recovery_policy` is not "auto" the machine is not
+     *  driven at all, so the surface says "disabled" rather than
+     *  pretending to track an idle machine (spec §六 25). */
+    void append_ice_recovery_stats(Stats& out) const noexcept;
+
+    /** Fill the turn-credentials fields of the **flat** `Stats`
+     *  (v1.4 N7, ADR-032).
+     *
+     *  Projects `Stats::turn_credentials_state` from the
+     *  `TurnCredentialsState` collaborator, and folds the ICE module's
+     *  rejection latch into it (a 401/403 the transport observed is what
+     *  makes the value "rejected").  Called from
+     *  `append_ice_recovery_stats()` — the flat-stats hook the media TU
+     *  already invokes, so the value is published regardless of the
+     *  reconnection-policy switch. */
+    void append_turn_credentials_stats(Stats& out) const noexcept;
+
+    /** Pull a credential set from the host's provider and apply it to the
+     *  ICE transport (v1.4 N7, ADR-032).
+     *
+     *  The engine consults the provider at the two moments a TURN server
+     *  is (re)configured: before candidate gathering (`open()`) and after
+     *  an N3 reconnection restart.  No-op when no provider is configured
+     *  or when the host added static TURN servers (`add_turn_server()`
+     *  wins — the provider is not consulted).  A pull that yields nothing
+     *  changes nothing: the session keeps going without TURN.  A pull that
+     *  yields credentials which differ from the last-applied ones is
+     *  applied through `add_turn_server_with_transport()`. */
+    void refresh_turn_credentials() noexcept;
     /** Close and release every extra stream's plugins. */
     void shutdown_extra_video_streams() noexcept;
 
@@ -6242,6 +6892,23 @@ private:
      *          to the encoder; false when there was nothing to do. */
     bool pump_video_capture() noexcept;
 
+    // ---- Audio device → outbound pump (remote-desktop plan D1) ------------
+    //
+    // The audio counterpart of `pump_video_capture()`: it pops one frame
+    // from the audio source device's bounded queue and runs it through
+    // the very same outbound audio path the host drives with
+    // `send_audio()` — without the host.  RD-6: the pump runs on the
+    // tick thread, so the 3A / codec are only ever touched from one
+    // thread.
+
+    /** Pop one captured audio frame and feed it to the outbound path.
+     *
+     *  Called from `tick()`.  A no-op when there is no audio source
+     *  device or when the queue is empty (the common case — the device's
+     *  cadence is slower than the tick).
+     *
+     *  @return true when a frame was taken from the device and handed
+
     /**
      * @brief Drain one GPU frame from the mailbox and encode it.
      *
@@ -6282,22 +6949,48 @@ private:
     void wire_capture_gpu_callback() noexcept;
 
     /**
-     * @brief Reopen the capture device after it reported an error.
+     * @brief Drive the capture-device reconnect backoff state machine
+     *        (v1-device-policy D4).
      *
-     * A device that is *lost* — a display that was unplugged, a portal
-     * that was revoked, a compositor that restarted — fails on the
-     * producer side, so the queue simply stays empty and the pump
-     * looks like a device that never delivers anything.  The device's
-     * own error counter is what tells the two apart.
+     * A device that is *lost* — a display that was unplugged, a camera
+     * that was disconnected, a portal that was revoked — fails on the
+     * producer side, so the queue simply stays empty and the pump looks
+     * like a device that never delivers anything.  The device's own
+     * error counter (or a device-list change detected by
+     * `poll_capture_device_changes()`) is what tells the two apart.
      *
-     * The device is reopened **once**: a transient loss does not end
-     * the session, and a device that cannot be reopened is reported
-     * through the error callback.
+     * The retry is **bounded**: the device is reopened with an
+     * exponential backoff (100 ms → 5 s ceiling, at most 20 attempts)
+     * instead of being reopened once or retried every tick.  A transient
+     * loss does not end the session; a device that cannot be recovered
+     * within the bound is reported through the error callback
+     * (`kVideoCaptureOpenFailed`) and the capture pump stops.
      *
-     * A no-op when there is no capture device, or when the device has
-     * not reported a new error.
+     * A no-op when there is no capture device, when the device is in
+     * `kIdle`, or when the backoff window has not elapsed.
      */
     void recover_capture_device() noexcept;
+
+    /**
+     * @brief Detect capture-device-list changes (v1-device-policy D4).
+     *
+     * Two routes, tried in order:
+     *  - Route A: the device implements `plugins::ICaptureDeviceEventSource`
+     *    (probed with `dynamic_cast`) — take the structured change events
+     *    it reports since the last poll.
+     *  - Route B: poll `IVideoCapture::enumerate_devices()` and diff the
+     *    device-id set against the previous snapshot.
+     *
+     * Polling is throttled (500 ms) because enumeration is not cheap on
+     * some backends (V4L2 ioctls, Media Foundation COM enumeration).
+     * Each removed/added event increments the cumulative
+     * `video_capture_device_changes` counter; a *removed* event also
+     * sends the reconnect state machine to `kBackoff`.
+     *
+     * A no-op when there is no capture device or the poll interval has
+     * not elapsed.
+     */
+    void poll_capture_device_changes() noexcept;
 
     /**
      * @brief Publish the capture device's own counters (plan A11).
@@ -6516,7 +7209,7 @@ private:
      *  return, matching the other `init_*` failure paths. */
     uint32_t init_datachannel_registry() noexcept;
 
-    // ---- Audio device plane (v1.4 D1, ADR-028) ----------------------
+    // ---- Audio device plane (v1.4 D1, ADR-040) ----------------------
     //
     // The device half of the audio path.  These live in
     // `src/engine/src/engine_audio_pump.cpp`; they are declared here so
@@ -6536,7 +7229,7 @@ private:
      *
      *  Idempotent: calling it twice without an intervening
      *  `shutdown_audio_devices()` is a no-op. */
-    void init_audio_devices() noexcept;
+    uint32_t init_audio_devices() noexcept;
 
     /** Stop and release the capture + playback devices.
      *
@@ -6840,6 +7533,29 @@ private:
      *          etc.).  On failure, partial state is rolled back enough to
      *          leave the engine re-callable. */
     uint32_t init_modules_once() noexcept;
+};
+
+/**
+ * @brief The current platform's default device policy (read-only).
+ *
+ * A value type carrying the four default backend plugin ids the engine
+ * would resolve for `EngineConfig::video_capture_name = "auto"`
+ * (v1-device-policy D3).  A host that wants to print or reason about the
+ * defaults reads this through `NimRTCEngine::default_device_policy()`.
+ *
+ * An empty string means "no default on this platform".  The audio fields
+ * are **reserved**: the engine has no audio-device layer yet (D1), so
+ * they are always empty until D1 lands.
+ */
+struct NIMRTC_API_STABLE DevicePolicyInfo {
+    /** Default screen-capture backend plugin id. */
+    std::string screen_capture_backend;
+    /** Default camera backend plugin id. */
+    std::string camera_capture_backend;
+    /** Default audio-capture device plugin id (reserved, empty until D1). */
+    std::string audio_capture_backend;
+    /** Default audio-playback device plugin id (reserved, empty until D1). */
+    std::string audio_playback_backend;
 };
 
 } // namespace nimrtc::engine

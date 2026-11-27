@@ -33,10 +33,25 @@ import os
 import sys
 from pathlib import Path
 
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+# `cryptography` is imported where it is used, not here, so importing
+# this module is free: `generate_dtls_certs_ci.py` imports it to ask
+# whether the pair is present and current *before* it decides a pip
+# install is needed, and an import that dies on a missing dependency
+# cannot answer that question.
+#
+# The import is `cryptography`, but the wheel is `<42` on purpose: 42+
+# ships a Rust-backed Windows wheel whose `cryptography_rust.dll` is
+# not in the PyPI artefact, so `import cryptography` fails with "DLL
+# load failed while importing _rust".  41.x is the last pure-C line.
+try:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+    HAVE_CRYPTOGRAPHY = True
+except ImportError:  # pragma: no cover - depends on the host's site-packages
+    x509 = None
+    HAVE_CRYPTOGRAPHY = False
 
 try:
     import ifaddr as _ifaddr  # type: ignore
@@ -123,6 +138,73 @@ def collect_local_ips() -> list[str]:
     return sorted(out)
 
 
+# A stale cert regenerates at most once per this many seconds.  See the
+# comment in `build_or_skip()` for why the cap exists.
+_STALE_REGEN_INTERVAL_SECONDS = 24 * 60 * 60
+
+
+def _regenerated_within(seconds: float) -> bool:
+    """True when the certificate file is younger than `seconds`."""
+    try:
+        return (datetime.datetime.now().timestamp()
+                - CERT_PATH.stat().st_mtime) < seconds
+    except OSError:
+        return False
+
+
+def verify_pair() -> tuple[int, str]:
+    """(exit code, reason) -- is the existing pair usable as it is?
+
+    0 / "current"      the pair exists, parses, carries SAN, and covers
+                       every local IPv4 address.
+    1 / "missing"      one or both files are absent.
+    2 / "no-san"       the certificate exists but has no SAN, or cannot
+                       be parsed.
+    3 / "stale"        the SAN no longer covers every local IPv4 address
+                       (a new NIC, VPN or Docker bridge came up).
+    4 / "no-crypto"    `cryptography` is not importable, so the pair
+                       cannot even be inspected.
+
+    This is the whole decision `build_dtls_cert.py` makes, exposed as a
+    function so `generate_dtls_certs_ci.py` can ask it with the
+    interpreter that is about to build -- the *same* interpreter and
+    the *same* site-packages -- instead of running pip on every CI job
+    before finding out it was not needed.
+    """
+    if not HAVE_CRYPTOGRAPHY:
+        return 4, "no-crypto"
+    if not CERT_PATH.exists() or not KEY_PATH.exists():
+        return 1, "missing"
+    try:
+        existing = x509.load_pem_x509_certificate(CERT_PATH.read_bytes())
+    except Exception as e:
+        return 2, "no-san (unparseable: %s)" % e
+    try:
+        san = existing.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return 2, "no-san"
+    # `str(x509.IPAddress(...))` is not the address.  An
+    # `x509.GeneralName` renders its class and fields ("IPAddress
+    # (value=10.0.0.1)"), while `str(n)` on *this* object has always
+    # been the dotted address because `IPAddress` subclasses
+    # `ipaddress.IPv4Address`.  Comparing the rendered form against a
+    # collected address never matches, so every host read as "stale" --
+    # the checked-in pair's SAN names every local IP and `verify_pair()`
+    # still called it incomplete.  `n.value` is the address the SAN
+    # actually carries.
+    existing_san_ips = {
+        str(n.value) for n in san if isinstance(n, x509.IPAddress)
+    }
+    local_ips = collect_local_ips()
+    if local_ips and existing_san_ips:
+        missing = sorted(ip for ip in local_ips if ip not in existing_san_ips)
+        if missing:
+            return 3, "stale (missing %d local IP(s) in SAN: %s)" % (
+                len(missing), ", ".join(missing))
+    return 0, "current"
+
+
 def build_or_skip() -> int:
     """Build a new cert/key, but only overwrite the existing files if the
     existing cert is missing the subjectAltName extension (i.e. the old
@@ -136,43 +218,53 @@ def build_or_skip() -> int:
     brought up, and Chrome will fail the DTLS handshake with alert 46
     on the new interface if the IP isn't in the SAN.
     """
-    local_ips = collect_local_ips()
-    existing_san_ips: set[str] = set()
-    if CERT_PATH.exists():
-        try:
-            existing = x509.load_pem_x509_certificate(CERT_PATH.read_bytes())
-            try:
-                san = existing.extensions.get_extension_for_class(
-                    x509.SubjectAlternativeName).value
-                existing_san_ips = {
-                    str(n) for n in san
-                    if isinstance(n, x509.IPAddress)
-                }
-            except x509.ExtensionNotFound:
-                pass  # needs regeneration — fall through
-        except Exception as e:
-            print(f"[warn] could not parse existing cert ({e}); regenerating")
+    if not HAVE_CRYPTOGRAPHY:
+        # Non-zero on purpose.  A build step that cannot generate the
+        # pair must not read as success: the copy rule downstream then
+        # has no source file, and CMake's own error names the missing
+        # file.  The exit code is the one a CI caller can branch on.
+        print("build_dtls_cert.py: the `cryptography` package is not "
+              "importable; run `python -m pip install 'cryptography<42'`.",
+              file=sys.stderr)
+        return 2
 
-    # If SAN exists but doesn't cover every local IP, regenerate.  We
-    # only force-regenerate when there's a real mismatch (missing IP),
-    # so transient socket failures during collection don't churn the
-    # cert on every build.
-    if CERT_PATH.exists() and existing_san_ips and local_ips:
-        missing = {ip for ip in local_ips if ip not in existing_san_ips}
-        if not missing:
-            print(f"[skip] {CERT_PATH.name} already has subjectAltName "
-                  f"covering all {len(local_ips)} local interface IPs")
-            return 0
-        print(f"[regen] cert missing {len(missing)} local IPs in SAN: "
-              f"{sorted(missing)}")
-    elif CERT_PATH.exists() and not existing_san_ips and not local_ips:
-        # Old-style cert without SAN, but we have no way to know which
-        # local IPs to add.  Skip regen — at minimum the cert has SAN
-        # for localhost/127.0.0.1 already (caller can force regen by
-        # deleting the file).
+    code, reason = verify_pair()
+    if code == 0:
         print(f"[skip] {CERT_PATH.name} already has subjectAltName "
-              f"(and could not enumerate local IPs to compare)")
+              f"covering all local interface IPs")
         return 0
+    if code == 2 and "unparseable" in reason:
+        print(f"[warn] could not parse existing cert ({reason}); regenerating")
+    elif code == 2:
+        # The "no SAN, and no local IPs to compare" case used to skip
+        # here.  It now regenerates instead: the pair is only checked
+        # into this directory as a *generated* file, and the old skip
+        # left the checked-out stale pair in place -- which is what the
+        # `nimrtc_dtls_certs` build edge then copied, silently.  A
+        # certificate with no SAN is never what CMake wants to stage.
+        print("[regen] the existing cert has no subjectAltName")
+    elif code == 3:
+        print(f"[regen] cert is {reason}")
+        # A stale cert is regenerated at most once a day per host.  The
+        # "is it stale?" test is deliberately generous -- *any* missing
+        # local interface IP regenerates -- and on a Windows box the
+        # interface list changes as DHCP leases come and go.  Without
+        # this cap, the single `nimrtc_dtls_certs` target (which every
+        # test target depends on) would regenerate the pair before every
+        # build, and every test executable's POST_BUILD copy would see a
+        # changed source on every incremental build.  Deleting the file
+        # remains the way to force a regeneration, and a *missing*
+        # cert is always regenerated at once.
+        if _regenerated_within(_STALE_REGEN_INTERVAL_SECONDS):
+            print(f"[skip] {CERT_PATH.name} was regenerated less than a day "
+                  f"ago (delete it to force a regeneration)")
+            return 0
+        print(f"[regen] the pair on disk is older than a day and its SAN is "
+              f"incomplete for this host; regenerating")
+    elif code == 1:
+        print("[regen] the pair is missing")
+
+    local_ips = collect_local_ips()
 
     key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([

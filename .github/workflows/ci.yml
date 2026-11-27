@@ -233,29 +233,53 @@ jobs:
             -File ./scripts/generate_wtserver_cert.ps1 `
             -BuildDir "${{ github.workspace }}/build"
 
-      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
-      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
-      # (`.gitignore:227`).  A fresh checkout therefore has neither
-      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
-      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
-      # unconditionally -- so without this step the build fails with
-      # "Error copying file (if different) from .../ecc-key.pem".
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  This step used to install `cryptography`
+      # and run the generator by hand, and it was copied into fifteen
+      # jobs across five workflows -- with the hardware job's copy
+      # written differently from the other fourteen.
       #
-      # It used to work in CI because the pair came from wolfSSL's own cert
-      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
-      # out of the vendored submodule -- a build artefact must not dirty a
-      # vendored dependency's tracked files.
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file -- instead of at CMake's copy rule
+      # halfway through a build.  A tree without the pair is not an
+      # error: CMake generates it during the build.
       #
-      # The helper knows the platform's interpreter name and pip
-      # invocation (`python` vs `python3`, and `--user` for the
-      # externally-managed PEP 668 Pythons on the Linux and macOS
-      # runners).  `cryptography<42` on purpose: 42+ ships a Rust-backed
-      # Windows wheel whose `cryptography_rust.dll` is not bundled in the
-      # PyPI artefact, so `import cryptography` fails with "DLL load
-      # failed while importing _rust".  41.x is the last pure-C line.
-      - name: Generate the DTLS test certificate pair
+      # The step's shell is pwsh and only *very* recent PowerShell
+      # versions understand `||`, so the command is written the same way
+      # on every runner: a one-line PowerShell expression.  The exit
+      # code is deliberately dropped: this is a preview, and a missing
+      # interpreter must not fail the job at a step that generated
+      # nothing anyway -- the build's own error names the problem when
+      # there is nothing to generate with.
+      # One install per workflow file, at the first job that needs the
+      # pair.  The guard below never installs -- that is the point of
+      # it -- and hosted images do not all ship `cryptography`, so
+      # someone has to.  This is the one step: it runs before the first
+      # configure in this file, and every later job in the same file
+      # (same runner image) finds the pair current and pays nothing.
+      - name: Prepare the DTLS test certificate pair
+        if: always()
+        continue-on-error: true
         shell: pwsh
-        run: python scripts/generate_dtls_certs_ci.py
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py
+          } else {
+            python scripts/generate_dtls_certs_ci.py
+          }
+      - name: Check the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
 
       # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
       # codecs (remote-desktop plan WP-B).  They are vendored source

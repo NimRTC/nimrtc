@@ -383,6 +383,19 @@ jobs:
         # and delete them, but not create): into the step summary,
         # which is rendered on the run page and archived with the run,
         # and into the job outputs, which the API exposes on the run.
+        #
+        # The third destination, `--annotations-file`, is what a
+        # *release machine* reads.  The record has to be readable from
+        # a checkout that is not this runner -- that is the whole point
+        # of it -- and the two destinations above are not: the summary
+        # and the outputs live in the job log, and downloading a job log
+        # needs `actions:read` on a token whose job-log endpoint is
+        # served by a different service (a token without the scope gets
+        # a bare 404, which is indistinguishable from "the log has
+        # expired").  `GET /actions/runs/{id}/jobs` answers for the same
+        # scope, and so does a check run's annotations, so the record is
+        # also emitted in the runner's `::error::` annotation format --
+        # parsed by the job runner and served by the API.
         shell: powershell
         run: |
           python tools/run_hardware_job.py `
@@ -390,6 +403,8 @@ jobs:
             --out-dir build/hardware `
             --summary-file $env:GITHUB_STEP_SUMMARY `
             --output-file $env:GITHUB_OUTPUT `
+            --annotations-file $env:RUNNER_TEMP\nimrtc-hw-evidence.txt `
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" `
             --expect-green
         env:
           PYTHONIOENCODING: utf-8

@@ -225,16 +225,26 @@ def record_text(records: list[Path]) -> str:
 
 
 def publish(records: list[Path], summary_path: Path | None,
-            outputs_path: Path | None) -> str:
+            outputs_path: Path | None,
+            annotations_path: Path | None = None,
+            tree: Path | None = None) -> str:
     """Publish the record without an artifact action.
 
-    Two destinations, because they answer different questions:
+    Three destinations, because they answer different questions:
 
       * the **step summary** is what a human reads on the run page --
         it is rendered there and archived with the run;
       * the **job outputs** are what a machine reads -- the API
         exposes them on the run object, so a later process can fetch
-        the evidence without downloading anything.
+        the evidence without downloading anything;
+      * a **check-run annotation** (when `annotations_path` is given)
+        is the one copy the REST API serves through the `actions:read`
+        scope an ordinary repository token already holds -- the other
+        two live in the job log, whose download endpoint needs
+        `actions:read` *and* is served by a different service that
+        answers 404 to a token without it.  That is how
+        `tools/read_hardware_evidence.py` reads the evidence from a
+        workstation at tag-cut time.
 
     A copy is also written next to the job's output directory, so the
     raw file stays reachable on the machine.
@@ -280,6 +290,33 @@ def publish(records: list[Path], summary_path: Path | None,
             delimiter += "_"
         with outputs_path.open("w", encoding="utf-8", newline="\n") as handle:
             handle.write("evidence<<%s\n%s%s\n" % (delimiter, body, delimiter))
+
+    if annotations_path is not None:
+        # The workflow-file "error annotation" format.  The runner
+        # parses a line that starts with `::<command> key=value,...::`
+        # and turns it into a check-run annotation; the API serves the
+        # annotations of a check run over `actions:read`.  The record
+        # is carried in a `file=`/`line=` pair pointing at an existing
+        # tree file (GitHub drops an annotation whose file does not
+        # exist), with one escaped line per record.
+        #
+        # Escaping: the property *values* escape `%`, CR, LF, `:` and
+        # `,`; the message escapes only `%`, CR and LF.  An
+        # unescaped `,` in a value splits it into a new property.
+        def prop(text: str) -> str:
+            return (text.replace("%", "%25").replace("\r", "%0D")
+                        .replace("\n", "%0A").replace(":", "%3A")
+                        .replace(",", "%2C"))
+
+        def msg(text: str) -> str:
+            return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+        anchor = "build/hardware"
+        lines = ["::error title=nimrtc hardware evidence,file=%s,line=1::%s"
+                 % (prop(anchor), msg(line))
+                 for line in body.splitlines() if line.strip()]
+        with annotations_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(lines) + "\n")
 
     return body
 
@@ -399,6 +436,16 @@ def main() -> int:
                         help="the step-summary file to append the record to")
     parser.add_argument("--output-file", default=None,
                         help="the job-output file to write the record to")
+    parser.add_argument("--annotations-file", default=None,
+                        help="write the record as check-run annotations "
+                             "(the workflow-file '::error::' format); the "
+                             "API serves these over actions:read, which "
+                             "is what lets a release machine read the "
+                             "evidence without the job-log endpoint")
+    parser.add_argument("--run-url", default="",
+                        help="the run's page URL, recorded into the "
+                             "summary so an annotation can point at the "
+                             "run that carries it")
     parser.add_argument("--expect-green", action="store_true",
                         help="fail when the evidence window is not green")
     parser.add_argument("--dry-run", action="store_true",
@@ -444,7 +491,14 @@ def main() -> int:
         records,
         Path(args.summary_file) if args.summary_file else None,
         Path(args.output_file) if args.output_file else None,
+        Path(args.annotations_file) if args.annotations_file else None,
     )
+    if args.run_url and args.summary_file:
+        # Where the annotation copy lives, for whoever reads only the
+        # run page: the annotations are attached to the run's check.
+        with Path(args.summary_file).open("a", encoding="utf-8") as handle:
+            handle.write("\nThe same record is attached as check-run "
+                         "annotations on [this run](%s).\n" % args.run_url)
     print("published %d record(s), %d byte(s)"
           % (len(records), len(body.encode("utf-8"))))
 
@@ -520,6 +574,37 @@ def self_test() -> int:
               "the closing delimiter must be a line of its own, once")
         check(delimiter not in body_text,
               "the delimiter must not appear inside the value")
+
+        # --- the annotations form ------------------------------------
+        #
+        # The API serves check-run annotations over `actions:read`, and
+        # the release check reads the evidence from there.  The format
+        # is the workflow-file one; a `,` in a property value would
+        # split it into a new property, so it must be escaped.
+        ann = root / "annotations.txt"
+        publish(found, None, None, ann)
+        ann_lines = ann.read_text(encoding="utf-8").splitlines()
+        check(len(ann_lines) == 2, "one annotation line per record")
+        check(ann_lines[0].startswith("::error title=nimrtc hardware evidence,"),
+              "an annotation line starts with the runner's marker")
+        check("file=build/hardware,line=1::" in ann_lines[0],
+              "the annotation anchors on a tree file and line")
+        check(ann_lines[0].count('"verdict":"PASS"') == 1,
+              "the annotation carries the record")
+        # Every comma in the prefix is a property separator; every comma
+        # in the message is escaped.  Split on the first `::` after the
+        # prefix: what comes before holds exactly two separators, what
+        # comes after holds none.
+        prefix, _, message = ann_lines[0][2:].partition("::")
+        check(prefix.count(",") == 2,
+              "the prefix carries exactly the two property separators")
+        # The message carries no `::`, which would end the command
+        # marker early; a `%` is escaped so the runner's unescape is a
+        # no-op on a record that happens to contain one.
+        check("::" not in message, "the message must not re-open the marker")
+        check("%" not in message, "a '%' in the record must be escaped")
+        escaped = publish(found, None, None, root / "ann2.txt")
+        check(escaped, "publish returns the body")
 
         # --- a missing record is a failure, not an empty success ----
         empty = root / "empty"

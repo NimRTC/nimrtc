@@ -480,6 +480,15 @@ public:
                                         std::string_view password,
                                         plugins::TurnTransport transport) noexcept override;
 
+    // The seam declares TWO overloads of `add_turn_server_with_transport`:
+    // the 5-argument one above and the 7-argument one that carries the
+    // TURN/TLS trust policy (ADR-037).  Declaring an overload with the
+    // 5-argument signature in a derived class would *hide* the
+    // 7-argument one, which GCC reports as -Woverloaded-virtual (an
+    // error under -Werror).  This `using` brings the base's overloads
+    // back into scope, so neither is hidden.
+    using plugins::IICETransport::add_turn_server_with_transport;
+
     /** @override plugins::IICETransport */
     bool turn_transport_supported(plugins::TurnTransport transport) const noexcept override;
 

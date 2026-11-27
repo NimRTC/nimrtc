@@ -5432,10 +5432,18 @@ public:
         // the factory id the engine resolved.  Empty strings mean no
         // device is in use ("none" / "" config, or an "auto" backend
         // that degraded at open time).
-        std::string audio_source_device_id;   // negotiated capture device id
-        std::string audio_source_backend;     // resolved capture backend id
-        std::string audio_sink_device_id;     // negotiated playback device id
-        std::string audio_sink_backend;       // resolved playback backend id
+        /** The id of the capture device the engine negotiated ("" = none).
+         *  The plugin reports what it actually opened after `open()`, so
+         *  this may differ from the host's request. */
+        std::string audio_source_device_id;
+        /** The id of the capture backend the engine resolved ("" = none). */
+        std::string audio_source_backend;
+        /** The id of the playback device the engine negotiated ("" = none).
+         *  The plugin reports what it actually opened after `open()`, so
+         *  this may differ from the host's request. */
+        std::string audio_sink_device_id;
+        /** The id of the playback backend the engine resolved ("" = none). */
+        std::string audio_sink_backend;
         // The pump's own counters — the analog of
         // `video_capture_pumped_frames` / `video_capture_pump_errors`.
         // `audio_device_pumped_frames` moving is the proof that the
@@ -6900,14 +6908,9 @@ private:
     // `send_audio()` — without the host.  RD-6: the pump runs on the
     // tick thread, so the 3A / codec are only ever touched from one
     // thread.
-
-    /** Pop one captured audio frame and feed it to the outbound path.
-     *
-     *  Called from `tick()`.  A no-op when there is no audio source
-     *  device or when the queue is empty (the common case — the device's
-     *  cadence is slower than the tick).
-     *
-     *  @return true when a frame was taken from the device and handed
+    //
+    // The pump itself is declared further down, next to the other audio
+    // device entry points (`init_audio_devices()` and friends).
 
     /**
      * @brief Drain one GPU frame from the mailbox and encode it.

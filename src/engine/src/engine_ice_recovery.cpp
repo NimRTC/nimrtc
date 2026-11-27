@@ -23,6 +23,8 @@ IceRecoveryPolicy resolve_ice_recovery_policy(std::string_view name) noexcept {
     return IceRecoveryPolicy::kOff;
 }
 
+IceRecovery::IceRecovery() noexcept : IceRecovery(Config{}) {}
+
 IceRecovery::IceRecovery(Config config) noexcept : config_(config) {}
 
 void IceRecovery::note_disconnected(std::int64_t now_us) noexcept {

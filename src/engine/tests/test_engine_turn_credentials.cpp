@@ -500,6 +500,13 @@ public:
         turn_calls_.push_back(std::move(c));
     }
 
+    // The seam declares two overloads of `add_turn_server_with_transport`
+    // (the 5-argument one and the 7-argument trust-policy one from
+    // ADR-037).  Overriding the 5-argument form would hide the
+    // 7-argument one, which GCC reports as -Woverloaded-virtual (an error
+    // under -Werror).  This `using` keeps both in scope.
+    using np::IICETransport::add_turn_server_with_transport;
+
     void set_bwe(np::IBwe*) noexcept override {}
     void set_scheduler(np::IScheduler*) noexcept override {}
 

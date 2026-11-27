@@ -294,6 +294,63 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The convergence merge broke the GCC/Clang build in four places
+  (2026-11-28).**
+  Merging `origin/version/v4` into `main` produced a tree that MSVC
+  compiled cleanly but GCC and Clang rejected.  Every one of the four
+  is a defect the merge introduced, and every one of them is now fixed:
+
+  - **`-Werror=overloaded-virtual` in `src/modules/ice/`** (the hard
+    one: it stopped the Linux legs from *compiling* at all).
+    `plugins::IICETransport` declares **two** overloads of
+    `add_turn_server_with_transport`: the 5-argument one and the
+    7-argument one that carries the TURN/TLS trust policy
+    (ADR-037).  A derived class that overrides the 5-argument form
+    therefore *hides* the 7-argument one, which GCC reports as
+    `-Woverloaded-virtual` — and the Linux legs build with
+    `-Werror`.  The header's own comment already warned about exactly
+    this hazard for a *different* reason (an overload would break
+    out-of-tree implementers); the fix is the standard remedy: a
+    `using plugins::IICETransport::add_turn_server_with_transport;`
+    in each derived class, so neither overload is hidden.
+
+  - **`'/*' within block comment` in `src/engine/include/nimrtc/engine/engine.hpp`.**
+    The merge left an **orphaned doc comment** behind: the
+    `/** Pop one captured audio frame ... */` block that documents
+    `pump_audio_capture()` was truncated mid-sentence (at "…and
+    handed"), so its closing `*/` never arrived and the following
+    `/**` opened a *nested* comment.  The whole region was silently
+    swallowed: `pump_audio_capture()` still had its own (correct)
+    declaration further down, so nothing was missing at link time —
+    only the documentation of the method had eaten its neighbours.
+    The orphan is removed and the section comment now points at the
+    declaration.
+
+  - **`default member initializer for 'grace_us' needed within definition
+    of enclosing class` in `src/engine/src/engine_ice_recovery.hpp`.**
+    Clang rejects `explicit IceRecovery(Config config = {}) noexcept;`
+    as a default argument *inside* the class body, because `Config`'s
+    default member initializers are not yet complete there.  The
+    constructor is split into a default-constructing overload and a
+    `Config`-taking one; the call sites (`IceRecovery rec;` /
+    `IceRecovery rec{cfg};`) are unchanged.
+
+  - **`unused variable 'profile'` in `src/engine/src/engine_transport.cpp`.**
+    The merge brought in `resolve_stun_server()` (which resolves the
+    profile's STUN default *and* the host's explicit key in one step)
+    alongside the older `resolve_connectivity_profile()` call, and the
+    latter's result became dead.  The dead local is removed; the
+    behaviour is unchanged.
+
+  Two **documentation** defects the same merge introduced are fixed in
+  the same pass: `docs/api/stats_field_reference.md` was stale against
+  the merged `Engine::Stats` (the CI gate `dump_stats_fields.py
+  --check` caught it, and the file is regenerated), and the merge had
+  replaced two per-field Doxygen comments on
+  `audio_source_device_id` / `audio_sink_device_id` with a shared
+  section comment, which silently degraded their descriptions in the
+  regenerated reference — the per-field comments are restored.
+
 - **The merge-gate guard could not see the ruleset it was guarding
   (2026-11-27).**
   `tools/check_ci_ruleset.py` compares `.github/rulesets/protect-main.json`

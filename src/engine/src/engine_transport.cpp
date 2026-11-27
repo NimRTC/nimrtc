@@ -629,8 +629,6 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
     // The profile is resolved *here* rather than at config time because
     // the STUN default depends on the profile's `stun` flag, and the
     // flag is a policy decision the profile table owns.
-    const auto profile =
-        detail::resolve_connectivity_profile(config_.connectivity_profile);
     if (!detail::is_known_connectivity_profile(config_.connectivity_profile)) {
         core::log::Logger::instance().warn(
             "engine[transport]: unknown connectivity profile \"" +

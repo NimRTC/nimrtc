@@ -100,7 +100,19 @@ public:
         kTerminal = 3,  ///< budget spent, giving up
     };
 
-    explicit IceRecovery(Config config = {}) noexcept;
+    /** Default-constructed: every value comes from `Config`'s defaults.
+     *
+     *  A separate overload rather than a default argument on the
+     *  `Config` one: Clang rejects `Config config = {}` as a default
+     *  argument *inside* the class body, because `Config`'s default
+     *  member initializers are not yet complete there ("default member
+     *  initializer for 'grace_us' needed within definition of enclosing
+     *  class").  Splitting the two keeps both compilers happy and leaves
+     *  the call sites (`IceRecovery rec;` / `IceRecovery rec{cfg};`)
+     *  unchanged. */
+    IceRecovery() noexcept;
+
+    explicit IceRecovery(Config config) noexcept;
 
     const Config& config() const noexcept { return config_; }
     State state() const noexcept { return state_; }

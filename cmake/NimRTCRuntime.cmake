@@ -64,6 +64,121 @@ set(NIMRTC_DTLS_CERT_STAGING_DIR
     CACHE INTERNAL "The generated DTLS certificate directory")
 
 # -----------------------------------------------------------------------------
+# nimrtc_generate_dtls_certs()
+#
+# Generate the pair, as a build step, once per build tree.  This is the
+# replacement for the `Generate the DTLS test certificate pair` step
+# that every CI job carried by hand -- fifteen copies across five
+# workflow files, all installing `cryptography<42` and running the
+# generator, and one of them (`hardware.yml`) written differently from
+# the other fourteen.  Fifteen copies is fifteen chances to drift, and
+# the drift is invisible until the copy that was never run runs.
+#
+# **One target, not one custom command per consumer.**  The staging
+# helpers below are called for twenty-six test targets; hanging a
+# generate command off each of them would start twenty-six generators
+# against `cryptography` whenever their POST_BUILD edges run close
+# together in an incremental build.  Instead there is a single
+# `nimrtc_dtls_certs` target, and every consumer only *depends* on it,
+# so the generator runs exactly once per build and the copy steps read
+# a directory that is complete by the time they run.
+#
+# The generator is `scripts/build_dtls_cert.py`, invoked with this
+# CMake's own `Python3_EXECUTABLE`.   It writes
+# `tests/wolfssl_dtls/certs/` in the *source tree* (that is where
+# `nimrtc::dtls`'s compiled-in fallback points), so the target is
+# marked with a byproduct there that the copy steps also name -- a
+# multi-config build (Debug, then Release) does not regenerate.
+#
+# `cryptography` availability is probed once at configure time, with
+# `execute_process` under `cmake -E env` so it sees the caller's
+# environment.  When the probe says no, the target falls back to
+# `scripts/generate_dtls_certs_ci.py` on PATH -- the one code path that
+# knows the platform's pip invocation -- rather than failing the build
+# with an interpreter traceback or, worse, skipping the pair silently.
+# This is what makes the build own the artefact regardless of when the
+# package was installed.
+#
+# `find_package(Python3)`'s interpreter (`-DPython3_EXECUTABLE`) is not
+# always the `python` on PATH, and the two can have different
+# site-packages.  The probe is therefore a *hint*, not a gate: a "no"
+# selects the PATH fallback, and a "yes" only chooses the shorter path.
+# -----------------------------------------------------------------------------
+get_property(_nimrtc_certs_target GLOBAL PROPERTY NIMRTC_DTLS_CERTS_TARGET)
+if(NOT _nimrtc_certs_target)
+    set_property(GLOBAL PROPERTY NIMRTC_DTLS_CERTS_TARGET TRUE)
+
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    set(_nimrtc_py "")
+    if(Python3_Interpreter_FOUND)
+        # The `<42` pin is not cosmetic.  42+ ships a Rust-backed
+        # Windows wheel whose `cryptography_rust.dll` is not in the
+        # PyPI artefact, so `import cryptography` fails with
+        # "DLL load failed while importing _rust".  41.x is the last
+        # pure-C line -- the same reason every CI step that installed
+        # it by hand pinned it.
+        set(_nimrtc_py "${Python3_EXECUTABLE}")
+        # `cmake -E env` runs the probe with the caller's environment,
+        # the same way the build step will run the generator: a venv
+        # the workflow activated is visible to both, or to neither.
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    "${_nimrtc_py}" -c "import cryptography"
+            RESULT_VARIABLE _nimrtc_have_cryptography
+            OUTPUT_QUIET ERROR_QUIET)
+        if(NOT _nimrtc_have_cryptography EQUAL 0)
+            set(_nimrtc_py "")
+        endif()
+    endif()
+
+    if(_nimrtc_py)
+        # `PYTHONDONTWRITEBYTECODE`: the generator lives in the source
+        # tree, and a `__pycache__` next to it is a file the build has
+        # no business creating there.
+        set(_nimrtc_cert_cmd
+            ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+            ${_nimrtc_py} scripts/build_dtls_cert.py)
+    else()
+        # The PATH fallback: `generate_dtls_certs_ci.py` installs into
+        # whichever of these two it finds, and that may not be the
+        # interpreter `find_package` saw (or it may have been
+        # installed *after* the configure that did not see it).  The
+        # helper is asked for the command rather than re-implementing
+        # its probe here, so the two cannot disagree.
+        find_program(_nimrtc_cert_helper python3 PATHS ENV PATH)
+        if(NOT _nimrtc_cert_helper)
+            find_program(_nimrtc_cert_helper python PATHS ENV PATH)
+        endif()
+        if(_nimrtc_cert_helper)
+            set(_nimrtc_cert_cmd
+                ${_nimrtc_cert_helper} scripts/generate_dtls_certs_ci.py)
+        else()
+            set(_nimrtc_cert_cmd
+                ${CMAKE_COMMAND} -E echo
+                "the DTLS certificate pair was not generated: no Python interpreter is usable at configure time.  Install Python and cryptography, then reconfigure.")
+        endif()
+        message(WARNING
+            "The DTLS test certificate generator cannot see `cryptography` "
+            "with the interpreter CMake found.  The build will ask "
+            "scripts/generate_dtls_certs_ci.py, which installs it into "
+            "the first python3/python on PATH; if that fails, install it "
+            "by hand with:\n"
+            "  <python> -m pip install \"cryptography<42\"\n"
+            "To pin the interpreter for both, pass "
+            "-DPython3_EXECUTABLE=<path>.")
+    endif()
+
+    add_custom_target(nimrtc_dtls_certs
+        COMMAND ${_nimrtc_cert_cmd}
+        BYPRODUCTS
+            "${NIMRTC_DTLS_CERT_STAGING_DIR}/server-ecc.pem"
+            "${NIMRTC_DTLS_CERT_STAGING_DIR}/ecc-key.pem"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Ensuring the Chrome-friendly DTLS certificate pair exists"
+        VERBATIM)
+endif()
+
+# -----------------------------------------------------------------------------
 # nimrtc_stage_msquic_dll(<target>)
 #
 # Copy the msquic runtime DLL next to <target>'s executable.
@@ -129,6 +244,13 @@ function(nimrtc_stage_dtls_certs target)
         return()
     endif()
     set_property(GLOBAL PROPERTY NIMRTC_DTLS_CERTS_STAGED_${target} TRUE)
+
+    # The pair is generated by the build (`nimrtc_generate_dtls_certs()`),
+    # once per build tree; the copy below has to wait for it, or it reads
+    # a directory that does not exist yet on a fresh checkout.
+    if(TARGET nimrtc_dtls_certs)
+        add_dependencies(${target} nimrtc_dtls_certs)
+    endif()
 
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory

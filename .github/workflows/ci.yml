@@ -140,7 +140,10 @@ jobs:
       # documentation task, and a build that goes red for it teaches
       # people to ignore the build.  The self-test pins the checker's
       # own machinery, so the checker cannot silently pass everything.
-      - name: Report the v1.4 plan's claims against the tree
+      # (The flags are the same for both checkers: `--self-test`, then the
+      # plain report; `--json` and `--strict` exist on both and are not
+      # used here.  See the v1.5 pair below.)
+      - name: Check the v1.4 plan's checker
         shell: pwsh
         run: python tools/check_v14_plan_status.py --self-test
         # The report itself: every claim, with the stale ones marked.
@@ -153,6 +156,13 @@ jobs:
       # `ok` today; the point of running it now is that the checker's
       # own machinery -- and its ability to speak -- is proven before
       # the rows that will change are written.
+      #
+      # The two checkers are a pair, and this pair of steps is the same
+      # pair as v1.4's above: same flags (`--self-test`, then the plain
+      # report), neither `--strict`.  Before, only one plan's checker
+      # had a `--json`/`--strict` surface, so "the plan is checked in
+      # CI" meant two different things depending on which plan was
+      # meant.
       - name: Check the v1.5 plan's checker
         shell: pwsh
         run: python tools/check_v15_plan_status.py --self-test
@@ -233,29 +243,41 @@ jobs:
             -File ./scripts/generate_wtserver_cert.ps1 `
             -BuildDir "${{ github.workspace }}/build"
 
-      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
-      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
-      # (`.gitignore:227`).  A fresh checkout therefore has neither
-      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
-      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
-      # unconditionally -- so without this step the build fails with
-      # "Error copying file (if different) from .../ecc-key.pem".
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  The hand-written step this replaces was
+      # copied into fifteen jobs across five workflows.
       #
-      # It used to work in CI because the pair came from wolfSSL's own cert
-      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
-      # out of the vendored submodule -- a build artefact must not dirty a
-      # vendored dependency's tracked files.
-      #
-      # The helper knows the platform's interpreter name and pip
-      # invocation (`python` vs `python3`, and `--user` for the
-      # externally-managed PEP 668 Pythons on the Linux and macOS
-      # runners).  `cryptography<42` on purpose: 42+ ships a Rust-backed
-      # Windows wheel whose `cryptography_rust.dll` is not bundled in the
-      # PyPI artefact, so `import cryptography` fails with "DLL load
-      # failed while importing _rust".  41.x is the last pure-C line.
-      - name: Generate the DTLS test certificate pair
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file instead of halfway through a build.
+      # A tree without the pair is not an error: the build generates it.
+      # One install per workflow file, at the first job that needs the
+      # pair.  The guard below never installs -- that is the point of
+      # it -- and hosted images do not all ship `cryptography`, so
+      # someone has to.  This step runs before the first configure in
+      # this file; every later job finds the pair current.
+      - name: Prepare the DTLS test certificate pair
+        if: always()
+        continue-on-error: true
         shell: pwsh
-        run: python scripts/generate_dtls_certs_ci.py
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py
+          } else {
+            python scripts/generate_dtls_certs_ci.py
+          }
+      - name: Check the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
 
       # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
       # codecs (remote-desktop plan WP-B).  They are vendored source
@@ -454,22 +476,26 @@ jobs:
         with:
           arch: x64
 
-      # The DTLS test certificate pair.
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  The hand-written step this replaces was
+      # copied into fifteen jobs across five workflows.
       #
-      # `scripts/build_dtls_cert.py` produces the Chrome-friendly ECC pair
-      # into `tests/wolfssl_dtls/certs/` — a *build artefact*, gitignored
-      # (`.gitignore:227`) — and CMake's copy rule reads it from there
-      # (`cmake/NimRTCTest.cmake`).  It is therefore absent from a fresh
-      # checkout, and every job whose build reaches that rule has to
-      # generate it first; without it the build fails with
-      #
-      #     error MSB3073: "cmake.exe" -E copy_if_different
-      #         .../tests/wolfssl_dtls/certs/ecc-key.pem .../certs/
-      #
-      # This leg builds the whole test tree, so it reaches that rule.
-      # Every other job that does the same carries the same step.
-      - name: Generate the DTLS test certificate pair
-        run: python scripts/generate_dtls_certs_ci.py
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file instead of halfway through a build.
+      # A tree without the pair is not an error: the build generates it.
+      - name: Check the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
 
       # NIMRTC_PLUGINS_DXVA=ON is the whole point of this leg.
       #
@@ -549,29 +575,26 @@ jobs:
         with:
           arch: x64
 
-      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
-      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
-      # (`.gitignore:227`).  A fresh checkout therefore has neither
-      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
-      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
-      # unconditionally -- so without this step the build fails with
-      # "Error copying file (if different) from .../ecc-key.pem".
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  The hand-written step this replaces was
+      # copied into fifteen jobs across five workflows.
       #
-      # It used to work in CI because the pair came from wolfSSL's own cert
-      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
-      # out of the vendored submodule -- a build artefact must not dirty a
-      # vendored dependency's tracked files.
-      #
-      # The helper knows the platform's interpreter name and pip
-      # invocation (`python` vs `python3`, and `--user` for the
-      # externally-managed PEP 668 Pythons on the Linux and macOS
-      # runners).  `cryptography<42` on purpose: 42+ ships a Rust-backed
-      # Windows wheel whose `cryptography_rust.dll` is not bundled in the
-      # PyPI artefact, so `import cryptography` fails with "DLL load
-      # failed while importing _rust".  41.x is the last pure-C line.
-      - name: Generate the DTLS test certificate pair
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file instead of halfway through a build.
+      # A tree without the pair is not an error: the build generates it.
+      - name: Check the DTLS test certificate pair
         shell: pwsh
-        run: python scripts/generate_dtls_certs_ci.py
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
       - name: Configure (GMSSL ON)
         # NIMRTC_VENDORED_WEBRTC_APM=OFF: this leg is about the GMSSL DTLS
         # backend, not the 3A stack.  The WebRTC APM prebuilt archive is
@@ -657,28 +680,26 @@ jobs:
         shell: bash
         run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
 
-      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
-      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
-      # (`.gitignore:227`).  A fresh checkout therefore has neither
-      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
-      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
-      # unconditionally -- so without this step the build fails with
-      # "Error copying file (if different) from .../ecc-key.pem".
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  The hand-written step this replaces was
+      # copied into fifteen jobs across five workflows.
       #
-      # It used to work in CI because the pair came from wolfSSL's own cert
-      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
-      # out of the vendored submodule -- a build artefact must not dirty a
-      # vendored dependency's tracked files.
-      #
-      # The helper knows the platform's interpreter name and pip
-      # invocation (`python` vs `python3`, and `--user` for the
-      # externally-managed PEP 668 Pythons on the Linux and macOS
-      # runners).  `cryptography<42` on purpose: 42+ ships a Rust-backed
-      # Windows wheel whose `cryptography_rust.dll` is not bundled in the
-      # PyPI artefact, so `import cryptography` fails with "DLL load
-      # failed while importing _rust".  41.x is the last pure-C line.
-      - name: Generate the DTLS test certificate pair
-        run: python3 scripts/generate_dtls_certs_ci.py
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file instead of halfway through a build.
+      # A tree without the pair is not an error: the build generates it.
+      - name: Check the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
       - name: Configure (APM left at its default)
         # NOTE: no -DNIMRTC_VENDORED_WEBRTC_APM flag here on purpose.  The
         # option's default IS the claim under test (docs/zh/architecture.md
@@ -922,6 +943,54 @@ jobs:
 
       - name: Self-test the merge-gate guard
         run: python tools/check_ci_ruleset.py --self-test
+
+      # The step above compares the ruleset *mirror* with the workflows,
+      # and it needs no network.  That is also its blind spot: the
+      # mirror is a file, and a file can disagree with the ruleset
+      # GitHub actually applies.  #181 added `windows / dxva` to the
+      # mirror, the live ruleset stayed at thirteen checks for a day,
+      # and this check reported 14/14 the whole time -- while the DXVA
+      # leg ran and went green without being part of a single merge
+      # decision.
+      #
+      # So the live ruleset is read too, over the API, and compared
+      # with the mirror field by field.  A FAIL here is fixed with
+      # `--apply` from a machine with write access -- never by editing
+      # the mirror to match a mistake.
+      #
+      # The token is the job's own `GITHUB_TOKEN`, which the
+      # repository's default workflow permissions (`read`) make
+      # read-only.  GitHub withholds `bypass_actors` from a caller
+      # without write access to the ruleset, so the script compares the
+      # fields the token could read and names the ones it could not --
+      # an unseen field is not a difference.  The self-test pins that
+      # rule, because a regression there would turn this step red on
+      # every push, and a red step gets deleted.
+      - name: Check the live ruleset against the mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/apply_ci_ruleset.py --check
+
+      - name: Self-test the live-ruleset guard
+        run: python tools/apply_ci_ruleset.py --self-test
+
+      # The hardware-evidence reader (`tools/read_hardware_evidence.py`)
+      # is what `scripts/check-release-freeze.sh` asks at tag-cut time:
+      # "is there a PASS Q7 record on the tree being tagged?".  Its
+      # answer comes from local files or from a check-run annotation on
+      # the archived run, and the annotation format is the runner's,
+      # not the script's -- so the parsing is pinned here rather than
+      # discovered when the first release after this change reads it.
+      - name: Self-test the hardware-evidence reader
+        run: python tools/read_hardware_evidence.py --self-test
+
+      # `tools/run_hardware_job.py` is the job body the hardware
+      # workflow runs, and it is where the record is written into all
+      # three destinations.  The annotation escaping is the fragile
+      # part: the `::error::` format splits properties on `,`, and a
+      # record is JSON.
+      - name: Self-test the hardware job publisher
+        run: python tools/run_hardware_job.py --self-test
 
       # The CI auto-retry workflow (`ci-retry.yml`) re-runs the jobs
       # that were starved of a runner.  Its safety rests entirely on
@@ -1319,28 +1388,26 @@ jobs:
             -out build/wtserver_cert.pem \
             -config build/wtserver_openssl.cnf
 
-      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
-      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
-      # (`.gitignore:227`).  A fresh checkout therefore has neither
-      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
-      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
-      # unconditionally -- so without this step the build fails with
-      # "Error copying file (if different) from .../ecc-key.pem".
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  The hand-written step this replaces was
+      # copied into fifteen jobs across five workflows.
       #
-      # It used to work in CI because the pair came from wolfSSL's own cert
-      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
-      # out of the vendored submodule -- a build artefact must not dirty a
-      # vendored dependency's tracked files.
-      #
-      # The helper knows the platform's interpreter name and pip
-      # invocation (`python` vs `python3`, and `--user` for the
-      # externally-managed PEP 668 Pythons on the Linux and macOS
-      # runners).  `cryptography<42` on purpose: 42+ ships a Rust-backed
-      # Windows wheel whose `cryptography_rust.dll` is not bundled in the
-      # PyPI artefact, so `import cryptography` fails with "DLL load
-      # failed while importing _rust".  41.x is the last pure-C line.
-      - name: Generate the DTLS test certificate pair
-        run: python3 scripts/generate_dtls_certs_ci.py
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file instead of halfway through a build.
+      # A tree without the pair is not an error: the build generates it.
+      - name: Check the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
       # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
       # codecs (remote-desktop plan WP-B).  They are vendored source
       # builds, so the leg proves that the wrappers compile and that the
@@ -1574,28 +1641,26 @@ jobs:
       - name: Pre-flight tool check
         run: python3 tools/ci_preflight.py --preset ${{ matrix.preset }}
 
-      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
-      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
-      # (`.gitignore:227`).  A fresh checkout therefore has neither
-      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
-      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
-      # unconditionally -- so without this step the build fails with
-      # "Error copying file (if different) from .../ecc-key.pem".
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  The hand-written step this replaces was
+      # copied into fifteen jobs across five workflows.
       #
-      # It used to work in CI because the pair came from wolfSSL's own cert
-      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
-      # out of the vendored submodule -- a build artefact must not dirty a
-      # vendored dependency's tracked files.
-      #
-      # The helper knows the platform's interpreter name and pip
-      # invocation (`python` vs `python3`, and `--user` for the
-      # externally-managed PEP 668 Pythons on the Linux and macOS
-      # runners).  `cryptography<42` on purpose: 42+ ships a Rust-backed
-      # Windows wheel whose `cryptography_rust.dll` is not bundled in the
-      # PyPI artefact, so `import cryptography` fails with "DLL load
-      # failed while importing _rust".  41.x is the last pure-C line.
-      - name: Generate the DTLS test certificate pair
-        run: python3 scripts/generate_dtls_certs_ci.py
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file instead of halfway through a build.
+      # A tree without the pair is not an error: the build generates it.
+      - name: Check the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
       - name: Configure (${{ matrix.preset }})
         run: |
           cmake --preset ${{ matrix.preset }} \
@@ -1687,28 +1752,26 @@ jobs:
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
-      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
-      # (`.gitignore:227`).  A fresh checkout therefore has neither
-      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
-      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
-      # unconditionally -- so without this step the build fails with
-      # "Error copying file (if different) from .../ecc-key.pem".
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  The hand-written step this replaces was
+      # copied into fifteen jobs across five workflows.
       #
-      # It used to work in CI because the pair came from wolfSSL's own cert
-      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
-      # out of the vendored submodule -- a build artefact must not dirty a
-      # vendored dependency's tracked files.
-      #
-      # The helper knows the platform's interpreter name and pip
-      # invocation (`python` vs `python3`, and `--user` for the
-      # externally-managed PEP 668 Pythons on the Linux and macOS
-      # runners).  `cryptography<42` on purpose: 42+ ships a Rust-backed
-      # Windows wheel whose `cryptography_rust.dll` is not bundled in the
-      # PyPI artefact, so `import cryptography` fails with "DLL load
-      # failed while importing _rust".  41.x is the last pure-C line.
-      - name: Generate the DTLS test certificate pair
-        run: python3 scripts/generate_dtls_certs_ci.py
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file instead of halfway through a build.
+      # A tree without the pair is not an error: the build generates it.
+      - name: Check the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
       - name: Configure (clang + fuzzing + sanitizers)
         run: |
           cmake -S . -B build/fuzz \
@@ -1901,28 +1964,26 @@ jobs:
             -out build/wtserver_cert.pem \
             -config build/wtserver_openssl.cnf
 
-      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
-      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
-      # (`.gitignore:227`).  A fresh checkout therefore has neither
-      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
-      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
-      # unconditionally -- so without this step the build fails with
-      # "Error copying file (if different) from .../ecc-key.pem".
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  The hand-written step this replaces was
+      # copied into fifteen jobs across five workflows.
       #
-      # It used to work in CI because the pair came from wolfSSL's own cert
-      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
-      # out of the vendored submodule -- a build artefact must not dirty a
-      # vendored dependency's tracked files.
-      #
-      # The helper knows the platform's interpreter name and pip
-      # invocation (`python` vs `python3`, and `--user` for the
-      # externally-managed PEP 668 Pythons on the Linux and macOS
-      # runners).  `cryptography<42` on purpose: 42+ ships a Rust-backed
-      # Windows wheel whose `cryptography_rust.dll` is not bundled in the
-      # PyPI artefact, so `import cryptography` fails with "DLL load
-      # failed while importing _rust".  41.x is the last pure-C line.
-      - name: Generate the DTLS test certificate pair
-        run: python3 scripts/generate_dtls_certs_ci.py
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file instead of halfway through a build.
+      # A tree without the pair is not an error: the build generates it.
+      - name: Check the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
       - name: Configure
         run: cmake --preset debug.aarch64 -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
@@ -2048,28 +2109,26 @@ jobs:
             -out build/wtserver_cert.pem \
             -config build/wtserver_openssl.cnf
 
-      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
-      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
-      # (`.gitignore:227`).  A fresh checkout therefore has neither
-      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
-      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
-      # unconditionally -- so without this step the build fails with
-      # "Error copying file (if different) from .../ecc-key.pem".
+      # The pair is a build artefact, and the *build* owns generating it
+      # now: `nimrtc_generate_dtls_certs()` in cmake/NimRTCRuntime.cmake
+      # declares one `nimrtc_dtls_certs` target, and every staging
+      # helper depends on it.  The hand-written step this replaces was
+      # copied into fifteen jobs across five workflows.
       #
-      # It used to work in CI because the pair came from wolfSSL's own cert
-      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
-      # out of the vendored submodule -- a build artefact must not dirty a
-      # vendored dependency's tracked files.
-      #
-      # The helper knows the platform's interpreter name and pip
-      # invocation (`python` vs `python3`, and `--user` for the
-      # externally-managed PEP 668 Pythons on the Linux and macOS
-      # runners).  `cryptography<42` on purpose: 42+ ships a Rust-backed
-      # Windows wheel whose `cryptography_rust.dll` is not bundled in the
-      # PyPI artefact, so `import cryptography` fails with "DLL load
-      # failed while importing _rust".  41.x is the last pure-C line.
-      - name: Generate the DTLS test certificate pair
-        run: python3 scripts/generate_dtls_certs_ci.py
+      # What is left is a *guard*, not a generator: it asks the build's
+      # own interpreter whether the pair is current (no pip, no
+      # network), so a job that is going to fail anyway fails here, in
+      # seconds, naming the file instead of halfway through a build.
+      # A tree without the pair is not an error: the build generates it.
+      - name: Check the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          if (Get-Command python3 -ErrorAction SilentlyContinue) {
+            python3 scripts/generate_dtls_certs_ci.py --check-only
+          } else {
+            python scripts/generate_dtls_certs_ci.py --check-only
+          }
+          exit 0
       # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
       # codecs (remote-desktop plan WP-B).  They are vendored source
       # builds, so the leg proves that the wrappers compile and that the

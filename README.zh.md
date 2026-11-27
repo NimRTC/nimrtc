@@ -148,7 +148,9 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 
 ---
 
-## 下载预编译包（v1.3.x）
+## 下载预编译包
+
+最新已发布版本是 **`v1.3.1`**；下面描述的是 `v1.3.x` bundle 的形态，`v1.3.0` 是最早按此形态发布的一版。
 
 每个平台的 bundle 都包含 **NimRTC 本体**——公共头文件、静态库与 CMake 包配置——以及该平台
 **vendored 第三方依赖栈**（wolfSSL / libsrtp3 / libjuice / msquic 的头文件与库），你可以直接
@@ -550,7 +552,7 @@ Plugin 是 NimRTC **可演进性**的核心机制：P0–P1 用内置实现，P2
 | **AI Agent / 3A 旁路 hook** | ✅ `pre/post-3a` PCM tap（P2） | ❌ APM 黑盒 | ❌ | ❌ | ❌ |
 | **ref_frame / 帧对齐时间线** | 🚧 P3 | ❌ | ❌ | ❌ | ❌ |
 | **线缆级 Chrome 互通** | ✅ Case D 绿色（媒体）+ Case E 绿色（WebTransport DataChannel） | ✅ | ✅（仅 Go） | ✅ 通过浏览器 SDK | ✅ 通过浏览器 SDK |
-| **2026 生产成熟度** | Stable（v1.3.0 已发布） | Production-grade | Production-grade | Production-grade | Production-grade |
+| **2026 生产成熟度** | Stable（v1.3.1 已发布） | Production-grade | Production-grade | Production-grade | Production-grade |
 
 **NimRTC 全面领先的领域**：aarch64 嵌入式、GM/T 国密路径（DTLS 层）、AI Agent hook、单主干 P2P+relay（`relay` 是单策略网关 profile，编译期跳过 L2 编解码；from-scratch 的 SFU 模块不是交付内容 —— 见 `docs/plan/v1.0-plan.md` §7，BDFL 2026-10-19）。
 **NimRTC 落后的领域**：生态广度、编解码覆盖、浏览器引擎对等、年限沉淀。**按需选择。**

@@ -6,17 +6,27 @@ Why this script exists
 The pair (`server-ecc.pem` + `ecc-key.pem`) is a **build artefact**, not a
 checked-in file: it is produced by `scripts/build_dtls_cert.py` into
 `tests/wolfssl_dtls/certs/`, which is gitignored (`.gitignore:227`).
-A fresh checkout therefore has neither file, and CMake's
-`nimrtc_copy_wolfssl_certs()` POST_BUILD rule copies them
-**unconditionally** -- so a build without the pair dies with
 
-    error MSB3073: "cmake.exe" -E copy_if_different
-        .../tests/wolfssl_dtls/certs/ecc-key.pem .../certs/
+Since 2026-11-27 the build generates it itself:
+`nimrtc_generate_dtls_certs()` in `cmake/NimRTCRuntime.cmake` declares a
+single `nimrtc_dtls_certs` target, and the staging helpers
+(`nimrtc_copy_wolfssl_certs()`, `nimrtc_stage_dtls_certs()`) depend on
+it.  A workflow therefore does **not** need a "generate the certs" step
+any more -- and the fifteen hand-written copies that used to carry one
+(ci 9, soak 2, interop 2, ci-fast 1, hardware 1) are gone.
 
-It used to work in CI because the pair came from wolfSSL's own cert tree
-(upstream tracks `certs/ecc-key.pem`), but the pair has moved out of the
-vendored submodule -- a build artefact must not dirty a vendored
-dependency's tracked files.
+This script remains for the two cases CMake cannot cover:
+
+  * **`--check-only`** -- the guard workflows call instead of
+    generating.  It answers "is the pair present and current?" from the
+    build's own verdict, with **no pip install**, so a job that is
+    about to fail anyway does not spend a minute on the network first.
+    Crucially it runs the *same* interpreter the CMake configure found,
+    so its answer and the build's answer cannot disagree.
+  * **a host that runs tests outside CMake** (a scratch build of one
+    module, a Windows box without a configure) -- `--check-only` says
+    what is missing, and running it without `--check-only` installs
+    and generates.
 
 The platform split
 ------------------
@@ -35,8 +45,8 @@ whose `cryptography_rust.dll` is not bundled in the PyPI artefact, so
 _rust".  41.x is the last pure-C line.
 
 Usage:
-    python scripts/generate_dtls_certs_ci.py
     python scripts/generate_dtls_certs_ci.py --check-only
+    python scripts/generate_dtls_certs_ci.py
 """
 
 from __future__ import annotations
@@ -71,18 +81,16 @@ def interpreter() -> str:
     )
 
 
-def run(cmd: list[str]) -> None:
-    """Run a command, failing loudly with its output."""
+def run(cmd: list[str]) -> subprocess.CompletedProcess:
+    """Run a command, echoing its output, and return the result."""
     print(f"$ {' '.join(cmd)}")
-    proc = subprocess.run(cmd, text=True, capture_output=True)
+    proc = subprocess.run(cmd, text=True, capture_output=True,
+                          encoding="utf-8", errors="replace")
     if proc.stdout:
         print(proc.stdout.rstrip())
     if proc.stderr:
         print(proc.stderr.rstrip(), file=sys.stderr)
-    if proc.returncode != 0:
-        raise SystemExit(
-            f"generate_dtls_certs_ci.py: `{cmd[0]}` exited {proc.returncode}"
-        )
+    return proc
 
 
 def pip_install(py: str) -> None:
@@ -91,7 +99,60 @@ def pip_install(py: str) -> None:
         run([py, "-m", "pip", "install", "--upgrade", "cryptography<42"])
     else:
         # `--user` because the runners' Pythons are externally managed.
-        run([py, "-m", "pip", "install", "--user", "--upgrade", "cryptography<42"])
+        run([py, "-m", "pip", "install", "--user", "--upgrade",
+             "cryptography<42"])
+
+
+# The verdict codes `build_dtls_cert.verify_pair()` returns.
+CURRENT, MISSING, NO_SAN, STALE, NO_CRYPTO = 0, 1, 2, 3, 4
+
+
+def ask_build() -> tuple[int, str]:
+    """Run `verify_pair()` in `py`'s own site-packages, and return its answer.
+
+    It has to be a child process: this script's own interpreter is
+    whatever GitHub put on PATH, and the *build's* interpreter is the
+    one CMake found -- and the two can have different site-packages.
+    Asking the build's interpreter is what makes the answer true for
+    the build.
+    """
+    py = interpreter()
+    probe = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "import build_dtls_cert as b\n"
+        "code, reason = b.verify_pair()\n"
+        "print(code)\n"
+        "print(reason)\n"
+    ) % str(ROOT / "scripts")
+    proc = subprocess.run([py, "-c", probe], text=True, capture_output=True,
+                          encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        # The probe itself failed -- no interpreter, a broken
+        # site-packages. Treat it as "cannot inspect", which is
+        # NO_CRYPTO: the caller installs and lets the generator report.
+        return NO_CRYPTO, (proc.stderr.strip().splitlines() or
+                           ["the probe exited %d" % proc.returncode])[-1]
+    lines = proc.stdout.splitlines()
+    try:
+        return int(lines[0]), lines[1] if len(lines) > 1 else ""
+    except (IndexError, ValueError):
+        return NO_CRYPTO, "the probe printed nothing parseable"
+
+
+def report(code: int, reason: str) -> int:
+    """Print the pair's files and the build's verdict."""
+    for p in (CERT, KEY):
+        state = "present" if p.exists() else "MISSING"
+        print(f"[{state}] {p.relative_to(ROOT)}")
+    verdict = {
+        CURRENT: "current",
+        MISSING: "MISSING",
+        NO_SAN: "no valid SAN",
+        STALE: "stale",
+        NO_CRYPTO: "cannot be inspected",
+    }.get(code, "unknown")
+    print(f"[{verdict}] {reason}")
+    return 0 if code == CURRENT else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -99,27 +160,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check-only",
         action="store_true",
-        help="do not install or generate; just report whether the pair exists",
-    )
+        help="do not install or generate; report whether the pair is "
+             "present and current (exit 0 when it is), and with the "
+             "build's own interpreter"),
     args = parser.parse_args(argv)
 
     if args.check_only:
-        missing = [p for p in (CERT, KEY) if not p.exists()]
-        for p in (CERT, KEY):
-            state = "present" if p.exists() else "MISSING"
-            print(f"[{state}] {p.relative_to(ROOT)}")
-        if missing:
+        code, reason = ask_build()
+        rc = report(code, reason)
+        if rc != 0:
             print(
                 "generate_dtls_certs_ci.py: the DTLS certificate pair is not "
-                "generated -- the build would fail on the copy rule",
+                "ready.  The CMake build generates it (`nimrtc_dtls_certs`), "
+                "or run this script without --check-only.",
                 file=sys.stderr,
             )
-            return 1
-        return 0
+        return rc
 
     py = interpreter()
-    pip_install(py)
-    run([py, str(ROOT / "scripts" / "build_dtls_cert.py")])
+
+    # Install only when the pair is not already current.  A CI job that
+    # restores a cached build tree (or ran a previous job in the same
+    # workspace) does not need the network at all, and a job that does
+    # need it still gets the *same* verdict the build will get.
+    code, reason = ask_build()
+    if code == CURRENT:
+        print(f"[ok] the pair is current ({reason}); nothing to install")
+        report(code, reason)
+        return 0
+    if code == NO_CRYPTO:
+        pip_install(py)
+    else:
+        print(f"[regen] {reason}")
+
+    proc = run([py, str(ROOT / "scripts" / "build_dtls_cert.py")])
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"generate_dtls_certs_ci.py: build_dtls_cert.py exited "
+            f"{proc.returncode}")
 
     # The generator skips when the existing cert already covers every local
     # IP, so re-check rather than assume it wrote something.

@@ -175,7 +175,107 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   expectation flips when its item lands, and a row left asserting the
   absence of something that now exists reports `STALE` forever.
 
+### Changed
+
+- **`hw_composite_codec.hpp` moved from `nimrtc/nvcodec/` to
+  `nimrtc/plugins/`, and the move was not in the changelog (2026-11-27,
+  backfilled for #181).**
+  The header declares `plugins::IHardwareCompositeCodec` (P010 NV12 +
+  BGRA -> NV12 composition for the remote-desktop path), which is a
+  plugin **interface** -- the rule that interfaces live in
+  `src/plugins/` and nothing else does is `AGENTS.md` L2.  It lived in
+  the NVENC module's include tree, so a host that wanted the interface
+  had to depend on the NVIDIA backend, and the header count under
+  `src/*/include/nimrtc/` went from 196 to 197 with no note anywhere.
+
+  **Migration:** `#include <nimrtc/nvcodec/hw_composite_codec.hpp>`
+  becomes `#include <nimrtc/plugins/hw_composite_codec.hpp>`.  The
+  namespace and every symbol are unchanged (`plugins::IHardwareCompositeCodec`,
+  `plugins::HardwareFrame`), so the only edit is the include path.
+  There is no compatibility shim: the old path is gone, because a shim
+  in `nvcodec/` would re-create exactly the dependency the move removes.
+  A host that does not use the interface is unaffected -- the
+  `nimrtc::nvcodec` link target no longer drags the header in.
+
+- **The tree now has a rule for review documents, because it had two
+  opposite precedents and no rule (2026-11-27).**
+  #174 deleted a review document as "about the process, not the
+  machinery"; #189 added a 640-line plan derived from a review of the
+  same kind.  Both were defensible; together they left the next author
+  with no way to know which theirs was.  `CONTRIBUTING.md` now says:
+  a plan (`docs/plan/`) and an ADR stay, a finding becomes the fix plus
+  its changelog entry, and a review of a plan or a PR lives outside the
+  repository.  The test is whether the tree's code or plans need to
+  cite the file.  Existing documents under `docs/plan/` are kept --
+  they are cited, so they pass the test.
+
 ### Fixed
+
+- **The merge-gate guard could not see the ruleset it was guarding
+  (2026-11-27).**
+  `tools/check_ci_ruleset.py` compares `.github/rulesets/protect-main.json`
+  with the checks the workflows produce, and it needs no network.  That is
+  also its blind spot: **the mirror is a file, and a file can disagree
+  with the ruleset GitHub actually applies.**  #181 added
+  `windows / dxva` to the mirror; the live ruleset stayed at thirteen
+  required checks for a day; the guard reported `14/14` the whole time --
+  and the DXVA leg ran and went green without participating in a single
+  merge decision.  A gate that cannot see the gate is not a gate.
+
+  The other half now runs in CI, on the `docs / markdown links` leg:
+  `tools/apply_ci_ruleset.py --check` reads the live rulesets over the
+  API and compares them with the mirrors, field by field.  A FAIL there
+  is fixed with `--apply` from a machine with write access -- **never by
+  editing the mirror to match a mistake.**  The script reports "could
+  not look" as a failure rather than a skip: a missing `gh` on PATH is
+  an ERROR now, and the read call gets `stdin=DEVNULL` instead of
+  inheriting the caller's stdin.
+
+  One detail decides whether the step can run in CI at all.  GitHub
+  withholds `bypass_actors` from a caller that has no **write** access
+  to the ruleset ("to prevent leaking sensitive information, the
+  bypass_actors property is only returned if the user making the API
+  request has write access"), and the repository's default workflow
+  permissions are `read` -- so the CI job's `GITHUB_TOKEN` sees the
+  field *absent*, while the mirror records it as `[]`.  Comparing them
+  directly would report a difference on every push, for a field the
+  caller was never allowed to see.  The script now compares the fields
+  the token could read and names the ones it could not: **an unseen
+  field is not a difference.**  `--self-test` pins that rule, because a
+  regression there would turn the step red on every push -- and a
+  permanently red step gets deleted, taking the guard with it.
+
+- **The v1.4.0 final-tag preflight was red by construction: it read the
+  hardware evidence from a directory the evidence is never in
+  (2026-11-27).**
+  `scripts/check-release-freeze.sh`'s `hardware` check read
+  `build/hardware/*.jsonl` and nothing else.  Those files are written
+  by `hardware.yml` on a **self-hosted GPU runner**; a release is cut
+  from a checkout on another machine, where the directory simply does
+  not exist.  So `--final-tag` failed at the tag cut no matter how many
+  green hardware runs there were -- a gate that can only say no is not
+  a gate.
+
+  The record now has a source that is readable from anywhere.
+  `tools/run_hardware_job.py` already published it twice, into the run's
+  step summary and into the job outputs -- and both live in the job
+  log, whose download endpoint answers a bare **404** to a token
+  without `actions:read` (indistinguishable from "the log expired";
+  verified against run 45474878131).  It now also emits the record as a
+  **check-run annotation** (the workflow-file `::error::` format),
+  which `GET /actions/runs/{id}/jobs` serves under the same
+  `actions:read` scope an ordinary repository token holds.
+
+  `tools/read_hardware_evidence.py` reads, in order, `build/hardware/`
+  in the checkout and the annotations of the newest successful
+  `hardware.yml` run (the one on the commit being tagged first).  The
+  freeze check's rules are unchanged -- a PASS on a dirty tree, or on
+  another commit, still does not count, and a missing record is still
+  a SKIP outside a final tag and a FAIL under it -- only the *source*
+  moved.  `--no-network` keeps the local-only behaviour.  Runs made
+  before this change carry no annotation, so the first release after
+  it needs one `hardware.yml` run (or the raw file copied into
+  `build/hardware/`).
 
 - **The DTLS test certificate was written into the wolfSSL submodule, and
   it left the submodule permanently dirty (2026-11-26).**
@@ -217,9 +317,72 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   driven by `scripts/generate_dtls_certs_ci.py`, which knows each
   platform's interpreter name and pip invocation (`python` vs
   `python3`, and `--user` for the externally-managed PEP 668 Pythons on
-  the Linux and macOS runners), and it is present in all thirteen jobs
-  that need it -- and in none of the four release jobs, which build
-  neither the test tree nor the examples.
+  the Linux and macOS runners).  It was written in **fifteen job
+  steps** across five workflows (`ci.yml` 9, `soak.yml` 2,
+  `interop.yml` 2, `ci-fast.yml` 1, `hardware.yml` 1), and in none of
+  the four release jobs, which build neither the test tree nor the
+  examples.  (The thirteen counted in the first version of this entry
+  was the number of *jobs* the helper covered when the legs that
+  generate the pair themselves -- the gmssl leg's inline pip, the
+  hardware job's own copy -- were left out of the tally; the
+  *steps* in the tree were fifteen, and one of them, the hardware
+  job's, was written differently from the other fourteen.)
+
+- **The DTLS test certificate is generated by the build, and the
+  fifteen hand-written CI steps are a single guard (2026-11-27).**
+  Fifteen copies of a step are fifteen chances to drift, and the copy
+  that drifts is not visible until it runs -- which, for the hardware
+  job, had never happened: its step installed `cryptography` with an
+  inline pip and called `scripts/build_dtls_cert.py` directly, and it
+  was the one copy no other job proved.
+
+  `nimrtc_generate_dtls_certs()` (`cmake/NimRTCRuntime.cmake`) now
+  declares a single `nimrtc_dtls_certs` target, and both staging
+  helpers -- `nimrtc_copy_wolfssl_certs()` (26 test targets) and
+  `nimrtc_stage_dtls_certs()` -- only *depend* on it.  One target,
+  not one custom command per consumer: 26 generators racing on the
+  same `cryptography` install is a third failure mode, not a fix.
+  `cryptography` availability is probed once at configure time, with
+  the interpreter CMake found, so a host without it gets a warning and
+  an instruction instead of a configure error at a path that happens
+  to contain a space.
+
+  In the workflows, each of the fifteen steps became
+  `Check the DTLS test certificate pair`: no pip, no network.  It asks
+  the *build's* interpreter whether the pair is current (the same
+  `verify_pair()` the generator uses), so a job that is about to fail
+  names the file in seconds instead of dying at CMake's copy rule
+  halfway through a build -- and the step's exit code is deliberately
+  dropped, because a tree without the pair is not an error: the build
+  generates it.
+
+  The guard never installs, so **one** step per workflow file
+  (`Prepare the DTLS test certificate pair`, `if: always()`,
+  `continue-on-error`) runs `generate_dtls_certs_ci.py` before the
+  first configure and installs `cryptography` only if the pair is
+  missing or unreadable.  That is one network step per workflow, not
+  fifteen per tree, and the jobs that never need it never pay for it.
+  CMake's own probe is a hint, not a gate: when it cannot see the
+  package, the `nimrtc_dtls_certs` target defers to the same helper on
+  PATH, so the build generates the pair regardless of when the package
+  was installed.
+
+  Two defects in `scripts/build_dtls_cert.py` came out of writing the
+  judge: `verify_pair()` compared `str(x509.IPAddress(...))` -- which
+  renders `IPAddress(value=10.0.0.1)` -- against the collected
+  addresses, so **every** host read as stale and the pair was
+  regenerated on every invocation; the check now reads `n.value`.  And
+  a stale pair regenerates at most once a day, because the
+  deliberately generous staleness rule (any missing local interface
+  regenerates) would otherwise rewrite the pair before every build.  A
+  certificate with no SAN is always regenerated; a missing one,
+  always.
+
+  `scripts/generate_dtls_certs_ci.py --check-only` is the guard's
+  entry point.  It no longer runs `pip install` to answer a question
+  the answer is already known to: it asks the build's interpreter
+  first, and installs only when the pair is actually missing or
+  unreadable.
 
 - **A transient `503` from GitHub's artifact store made the soak
   window read "incomplete", and the whole soak leg red for a reason

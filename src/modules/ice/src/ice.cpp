@@ -1498,6 +1498,31 @@ IceTransport::gathered_local_candidates() const noexcept {
     return impl_->local_candidates;
 }
 
+std::string_view IceTransport::gathering_state() const noexcept {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    // The collection's own state, kept separate from the agent's state
+    // machine: an agent can be `connected` while a reflexive candidate is
+    // still arriving (RFC 8445 §5.1.1.5).
+    if (impl_->gathering_done) return "complete";
+    if (impl_->state == plugins::IceState::Gathering) return "gathering";
+    // The agent is gathering before it says so in its state machine: the
+    // candidates start arriving as soon as the agent is created.
+    if (!impl_->local_candidates.empty()) return "gathering";
+    return "new";
+}
+
+std::string_view IceTransport::turn_failure_reason() const noexcept {
+    if (!impl_->agent) return {};
+    switch (juice_get_turn_failure(impl_->agent)) {
+        case JUICE_TURN_FAILURE_UNAUTHORIZED: return "credentials-rejected";
+        case JUICE_TURN_FAILURE_STALE_NONCE:  return "stale-nonce";
+        case JUICE_TURN_FAILURE_TRANSPORT:    return "transport-unavailable";
+        case JUICE_TURN_FAILURE_ALLOCATE:     return "allocate-refused";
+        case JUICE_TURN_FAILURE_NONE:         break;
+    }
+    return {};
+}
+
 bool IceTransport::wait_for_gathering(int timeout_ms) noexcept {
     if (!impl_->agent) return false;
     std::unique_lock<std::mutex> lk(impl_->mu);

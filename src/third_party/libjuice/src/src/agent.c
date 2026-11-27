@@ -991,6 +991,13 @@ juice_state_t agent_get_state(juice_agent_t *agent) {
 	return state;
 }
 
+juice_turn_failure_t agent_get_turn_failure(juice_agent_t *agent) {
+	conn_lock(agent);
+	juice_turn_failure_t failure = agent->turn_failure;
+	conn_unlock(agent);
+	return failure;
+}
+
 int agent_get_selected_candidate_pair(juice_agent_t *agent, ice_candidate_t *local,
                                       ice_candidate_t *remote) {
 	conn_lock(agent);
@@ -1109,6 +1116,11 @@ int agent_bookkeeping(juice_agent_t *agent, timestamp_t *next_timestamp) {
 			// for the retransmission timeout.
 			if (entry->turn && entry->turn->failed) {
 				JLOG_INFO("TURN allocation failed");
+				// The transport could not be opened at all -- the
+				// server was never reached (NimRTC extension, see the
+				// 0003-turn-allocation-failure-reason patch).  This is
+				// a different fact from "the server refused us".
+				agent->turn_failure = JUICE_TURN_FAILURE_TRANSPORT;
 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
 				entry->next_transmission = 0;
 				agent_update_gathering_done(agent);
@@ -2053,12 +2065,18 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
 			           msg->msg_method == STUN_METHOD_ALLOCATE ? "Allocate" : "Refresh");
 			if (*entry->turn->credentials.realm != '\0') {
 				JLOG_ERROR("TURN authentication failed");
+				// The realm is already known, so the server answered the
+				// authenticated request with 401: the credentials
+				// themselves were refused (NimRTC extension, see the
+				// 0003-turn-allocation-failure-reason patch).
+				agent->turn_failure = JUICE_TURN_FAILURE_UNAUTHORIZED;
 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
 				agent_update_gathering_done(agent);
 				return -1;
 			}
 			if (*msg->credentials.realm == '\0' || *msg->credentials.nonce == '\0') {
 				JLOG_ERROR("Expected realm and nonce in TURN error response");
+				agent->turn_failure = JUICE_TURN_FAILURE_ALLOCATE;
 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
 				agent_update_gathering_done(agent);
 				return -1;
@@ -2074,6 +2092,10 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
 			           msg->msg_method == STUN_METHOD_ALLOCATE ? "Allocate" : "Refresh");
 			if (*msg->credentials.realm == '\0' || *msg->credentials.nonce == '\0') {
 				JLOG_ERROR("Expected realm and nonce in TURN error response");
+				// A 438 we cannot act on: the server asked for a fresh
+				// nonce and did not give one (NimRTC extension, see the
+				// 0003-turn-allocation-failure-reason patch).
+				agent->turn_failure = JUICE_TURN_FAILURE_STALE_NONCE;
 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
 				agent_update_gathering_done(agent);
 				return -1;
@@ -2095,6 +2117,7 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
 			if (!msg->alternate_server.len ||
 			    addr_record_is_equal(&msg->alternate_server, &entry->record, true)) {
 				JLOG_ERROR("Expected alternate server in TURN Allocate 300 Try Alternate response");
+				agent->turn_failure = JUICE_TURN_FAILURE_ALLOCATE;
 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
 				agent_update_gathering_done(agent);
 				return -1;
@@ -2102,6 +2125,7 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
 			// Prevent infinite redirection loop
 			if (entry->turn_redirections >= MAX_TURN_REDIRECTIONS) {
 				JLOG_ERROR("Too many redirections for TURN Allocate");
+				agent->turn_failure = JUICE_TURN_FAILURE_ALLOCATE;
 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
 				agent_update_gathering_done(agent);
 				return -1;
@@ -2126,6 +2150,11 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
 				          (unsigned int)msg->error_code);
 
 			JLOG_INFO("TURN allocation failed");
+			// Any other Allocate error (NimRTC extension, see the
+			// 0003-turn-allocation-failure-reason patch).  The server
+			// answered, so the transport was fine -- the allocation
+			// itself was refused.
+			agent->turn_failure = JUICE_TURN_FAILURE_ALLOCATE;
 			entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
 			agent_update_gathering_done(agent);
 		}

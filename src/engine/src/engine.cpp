@@ -844,6 +844,9 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
         return -1;
     }
     ice_t_->add_turn_server(host, port, username, password);
+    // The plain overload reaches the server over TURN/UDP (RFC 5766),
+    // which is what the seam does with it.
+    note_turn_transport(plugins::TurnTransport::Udp);
     return 0;
 }
 
@@ -857,7 +860,32 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
         return -1;
     }
     ice_t_->add_turn_server_with_transport(host, port, username, password, transport);
+    note_turn_transport(transport);
     return 0;
+}
+
+void NimRTCEngine::note_turn_transport(plugins::TurnTransport transport) noexcept {
+    // The transport this session uses is read from the engine's own
+    // record of what it configured — the same list it handed to the
+    // seam.  The first transport wins: a session that configures
+    // several TURN servers uses one of them, and reporting the last
+    // one added would make the field depend on call order.
+    if (turn_configured_) return;
+    turn_configured_ = true;
+    turn_transport_ = transport;
+    turn_transport_name_ = turn_transport_name_of(transport);
+}
+
+std::string_view NimRTCEngine::turn_transport_name_of(
+    plugins::TurnTransport transport) noexcept {
+    // The same three spellings the ICE module uses, so the field reads
+    // the same way in a log line as it does in a stats snapshot.
+    switch (transport) {
+        case plugins::TurnTransport::Udp: return "udp";
+        case plugins::TurnTransport::Tcp: return "tcp";
+        case plugins::TurnTransport::Tls: return "tls";
+    }
+    return {};
 }
 
 

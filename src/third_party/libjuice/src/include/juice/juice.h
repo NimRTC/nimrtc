@@ -172,6 +172,29 @@ typedef struct juice_turn_server {
 	const char *server_name;
 } juice_turn_server_t;
 
+// Why the last TURN allocation failed (NimRTC extension, see
+// src/third_party/libjuice/patches/0003-turn-allocation-failure-reason.patch).
+//
+// Upstream libjuice reports a failed allocation only through the log: the
+// Allocate response's error code is consumed inside
+// agent_process_turn_allocate() and the entry is simply marked FAILED.  A
+// host that wants to tell "the server refused my credentials" from "the
+// server is unreachable" from "the transport could not be opened" cannot
+// do so, because all three look identical from the outside.
+//
+// The classification happens here, in the only place that knows the
+// context: 401 is a credential problem, 438 is a stale nonce, and the
+// agent_turn_state_t::failed flag is a transport problem.  The host gets
+// the *category*, not the raw STUN error code -- the raw code table is
+// libjuice's business, and a host-facing surface should not leak it.
+typedef enum juice_turn_failure {
+	JUICE_TURN_FAILURE_NONE = 0,      // no allocation has failed
+	JUICE_TURN_FAILURE_UNAUTHORIZED,  // 401: the server refused the credentials
+	JUICE_TURN_FAILURE_STALE_NONCE,   // 438: the nonce went stale
+	JUICE_TURN_FAILURE_TRANSPORT,     // the transport could not be opened at all
+	JUICE_TURN_FAILURE_ALLOCATE,      // any other Allocate error
+} juice_turn_failure_t;
+
 typedef enum juice_concurrency_mode {
 	JUICE_CONCURRENCY_MODE_POLL = 0, // Connections share a single thread
 	JUICE_CONCURRENCY_MODE_MUX,      // Connections are multiplexed on a single UDP socket
@@ -225,6 +248,7 @@ JUICE_EXPORT int juice_get_selected_addresses(juice_agent_t *agent, char *local,
                                               char *remote, size_t remote_size);
 JUICE_EXPORT int juice_set_local_ice_attributes(juice_agent_t *agent, const char *ufrag, const char *pwd);
 JUICE_EXPORT const char *juice_state_to_string(juice_state_t state);
+JUICE_EXPORT juice_turn_failure_t juice_get_turn_failure(juice_agent_t *agent);
 JUICE_EXPORT int juice_mux_listen(const char *bind_address, int local_port, juice_cb_mux_incoming_t cb, void *user_ptr);
 
 // ICE server

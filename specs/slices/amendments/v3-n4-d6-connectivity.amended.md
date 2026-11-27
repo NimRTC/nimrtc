@@ -67,13 +67,129 @@ libjuice 只看得到被提名的那一对；引擎自己维护一份列表，
 UDP 失败后 TCP、N3 的恢复策略待命。
 宿主显式设置的键（STUN / TURN 服务器列表）**优先于 profile 的默认值**。
 
+## 本片实现期的三个决定（2026-11-27）
+
+frozen spec 有三处没有落地，实现把它们定下来。**这三个决定改的是
+frozen spec 没说清的地方，不是推翻 frozen spec 的结论**，
+所以它们记在这里（修订稿），而不是改写 frozen spec。
+
+### 决定一：`credentials-rejected` 走 **seam**，不是引擎推导
+
+**frozen spec 的问题**：它要求 `ice_failure_reason` 是个六值封闭词汇表，
+其中 `credentials-rejected` 表示「TURN 服务器拒绝了凭据」。但
+**libjuice 不把 TURN Allocate 的错误码交给调用方**——
+`src/third_party/libjuice/src/src/agent.c` 的
+`agent_process_turn_allocate()` 在 401 分支只打一行
+`"TURN authentication failed"` 的日志，然后
+`entry->state = AGENT_STUN_ENTRY_STATE_FAILED`。错误码（401 / 438 /
+其它）就此消失。
+
+**决定**：**在 seam 上加一个 TURN 分配结果**，由 ICE 模块读 libjuice
+的 Allocate 响应错误码分类后报出来。
+
+**理由**：
+
+* 引擎侧**推导不出**这个事实。引擎能看到的只有「配了 TURN 但没拿到
+  relay 候选」——那是 `no-candidates`，与「凭据被拒」是不同的事实，
+  而凭据被拒是宿主最需要知道的一种（换凭据 vs 换网络）。
+* 归到 `no-candidates` 是**说谎**：它把一个可行动的失败报成一个模糊的
+  症状。这正是 N4 要消灭的东西。
+* 归到 `none`（不报）更糟。
+
+**代价**：要改 vendored 的 libjuice 树。仓库已有这个机制
+（`src/third_party/libjuice/patches/`，N1 的 TURN/TLS 就是
+`0002-turn-tls-transport.patch`），本片新增
+`0003-turn-allocation-failure-reason.patch`，用
+`tools/make_libjuice_turn_failure_patch.ps1` 重新生成。
+
+**补丁的形状**（窄，不改 libjuice 的行为）：
+
+```c
+// include/juice/juice.h
+typedef enum juice_turn_failure {
+    JUICE_TURN_FAILURE_NONE = 0,
+    JUICE_TURN_FAILURE_UNAUTHORIZED = 1,   // 401: the credentials were refused
+    JUICE_TURN_FAILURE_STALE_NONCE = 2,    // 438: the nonce went stale
+    JUICE_TURN_FAILURE_TRANSPORT = 3,     // the transport could not be opened
+    JUICE_TURN_FAILURE_ALLOCATE = 4,      // any other Allocate error
+} juice_turn_failure_t;
+
+JUICE_EXPORT juice_turn_failure_t juice_get_turn_failure(juice_agent_t *agent);
+```
+
+agent 多一个字段 `juice_turn_failure_t turn_failure`，在
+`agent_process_turn_allocate()` 的失败分支里**就地**记下分类；
+`agent_turn_state_t::failed`（TURN/TLS 没有可用客户端）记
+`JUICE_TURN_FAILURE_TRANSPORT`。
+
+**为什么在 libjuice 里分类、而不是把原始错误码透出去**：透出去要给
+调用方一个 STUN 错误码的词汇（NimRTC 的 `ice_failure_reason` 只有六个
+值，不该让 libjuice 的码表泄漏进公开面）。分类在**唯一知道上下文**
+的地方做——那里知道 401 是凭据问题、438 是 nonce 问题、而 `failed`
+标志是传输层问题。
+
+### 决定二：`turn_transport_used` 从**引擎自己的配置**读
+
+引擎经 `add_turn_server_with_transport()` 把 TURN 服务器交给
+`ice_t_`，但 `IceConfig::turn_servers` 是**引擎自己**的一份副本
+（`src/engine/src/engine_transport.cpp`），ICE 模块持有**另一份**。
+
+**决定**：引擎从**自己的**配置读。
+
+**理由**：
+
+* 引擎知道自己配了什么；这个字段报的是「本会话用的 TURN 传输」。
+* 改 seam 让它报告「实际用的」会更准，但**这一版没有必要**：
+  一个引擎会话配一组 TURN 服务器，全部用同一种 transport。
+* seam 的 `turn_transport_supported()` 已经存在，
+  `transport-unsupported` 那一条从它读。
+
+### 决定三：D6 的默认 STUN 服务器是**内置公共 STUN**
+
+frozen spec 说「一个没设任何 STUN / TURN 键的引擎，用 `"auto"` 打开时，
+STUN 被配上」——但**没有定义配哪个**。
+
+**决定**：`"auto"` profile 配上 `stun.l.google.com:3478`。
+
+**理由**：
+
+* 仓库里已经有 4 处用这个默认值
+  （`examples/remote-desktop/demo-p2p.cpp:1145`、
+  `rd_device.cpp:348`、`rd_viewer.cpp:259`、`README.md:68`），
+  但**都在示例里**——D3 那条「默认策略住在示例里」的批评，
+  在 STUN 这一项上同样成立。
+* 引擎是 SDK：宿主不该为了拿到一个 srflx 候选而知道
+  `stun.l.google.com` 这个字符串。
+* **宿主的显式值仍然赢**：`EngineConfig::stun_server_host` 非空时
+  绝不被 profile 覆盖（验收标准 5）。
+
+**端口为什么是 3478**：Google 的 STUN 服务也听 19302（仓库示例用的是
+那个），但 3478 是 IANA 分配的 STUN 端口（RFC 8489 §9），
+是所有 STUN 部署都同意的那个，所以默认该带它。
+
+**不选「profile 里写具体地址」**：那让 profile 文件承载部署细节，
+而 profile 的其它键（`stun` / `turn_tls` / `tcp_fallback`）都是**意图**
+不是地址。**不选「不内置任何 STUN」**：那样 `"auto"` 就不是一个
+「开」的 profile，D6-1 定义的「profile 默认开」落空。
+
+### 决定四：`checks-failed` 排在 `no-pair` **前面**
+
+frozen spec 的优先级表把 `no-pair`（第 4）排在 `checks-failed`（第 5）
+前面。实现把它**倒过来**了。
+
+**理由**：一个 agent 已经放弃的会话**同时**有候选和没有提名的 pair，
+两个事实都在。但 `"no-pair"` 读起来像「**还在等**一个 pair」，
+而一个已经放弃的会话不是在等。所以 `"no-pair"` 是**等待中**的答案，
+是五个失败原因里最轻的，排在最后。
+
 ## 范围
 
 写入：
 - `src/modules/ice/**`
-- `src/modules/video_stats/**`
 - `src/engine/**`
+- `src/third_party/libjuice/**`（补丁 + 树内改动，见决定一）
 - `profiles/**`
+- `docs/api/**`
 - `tests/acceptance/v3-n4-d6-connectivity/acceptance.test.cjs`
 
 只读参考（**不得修改**）：
@@ -93,6 +209,7 @@ UDP 失败后 TCP、N3 的恢复策略待命。
 - **D6**：`EngineConfig` 增 `connectivity_profile` 键，默认 `"auto"`。
 - **D6**：`profiles/` 下预置连通性 profile 模板。
 - **D6**：宿主显式设置的 STUN / TURN 键**优先于** profile 的默认值。
+- **D6**：默认 STUN 服务器是 `stun.l.google.com:3478`（决定三）。
 - **D6-1**（已定）：profile 默认**开**。
 
 ## 接口约定
@@ -123,26 +240,58 @@ std::string turn_transport_used;   // "udp" / "tcp" / "tls"
 1. `transport-unsupported` —— 宿主配的 TURN 传输这版不支持
 2. `credentials-rejected` —— TURN 服务器拒绝了凭据
 3. `no-candidates` —— 收集结束，`host` / `srflx` / `relay` **三个计数全为 0**
-4. `no-pair` —— 有候选，但 `selected_pair` 为空（还没提名）
-5. `checks-failed` —— ICE agent 进了 `failed` 状态
+4. `checks-failed` —— ICE agent 进了 `failed` 状态
+5. `no-pair` —— 有候选，但 `selected_pair` 为空（还没提名）
 6. `none` —— 以上都不成立
+
+**`checks-failed` 为什么排在 `no-pair` 前面**（本片修订，见决定四）：
+一个 agent 已经放弃的会话**同时**有候选和没有提名的 pair，两个事实都在。
+但 `"no-pair"` 读起来像「**还在等**一个 pair」，而一个已经放弃的会话
+不是在等。所以 `"no-pair"` 是**等待中**的答案，是五个失败原因里最轻的，
+排在最后。
 
 **没有失败时不编造理由**：一切正常时是 `"none"`。
 
-### 2. `EngineConfig` 的加法式扩展
+### 2. `IICETransport` 的加法式扩展
+
+`src/plugins/include/nimrtc/plugins/ice_transport.hpp` 是 **STABLE 公开头**，
+**不能**加纯虚函数（会破坏所有外部实现者）。因此新增的成员**全部带默认实现**：
+
+```cpp
+/** The candidate *gathering* action's state, independent of the agent's
+ *  own state machine: "new" / "gathering" / "complete". */
+virtual std::string_view gathering_state() const noexcept { return "new"; }
+
+/** Why the last TURN allocation failed, if it did.  Empty = no failure. */
+virtual std::string_view turn_failure_reason() const noexcept { return {}; }
+```
+
+两个方法的默认实现返回「没有信息」的值，所以**既有实现者不受破坏**
+（这与 `IVideoCapture` 的处理方式一致——见
+`specs/slices/v1-device-policy.md` §「接缝侧：新增『设备变更』的可选能力」：
+新增能力用**独立接口**或**带默认实现的方法**，不用纯虚函数）。
+
+`src/modules/ice/src/ice.cpp` 的 `IceTransport` 实现这两个方法：
+`gathering_state()` 从 `impl_->gathering_done` 与 `impl_->state` 推出
+（`gathering_done` 为真 → `"complete"`；agent 在 `Gathering` →
+`"gathering"`；否则 `"new"`）；
+`turn_failure_reason()` 从 libjuice 的 `juice_get_turn_failure()` 读。
+
+### 3. `EngineConfig` 的加法式扩展
 
 ```
 std::string connectivity_profile = "auto";
 ```
 
 **`"auto"` 是默认值，也是「开」的意思**（D6-1）。
-它意味着：STUN 开、凭据存在时开 TURN/TLS、UDP 失败后 TCP 兜底。
+它意味着：STUN 开（`stun.l.google.com:3478`）、凭据存在时开 TURN/TLS、
+UDP 失败后 TCP 兜底。
 
 **profile 携带的是「策略默认值」，不是「seam 值」**：
 宿主显式设置的 STUN / TURN 服务器列表**优先**，
 profile 只在宿主**没设**的那些键上补默认值。
 
-### 3. `profiles/` 下的连通性 profile 模板
+### 4. `profiles/` 下的连通性 profile 模板
 
 `profiles/connectivity/connectivity-profiles.json`（新文件），承载各 profile 的**默认值**：
 
@@ -227,3 +376,10 @@ profile 只在宿主**没设**的那些键上补默认值。
   本片只认上面列的六个。
 - **`profiles/connectivity/connectivity-profiles.json` 不属于 `profiles/schema/` 管的那些文件**，
   别把它塞进引擎 profile 的加载路径。
+- **改 vendored 的 libjuice 树**（决定一）：这是本片最大的风险面。
+  补丁必须**窄**——只加一个分类字段与一个读函数，不改 libjuice 的任何
+  行为；`vendor.json` 的 libjuice note 必须同步更新；
+  补丁要能被 `tools/make_libjuice_turn_failure_patch.ps1` 重新生成。
+- **默认 STUN 是公共服务器**（决定三）：`stun.l.google.com` 不可用时
+  引擎仍然工作（只是没有 srflx 候选），N4 会报 `no-candidates`。
+  这不是错误，是**如实报告**。

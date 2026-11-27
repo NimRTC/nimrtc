@@ -2853,6 +2853,64 @@ endif()
 nimrtc_copy_wolfssl_certs(test_engine_transport_stats)
 
 # ---------------------------------------------------------------------------
+# v1.4 plan N4 / D6 -- the connectivity diagnostics: the gathering
+# action's state, the candidate counts by type, the closed failure
+# vocabulary, and the TURN transport in use.
+#
+# The engine is driven through a fake ICE transport whose gathering
+# state, candidate list, nominated pair and TURN failure the test
+# controls, so every answer on the surface is one the test placed
+# there -- no handshake, no STUN server, no network.
+# ---------------------------------------------------------------------------
+add_executable(test_engine_connectivity_diagnostics
+    test_engine_connectivity_diagnostics.cpp)
+if(WIN32)
+    target_link_libraries(test_engine_connectivity_diagnostics PRIVATE ws2_32)
+elseif(APPLE)
+    target_link_libraries(test_engine_connectivity_diagnostics PRIVATE c++ pthread)
+else()
+    target_link_libraries(test_engine_connectivity_diagnostics PRIVATE atomic)
+endif()
+target_link_libraries(test_engine_connectivity_diagnostics PRIVATE
+    nimrtc::engine
+    nimrtc::ice
+    nimrtc::rtp
+    nimrtc::sdp
+    nimrtc::jb
+    nimrtc::audio3a
+    nimrtc::dtls_seam
+    nimrtc::sctp
+    nimrtc::raw_udp
+    nimrtc::transport
+    nimrtc::datachannel
+    nimrtc::net_feedback
+    nimrtc::web_transport
+    nimrtc::session
+    nimrtc::dtls
+    GTest::gtest_main)
+target_include_directories(test_engine_connectivity_diagnostics PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+  target_compile_definitions(test_engine_connectivity_diagnostics PRIVATE
+      _WIN32_WINNT=0x0601)
+endif()
+set_target_properties(test_engine_connectivity_diagnostics PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+nimrtc_apply_options(test_engine_connectivity_diagnostics LENIENT)
+add_test(NAME test_engine_connectivity_diagnostics
+    COMMAND $<TARGET_FILE:test_engine_connectivity_diagnostics>)
+set_tests_properties(test_engine_connectivity_diagnostics PROPERTIES TIMEOUT 90)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_connectivity_diagnostics
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 60)
+endif()
+nimrtc_copy_wolfssl_certs(test_engine_connectivity_diagnostics)
+
+# ---------------------------------------------------------------------------
 # v1.2.0 audio pipeline WP-9 — the cross-end capture timestamp of an
 # inbound audio frame (spec B-17).
 #

@@ -227,6 +227,61 @@ public:
      *  bodies (each entry starts with "candidate:" or "a=candidate:"). */
     virtual std::vector<std::string> gathered_local_candidates() const noexcept = 0;
 
+    /** The candidate *gathering* action's own state, independent of the
+     *  agent's state machine.
+     *
+     *  Three values:
+     *
+     *    - `"new"`      -- gathering has not started (or the transport
+     *                     carries no gathering action at all);
+     *    - `"gathering"` -- candidates are being collected right now;
+     *    - `"complete"` -- gathering finished.
+     *
+     *  This is deliberately **not** `state()`: the agent's state machine
+     *  (RFC 8445 §6) is about the *session* (connecting, connected,
+     *  failed), while this is about the *collection* (RFC 8445 §5.1.1).
+     *  The two are independent -- an agent can be `connected` and still
+     *  be `gathering`, because a server-reflexive candidate may arrive
+     *  after the path is already up (RFC 8445 §5.1.1.5).  A host
+     *  diagnosing "why is there no srflx candidate yet" needs the
+     *  collection's state, and reading it off the agent's state machine
+     *  would answer a different question.
+     *
+     *  The default implementation returns `"new"`, so an implementation
+     *  that does not track the collection separately is not wrong -- it
+     *  simply reports nothing.
+     */
+    virtual std::string_view gathering_state() const noexcept { return "new"; }
+
+    /** Why the last TURN allocation failed, if it did.
+     *
+     *  Empty means "no allocation has failed" -- which is the normal
+     *  case, and also the case for a session that never configured a
+     *  TURN server.
+     *
+     *  The values are a **closed vocabulary**:
+     *
+     *    - `"credentials-rejected"` -- the TURN server refused the
+     *      credentials (RFC 8489 §9.2.4: a 401 on an authenticated
+     *      request);
+     *    - `"stale-nonce"` -- the server asked for a fresh nonce and
+     *      did not give one (RFC 8489 §9.2.4: a 438);
+     *    - `"transport-unavailable"` -- the transport to the TURN server
+     *      could not be opened at all, so the server was never reached;
+     *    - `"allocate-refused"` -- the server answered and refused the
+     *      allocation for some other reason.
+     *
+     *  The distinction matters because each calls for a different
+     *  action: refresh the credential, try another path, fix the TLS
+     *  client, or look at the server.  A seam that reported only "the
+     *  allocation failed" would collapse all four into one.
+     *
+     *  The default implementation returns an empty string, so an
+     *  implementation that does not track the failure is not wrong -- it
+     *  simply reports nothing.
+     */
+    virtual std::string_view turn_failure_reason() const noexcept { return {}; }
+
     // ---- Remote SDP / candidates -----------------------------------------
 
     /** Apply a remote ICE description block. `ice_block` is the raw SDP

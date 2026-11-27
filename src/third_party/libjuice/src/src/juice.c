@@ -104,6 +104,13 @@ JUICE_EXPORT int juice_send_diffserv(juice_agent_t *agent, const char *data, siz
 
 JUICE_EXPORT juice_state_t juice_get_state(juice_agent_t *agent) { return agent_get_state(agent); }
 
+JUICE_EXPORT juice_turn_failure_t juice_get_turn_failure(juice_agent_t *agent) {
+	if (!agent)
+		return JUICE_TURN_FAILURE_NONE;
+
+	return agent_get_turn_failure(agent);
+}
+
 JUICE_EXPORT int juice_get_selected_candidates(juice_agent_t *agent, char *local, size_t local_size,
                                                char *remote, size_t remote_size) {
 	if (!agent || (!local && local_size) || (!remote && remote_size))

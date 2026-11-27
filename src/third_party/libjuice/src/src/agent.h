@@ -181,6 +181,12 @@ struct juice_agent {
 	timestamp_t nomination_timestamp;
 	bool gathering_done;
 
+	// Why the last TURN allocation failed, if it did (NimRTC extension,
+	// see the 0003-turn-allocation-failure-reason patch).  The category
+	// is recorded where the failure is detected, so a host can tell a
+	// refused credential from an unreachable server.
+	juice_turn_failure_t turn_failure;
+
 	conn_registry_t *registry;
 	int conn_index;
 	void *conn_impl;
@@ -208,6 +214,7 @@ int agent_relay_send(juice_agent_t *agent, agent_stun_entry_t *entry, const addr
 int agent_channel_send(juice_agent_t *agent, agent_stun_entry_t *entry, const addr_record_t *dst,
                        const char *data, size_t size, int ds);
 juice_state_t agent_get_state(juice_agent_t *agent);
+juice_turn_failure_t agent_get_turn_failure(juice_agent_t *agent);
 int agent_get_selected_candidate_pair(juice_agent_t *agent, ice_candidate_t *local,
                                       ice_candidate_t *remote);
 

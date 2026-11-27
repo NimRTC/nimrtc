@@ -40,10 +40,14 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <nimrtc/core/time.hpp>
+
+#include <nimrtc/plugins/audio_sink.hpp>
+#include <nimrtc/plugins/audio_source.hpp>
 
 #include "audio_routing.hpp"
 #include "engine_audio_stream_state.hpp"
@@ -362,6 +366,108 @@ struct AudioState {
     //
     // See `engine_audio_stream_state.hpp`.
     AudioStreamState audio_streams;
+
+    // ---- The audio devices (v1.4 D1, ADR-028) ------------------------
+    //
+    // The capture device (microphone) and the playback device
+    // (loudspeaker) the engine resolved and opened.  They live here
+    // rather than as members of `Impl` because they belong to the audio
+    // plane — and because `engine_impl.hpp` has no room left (the
+    // §4.3 split's 400-line budget is at 399).
+    //
+    // Null when the corresponding `EngineConfig` name is "none" (the
+    // explicit opt-out) or when the device could not be opened.  The
+    // engine keeps going in both cases: a machine with no sound card
+    // must not take down a video call.
+    std::unique_ptr<plugins::IAudioSource> audio_source;
+    std::unique_ptr<plugins::IAudioSink>   audio_sink;
+
+    /** The id of the capture device the engine opened ("" = none). */
+    std::string audio_source_device_id;
+
+    /** The id of the playback device the engine opened ("" = none). */
+    std::string audio_sink_device_id;
+
+    /** The capture request as the device *negotiated* it.
+     *
+     *  The configuration handed to the factory is a *request*; after
+     *  `open()` succeeds the device reports what it actually got, and
+     *  the engine reads it back rather than assuming the request was
+     *  granted (a device may have to fall back to a different rate or
+     *  channel count). */
+    plugins::AudioSourceConfig audio_source_negotiated;
+
+    /** The playback request as the device *negotiated* it. */
+    plugins::AudioSinkConfig audio_sink_negotiated;
+
+    /** True once the device plane has been brought up.
+     *
+     *  It distinguishes "the host asked for no device" (the "none"
+     *  opt-out) from "the device plane has not run yet", so a second
+     *  `open()` does not retry a resolution the host declined. */
+    bool audio_devices_initialized = false;
+
+    /** The buffer the capture pump reads the device's frames into.
+     *
+     *  It is the engine's own buffer rather than the send path's
+     *  scratch (`scratch.audio_pcm_buf`), because `send_audio()` owns
+     *  that one for the duration of its call. */
+    std::vector<float> audio_capture_scratch;
+
+    /** The device's drop counter as the pump last accounted for it. */
+    std::uint64_t audio_capture_seen_dropped = 0;
+
+    /** The device's own "frames produced" counter as the pump last saw it.
+     *
+     *  It is the *baseline* for the device's own accounting: the device
+     *  restarts its counter when it is reopened, so the baseline has to
+     *  follow or the next delta would be a huge underflowed number. */
+    std::uint64_t audio_capture_seen_frames = 0;
+
+    /** The device's error counter as the pump last accounted for it. */
+    std::uint64_t audio_capture_seen_device_errors = 0;
+
+    /** The sink's drop counter as the engine last accounted for it. */
+    std::uint64_t audio_playback_seen_dropped = 0;
+
+    // ---- The audio device counters (v1.4 D1) -------------------------
+    //
+    // The capture half mirrors the video capture device's counters
+    // (`engine_video_state.hpp`), so a host reads the two device kinds
+    // the same way.
+    std::uint64_t audio_capture_frames        = 0;  // frames pulled from the device
+    std::uint64_t audio_capture_frames_sent   = 0;  // frames handed to the encoder
+    std::uint64_t audio_capture_dropped       = 0;  // queue-overflow drops
+    std::uint64_t audio_capture_device_errors = 0;  // device-lost / read errors
+    std::uint64_t audio_capture_restarts      = 0;  // times the device was reopened
+
+    /** Frames handed to the playback device. */
+    std::uint64_t audio_playback_frames_written = 0;
+
+    /** Frames the playback device dropped (its queue overflowed). */
+    std::uint64_t audio_playback_frames_dropped = 0;
+
+    /** The number of times the playback device refused a block.
+     *
+     *  A device that refuses a block is a *device* problem: the stream
+     *  keeps flowing and the host's own callback still gets the PCM. */
+    std::uint64_t audio_playback_write_errors = 0;
+
+    /** Samples the playback device actually consumed.
+     *
+     *  This is the number the AEC reference must track: "the samples
+     *  the loudspeaker played" is not "the samples the engine
+     *  handed over" (remote-desktop plans F3 / F4). */
+    std::uint64_t audio_playback_samples_played = 0;
+
+    /** The last played-out sample count the engine reported to the 3A.
+     *
+     *  The 3A's render reference is a *cumulative* count, so the
+     *  engine reports the device's cumulative figure rather than a
+     *  per-frame delta.  This member remembers what was last reported
+     *  so a device whose counter went backwards (a re-opened device
+     *  restarts at zero) does not make the reference run backwards. */
+    std::uint64_t audio_render_delivered_reported = 0;
 };
 
 }  // namespace nimrtc::engine::detail

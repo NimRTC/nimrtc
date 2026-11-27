@@ -146,6 +146,15 @@ class NIMRTC_API_STABLE IAudioReceiverFactory;
 // The engine drives renegotiation through this interface and never
 // includes `src/modules/session/`'s headers (Layout Invariant 4).
 class NIMRTC_API_STABLE ISessionFactory;
+// v1.4 D1 (ADR-028): the two audio-device seams -- the capture device
+// (microphone) and the playback device (loudspeaker).  The engine
+// resolves them through the registry so it never includes
+// `src/modules/audio_device/`'s headers (Layout Invariant 4).
+// Forward-declared like the other factory types so the registry's
+// TypedRegistry<> fields can reference them without pulling the seam
+// headers into core (Layout Invariant 1).
+class NIMRTC_API_STABLE IAudioSourceFactory;
+class NIMRTC_API_STABLE IAudioSinkFactory;
 // v1.2.0 (session capability plan, D1 / D2): the RFC 4733
 // (telephone-event) seam.  A telephone-event payload is *not* audio, so
 // it does not belong to the audio-decoder category -- it has its own
@@ -231,6 +240,13 @@ namespace video_source    { void register_default_plugins() noexcept; }
 // Remote-desktop plan A1: the capture-device module.
 #ifdef NIMRTC_HAS_VIDEO_CAPTURE
 namespace video_capture   { void register_default_plugins() noexcept; }
+#endif
+// v1.4 D1 (ADR-028): the audio-device module.  Its entry point
+// populates the registry's audio-source / audio-sink slots, so the
+// engine can resolve a device backend through the seam without naming
+// a concrete module (Layout Invariant 4).
+#ifdef NIMRTC_HAS_AUDIO_DEVICE
+namespace audio_device    { void register_default_plugins() noexcept; }
 #endif
 // Remote-desktop plan D1: the video rate controller module.
 #ifdef NIMRTC_HAS_VIDEO_BITRATE_CONTROL
@@ -717,6 +733,41 @@ public:
         return video_sink_.list_ids();
     }
 
+    // -- Audio Source (v1.4 D1) --------------------------------------------
+    //
+    // The capture-device seam: the engine resolves the microphone
+    // through this slot (ADR-028), so it never names a concrete audio
+    // module (Layout Invariant 4).  The built-in module registers
+    // "portaudio", "synthetic", "system-audio" and
+    // "synthetic-system-audio"; the engine resolves it through
+    // `EngineConfig::audio_source_name`.
+    void register_audio_source(std::string_view id,
+                               const plugins::IAudioSourceFactory* f);
+    [[nodiscard]] const plugins::IAudioSourceFactory*
+    get_audio_source(std::string_view id) const {
+        return audio_source_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string> list_audio_sources() const {
+        return audio_source_.list_ids();
+    }
+
+    // -- Audio Sink (v1.4 D1) ----------------------------------------------
+    //
+    // The playback-device seam: the engine resolves the loudspeaker
+    // through this slot (ADR-028), so it never names a concrete audio
+    // module (Layout Invariant 4).  The built-in module registers
+    // "portaudio" and "synthetic"; the engine resolves it through
+    // `EngineConfig::audio_sink_name`.
+    void register_audio_sink(std::string_view id,
+                             const plugins::IAudioSinkFactory* f);
+    [[nodiscard]] const plugins::IAudioSinkFactory*
+    get_audio_sink(std::string_view id) const {
+        return audio_sink_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string> list_audio_sinks() const {
+        return audio_sink_.list_ids();
+    }
+
     // -- Video bitrate controller (remote-desktop plan D1) ---------------
     //
     // Typed slot for `plugins::IVideoBitrateControllerFactory*` — the
@@ -1094,6 +1145,12 @@ private:
     // selection and dirty-rect metadata.
     TypedRegistry<plugins::IVideoCaptureFactory> video_capture_{"video-capture"};
     TypedRegistry<plugins::IVideoSinkFactory>    video_sink_{"video-sink"};
+    // v1.4 D1 (ADR-028): the audio-device slots.  They are separate
+    // slots rather than variants of one, because a capture device is
+    // not a playback device: a host that asks for the microphone never
+    // gets the system output by accident.
+    TypedRegistry<plugins::IAudioSourceFactory> audio_source_{"audio-source"};
+    TypedRegistry<plugins::IAudioSinkFactory>   audio_sink_{"audio-sink"};
     // Remote-desktop plan D1: the video rate controller slot.  The
     // built-in ladder controller registers under "video-bitrate-control".
     TypedRegistry<plugins::IVideoBitrateControllerFactory>
@@ -1383,6 +1440,26 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kVideoSink,      \
             #id, factory_ptr }
 
+/** Register an audio capture-device plugin by ID and factory pointer
+ *  (v1.4 D1, ADR-028). */
+#define NIMRTC_REGISTER_AUDIO_SOURCE(id, factory_ptr)                    \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_audio_source_){                          \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kAudioSource,   \
+            #id, factory_ptr }
+
+/** Register an audio playback-device plugin by ID and factory pointer
+ *  (v1.4 D1, ADR-028). */
+#define NIMRTC_REGISTER_AUDIO_SINK(id, factory_ptr)                      \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_audio_sink_){                            \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kAudioSink,     \
+            #id, factory_ptr }
+
 /** Register a video rate-controller plugin by ID and factory pointer
  *  (remote-desktop plan D1). */
 #define NIMRTC_REGISTER_VIDEO_BITRATE_CONTROLLER(id, factory_ptr)        \
@@ -1670,7 +1747,12 @@ public:
         kWebTransport,
         // v1.2.0 (remediation plan B7 / Q3): the SRTP crypto backend
         // seam -- see register_srtp_backend().
-        kSrtpBackend
+        kSrtpBackend,
+        // v1.4 D1 (ADR-028): the two audio-device seams.  They have
+        // their own categories because a capture device and a playback
+        // device are different devices: a host that asks for the
+        // microphone must never get the system output by accident.
+        kAudioSource, kAudioSink
     };
 
     Registrar(core::PluginRegistry& reg, Category cat,
@@ -1811,6 +1893,14 @@ public:
             case Category::kSrtpBackend:
                 reg.register_srtp_backend(id,
                     static_cast<const plugins::ISrtpBackendFactory*>(factory));
+                break;
+            case Category::kAudioSource:
+                reg.register_audio_source(id,
+                    static_cast<const plugins::IAudioSourceFactory*>(factory));
+                break;
+            case Category::kAudioSink:
+                reg.register_audio_sink(id,
+                    static_cast<const plugins::IAudioSinkFactory*>(factory));
                 break;
         }
     }

@@ -107,11 +107,18 @@ PROBES: list[tuple[str, str, str, str, str]] = [
      "src/engine", "set_on_path_change|path_changed"),
 
     # -- D1: the engine runs the device layer --------------------------
-    ("D1", "the engine never opens an audio device", "absent",
+    #
+    # D1 closed on 2026-11-27: the engine owns the audio device
+    # layer, so the claim flipped the same way N5's and D2's did.
+    # "present" is how a *finished* item is recognised -- a plan
+    # that says "this does not exist" and a tree that has it is a
+    # plan that is out of date, and the row says so rather than
+    # quietly passing.
+    ("D1", "the engine runs the audio device layer", "present",
      "src/engine", "IAudioSource|IAudioSink"),
-    ("D1", "the engine has no audio-source config key", "absent",
+    ("D1", "the engine has an audio-source config key", "present",
      "src/engine", "audio_source_name"),
-    ("D1", "the engine has no audio-sink config key", "absent",
+    ("D1", "the engine has an audio-sink config key", "present",
      "src/engine", "audio_sink_name"),
 
     # -- D2: the engine runs the renderer ------------------------------

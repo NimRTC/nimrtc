@@ -192,6 +192,15 @@ namespace nimrtc::engine::detail {
     X(audio_jitter_ms, core::StatSemantics::kGauge)                                  \
     X(audio_playout_delay_ms, core::StatSemantics::kGauge)                           \
     X(audio_encoder_bitrate_bps, core::StatSemantics::kGauge)                        \
+    /* ---- The audio devices (v1.4 D1) ---- */                                     \
+    X(audio_capture_frames, core::StatSemantics::kCumulative)                       \
+    X(audio_capture_frames_sent, core::StatSemantics::kCumulative)                  \
+    X(audio_capture_dropped, core::StatSemantics::kCumulative)                      \
+    X(audio_capture_device_errors, core::StatSemantics::kCumulative)                \
+    X(audio_capture_restarts, core::StatSemantics::kCumulative)                     \
+    X(audio_playback_frames_written, core::StatSemantics::kCumulative)             \
+    X(audio_playback_frames_dropped, core::StatSemantics::kCumulative)             \
+    X(audio_playback_samples_played, core::StatSemantics::kCumulative)            \
     /* ---- The network-feedback / BWE loop ---- */                                  \
     X(net_feedback_blocks, core::StatSemantics::kCumulative)                         \
     X(bwe_feedback_samples, core::StatSemantics::kCumulative)                        \

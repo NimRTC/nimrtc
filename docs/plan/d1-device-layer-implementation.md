@@ -1,10 +1,15 @@
 # D1 实施拆解 — 引擎运行设备层
 
-> **状态**：草案，2026-11-25。
+> **状态**：**已落地**，2026-11-27。
 > **归属**：v1.4 Track D，波次 1。
 > **决策依据**：[ADR-028](../adr/ADR-028-audio-device-plugin-registry.md)（音频设备后端并入 `core::PluginRegistry`）。
 > **计划源**：`docs/plan/v1.4-plan.md` §4（D1）、§5（D1-1）、§6。
 > **缺口源**：`docs/plan/post-v1.4-gap-inventory.md` §1.2.1–1.2.6。
+>
+> **落地说明（2026-11-27）**：本文的七步与四个 pump 章节全部实现。
+> 落地时的**偏差**记录在 §12：默认配置的键值语义、空串 vs `"none"`
+> 的取舍、`engine_impl.hpp` 的成员归属、测试与 CMake 链接的补充。
+> §1 的「现状」是**决策前**的快照，读时请按 §12 的对照看。
 
 ---
 
@@ -819,7 +824,52 @@ D4 做的热插拔（设备掉了干净失败、之后重开）在音频侧**没
 
 ---
 
-## 11. 文档版本
+## 11. 落地记录（2026-11-27）
+
+D1 已落地。本文 §3 的七个步骤与 §4 的四个 pump 章节全部实现，测试
+`tests/test_engine_audio_device.cpp` 全绿（10/10），全树 `ctest`
+2305 通过 / 0 失败。
+
+### 12.1 与本文的偏差
+
+| 本文说 | 落地为 | 为什么 |
+|---|---|---|
+| §3 步骤 5：`audio_source_name` 默认 `"portaudio"`，空串 = 默认设备，`"none"` = 显式关闭 | **一致** | — |
+| §4.4 的 `Stats` 字段名 | 落地时多了一个 `audio_playback_frames_dropped` 之外的 `audio_playback_write_errors`（内部计数器，未进 `Stats`） | 播放设备拒收一块 PCM 是**设备问题**，计数器放在引擎内部即可 |
+| §4.5：`recover_audio_device()` 与 `audio_capture_restarts` 恒为 0，留给 D4 | **不是恒为 0** —— `recover_audio_device()` **已实现**：设备错误计数增长时关闭并重开设备，`audio_capture_restarts` 随之增长 | 设备掉了"干净失败"本来就是 D1 的 DoD 的一部分（D4 是**热插拔通知**，不是重开）。留一个恒为 0 的函数比实现它更危险 |
+| §4.3 的 AEC 对齐：设备路径存在时**只有**设备路径报 `set_render_delivered()` | **一致**，且报的是**增量**（sink 的 `played_samples()` 是累计值） | 累计值直接报给 3A 会让参考计数按平方增长 |
+| §6.2 的待确认项：`send_audio()` 的线程约定 | **确认**：pump 在引擎 tick 线程上调用 `send_audio()`，与宿主的调用不并发（引擎的 tick 线程是单线程的） | — |
+| §7.1 的「`set_render_delivered` 不重复」测试 | **未单独写** —— 改为在泵的代码里保证：设备路径存在时，宿主回调路径**不再**报 | 正确的做法是让代码不可能重复，而不是让测试证明它不重复 |
+| §7.1 的「行数预算」 | **通过** —— `engine_impl.hpp` **零改动**，仍是 399/400 行 | §6.4 的方案成立：设备成员全在 `detail::AudioState` 里 |
+
+### 12.2 落地时发现并修掉的问题
+
+1. **后端不写回解析出的设备身份。** 合成 / 系统音频 / PortAudio 后端
+   在 `device_id` 为空（请求默认设备）时把 `cfg_.device_id` 留空，于是
+   `Stats::audio_source_device_id` 是空串——**"统计里能看到两个设备"
+   这条 DoD 落空了**。修法：后端把解析出的真实身份写回
+   （`synthetic:0` / `portaudio:<idx>` / `system-audio:wasapi:<idx>`），
+   对齐 `SyntheticCapture` / `CameraCapture` 的既有约定。
+2. **`transport_strategy_name = "shell"` 会让需要 DTLS 的测试拿不到
+   连接。** shell 工厂完全绕过 ICE/DTLS，`send_audio()` 因此返回
+   `kEngineNotReady`。修法：测试的 `connected_config()` 清掉这个哨兵值。
+3. **设备缺失是 `Warn` 而不是 `Error`。** 计划 §6 规定设备开不了只
+   告警（没有声卡的 CI 机器不该让通话失败）。测试因此断言的是
+   **告警日志 + `audio_source() == nullptr`**，而不是 `on_error` 回调。
+
+### 12.3 链接上的一个坑
+
+`nimrtc_core_objects` 装着 `pal_default_registrars.cpp`，而
+`NIMRTC_HAS_AUDIO_DEVICE=1` 时 `kDefaultRegistrars[]` 引用
+`nimrtc::audio_device::register_default_plugins()`。**任何直接链接
+`nimrtc_core_objects` 而不链接 `nimrtc::audio_device` 的目标都会
+LNK2001**——`test_registry_contract` 与 `test_plugin_id_contract` 就是
+这样。修法：`tests/CMakeLists.txt` 的模块链接表里加上 `audio_device`。
+
+---
+
+## 12. 文档版本
 
 2026-11-25 初稿。
 基线：`main` @ `836830e4`（`v1.3.1` 之后）。
+2026-11-27 落地，§12 记落地偏差。

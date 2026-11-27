@@ -49,6 +49,8 @@ PAL is split into two layers:
    a type-typed registry with one slot per plugin family:
    - `register_audio3a(id, factory*)` / `get_audio3a(id)`
    - `register_codec(id, factory*)` / `get_codec(id)`
+   - `register_audio_source(id, factory*)` / `get_audio_source(id)`
+   - `register_audio_sink(id, factory*)` / `get_audio_sink(id)`
    - `register_video_source(id, factory*)` / …sink/receiver/sender/codec
    - `register_dtls_session(id, factory*)` / `get_dtls_session(id)`
    - `register_sctp_socket(id, factory*)` / `get_sctp_socket(id)`
@@ -234,6 +236,8 @@ by an empty config knob.
 | DTMF codec   | `plugins/dtmf.hpp`                               | `dtmf_codec_name`           | `NIMRTC_REGISTER_DTMF`        | logged | `dtmf`. The RFC 4733 telephone-event codec. |
 | Jitter buffer | `plugins/jb.hpp`                                 | `jb_name`                   | `NIMRTC_REGISTER_JB`           | reported | `adaptive` is the v0.11.0 default. Resolved inside the audio-receiver module; a missing plugin makes the receiver report `kAudioReceiverMissing`. |
 | Audio 3A     | `plugins/audio3a.hpp`                            | `audio3a_name`              | `NIMRTC_REGISTER_AUDIO3A`      | logged | `webrtc_apm`, plus `webrtc` (Null stub). See §6.2. A missing plugin falls back to the concrete `NullAudio3A`; an *open* failure fires `on_error`. |
+| Audio source | `plugins/audio_source.hpp`                       | `audio_source_name`         | `NIMRTC_REGISTER_AUDIO_SOURCE` | logged | The capture *device* seam (v1.4 D1, ADR-028). Default = `"portaudio"`; empty = the backend's default input device; `"none"` = the explicit opt-out, so a host that feeds PCM by hand keeps working. A missing plugin or a failed `open()` **only warns** — a machine with no sound card still runs the session. The engine pumps the frames into `send_audio()`. |
+| Audio sink   | `plugins/audio_sink.hpp`                         | `audio_sink_name`           | `NIMRTC_REGISTER_AUDIO_SINK`   | logged | The playback *device* seam (v1.4 D1, ADR-028). Default = `"portaudio"`; empty = the backend's default output device; `"none"` = the explicit opt-out. Same warn-don't-fail policy as the source. The engine writes the decoded PCM to it and reports the sink's **consumed** sample count to the 3A's render reference, so the AEC reference tracks the speaker rather than the callback. |
 | Codec (audio)| `plugins/codec.hpp`                              | `codec_name`                | `NIMRTC_REGISTER_CODEC`        | logged | `opus`, `pcmu` (fallback). A missing plugin makes `send_audio()` report the frame as lost (throttled) rather than substituting a codec. |
 | Video codec  | `plugins/video_codec.hpp`                        | `video_codec_name`          | `NIMRTC_REGISTER_VIDEO_CODEC`  | reported | `h264` (P1 reference). |
 | Video encoder| `plugins/video_codec.hpp` (`IVideoEncoderFactory`) | `video_codec_name`        | `NIMRTC_REGISTER_VIDEO_ENCODER` | reported | The *encode half* of the split codec seam (remote-desktop plan B1). A plugin that implements both directions registers the same id in this slot **and** in `NIMRTC_REGISTER_VIDEO_DECODER`; a plugin that implements only one registers only that one — the engine then has no half for the other direction, which is the honest answer for an asymmetric deployment (a camera gateway encodes and never decodes). |

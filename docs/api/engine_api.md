@@ -760,8 +760,60 @@ by their length field, never an error — see §8.6.
 The codec-control-message family (RFC 5104) is **partially**
 implemented: `tmmbr` is supported, `fir` / `tstr` / `tstn` / `vbcm`
 are not.  An `a=rtcp-fb:` entry that names an unsupported CCM
-parameter has that *parameter* removed from the answer — the rest of
+parameter has that *parameter* removed from the answer - the rest of
 the entry survives (RFC 5104 section 7.2).
+
+### 8.9 The audio device plane (v1.4 D1)
+
+The engine owns the microphone and the loudspeaker.  It resolves them by
+name through the registry (`EngineConfig::audio_source_name` /
+`audio_sink_name`), opens them, and pumps them itself - so a host that
+configures nothing gets a working capture-and-playback session.
+
+```cpp
+NIMRTC_API_UNSTABLE plugins::IAudioSource* audio_source() noexcept;
+NIMRTC_API_UNSTABLE plugins::IAudioSink*   audio_sink() noexcept;
+
+NIMRTC_API_STABLE std::vector<plugins::AudioDevice>
+    audio_capture_devices() const noexcept;
+NIMRTC_API_STABLE std::vector<plugins::AudioDevice>
+    audio_playback_devices() const noexcept;
+```
+
+`audio_source()` / `audio_sink()` return the device the engine holds, or
+`nullptr` when the name was `"none"` or the device could not be opened.
+The enumeration calls return the devices the resolved device can see; an
+**empty list is a legitimate answer** (a CI machine with no sound card),
+not an error.
+
+**The paths are parallel, not alternatives.**  The device path is
+*appended* to the host's `set_on_audio_frame()` callback: a host that
+installs the callback keeps receiving the decoded PCM, and the PCM also
+goes to the loudspeaker.  A host that wants the device path *only* sets
+`audio_sink_pump = false`.
+
+**The AEC reference follows the loudspeaker.**  With a playback device
+present, the engine reports the sink's **consumed** sample count to the
+3A's render reference (not "the samples were handed to the host"), which
+is what keeps the echo canceller's reference aligned with what was
+actually played.  Without a device, the host-callback path reports it as
+before.
+
+**A device failure is not a session failure.**  A device that will not
+open, or that disappears mid-call, is a warning and a counter - the
+session keeps running, and the host can still feed PCM by hand.
+
+The statistics live in `Stats`:
+`audio_capture_frames`, `audio_capture_frames_sent`,
+`audio_capture_dropped`, `audio_capture_device_errors`,
+`audio_capture_restarts`, `audio_playback_frames_written`,
+`audio_playback_frames_dropped`, `audio_playback_samples_played`, plus
+the two **identity** fields `audio_source_device_id` /
+`audio_sink_device_id` ("" = none).  The counters say "how much"; the
+identity fields say "which device".
+
+See [`engine_config.md` §2.4c](./engine_config.md) for the configuration
+side.
 
 ---
 

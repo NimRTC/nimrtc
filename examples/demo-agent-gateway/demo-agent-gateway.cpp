@@ -217,7 +217,8 @@ int run_demo(double seconds) {
     // see and reports which backend won — it does not *open* a device,
     // because the demo drives the 3A path with synthetic PCM below.
     {
-        const auto backends = audio_device::available_source_backends();
+        const auto backends =
+            nimrtc::core::PluginRegistry::instance().list_audio_sources();
         std::fprintf(stderr, "[AudioDevice] capture backends:");
         for (const auto& b : backends) std::fprintf(stderr, " %s", b.c_str());
         std::fprintf(stderr, "\n");

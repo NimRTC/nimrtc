@@ -19,6 +19,110 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > Shipping it as `1.3.2` would promise a compatibility the tree no
 > longer has.
 
+### Added
+
+- **The engine now runs the audio device layer (v1.4 D1, ADR-028).**
+  The audio device module was complete, buildable and tested — but the
+  **engine never touched it**: there was no `IAudioSource` / `IAudioSink`
+  anywhere in `src/engine/`, no `EngineConfig` key naming a device, and
+  no registry slot to resolve one through.  A host therefore had to open
+  its own sound card and hand-feed PCM, which is exactly the "the host
+  writes a pipeline, not an application" gap the v1.4 release exists to
+  close.
+
+  What landed:
+
+  - **A registry slot per audio device seam.**  `core::PluginRegistry`
+    gained `kAudioSource` / `kAudioSink` with
+    `register_audio_source` / `get_audio_source` and
+    `register_audio_sink` / `get_audio_sink`, plus the
+    `NIMRTC_REGISTER_AUDIO_SOURCE` / `NIMRTC_REGISTER_AUDIO_SINK`
+    macros.  The `audio_device` module now registers its factories
+    through them (`register_default_plugins()`), so the engine resolves
+    a backend **by name** without naming a concrete module — the same
+    shape as every other seam (ADR-025's Layout Invariant 4).
+
+  - **Four configuration keys.**  `EngineConfig::audio_source_name` /
+    `audio_sink_name` (default `"portaudio"`) name the backends, and
+    `audio_source_config` / `audio_sink_config` carry the device
+    request.  An **empty** name means "the default device" (the backend
+    picks its own default input / output) and **`"none"`** is the
+    explicit opt-out, so a host that feeds PCM by hand through
+    `send_audio()` keeps working unchanged.  This is deliberately
+    *different* from `audio_decoder_name`, where an empty string means
+    "no audio track": a device can only be defaulted or explicitly
+    declined, never silently switched off.
+
+  - **Two pump switches.**  `audio_source_pump` / `audio_sink_pump`
+    (default `true`) turn the automatic paths off for a host that wants
+    the explicit manual path.
+
+  - **The engine's audio device pump** (`src/engine/src/engine_audio_pump.cpp`),
+    the audio counterpart of `engine_video_pump.cpp`.  The capture pump
+    reads the device's bounded queue on the engine's tick thread and
+    hands the frames to `send_audio()` — so the 3A's
+    `process_capture()`, the encoder, the RTP packetiser and the send
+    gate are reused **verbatim**.  There is no second implementation of
+    the outbound path to drift.  The playback path writes the decoded
+    PCM to the sink and reports the sink's *consumed* sample count to
+    the 3A's render reference.
+
+  - **The AEC reference now follows the loudspeaker.**  Before this,
+    the engine reported `set_render_delivered(the frame's sample
+    count)` — that is, "the samples were handed to the host", which is
+    *not* "the loudspeaker played them": the device's buffer and driver
+    latency sit between the two.  With a playback device present the
+    engine reports the device's cumulative played-out count (as a
+    **delta**, so the reference does not grow quadratically).  This is
+    the remote-desktop plan's F3 / F4 alignment, wired by the engine
+    rather than by the host.
+
+  - **The statistics.**  `Stats` gained `audio_capture_frames`,
+    `audio_capture_frames_sent`, `audio_capture_dropped`,
+    `audio_capture_device_errors`, `audio_capture_restarts`,
+    `audio_playback_frames_written`, `audio_playback_frames_dropped`,
+    `audio_playback_samples_played`, and the two **identity** fields
+    `audio_source_device_id` / `audio_sink_device_id`.  The counters
+    say "how much"; the identity fields say "which device" — and they
+    are what makes the plan's "both devices in the stats" a fact rather
+    than a claim.
+
+  - **The public surface.**  `audio_source()` / `audio_sink()` return
+    the device the engine holds, and `audio_capture_devices()` /
+    `audio_playback_devices()` enumerate what it can see (an empty list
+    is a legitimate answer — a CI machine with no sound card — not an
+    error).
+
+  **A device that will not open is not a session failure.**  A machine
+  with no sound card, or a revoked microphone permission, must not take
+  down a video call: the engine logs a **warning** and carries on, and
+  the host can still feed PCM by hand.  (The same `Warn` policy the
+  video sink uses.)
+
+  **The host's callbacks are untouched.**  `set_on_audio_frame()` /
+  `set_on_audio_frame_info()` are `NIMRTC_API_STABLE` and keep firing.
+  The device path is *appended* to them, not substituted for them: a
+  host that installs the callback keeps receiving the decoded PCM, and
+  the PCM also goes to the loudspeaker.
+
+  The old free functions (`available_source_backends` /
+  `available_sink_backends` / `source_factory` / `sink_factory`) are
+  **deprecated** and now forward to the registry, so the two entry
+  points cannot give two different answers.
+
+- **A device that disappears mid-call is reopened (v1.4 D1).**
+  The capture pump watches the device's error counter, and a device
+  that reports an error is closed and opened again — the count of
+  restarts is in `Stats::audio_capture_restarts`.  A lost device is
+  torn down and built up again rather than "re-opened" in place: most
+  backends treat `open()` on an already-open device as a no-op, so an
+  in-place reopen would silently do nothing.
+
+  The device's **dropped** frames are counted too, and the counters are
+  read *after* the read rather than before it — the drops are counted
+  by the *producer* thread, so a delta taken before the read would miss
+  everything that happened between the previous tick and this one.
+
 ### Changed
 
 - **The v1.4 plan's drift detector reported two rows as stale forever,
@@ -37,6 +141,13 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rows — and `docs/plan/post-v1.4-gap-inventory.md` cited those two
   rows as *evidence*.  The rows are flipped to `present` now, and the
   report is clean: **20 of 20 `ok`, no STALE.**
+
+  **D1 joined them on 2026-11-27** — the engine now runs the audio
+  device layer, so its three rows ("the engine never opens an audio
+  device" / "the engine has no audio-source config key" / "…no
+  audio-sink config key") were flipped to `present` on the same
+  principle.  The v1.4 plan's §1.2 row and §10 table are marked
+  SUPERSEDED in place, and §0a carries the D1 entry.
 
   The self-test is what makes the flip stick, and it was rewritten to
   stop pinning the *wrong* thing.  It used to assert "the D2 row must

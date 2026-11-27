@@ -75,6 +75,17 @@
 
 **级别**：高（影响 D1 的可行性与 D5 的 3A 契约）
 
+> **✅ 2026-11-27：本节已关闭 —— v1.4 D1 落地。**
+> 引擎现在编排音频设备层：`EngineConfig::audio_source_name` /
+> `audio_sink_name`（加两个设备配置），`core::PluginRegistry` 有
+> `kAudioSource` / `kAudioSink` 两个槽位（ADR-028 路线 A），
+> `src/engine/src/engine_audio_pump.cpp` 是设备 pump，统计里有
+> `audio_source_device_id` / `audio_sink_device_id`。
+> §1.2.1–1.2.6 六条缺口全部有落点，实施拆解见
+> `docs/plan/d1-device-layer-implementation.md`。
+> **本节正文保留原样**——它记录的是「模块写好了但引擎接不上」这个状态
+> 是如何被发现和量化的，这本身是有价值的历史。
+
 ### 1.1 现状（已核实）
 
 `src/modules/audio_device/` 是一个**完整、可构建、有测试**的模块：

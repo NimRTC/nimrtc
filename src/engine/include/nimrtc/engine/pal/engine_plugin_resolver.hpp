@@ -27,6 +27,12 @@
 #include <nimrtc/plugins/audio3a.hpp>
 #include <nimrtc/plugins/audio_decoder.hpp>
 #include <nimrtc/plugins/audio_receiver.hpp>
+// v1.4 D1 (ADR-028): the two audio-device seams — the capture device
+// (microphone) and the playback device (loudspeaker).  The engine
+// resolves them through the registry and never includes the
+// `audio_device` module's headers (Layout Invariant 4).
+#include <nimrtc/plugins/audio_sink.hpp>
+#include <nimrtc/plugins/audio_source.hpp>
 #include <nimrtc/plugins/bwe.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
@@ -175,6 +181,29 @@ resolve_video_source(std::string_view id) noexcept {
 [[nodiscard]] inline const plugins::IVideoCaptureFactory*
 resolve_video_capture(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_video_capture(id);
+}
+
+/** Resolve an `IAudioSourceFactory` by plugin id. Returns nullptr if not
+ *  registered.
+ *
+ *  Used by the engine to satisfy `EngineConfig::audio_source_name`
+ *  (default "portaudio").  The capture-device seam of v1.4 D1
+ *  (ADR-028): the engine resolves the microphone through the registry
+ *  and never names the `audio_device` module (Layout Invariant 4). */
+[[nodiscard]] inline const plugins::IAudioSourceFactory*
+resolve_audio_source(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_audio_source(id);
+}
+
+/** Resolve an `IAudioSinkFactory` by plugin id. Returns nullptr if not
+ *  registered.
+ *
+ *  Used by the engine to satisfy `EngineConfig::audio_sink_name`
+ *  (default "portaudio").  The playback-device seam of v1.4 D1
+ *  (ADR-028) — see `resolve_audio_source`. */
+[[nodiscard]] inline const plugins::IAudioSinkFactory*
+resolve_audio_sink(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_audio_sink(id);
 }
 
 /** Resolve an `IVideoBitrateControllerFactory` by plugin id. Returns

@@ -1228,6 +1228,32 @@ int NimRTCEngine::tick() noexcept {
     // common case, because the capture cadence is slower than the tick.
     pump_video_capture();
 
+    // ---- Pump the capture device into the encoder (v1.4 D1) ------------
+    //
+    // The automatic audio path: one block of PCM is pulled from the
+    // capture device's bounded queue and handed to `send_audio()`.  The
+    // pump runs *here*, on the tick thread, so the codec and the 3A are
+    // only ever touched from one thread — the capture device fills its
+    // queue from its own thread, and the engine only polls it.
+    //
+    // `pump_audio_capture()` is a no-op when there is no capture device,
+    // when the host disabled the pump (`EngineConfig::audio_source_pump`),
+    // or when the queue is empty — which is the common case, because the
+    // capture cadence is slower than the tick.
+    pump_audio_capture();
+
+    // ---- Report the playback progress to the 3A (v1.4 D1) -------------
+    //
+    // The echo canceller's render reference must follow the samples the
+    // loudspeaker **actually played**, not the samples the engine
+    // handed over.  With a playback device present, that number is the
+    // device's cumulative played-sample count — and it is read here, on
+    // the tick thread, at the moment the device reports progress.
+    //
+    // Without a device, the host's own callback path reports the
+    // reference (the pre-D1 behaviour), so this is a no-op.
+    report_playback_progress_to_3a();
+
     // ---- Re-offer the held key-frame request (plan B14) -----------------
     //
     // The key-frame storm limiter *defers* a request that arrives too

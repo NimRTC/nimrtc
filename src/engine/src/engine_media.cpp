@@ -360,10 +360,30 @@ void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame
     // concealment / FEC flags).
     deliver_audio_frame_info(frame);
 
+    // ---- The playback device (v1.4 D1, ADR-028) -----------------------
+    //
+    // The device write is **additional** to the host's callbacks, not a
+    // replacement: the host keeps receiving the PCM either way.  A host
+    // that installs the callback and also has a loudspeaker connected
+    // hears the audio twice — that is the host's business (it can turn
+    // the device path off with `EngineConfig::audio_sink_pump`).
+    write_audio_to_sink(frame.pcm, samples_per_ch, channels);
+
+    // ---- The 3A's render reference --------------------------------------
+    //
     // The frame has been handed over for playback — tell the 3A plugin
     // that the reference signal reached the speaker so it can track the
     // system delay.
-    if (audio3a_plugin_) {
+    //
+    // With a playback device present, the reference follows the
+    // device's **cumulative played-sample count** instead: "the samples
+    // reached the loudspeaker" is not "the samples were handed over",
+    // and the device's buffer + driver latency sit between the two.
+    // Reporting *both* would double the 3A's reference count, so the
+    // device path owns the report (and it runs on the tick thread, at
+    // the moment the device reports progress) and the host path stays
+    // silent.
+    if (!(impl_ && impl_->audio_state.audio_sink) && audio3a_plugin_) {
         audio3a_plugin_->set_render_delivered(samples_per_ch);
     }
 
@@ -3677,6 +3697,42 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_format_source =
         std::string{plugins::pixel_format_name(
             impl_->video_state.video_format_source)};
+
+    // ---- The audio devices (v1.4 D1, ADR-028) --------------------------
+    //
+    // The device's own counters are republished the way the video
+    // capture device's are: the device owns the detailed bookkeeping
+    // and the engine republishes the numbers a host watching a live
+    // session needs.
+    out.audio_capture_frames        = impl_->audio_state.audio_capture_frames;
+    out.audio_capture_frames_sent   = impl_->audio_state.audio_capture_frames_sent;
+    out.audio_capture_dropped       = impl_->audio_state.audio_capture_dropped;
+    out.audio_capture_device_errors = impl_->audio_state.audio_capture_device_errors;
+    out.audio_capture_restarts      = impl_->audio_state.audio_capture_restarts;
+    out.audio_playback_frames_written =
+        impl_->audio_state.audio_playback_frames_written;
+    out.audio_playback_frames_dropped =
+        impl_->audio_state.audio_playback_frames_dropped;
+    out.audio_playback_samples_played =
+        impl_->audio_state.audio_playback_samples_played;
+    // The two *identity* fields are what say "which devices" — the
+    // counters only say "how much".
+    out.audio_source_device_id = impl_->audio_state.audio_source_device_id;
+    out.audio_sink_device_id   = impl_->audio_state.audio_sink_device_id;
+    if (impl_->audio_state.audio_source) {
+        const plugins::AudioDeviceStats ds =
+            impl_->audio_state.audio_source->stats();
+        if (ds.frames_dropped > impl_->audio_state.audio_capture_dropped) {
+            out.audio_capture_dropped = ds.frames_dropped;
+        }
+    }
+    if (impl_->audio_state.audio_sink) {
+        const plugins::AudioDeviceStats ds =
+            impl_->audio_state.audio_sink->stats();
+        out.audio_playback_frames_dropped = ds.frames_dropped;
+        out.audio_playback_samples_played =
+            impl_->audio_state.audio_sink->played_samples();
+    }
 
     // ---- Codec telemetry (remote-desktop plan B15) ------------------------
     //

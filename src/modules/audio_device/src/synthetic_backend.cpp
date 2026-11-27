@@ -113,6 +113,19 @@ SyntheticAudioSource::SyntheticAudioSource(plugins::AudioSourceConfig cfg) noexc
     // The negotiation happens at construction: the request's zero
     // fields become the device's defaults, and the *result* is what
     // `config()` reports.
+    //
+    // The *device id* is negotiated the same way.  An empty id means
+    // "the backend's default device", and the backend knows which
+    // device that is -- so it reports it.  The seam's contract is
+    // explicit about this ("after `open()` succeeds, `config()` reports
+    // what was actually negotiated"), and the tree's other backends
+    // already do it: `SyntheticCapture` and `CameraCapture` both write
+    // the concrete id they resolved back into their config, and a host
+    // that reads `config().device_id` gets the device it is really
+    // talking to rather than an empty string it has to interpret.
+    if (cfg_.device_id.empty()) {
+        cfg_.device_id = kSyntheticDeviceId;
+    }
     cfg_.format.sample_rate_hz = effective_rate(cfg_.format.sample_rate_hz);
     cfg_.format.channels = effective_channels(cfg_.format.channels);
     cfg_.format.frames_per_buffer =
@@ -326,6 +339,13 @@ void SyntheticAudioSource::realtime_loop(std::size_t frames_per_buffer) noexcept
 SyntheticAudioSink::SyntheticAudioSink(plugins::AudioSinkConfig cfg) noexcept
     : cfg_(std::move(cfg)),
       queue_(queue_capacity(cfg_), effective_channels(cfg_.format.channels)) {
+    // The device id is negotiated like the format: an empty id means
+    // "the backend's default device", and the backend reports the
+    // concrete one it resolved.  See the source constructor above for
+    // the full reasoning.
+    if (cfg_.device_id.empty()) {
+        cfg_.device_id = kSyntheticDeviceId;
+    }
     cfg_.format.sample_rate_hz = effective_rate(cfg_.format.sample_rate_hz);
     cfg_.format.channels = effective_channels(cfg_.format.channels);
     cfg_.format.frames_per_buffer =

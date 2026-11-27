@@ -2443,7 +2443,7 @@ target_link_libraries(test_registry_contract PRIVATE
 # symbol only exists when the module is compiled in.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input rd_qoe video_sync)
+              rd_input rd_qoe video_sync audio_device)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_registry_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -2528,7 +2528,7 @@ target_link_libraries(test_plugin_id_contract PRIVATE
 # only when it was actually built.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input rd_qoe video_sync)
+              rd_input rd_qoe video_sync audio_device)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_plugin_id_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -2896,6 +2896,27 @@ nimrtc_add_engine_test(test_engine_audio_loopback test_engine_audio_loopback.cpp
 # without a peer.
 # ---------------------------------------------------------------------------
 nimrtc_add_engine_test(test_engine_audio_send test_engine_audio_send.cpp)
+
+# ---------------------------------------------------------------------------
+# v1.4 D1 (ADR-028) -- the engine's audio-device plane.
+#
+# The engine resolves the capture / playback device through
+# `core::PluginRegistry` (never by naming the module -- Layout
+# Invariant 4), opens it, pumps the capture device into `send_audio()`
+# on the tick thread, writes the decoded PCM to the playback device,
+# and reports the device's *played-out* sample count to the 3A (the AEC
+# reference follows the device, not the hand-over).
+#
+# The device under test is the audio_device module's "synthetic"
+# backend: it needs no sound card, so the suite runs on CI.
+# ---------------------------------------------------------------------------
+if(NIMRTC_MODULE_AUDIO_DEVICE)
+nimrtc_add_engine_test(test_engine_audio_device test_engine_audio_device.cpp)
+# The engine links the WebTransport seam, which pulls in msquic.dll.
+# The DLL must sit next to the .exe before the gtest discovery probe
+# runs, or the probe fails with STATUS_DLL_NOT_FOUND (0xC0000135).
+nimrtc_copy_msquic_dll(test_engine_audio_device)
+endif()
 
 # ---------------------------------------------------------------------------
 # The Q5 finding's second defect: the engine kept sending into a dead

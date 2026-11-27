@@ -287,11 +287,23 @@ enumerate_playback_devices() noexcept;
  *
  * The ids are the same strings the factories report: "portaudio" (when
  * the PortAudio backend is compiled in) and "synthetic" (always).
+ *
+ * @deprecated (v1.4 D1, ADR-028) Use
+ * `core::PluginRegistry::instance().list_audio_sources()` instead.  The
+ * two entry points must answer the same question with the same answer,
+ * so this one now forwards to the registry — a backend that a third
+ * party registered is visible through *both*.
  */
+[[deprecated("use core::PluginRegistry::list_audio_sources() instead")]]
 [[nodiscard]] NIMRTC_API_STABLE std::vector<std::string>
 available_source_backends() noexcept;
 
-/** The playback backends this build offers. */
+/** The playback backends this build offers.
+ *
+ * @deprecated (v1.4 D1, ADR-028) Use
+ * `core::PluginRegistry::instance().list_audio_sinks()` instead.
+ */
+[[deprecated("use core::PluginRegistry::list_audio_sinks() instead")]]
 [[nodiscard]] NIMRTC_API_STABLE std::vector<std::string>
 available_sink_backends() noexcept;
 
@@ -302,7 +314,13 @@ available_sink_backends() noexcept;
  *         The returned pointer is to a `const` object with static
  *         storage duration — it stays valid for the lifetime of the
  *         process, and the caller must not delete it.
+ *
+ * @deprecated (v1.4 D1, ADR-028) Use
+ * `core::PluginRegistry::instance().get_audio_source(id)` instead.  The
+ * two entry points must return the *same* pointer for the same id, so
+ * this one now forwards to the registry.
  */
+[[deprecated("use core::PluginRegistry::get_audio_source(id) instead")]]
 [[nodiscard]] NIMRTC_API_STABLE const plugins::IAudioSourceFactory*
 source_factory(std::string_view id) noexcept;
 
@@ -310,7 +328,11 @@ source_factory(std::string_view id) noexcept;
  * @brief Look up a playback backend by id.
  *
  * @return The factory, or nullptr when no such backend is compiled in.
+ *
+ * @deprecated (v1.4 D1, ADR-028) Use
+ * `core::PluginRegistry::instance().get_audio_sink(id)` instead.
  */
+[[deprecated("use core::PluginRegistry::get_audio_sink(id) instead")]]
 [[nodiscard]] NIMRTC_API_STABLE const plugins::IAudioSinkFactory*
 sink_factory(std::string_view id) noexcept;
 
@@ -436,5 +458,29 @@ aec_delay_headroom_ms(const plugins::IAudioSink* sink) noexcept;
  */
 [[nodiscard]] NIMRTC_API_STABLE float
 aec_delay_confidence(const plugins::IAudioSink* sink) noexcept;
+
+// ---------------------------------------------------------------------------
+// Registration (v1.4 D1, ADR-028)
+// ---------------------------------------------------------------------------
+/**
+ * @brief Register the module's device backends with `core::PluginRegistry`.
+ *
+ * The entry point populates the registry's **audio-source** and
+ * **audio-sink** slots, so the engine can resolve a device backend
+ * through the seam without naming this module (Layout Invariant 4).
+ *
+ * The ids it registers:
+ *
+ * | id | slot | notes |
+ * |---|---|---|
+ * | `portaudio` | source + sink | only when the PortAudio backend is compiled in |
+ * | `synthetic` | source + sink | always — the CI-testable device |
+ * | `system-audio` | source | the loopback device; a separate id, so a host that asks for the microphone never gets the system output by accident |
+ * | `synthetic-system-audio` | source | the CI-testable loopback device |
+ *
+ * Idempotent: calling it twice registers the same factories again, and
+ * the registry treats a duplicate id as a late-binding overwrite.
+ */
+NIMRTC_API_STABLE void register_default_plugins() noexcept;
 
 } // namespace nimrtc::audio_device

@@ -57,20 +57,24 @@ a **registration macro**, and — for the seams the engine resolves — an
 | **Video encoder / decoder** | `plugins/video_codec.hpp` | The split codec seam: `IVideoEncoder` / `IVideoDecoder`, the passive parameter set, the zero-copy path. | the encoder/decoder *backends* are `stub_h264`, `openh264_h264`, `nvenc_h264`, `nvdec_h264`, … | the codec plugin itself goes in `register_video_codec` (macro `NIMRTC_REGISTER_VIDEO_CODEC`, knob `EngineConfig::video_codec_name`); the *backends* go in `HwVideoBackendRegistry` (macros `NIMRTC_REGISTER_VIDEO_ENCODER_BACKEND` / `NIMRTC_REGISTER_VIDEO_DECODER_BACKEND`) |
 | **HW backend selection** | `plugins/hw_video_backend.hpp` | The `available()` probe, the priority order, the `zero_copy_supported` flag, the surface pool. | (not a factory id — a priority-ordered table) | `HwVideoBackendRegistry::instance()`; the class of backend is chosen by `EngineConfig::video_codec_backend` |
 | **Video rate controller** | `plugins/video_bitrate_controller.hpp` | The resolution / frame-rate / bitrate ladder, the resolution floor, the keyframe-cost budget. | `video-bitrate-control` | `register_video_bitrate_controller` / `get_video_bitrate_controller`; macro `NIMRTC_REGISTER_VIDEO_BITRATE_CONTROLLER`; knob `EngineConfig::video_bitrate_controller_name` |
-| **Audio source** | `plugins/audio_source.hpp` | A capture device (a microphone): the callback path and the pull path. | `synthetic`, `portaudio` | **no registry slot** — resolved through `nimrtc::audio_device::source_factory(id)` |
-| **Audio sink** | `plugins/audio_sink.hpp` | A playback device (a loudspeaker): the write path, the played-sample counter. | `synthetic`, `portaudio` | **no registry slot** — resolved through `nimrtc::audio_device::sink_factory(id)` |
+| **Audio source** | `plugins/audio_source.hpp` | A capture device (a microphone): the callback path and the pull path. | `synthetic`, `portaudio`, `system-audio`, `synthetic-system-audio` | `register_audio_source` / `get_audio_source`; macro `NIMRTC_REGISTER_AUDIO_SOURCE`; knob `EngineConfig::audio_source_name` |
+| **Audio sink** | `plugins/audio_sink.hpp` | A playback device (a loudspeaker): the write path, the played-sample counter. | `synthetic`, `portaudio` | `register_audio_sink` / `get_audio_sink`; macro `NIMRTC_REGISTER_AUDIO_SINK`; knob `EngineConfig::audio_sink_name` |
 | **Audio device vocabulary** | `plugins/audio_device.hpp` | `AudioDeviceFormat`, `AudioDevice`, `AudioDeviceCapabilities`, `AudioDeviceStats`. | — | shared by both audio seams |
 | **HW capability bases** | `plugins/hw_seam.hpp` | `HwBackend` (the *accelerator class*), `IHwVideoEncoder` / `IHwVideoDecoder` / `IHwVideoCapture` (the optional capability mix-ins). | — | — |
 
 Two facts in that table deserve to be read twice:
 
-1. **The audio device seams are not registry slots.** They resolve
-   through the module's own lookup functions, because a device backend
-   is a *module* concern (PortAudio, the synthetic device) and the
-   registry's typed slots are reserved for the families the engine
-   resolves by name. A host therefore writes
-   `nimrtc::audio_device::source_factory("portaudio")`, not
-   `EngineConfig::audio_source_name = "portaudio"`.
+1. **The audio device seams ARE registry slots** (v1.4 D1, ADR-028).  They
+   used to resolve through the module's own lookup functions
+   (`nimrtc::audio_device::source_factory(id)`), because a device backend
+   was a *module* concern; that made the engine unable to resolve a
+   device by name without naming a concrete module.  They are now
+   ordinary typed slots — `register_audio_source` / `get_audio_source`
+   and `register_audio_sink` / `get_audio_sink` — so a host writes
+   `EngineConfig::audio_source_name = "portaudio"` and the engine resolves
+   it through the registry like every other family.  The old free
+   functions still exist and are **deprecated**; they forward to the
+   registry, so the two entry points cannot give two answers.
 2. **The codec has two registries.** The *codec plugin* (a "h264" family
    plug-in) is a registry entry; the *backend* (a concrete NVENC or
    OpenH264 implementation) is an entry in `HwVideoBackendRegistry`.
@@ -82,7 +86,7 @@ Two facts in that table deserve to be read twice:
 ```mermaid
 flowchart LR
     subgraph host["Host application"]
-        H["EngineConfig<br/>video_capture_name<br/>video_codec_name<br/>video_sink_name<br/>video_bitrate_controller_name"]
+        H["EngineConfig<br/>video_capture_name<br/>video_codec_name<br/>video_sink_name<br/>video_bitrate_controller_name<br/>audio_source_name<br/>audio_sink_name"]
     end
 
     subgraph reg["nimrtc::core::PluginRegistry"]
@@ -90,6 +94,8 @@ flowchart LR
         RS["video-sink slot"]
         RV["video-codec slot"]
         RB["video-bitrate-controller slot"]
+        RA["audio-source slot"]
+        RA2["audio-sink slot"]
     end
 
     subgraph hw["HwVideoBackendRegistry"]
@@ -103,6 +109,8 @@ flowchart LR
         DEC["IVideoDecoder"]
         SINK["IVideoSink"]
         CTRL["IVideoBitrateController"]
+        ASRC["IAudioSource"]
+        ASNK["IAudioSink"]
     end
 
     H --> RC --> CAP
@@ -110,6 +118,8 @@ flowchart LR
     H --> RV --> ENC
     H --> RV --> DEC
     H --> RB --> CTRL
+    H --> RA --> ASRC
+    H --> RA2 --> ASNK
     BE --> ENC
     BD --> DEC
     CTRL -. "level -> engine turns it into VideoEncoderParams" .-> ENC
@@ -119,6 +129,11 @@ Note the dashed arrow: **the rate controller never touches the encoder.**
 The engine reads the controller's level and turns it into a
 `VideoEncoderParams`, and pushes that. That is the whole design of the
 rate-control seam, and §4.3 explains why it matters.
+
+The two audio slots are the **device** half of the same shape (v1.4 D1):
+the engine resolves the microphone and the loudspeaker by name, opens
+them, and pumps them itself — the host does not hand-feed PCM unless it
+explicitly opts out with `"none"`.
 
 ---
 
@@ -1352,7 +1367,7 @@ The seam adds enumeration, format negotiation and capabilities on top.
 | Delivery | `set_on_audio_frame(cb)` (push) **and** `read_samples(dst, capacity, out_frames)` (pull) | `write(samples, num_samples, channels)` |
 | Progress | — | `played_samples()`, `set_on_playback_progress(cb)`, `queued_frames()`, `last_playback_us()` |
 | Factory | `IAudioSourceFactory::create(AudioSourceConfig)` | `IAudioSinkFactory::create(AudioSinkConfig)` |
-| Resolved by | `nimrtc::audio_device::source_factory(id)` | `nimrtc::audio_device::sink_factory(id)` |
+| Resolved by | `core::PluginRegistry::get_audio_source(id)` (the engine resolves it from `EngineConfig::audio_source_name`) | `core::PluginRegistry::get_audio_sink(id)` (from `EngineConfig::audio_sink_name`) |
 
 ### 7.2 The two delivery paths
 

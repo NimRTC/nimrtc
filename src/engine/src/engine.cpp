@@ -325,6 +325,19 @@ uint32_t NimRTCEngine::open() noexcept {
         return video_rc;
     }
 
+    // ---- The audio devices (v1.4 D1, ADR-028) --------------------------
+    //
+    // The capture device (microphone) and the playback device
+    // (loudspeaker) are resolved through the registry's audio-source /
+    // audio-sink slots, so the engine never names a concrete module
+    // (Layout Invariant 4).
+    //
+    // A device that cannot be opened is **not** fatal: a machine with
+    // no sound card, or a revoked microphone permission, must not take
+    // down a video call.  The host can still feed PCM by hand through
+    // `send_audio()` or attach a device later.
+    init_audio_devices();
+
     // ---- Session base state (v1.2.0, session capability plan N1) --------
     //
     // The video m-line only exists when the video pipeline resolved, so
@@ -408,6 +421,10 @@ void NimRTCEngine::close() noexcept {
     if (audio3a_plugin_) audio3a_plugin_->close();
     if (codec_plugin_) codec_plugin_->close();
     shutdown_video_plugins();
+    // The audio devices (v1.4 D1): the capture and playback devices own
+    // OS resources (a PortAudio stream, a WASAPI capture), so they are
+    // closed explicitly rather than merely dropped.
+    shutdown_audio_devices();
     shutdown_bwe_scheduler();
     // ---- Tear down the TransportSession (Slice 7.6 PR3) ----------------
     //

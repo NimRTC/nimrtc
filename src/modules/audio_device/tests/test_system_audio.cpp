@@ -23,6 +23,7 @@
 #include <nimrtc/audio_device/mixer.hpp>
 #include <nimrtc/audio_device/synthetic_device.hpp>
 #include <nimrtc/audio_device/system_audio.hpp>
+#include <nimrtc/core/registry.hpp>
 
 #include <cmath>
 
@@ -83,19 +84,27 @@ TEST(system_audio, the_system_audio_device_is_not_in_the_microphone_list) {
 TEST(system_audio, the_factory_resolves_under_its_own_backend_id) {
     // The system-audio backend is a *second source*: it has its own id
     // and it does not shadow the microphone's backends.
-    const auto* factory = nimrtc::audio_device::source_factory("system-audio");
+    //
+    // ADR-028: the registry is the authority — the module's own
+    // lookup functions are deprecated shims over it.
+    nimrtc::audio_device::register_default_plugins();
+    const auto& reg = nimrtc::core::PluginRegistry::instance();
+
+    const auto* factory = reg.get_audio_source("system-audio");
     ASSERT_NE(factory, nullptr);
     EXPECT_EQ(factory->id(), "system-audio");
 
     // The microphone's backends still resolve to the microphone.
-    const auto* mic = nimrtc::audio_device::source_factory("synthetic");
+    const auto* mic = reg.get_audio_source("synthetic");
     ASSERT_NE(mic, nullptr);
     EXPECT_EQ(mic->id(), "synthetic");
     EXPECT_NE(mic->id(), factory->id());
 }
 
 TEST(system_audio, the_backend_list_carries_the_system_audio_backends) {
-    const auto backends = nimrtc::audio_device::available_source_backends();
+    nimrtc::audio_device::register_default_plugins();
+    const auto backends =
+        nimrtc::core::PluginRegistry::instance().list_audio_sources();
     EXPECT_NE(std::find(backends.begin(), backends.end(), "system-audio"),
               backends.end());
     EXPECT_NE(std::find(backends.begin(), backends.end(),

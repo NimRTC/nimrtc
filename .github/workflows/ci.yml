@@ -957,6 +957,24 @@ jobs:
       - name: Self-test the merge-gate guard
         run: python tools/check_ci_ruleset.py --self-test
 
+      # The hardware-evidence reader (`tools/read_hardware_evidence.py`)
+      # is what `scripts/check-release-freeze.sh` asks at tag-cut time:
+      # "is there a PASS Q7 record on the tree being tagged?".  Its
+      # answer comes from local files or from a check-run annotation on
+      # the archived run, and the annotation format is the runner's,
+      # not the script's -- so the parsing is pinned here rather than
+      # discovered when the first release after this change reads it.
+      - name: Self-test the hardware-evidence reader
+        run: python tools/read_hardware_evidence.py --self-test
+
+      # `tools/run_hardware_job.py` is the job body the hardware
+      # workflow runs, and it is where the record is written into all
+      # three destinations.  The annotation escaping is the fragile
+      # part: the `::error::` format splits properties on `,`, and a
+      # record is JSON.
+      - name: Self-test the hardware job publisher
+        run: python tools/run_hardware_job.py --self-test
+
       # The CI auto-retry workflow (`ci-retry.yml`) re-runs the jobs
       # that were starved of a runner.  Its safety rests entirely on
       # one distinction: a job that never received a runner is re-run,

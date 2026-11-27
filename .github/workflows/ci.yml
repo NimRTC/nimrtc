@@ -148,6 +148,19 @@ jobs:
         shell: pwsh
         run: python tools/check_v14_plan_status.py
 
+      # The v1.5 plan's table, executed the same way.  It starts with
+      # the baseline state (v1.5 has not started), so every row is
+      # `ok` today; the point of running it now is that the checker's
+      # own machinery -- and its ability to speak -- is proven before
+      # the rows that will change are written.
+      - name: Check the v1.5 plan's checker
+        shell: pwsh
+        run: python tools/check_v15_plan_status.py --self-test
+
+      - name: Report the v1.5 plan's status
+        shell: pwsh
+        run: python tools/check_v15_plan_status.py
+
       - name: API freeze — per-symbol classification
         # Every namespace-scope symbol in a public header must carry a
         # NIMRTC_API_STABLE / NIMRTC_API_UNSTABLE marker (ADR-015

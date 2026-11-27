@@ -2240,7 +2240,16 @@ jobs:
           python3 scripts/build_dtls_cert.py
 
       - name: Configure
-        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
+        # NIMRTC_INSTALL=ON: the "Install + downstream proof" step below
+        # installs this tree and builds a find_package(NimRTC) consumer
+        # against it.  Without the flag the install rules are not
+        # generated at all (cmake/NimRTCInstall.cmake is guarded by it),
+        # so `cmake --install` installs only the vendored dependencies
+        # and the consumer's find_package(NimRTC) fails with "Could not
+        # find a package configuration file provided by NimRTC".  The
+        # Windows and Linux legs already pass the flag for the same
+        # reason.
+        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
       - name: Build
         run: cmake --build --preset debug.macos -j 2

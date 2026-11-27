@@ -294,6 +294,25 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The macOS CI leg could not prove its own export path: it configured
+  without `NIMRTC_INSTALL=ON` (2026-11-28).**
+  The macOS leg gained an "Install + downstream proof" step — install
+  the tree into a staging dir, then build a minimal
+  `find_package(NimRTC)` consumer against it — but its **configure** step
+  never passed `-DNIMRTC_INSTALL=ON`.  The install rules live in
+  `cmake/NimRTCInstall.cmake`, which is guarded by exactly that flag
+  (`if(NOT NIMRTC_INSTALL) return()`), so the configure generated **no
+  install rules at all**: `cmake --install` installed only the vendored
+  dependencies, `NimRTCConfig.cmake` was never written, and the
+  consumer's `find_package(NimRTC 1.0 REQUIRED)` failed with *"Could
+  not find a package configuration file provided by NimRTC"*.
+
+  The Windows and Linux legs already passed the flag for the same
+  reason; the macOS leg was the one that did not.  It now passes it
+  too, with a comment that says why — the flag is not optional
+  bookkeeping for this leg, it is what makes the step it runs
+  meaningful.
+
 - **The convergence merge broke the GCC/Clang build in four places
   (2026-11-28).**
   Merging `origin/version/v4` into `main` produced a tree that MSVC

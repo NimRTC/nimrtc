@@ -104,6 +104,34 @@ IceCandidatePairInfo to_engine_pair(const plugins::IceCandidatePair& p) {
     return out;
 }
 
+/** Count the gathered candidates by type.
+ *
+ *  The seam publishes the candidates as **SDP attribute bodies** (RFC 8839
+ *  §5.1), each ending in a `typ <type>` field (RFC 8445 §5.1.1).  The
+ *  engine counts them here rather than asking the seam for three
+ *  counters: the candidate list is the seam's own shape, and a second
+ *  set of counters would be a second answer to the same question.
+ *
+ *  `prflx` (peer-reflexive, RFC 8445 §5.1.1.4) is deliberately **not**
+ *  counted: it is a candidate the *peer* discovered, not one this agent
+ *  gathered, so it appears in no local gathering list. */
+void count_candidates_by_type(const std::vector<std::string>& candidates,
+                              std::uint32_t& host,
+                              std::uint32_t& srflx,
+                              std::uint32_t& relay) {
+    for (const auto& line : candidates) {
+        // The `typ` field is the last one on the line by construction
+        // (RFC 8839 §5.1), so the search runs from the end.  Looking for
+        // "typ " with the space keeps "type" from matching.
+        const auto pos = line.rfind(" typ ");
+        if (pos == std::string::npos) continue;
+        const auto rest = line.substr(pos + 5);
+        if (rest.starts_with("host"))      ++host;
+        else if (rest.starts_with("srflx")) ++srflx;
+        else if (rest.starts_with("relay")) ++relay;
+    }
+}
+
 }  // namespace
 
 void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
@@ -119,6 +147,22 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
             ice_t_->state());
         out.ice_restart_count = ice_t_->restart_count();
 
+        // ---- The gathering action ----------------------------------------
+        //
+        // The collection's own state, read from the seam.  It is
+        // deliberately *not* derived from `ice_state`: an agent can be
+        // connected and still be gathering (RFC 8445 §5.1.1.5), and
+        // conflating the two would answer a different question.
+        out.ice_gathering_state = std::string(ice_t_->gathering_state());
+
+        // The candidate counts come from the seam's own candidate list:
+        // the list is the seam's shape, and three parallel counters
+        // would be a second answer to the same question.
+        count_candidates_by_type(ice_t_->gathered_local_candidates(),
+                                 out.ice_host_candidates,
+                                 out.ice_srflx_candidates,
+                                 out.ice_relay_candidates);
+
         const auto pair = ice_t_->selected_pair();
         if (pair) {
             out.selected_pair = to_engine_pair(*pair);
@@ -132,6 +176,56 @@ void NimRTCEngine::append_transport_stats(TransportStats& out) const noexcept {
             out.relayed = (pair->local.type == "relay") ||
                           (pair->remote.type == "relay");
         }
+
+        // ---- Why it failed ------------------------------------------------
+        //
+        // The six-value vocabulary, by a fixed priority order: the first
+        // match wins.  The order runs from the most *specific* cause to
+        // the least, because the specific one is the one a host can act
+        // on — "the TURN transport is unsupported" and "there are no
+        // candidates" are both true of the same broken session, and only
+        // the first is the cause.
+        //
+        // `checks-failed` sits **above** `no-pair` on purpose.  A session
+        // whose agent gave up has candidates and no nominated pair, so
+        // the two facts are both present — but "no pair" reads as
+        // "still waiting for one", and a session that already gave up is
+        // not waiting.  "no-pair" is the *waiting* answer, so it is the
+        // least severe of the five and sits last.
+        //
+        // A session with nothing wrong reports "none": the engine does
+        // not invent a reason, and "none" is a fact too.
+        const std::string turn_failure(ice_t_->turn_failure_reason());
+        // Whether the seam can speak the TURN transport the host asked
+        // for is asked *here*, at the moment the stats are read: it is a
+        // property of the build and the seam, not a snapshot of one
+        // moment in the session's life.
+        const bool turn_unsupported = turn_configured_ &&
+                                      !ice_t_->turn_transport_supported(
+                                          turn_transport_);
+        if (turn_unsupported) {
+            out.ice_failure_reason = "transport-unsupported";
+        } else if (turn_failure == "credentials-rejected") {
+            out.ice_failure_reason = "credentials-rejected";
+        } else if (out.ice_gathering_state == "complete" &&
+                   out.ice_host_candidates == 0 &&
+                   out.ice_srflx_candidates == 0 &&
+                   out.ice_relay_candidates == 0) {
+            out.ice_failure_reason = "no-candidates";
+        } else if (out.ice_state == "failed") {
+            out.ice_failure_reason = "checks-failed";
+        } else if (!pair && out.ice_gathering_state == "complete") {
+            out.ice_failure_reason = "no-pair";
+        } else {
+            out.ice_failure_reason = "none";
+        }
+
+        // ---- The TURN transport in use ------------------------------------
+        //
+        // Read from the engine's own TURN configuration (the same list it
+        // handed to the seam), not from the seam: the engine knows what
+        // it asked for, and that is what this field reports.
+        out.turn_transport_used = turn_transport_name_;
     }
 
     // ---- The round-trip time --------------------------------------------

@@ -502,6 +502,34 @@ struct NIMRTC_API_STABLE EngineConfig {
     std::string stun_server_host;
     std::uint16_t stun_server_port = 3478;
 
+    /** The connectivity profile: which traversal the engine reaches for.
+     *
+     *  A **profile** is a named set of connectivity defaults — STUN on or
+     *  off, whether TURN/TLS is used when credentials are available,
+     *  whether TCP is tried after UDP fails.  The point is that a host
+     *  says *what kind of session* it wants ("a conference call", "a
+     *  remote desktop session") rather than spelling out the traversal
+     *  policy itself.
+     *
+     *  The default, `"auto"`, means **on** (plan D6-1):
+     *
+     *    - STUN is configured (RFC 8489) — unless this field's profile
+     *      says otherwise or the host set `stun_server_host` itself;
+     *    - TURN/TLS is used when credentials are available (RFC 6062);
+     *    - TCP is tried after UDP fails (RFC 6544, RFC 8656 §12);
+     *    - the reconnection policy (plan N3) stands by.
+     *
+     *  **The host's explicit settings always win.**  The profile fills
+     *  in the keys the host left alone; it never overrides a key the
+     *  host set.  A host that sets `stun_server_host` keeps its server,
+     *  and a host that calls `add_turn_server()` keeps its TURN servers.
+     *
+     *  An unknown profile name is **not** an error: the engine falls
+     *  back to `"auto"` and says so in the log.  A profile is a
+     *  convenience, not a contract, and a typo should not stop a
+     *  session from starting. */
+    std::string connectivity_profile = "auto";
+
     /** Local UDP port range for ICE. 0 = OS picks.
      *
      *  Leave both at 0 (the default) unless you have a specific reason
@@ -2288,6 +2316,100 @@ struct NIMRTC_API_STABLE TransportStats {
      *  fast" from "the RTT is 0 because nothing was ever measured" --
      *  a distinction a host cannot make from the number alone. */
     bool has_rtt = false;
+
+    // ---- The gathering action (RFC 8445 5.1.1) ----------------------------
+
+    /** The candidate *gathering* action's state: "new", "gathering" or
+     *  "complete".
+     *
+     *  This is **not** `ice_state`.  `ice_state` is the agent's state
+     *  machine (RFC 8445 §6) — it says whether the *session* has a path.
+     *  This says whether the *collection* of candidates has finished —
+     *  the action of RFC 8445 §5.1.1.  The two are independent, and a
+     *  host that conflates them gets the wrong answer to "why is there
+     *  no server-reflexive candidate yet":
+     *
+     *    - `ice_state == "connected"` with `ice_gathering_state ==
+     *      "gathering"` is a **normal** state — a server-reflexive
+     *      candidate may arrive after the path is already up
+     *      (RFC 8445 §5.1.1.5);
+     *    - `ice_state == "gathering"` with `ice_gathering_state ==
+     *      "complete"` means the collection finished but the checks have
+     *      not nominated anything yet.
+     *
+     *  "new" means the collection has not started. */
+    std::string ice_gathering_state;
+
+    /** The number of **host** candidates gathered (RFC 8445 §5.1.1.1).
+     *
+     *  Host candidates are the local interfaces; they are always
+     *  gathered and need no server. */
+    std::uint32_t ice_host_candidates = 0;
+
+    /** The number of **server-reflexive** candidates gathered
+     *  (RFC 8445 §5.1.1.2).
+     *
+     *  Zero when no STUN server was reachable — which is the answer to
+     *  "the peer cannot see my address" on a network behind a NAT. */
+    std::uint32_t ice_srflx_candidates = 0;
+
+    /** The number of **relayed** candidates gathered (RFC 8445 §5.1.1.3).
+     *
+     *  Zero when no TURN allocation succeeded — which is the answer to
+     *  "the peer cannot reach me at all". */
+    std::uint32_t ice_relay_candidates = 0;
+
+    /** Why this session failed to connect, if it did.
+     *
+     *  A **closed vocabulary** (six values, and no others):
+     *
+     *    - `"none"` -- nothing has failed;
+     *    - `"no-candidates"` -- gathering finished and produced no
+     *      candidates at all;
+     *    - `"no-pair"` -- there are candidates, but no pair was ever
+     *      nominated (RFC 8445 §5.1.2) — the session is **waiting** for
+     *      one;
+     *    - `"checks-failed"` -- the connectivity checks failed and the
+     *      agent gave up (RFC 8445 §7.2.1);
+     *    - `"credentials-rejected"` -- the TURN server refused the
+     *      credentials;
+     *    - `"transport-unsupported"` -- the TURN transport this build
+     *      cannot speak.
+     *
+     *  The value is chosen by a **fixed priority order**, first match
+     *  wins: `transport-unsupported` → `credentials-rejected` →
+     *  `no-candidates` → `checks-failed` → `no-pair` → `none`.
+     *
+     *  **Why a closed vocabulary and not a free-form string.**  The
+     *  point of this field is that a host can *act* on the answer: a
+     *  refused credential means refresh the credential, a failed check
+     *  means try another path, an unsupported transport means fix the
+     *  configuration.  A free-form string would give the host a sentence
+     *  to log and nothing to branch on.
+     *
+     *  **Why the priority order.**  The earlier entries are more
+     *  specific and more actionable: a session whose TURN transport this
+     *  build cannot speak would also report "no candidates", but the
+     *  first is the true cause and the second is a symptom.
+     *
+     *  **Why `checks-failed` sits above `no-pair`.**  A session whose
+     *  agent gave up has candidates *and* no nominated pair, so both
+     *  facts are present.  But "no pair" reads as "still waiting for
+     *  one", and a session that already gave up is not waiting — so
+     *  "no-pair" is the waiting answer and the least severe of the
+     *  five. */
+    std::string ice_failure_reason;
+
+    /** The TURN transport this session uses: "udp", "tcp" or "tls".
+     *
+     *  Empty when the session configures no TURN server.
+     *
+     *  This is the field that catches a **silent downgrade**: a session
+     *  configured for TURN over TLS that ends up on plain UDP is a
+     *  different (and much weaker) session, and "the transport was not
+     *  the one you asked for" is a fact a host has no other way to
+     *  learn (RFC 6062 §3.2, RFC 8656 §12). */
+    std::string turn_transport_used;
 
     // ---- DTLS (RFC 6347) ---------------------------------------------------
 
@@ -5368,6 +5490,24 @@ private:
     std::unique_ptr<plugins::IAudio3A>          audio3a_plugin_;
     std::unique_ptr<plugins::ICodec>            codec_plugin_;
 
+    // ---- The TURN configuration this session asked for ----
+    //
+    // The engine's own record of the TURN transport it configured, kept
+    // so `TransportStats::turn_transport_used` can report it.  The
+    // engine, not the seam, is the authority here: the engine knows
+    // what it asked for, and "the transport was not the one you asked
+    // for" (the silent downgrade N4 is about) is a fact about the
+    // engine's configuration.
+    //
+    // `turn_configured_` is false until the first `add_turn_server()`
+    // call.  The *transport* is remembered rather than a boolean, so
+    // that whether the seam can speak it can be asked at the moment the
+    // stats are read — "can this build speak TURN over TLS" is a
+    // property of the build, not a snapshot of one moment.
+    bool                    turn_configured_ = false;
+    plugins::TurnTransport  turn_transport_ = plugins::TurnTransport::Udp;
+    std::string             turn_transport_name_;
+
     // ---- Audio receive pipeline (v1.2.0, audio pipeline WP-7) ----
     //
     // The engine drives the receive side of the audio path through this
@@ -6019,6 +6159,17 @@ private:
      *  DTLS session's state and role, the SRTP context's counters and
      *  the feedback path's round-trip time onto one `TransportStats`. */
     void append_transport_stats(TransportStats& out) const noexcept;
+
+    /** Record the TURN transport this session configured.
+     *
+     *  Called from `add_turn_server()`; the **first** transport wins, so
+     *  the reported value does not depend on the order in which several
+     *  TURN servers were added. */
+    void note_turn_transport(plugins::TurnTransport transport) noexcept;
+
+    /** The SDP spelling of a TURN transport: "udp" / "tcp" / "tls". */
+    static std::string_view turn_transport_name_of(
+        plugins::TurnTransport transport) noexcept;
     /** Close and release every extra stream's plugins. */
     void shutdown_extra_video_streams() noexcept;
 

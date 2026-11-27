@@ -365,6 +365,20 @@ public:
      *  "a=candidate:<rest>" lines).  Empty if gathering hasn't started. */
     std::vector<std::string> gathered_local_candidates() const noexcept override;
 
+    /** The candidate gathering action's own state: "new" / "gathering" /
+     *  "complete".
+     *
+     *  Independent of the agent's state machine: an agent can be
+     *  `connected` and still be gathering (RFC 8445 §5.1.1.5). */
+    std::string_view gathering_state() const noexcept override;
+
+    /** Why the last TURN allocation failed, if it did.
+     *
+     *  Empty when no allocation has failed.  Otherwise one of
+     *  "credentials-rejected" / "stale-nonce" / "transport-unavailable" /
+     *  "allocate-refused". */
+    std::string_view turn_failure_reason() const noexcept override;
+
     /** Wait (with timeout) until gathering completes or ICE reaches
      *  Connected/Completed state.  Returns true if finished within
      *  `timeout_ms`, false otherwise. */

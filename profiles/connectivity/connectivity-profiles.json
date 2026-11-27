@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "NOT an engine profile.",
+    "",
+    "The *.json files directly under profiles/ are ENGINE profiles: each one",
+    "is a single engine configuration and is validated against",
+    "profiles/schema/profile-v1.2.json by",
+    "src/modules/assembly/tests/test_profile_schema.cpp",
+    "ProfileSchema.EveryShippedProfileValidatesUnderV12.  That test scans",
+    "the profiles/ ROOT directory only, so this file lives in a",
+    "subdirectory on purpose: it is a different kind of artifact.",
+    "",
+    "This file is a MAP FROM PROFILE NAME TO CONNECTIVITY DEFAULTS.",
+    "It is read by the `connectivity_profile` key on EngineConfig",
+    "(src/engine/include/nimrtc/engine/engine.hpp) and describes the",
+    "INTENT of a connectivity profile -- not the addresses.",
+    "",
+    "The engine obeys a table written in code",
+    "(src/engine/src/engine_connectivity_profile.cpp,",
+    "resolve_connectivity_profile()).  This file documents the same table",
+    "for hosts and for people reading the tree; the code is the one that",
+    "runs.  Keep the two in sync.",
+    "",
+    "The keys of every profile are the same:",
+    "",
+    "  stun          -- gather server-reflexive candidates (a STUN server",
+    "                   is configured when the host did not configure one)",
+    "  turn_tls      -- 'always' | 'when_available' | 'never'",
+    "                   whether TURN/TLS (RFC 6062) is required or merely",
+    "                   preferred",
+    "  tcp_fallback  -- fall back to TURN/TCP when TURN/UDP does not get",
+    "                   through",
+    "",
+    "A host's explicit STUN / TURN configuration always WINS over these",
+    "defaults: a profile only fills in the keys the host left unset."
+  ],
+  "auto": {
+    "stun": true,
+    "turn_tls": "when_available",
+    "tcp_fallback": true
+  },
+  "conference": {
+    "stun": true,
+    "turn_tls": "when_available",
+    "tcp_fallback": true
+  },
+  "remote-desktop": {
+    "stun": true,
+    "turn_tls": "always",
+    "tcp_fallback": true
+  }
+}

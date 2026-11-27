@@ -7,6 +7,8 @@
  */
 #include "engine_impl.hpp"
 
+#include "engine_connectivity_profile.hpp"
+
 namespace nimrtc::engine {
 
 
@@ -599,6 +601,41 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
     // set_bind_address / set_stun_server / set_local_port_range are safe
     // on null-instance ICE returns from RawUdpArqStack (they are no-ops).
     ice_t_->set_bind_address(config_.local_bind_address);
+
+    // ---- The connectivity profile (plan D6) ------------------------------
+    //
+    // The profile fills in the keys the host left alone.  A host that
+    // named its own STUN server keeps it — the profile never overrides
+    // an explicit setting, it only fills a gap.
+    //
+    // The profile is resolved *here* rather than at config time because
+    // the STUN default depends on the profile's `stun` flag, and the
+    // flag is a policy decision the profile table owns.
+    const auto profile =
+        detail::resolve_connectivity_profile(config_.connectivity_profile);
+    if (!detail::is_known_connectivity_profile(config_.connectivity_profile)) {
+        core::log::Logger::instance().warn(
+            "engine[transport]: unknown connectivity profile \"" +
+            std::string{config_.connectivity_profile} +
+            "\"; falling back to \"auto\"");
+    }
+
+    if (config_.stun_server_host.empty()) {
+        if (profile.stun) {
+            config_.stun_server_host = std::string{detail::default_stun_server()};
+            config_.stun_server_port = detail::default_stun_port();
+            core::log::Logger::instance().info(
+                "engine[transport]: the connectivity profile configured the "
+                "default STUN server " + config_.stun_server_host + ":" +
+                std::to_string(config_.stun_server_port));
+        }
+        // A profile that says "no STUN" and a host that named no server
+        // mean the same thing: no STUN gathering.  That is not a
+        // failure — N4 reports the resulting candidate counts, and a
+        // session on a reachable network is perfectly happy with host
+        // candidates alone.
+    }
+
     ice_t_->set_stun_server(config_.stun_server_host, config_.stun_server_port);
     ice_t_->set_local_port_range(config_.local_port_range_begin,
                                   config_.local_port_range_end);

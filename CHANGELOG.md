@@ -123,6 +123,89 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by the *producer* thread, so a delta taken before the read would miss
   everything that happened between the previous tick and this one.
 
+- **The engine now says *why* a session did not connect (v1.4 N4).**
+  A host that could not reach its peer had one number and no answer:
+  `TransportStats` reported the ICE state, the candidate count and the
+  bytes on the wire, but nothing that named a *cause*.  "gathering" and
+  "failed" look identical whether the TURN server rejected the
+  credentials, the network blocked the transport, or the checks simply
+  never succeeded — and each of those calls for a different action
+  (refresh the credential, fix the configuration, try another path).
+
+  What landed:
+
+  - **A closed failure-reason vocabulary.**
+    `TransportStats::ice_failure_reason` is one of six values and no
+    others: `"none"`, `"no-candidates"`, `"no-pair"`,
+    `"checks-failed"`, `"credentials-rejected"`,
+    `"transport-unsupported"`.  The value is chosen by a **fixed
+    priority order** (first match wins):
+    `transport-unsupported` -> `credentials-rejected` ->
+    `no-candidates` -> `checks-failed` -> `no-pair` -> `none`.  The
+    earlier entries are the more specific and more actionable ones; a
+    session whose TURN transport this build cannot speak would also
+    report "no candidates", but the first is the cause and the second
+    is a symptom.
+
+    A **closed vocabulary and not a free-form string**, because the
+    point of the field is that a host can *act* on the answer.
+
+  - **The gathering action, which is not the ICE state.**
+    `TransportStats::ice_gathering_state` is `"new"`, `"gathering"` or
+    `"complete"` (RFC 8445 §5.1.1) and is **independent** of
+    `ice_state`.  `ice_state == "connected"` with
+    `ice_gathering_state == "gathering"` is a **normal** state — a
+    server-reflexive candidate may arrive after the path is already up.
+
+  - **The candidate census.**
+    `ice_host_candidates`, `ice_srflx_candidates` and
+    `ice_relay_candidates` say how many of each kind were gathered.
+    Zero server-reflexive candidates is the answer to "the peer cannot
+    see my address" behind a NAT; zero relay candidates is the answer to
+    "the peer cannot reach me at all".
+
+  - **The TURN transport, which catches a silent downgrade.**
+    `TransportStats::turn_transport_used` is `"udp"`, `"tcp"` or
+    `"tls"`.  A session configured for TURN over TLS that ends up on
+    plain UDP is a different (and much weaker) session, and the host
+    has no other way to learn that the transport was not the one it
+    asked for (RFC 6062 §3.2, RFC 8656 §12).
+
+  - **The seam.**  `plugins::IICETransport` gained two **additive**
+    methods, `gathering_state()` and `turn_failure_reason()`; the ICE
+    module implements them and the engine reads them.  The TURN failure
+    category comes from a vendored libjuice patch
+    (`src/third_party/libjuice/patches/0003-turn-allocation-failure-reason.patch`)
+    that exports `juice_turn_failure_t` and `juice_get_turn_failure()`:
+    upstream libjuice consumes the Allocate error code inside the agent
+    and only logs it, so a host **cannot** tell a refused credential
+    from an unreachable server.  The patch records the *category* — not
+    the raw STUN code — because the raw code table is libjuice's
+    business and the host wants "was it the credentials".
+
+- **The engine now has a connectivity profile (v1.4 D6).**
+  A host that wants "a conference call" or "a remote desktop session"
+  had to spell out the traversal policy itself: which STUN server,
+  whether TURN/TLS, whether to fall back to TCP.  `EngineConfig`
+  gained `connectivity_profile` (default `"auto"`), and the engine
+  fills in the keys the host left alone.
+
+  **The host's explicit settings always win** — the profile fills in
+  what the host did not set, and never overrides a key the host set.  A
+  host that names its own STUN server keeps it; a host that calls
+  `add_turn_server()` keeps its TURN servers.
+
+  An **unknown profile name is not an error**: the engine falls back
+  to `"auto"` and says so in the log.  A profile is a convenience, not
+  a contract, and a typo should not stop a session from starting.
+
+  The profile table lives in
+  `profiles/connectivity/connectivity-profiles.json` and ships three
+  defaults: `"auto"`, `"conference"` and `"remote-desktop"`.  The
+  built-in STUN fallback is `stun.l.google.com:3478`; a missing STUN
+  server is a *reported fact*, not a failure — the session simply has
+  no server-reflexive candidate and N4's `ice_failure_reason` says so.
+
 ### Changed
 
 - **The v1.4 plan's drift detector reported two rows as stale forever,

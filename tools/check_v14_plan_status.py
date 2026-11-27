@@ -87,11 +87,18 @@ PROBES: list[tuple[str, str, str, str, str]] = [
      "src/engine/src", "engine_ice_recovery"),
 
     # -- N4: connectivity diagnostics ----------------------------------
-    ("N4", "there is no failure-reason vocabulary", "absent",
+    #
+    # N4 closed on 2026-11-27, so the claims flipped the way N5's and
+    # D2's did: the things N4 was about to add now EXIST, and the probe
+    # asks for them rather than for their absence.  The wording below is
+    # the *historical* claim -- the plan's §1 still reads this way -- and
+    # what the row asserts now is that the tree carries the thing the
+    # claim said was missing.
+    ("N4", "the stats carry a failure-reason vocabulary", "present",
      "src/engine", "ice_failure_reason"),
-    ("N4", "there is no gathering-state field", "absent",
+    ("N4", "the stats carry a gathering-state field", "present",
      "src/engine", "ice_gathering_state"),
-    ("N4", "there is no field naming the TURN transport", "absent",
+    ("N4", "the stats name the TURN transport", "present",
      "src/engine", "turn_transport_used"),
 
     # -- N5: the reference TURN deployment -----------------------------
@@ -105,9 +112,32 @@ PROBES: list[tuple[str, str, str, str, str]] = [
     ("N5", "the reference TURN deployment exists", "present",
      "examples", "turn-server"),
 
+    # -- D6: the connectivity profile ----------------------------------
+    #
+    # This row used to live under **N6**, and that was a filing error:
+    # §1.1's "no connectivity profile" is D6's claim (D6 *is* the
+    # connectivity profile), while N6 is the SDK *sample* -- a different
+    # thing, with a different bar (a ≤ 200-line application that does
+    # the whole call).  So the row fired on D6's landing and reported
+    # N6 as stale, which was both wrong (N6 is not done) and a
+    # permanent false alarm (D6 landed, so the row could never go back
+    # to "absent").
+    #
+    # D6 closed on 2026-11-27: `EngineConfig::connectivity_profile`
+    # exists, and the profile table lives beside it.
+    ("D6", "the engine has a connectivity profile", "present",
+     "src/engine", "connectivity_profile"),
+    ("D6", "the connectivity profile table exists", "present",
+     "src/engine/src", "resolve_connectivity_profile"),
+
     # -- N6: the SDK sample ---------------------------------------------
-    ("N6", "there is no connectivity profile", "absent",
-     "src", "connectivity_profile"),
+    #
+    # N6 is NOT closed: the ≤ 200-line sample that does the whole call
+    # through a TLS-relayed NAT by default config does not exist yet.
+    # The row asks for the thing N6 is about to add -- the sample's
+    # own directory under examples/ -- so that it flips when N6 lands.
+    ("N6", "the SDK sample exists", "absent",
+     "examples", "sdk-sample"),
 
     # -- N7: credentials as a seam -------------------------------------
     ("N7", "there is no credential provider", "absent",

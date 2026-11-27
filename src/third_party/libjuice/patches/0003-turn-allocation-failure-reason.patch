@@ -1,0 +1,235 @@
+﻿From: NimRTC contributors <bot@nimrtc.local>
+Subject: [PATCH] libjuice: a TURN allocation failure reason the host can read
+
+Upstream base commit: 77daa8befd828046169adbb012d8de928bfdcdd4
+
+Applies on top of: the NimRTC libjuice tree after PR #34 (TURN over TCP,
+which added src/turn_tcp.c), PR #50 (0001-so-reuseaddr) and PR #139
+(0002-turn-tls-transport).  It does not apply to a pristine upstream
+checkout.
+
+Upstream libjuice reports a failed TURN allocation only through the log.
+The Allocate response's error code is consumed inside
+agent_process_turn_allocate(), the entry is marked
+AGENT_STUN_ENTRY_STATE_FAILED, and the code is gone.  A host that wants
+to tell "the server refused my credentials" from "the server is
+unreachable" from "the transport could not be opened" cannot: all three
+look identical from the outside, and each calls for a different action
+(refresh the credential, try another path, fix the TLS client).
+
+The patch adds one classification field and one read function.  It does
+not change any behaviour: the same branches that already logged and
+failed now also record *why*.
+
+The seam is juice_turn_failure_t in include/juice/juice.h:
+
+  JUICE_TURN_FAILURE_NONE         no allocation has failed
+  JUICE_TURN_FAILURE_UNAUTHORIZED 401: the server refused the credentials
+  JUICE_TURN_FAILURE_STALE_NONCE  438: the nonce went stale
+  JUICE_TURN_FAILURE_TRANSPORT    the transport could not be opened at all
+  JUICE_TURN_FAILURE_ALLOCATE     any other Allocate error
+
+and juice_get_turn_failure(juice_agent_t *agent), which reads the
+category the agent recorded.
+
+The classification is deliberately done HERE, in the only place that
+knows the context, and the host gets the *category* rather than the raw
+STUN error code.  The raw code table is libjuice's business; a
+host-facing surface should not leak it, and the caller of this seam
+wants "was it the credentials" rather than "was it 401".
+
+Two distinct sites are worth naming, because they are different facts
+that used to look the same:
+
+  - the 401 branch, when the realm is already known, is a refused
+    credential: the server answered the *authenticated* request with
+    401 (JUICE_TURN_FAILURE_UNAUTHORIZED);
+
+  - the agent_turn_state_t::failed flag, set when the transport could
+    not be opened at all (for example TURN over TLS with no usable TLS
+    client), means the server was never reached
+    (JUICE_TURN_FAILURE_TRANSPORT).
+
+A 438 that cannot be acted on -- the server asked for a fresh nonce
+and did not give one -- is JUICE_TURN_FAILURE_STALE_NONCE, and every
+other Allocate error is JUICE_TURN_FAILURE_ALLOCATE.
+
+The agent's field is zero-initialised by the existing calloc, so a
+fresh agent reports JUICE_TURN_FAILURE_NONE.
+
+NimRTC's host side of the seam is src/modules/ice/src/ice.cpp, which
+reads the category through the ICE plugin seam and lets the engine
+publish it as the transport plane's failure reason.
+diff --git a/include/juice/juice.h b/include/juice/juice.h
+index f95aa55e..31061f75 100644
+--- a/include/juice/juice.h
++++ b/include/juice/juice.h
+@@ -172,6 +172,29 @@ typedef struct juice_turn_server {
+ 	const char *server_name;
+ } juice_turn_server_t;
+ 
++// Why the last TURN allocation failed (NimRTC extension, see
++// src/third_party/libjuice/patches/0003-turn-allocation-failure-reason.patch).
++//
++// Upstream libjuice reports a failed allocation only through the log: the
++// Allocate response's error code is consumed inside
++// agent_process_turn_allocate() and the entry is simply marked FAILED.  A
++// host that wants to tell "the server refused my credentials" from "the
++// server is unreachable" from "the transport could not be opened" cannot
++// do so, because all three look identical from the outside.
++//
++// The classification happens here, in the only place that knows the
++// context: 401 is a credential problem, 438 is a stale nonce, and the
++// agent_turn_state_t::failed flag is a transport problem.  The host gets
++// the *category*, not the raw STUN error code -- the raw code table is
++// libjuice's business, and a host-facing surface should not leak it.
++typedef enum juice_turn_failure {
++	JUICE_TURN_FAILURE_NONE = 0,      // no allocation has failed
++	JUICE_TURN_FAILURE_UNAUTHORIZED,  // 401: the server refused the credentials
++	JUICE_TURN_FAILURE_STALE_NONCE,   // 438: the nonce went stale
++	JUICE_TURN_FAILURE_TRANSPORT,     // the transport could not be opened at all
++	JUICE_TURN_FAILURE_ALLOCATE,      // any other Allocate error
++} juice_turn_failure_t;
++
+ typedef enum juice_concurrency_mode {
+ 	JUICE_CONCURRENCY_MODE_POLL = 0, // Connections share a single thread
+ 	JUICE_CONCURRENCY_MODE_MUX,      // Connections are multiplexed on a single UDP socket
+@@ -225,6 +248,7 @@ JUICE_EXPORT int juice_get_selected_addresses(juice_agent_t *agent, char *local,
+                                               char *remote, size_t remote_size);
+ JUICE_EXPORT int juice_set_local_ice_attributes(juice_agent_t *agent, const char *ufrag, const char *pwd);
+ JUICE_EXPORT const char *juice_state_to_string(juice_state_t state);
++JUICE_EXPORT juice_turn_failure_t juice_get_turn_failure(juice_agent_t *agent);
+ JUICE_EXPORT int juice_mux_listen(const char *bind_address, int local_port, juice_cb_mux_incoming_t cb, void *user_ptr);
+ 
+ // ICE server
+diff --git a/src/agent.c b/src/agent.c
+index 47060827..27832c96 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -991,6 +991,13 @@ juice_state_t agent_get_state(juice_agent_t *agent) {
+ 	return state;
+ }
+ 
++juice_turn_failure_t agent_get_turn_failure(juice_agent_t *agent) {
++	conn_lock(agent);
++	juice_turn_failure_t failure = agent->turn_failure;
++	conn_unlock(agent);
++	return failure;
++}
++
+ int agent_get_selected_candidate_pair(juice_agent_t *agent, ice_candidate_t *local,
+                                       ice_candidate_t *remote) {
+ 	conn_lock(agent);
+@@ -1109,6 +1116,11 @@ int agent_bookkeeping(juice_agent_t *agent, timestamp_t *next_timestamp) {
+ 			// for the retransmission timeout.
+ 			if (entry->turn && entry->turn->failed) {
+ 				JLOG_INFO("TURN allocation failed");
++				// The transport could not be opened at all -- the
++				// server was never reached (NimRTC extension, see the
++				// 0003-turn-allocation-failure-reason patch).  This is
++				// a different fact from "the server refused us".
++				agent->turn_failure = JUICE_TURN_FAILURE_TRANSPORT;
+ 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
+ 				entry->next_transmission = 0;
+ 				agent_update_gathering_done(agent);
+@@ -2053,12 +2065,18 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
+ 			           msg->msg_method == STUN_METHOD_ALLOCATE ? "Allocate" : "Refresh");
+ 			if (*entry->turn->credentials.realm != '\0') {
+ 				JLOG_ERROR("TURN authentication failed");
++				// The realm is already known, so the server answered the
++				// authenticated request with 401: the credentials
++				// themselves were refused (NimRTC extension, see the
++				// 0003-turn-allocation-failure-reason patch).
++				agent->turn_failure = JUICE_TURN_FAILURE_UNAUTHORIZED;
+ 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
+ 				agent_update_gathering_done(agent);
+ 				return -1;
+ 			}
+ 			if (*msg->credentials.realm == '\0' || *msg->credentials.nonce == '\0') {
+ 				JLOG_ERROR("Expected realm and nonce in TURN error response");
++				agent->turn_failure = JUICE_TURN_FAILURE_ALLOCATE;
+ 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
+ 				agent_update_gathering_done(agent);
+ 				return -1;
+@@ -2074,6 +2092,10 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
+ 			           msg->msg_method == STUN_METHOD_ALLOCATE ? "Allocate" : "Refresh");
+ 			if (*msg->credentials.realm == '\0' || *msg->credentials.nonce == '\0') {
+ 				JLOG_ERROR("Expected realm and nonce in TURN error response");
++				// A 438 we cannot act on: the server asked for a fresh
++				// nonce and did not give one (NimRTC extension, see the
++				// 0003-turn-allocation-failure-reason patch).
++				agent->turn_failure = JUICE_TURN_FAILURE_STALE_NONCE;
+ 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
+ 				agent_update_gathering_done(agent);
+ 				return -1;
+@@ -2095,6 +2117,7 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
+ 			if (!msg->alternate_server.len ||
+ 			    addr_record_is_equal(&msg->alternate_server, &entry->record, true)) {
+ 				JLOG_ERROR("Expected alternate server in TURN Allocate 300 Try Alternate response");
++				agent->turn_failure = JUICE_TURN_FAILURE_ALLOCATE;
+ 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
+ 				agent_update_gathering_done(agent);
+ 				return -1;
+@@ -2102,6 +2125,7 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
+ 			// Prevent infinite redirection loop
+ 			if (entry->turn_redirections >= MAX_TURN_REDIRECTIONS) {
+ 				JLOG_ERROR("Too many redirections for TURN Allocate");
++				agent->turn_failure = JUICE_TURN_FAILURE_ALLOCATE;
+ 				entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
+ 				agent_update_gathering_done(agent);
+ 				return -1;
+@@ -2126,6 +2150,11 @@ int agent_process_turn_allocate(juice_agent_t *agent, const stun_message_t *msg,
+ 				          (unsigned int)msg->error_code);
+ 
+ 			JLOG_INFO("TURN allocation failed");
++			// Any other Allocate error (NimRTC extension, see the
++			// 0003-turn-allocation-failure-reason patch).  The server
++			// answered, so the transport was fine -- the allocation
++			// itself was refused.
++			agent->turn_failure = JUICE_TURN_FAILURE_ALLOCATE;
+ 			entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
+ 			agent_update_gathering_done(agent);
+ 		}
+diff --git a/src/agent.h b/src/agent.h
+index 8b7dd6dc..3a55eb6c 100644
+--- a/src/agent.h
++++ b/src/agent.h
+@@ -181,6 +181,12 @@ struct juice_agent {
+ 	timestamp_t nomination_timestamp;
+ 	bool gathering_done;
+ 
++	// Why the last TURN allocation failed, if it did (NimRTC extension,
++	// see the 0003-turn-allocation-failure-reason patch).  The category
++	// is recorded where the failure is detected, so a host can tell a
++	// refused credential from an unreachable server.
++	juice_turn_failure_t turn_failure;
++
+ 	conn_registry_t *registry;
+ 	int conn_index;
+ 	void *conn_impl;
+@@ -208,6 +214,7 @@ int agent_relay_send(juice_agent_t *agent, agent_stun_entry_t *entry, const addr
+ int agent_channel_send(juice_agent_t *agent, agent_stun_entry_t *entry, const addr_record_t *dst,
+                        const char *data, size_t size, int ds);
+ juice_state_t agent_get_state(juice_agent_t *agent);
++juice_turn_failure_t agent_get_turn_failure(juice_agent_t *agent);
+ int agent_get_selected_candidate_pair(juice_agent_t *agent, ice_candidate_t *local,
+                                       ice_candidate_t *remote);
+ 
+diff --git a/src/juice.c b/src/juice.c
+index 70be6446..78710840 100644
+--- a/src/juice.c
++++ b/src/juice.c
+@@ -104,6 +104,13 @@ JUICE_EXPORT int juice_send_diffserv(juice_agent_t *agent, const char *data, siz
+ 
+ JUICE_EXPORT juice_state_t juice_get_state(juice_agent_t *agent) { return agent_get_state(agent); }
+ 
++JUICE_EXPORT juice_turn_failure_t juice_get_turn_failure(juice_agent_t *agent) {
++	if (!agent)
++		return JUICE_TURN_FAILURE_NONE;
++
++	return agent_get_turn_failure(agent);
++}
++
+ JUICE_EXPORT int juice_get_selected_candidates(juice_agent_t *agent, char *local, size_t local_size,
+                                                char *remote, size_t remote_size) {
+ 	if (!agent || (!local && local_size) || (!remote && remote_size))

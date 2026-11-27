@@ -97,6 +97,12 @@ add_library(nimrtc_engine STATIC
     # report's age live in one private collaborator, so the engine's
     # receive-side feedback has ONE visible owner.
     src/engine_feedback_guard.cpp
+    # v1.4 plan D6: the connectivity profile -- the named set of
+    # traversal defaults (STUN on/off, TURN/TLS eagerness, TCP
+    # fallback) and the built-in default STUN server.  It lives in its
+    # own private collaborator so the policy table has ONE visible
+    # owner and the transport setup does not grow a vocabulary.
+    src/engine_connectivity_profile.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and

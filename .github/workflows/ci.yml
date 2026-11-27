@@ -140,7 +140,10 @@ jobs:
       # documentation task, and a build that goes red for it teaches
       # people to ignore the build.  The self-test pins the checker's
       # own machinery, so the checker cannot silently pass everything.
-      - name: Report the v1.4 plan's claims against the tree
+      # (The flags are the same for both checkers: `--self-test`, then the
+      # plain report; `--json` and `--strict` exist on both and are not
+      # used here.  See the v1.5 pair below.)
+      - name: Check the v1.4 plan's checker
         shell: pwsh
         run: python tools/check_v14_plan_status.py --self-test
         # The report itself: every claim, with the stale ones marked.
@@ -153,6 +156,13 @@ jobs:
       # `ok` today; the point of running it now is that the checker's
       # own machinery -- and its ability to speak -- is proven before
       # the rows that will change are written.
+      #
+      # The two checkers are a pair, and this pair of steps is the same
+      # pair as v1.4's above: same flags (`--self-test`, then the plain
+      # report), neither `--strict`.  Before, only one plan's checker
+      # had a `--json`/`--strict` surface, so "the plan is checked in
+      # CI" meant two different things depending on which plan was
+      # meant.
       - name: Check the v1.5 plan's checker
         shell: pwsh
         run: python tools/check_v15_plan_status.py --self-test

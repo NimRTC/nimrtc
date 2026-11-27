@@ -2867,7 +2867,36 @@ struct NIMRTC_API_STABLE RemoteDesktopStats {
      *  counter: a receive-only session has an empty encode stage and a
      *  busy decode stage.  Kept out of the drop accounting on purpose. */
     std::uint64_t frames_decoded_without_local_encode = 0;
+  };
+
+// ---------------------------------------------------------------------------
+// The default device policy (v1.4 D3)
+// ---------------------------------------------------------------------------
+
+/** @brief The platform's default device backends (v1.4 D3).
+ *
+ *  A read-only value: one plugin id per device class, and an **empty
+ *  string means "this platform has no default for this class"** -- which
+ *  is a fact about the platform, not a failure.
+ *
+ *  The table used to live in `examples/remote-desktop/rd_device.cpp`,
+ *  where a host that wrote its own application could not reach it.  It
+ *  is now in the engine, where the whole point of the "commercial SDK"
+ *  claim is that the host does not have to know the platform's spelling
+ *  of a device.
+ *
+ *  @see NimRTCEngine::default_device_policy() */
+struct NIMRTC_API_STABLE DevicePolicyInfo {
+    /** Screen-capture backend plugin id ("" = none on this platform). */
+    std::string screen_capture_backend;
+    /** Camera-capture backend plugin id ("" = none on this platform). */
+    std::string camera_capture_backend;
+    /** Audio capture backend plugin id ("" = none on this platform). */
+    std::string audio_capture_backend;
+    /** Audio playback backend plugin id ("" = none on this platform). */
+    std::string audio_playback_backend;
 };
+
 // ---------------------------------------------------------------------------
 // NimRTCEngine
 // ---------------------------------------------------------------------------
@@ -3949,6 +3978,21 @@ public:
      *  used instead. Pass nullptr to detach (next render() calls are no-ops). */
     NIMRTC_API_STABLE void set_video_sink(std::unique_ptr<plugins::IVideoSink> sink) noexcept;
 
+    /** The current platform's default device backends (v1.4 D3).
+     *
+     *  A **static** query, because the answer depends on the platform
+     *  and on nothing else -- not on the session, not on the config.
+     *
+     *  The host asks this to learn what it *would* get if it set
+     *  `EngineConfig::video_capture_name = "auto"`, and the engine
+     *  applies the same table when it resolves that value.  The host's
+     *  own explicit id always wins over the table; see
+     *  `EngineConfig::video_capture_name`.
+     *
+     *  @return The platform's default backends.  A field is empty when
+     *          this platform has no default for that device class. */
+    [[nodiscard]] static DevicePolicyInfo default_device_policy() noexcept;
+
     /** Replace the video source at runtime. Same semantics as set_video_sink. */
     NIMRTC_API_STABLE void set_video_source(std::unique_ptr<plugins::IVideoSource> source) noexcept;
 
@@ -4810,6 +4854,21 @@ public:
         std::uint64_t video_capture_restarts    = 0;  // times the device was reopened
         std::uint64_t video_capture_format_changes = 0;  // negotiated format changed
         std::uint64_t video_capture_bytes_copied = 0;  // CPU<->GPU bytes (0 = zero-copy)
+
+        // ---- The device-list changes (v1.4 D4, additive) ----------------
+        //
+        // How many times the **device list** changed while the session
+        // ran -- a device appeared or disappeared.  A *different* thing
+        // from `video_capture_device_errors` (the device itself
+        // reported an error) and from `video_capture_restarts` (the
+        // engine reopened the device): one "unplug and plug back in"
+        // produces one change and one restart, and the two counters are
+        // deliberately not related by a fixed ratio.
+        //
+        // The counter is what makes the hot-plug path *observable*: a
+        // device that comes back without a line in the stats looks
+        // exactly like a device that never went away.
+        std::uint64_t video_capture_device_changes = 0;
         // ---- Codec telemetry (remote-desktop plan B15, additive) ---------
         //
         // The numbers that make a live session *explainable*: which
@@ -6298,6 +6357,37 @@ private:
      * not reported a new error.
      */
     void recover_capture_device() noexcept;
+
+    /**
+     * @brief Reopen the capture device, with a bounded backoff.
+     *
+     * The reopen path that both the error path and the device-list
+     * path go through.  The backoff (v1.4 D4) is what keeps a device
+     * that stayed gone from turning into a busy loop: the interval
+     * grows, it is capped, and the number of attempts is capped too --
+     * after which the engine stops and reports `kVideoCaptureOpenFailed`
+     * once.
+     *
+     * A reopen that *succeeds* resets the budget: a device that
+     * recovers deserves a fresh set of attempts if it fails again.
+     */
+    void reopen_capture_device(const char* reason) noexcept;
+
+    /**
+     * @brief Watch the capture device list for changes (v1.4 D4).
+     *
+     * Two sources: the seam's own change notifications (when the device
+     * implements the optional `plugins::ICaptureDeviceEventSource`) and
+     * the engine's own enumeration.  The enumeration is authoritative --
+     * the seam's events say *when*, the list says *what*.
+     *
+     * A change reopens the device through the same backoff-bounded path
+     * the error path uses, and increments
+     * `video_capture_device_changes`.
+     *
+     * Runs on the **tick** path -- no new engine thread (RD-6).
+     */
+    void poll_capture_device_changes() noexcept;
 
     /**
      * @brief Publish the capture device's own counters (plan A11).

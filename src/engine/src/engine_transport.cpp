@@ -1265,6 +1265,23 @@ int NimRTCEngine::tick() noexcept {
     // common case, because the capture cadence is slower than the tick.
     pump_video_capture();
 
+    // ---- The capture device's health (v1.4 D4) --------------------------
+    //
+    // The device watch sits on the **tick** path and not inside
+    // `pump_video_capture()`, because the pump is about *frames* and
+    // this is about the *device*: a session that captures no frames (no
+    // encoder, or the pump switched off) still has a capture device
+    // that can be unplugged, and the host still has to be told.
+    //
+    // `recover_capture_device()` is the error half -- the device said it
+    // lost itself -- and `poll_capture_device_changes()` is the
+    // device-list half (v1.4 D4) -- the device list says it went away.
+    // The second one is the only way to notice a device that vanished
+    // *without* saying so: a yanked cable on a hub that does not
+    // report.
+    recover_capture_device();
+    poll_capture_device_changes();
+
     // ---- Pump the capture device into the encoder (v1.4 D1) ------------
     //
     // The automatic audio path: one block of PCM is pulled from the

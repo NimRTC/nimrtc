@@ -920,6 +920,128 @@ The two doors are counted separately because they call for completely
 different fixes: a rising `..._from_loss` means the network is lossy,
 a rising `..._from_decode_failure` means the bitstream is undecodable.
 
+### 9.4 The default device policy (v1.4 D3)
+
+```cpp
+struct DevicePolicyInfo {
+    std::string screen_capture_backend;
+    std::string camera_capture_backend;
+    std::string audio_capture_backend;
+    std::string audio_playback_backend;
+};
+
+[[nodiscard]] static DevicePolicyInfo
+NimRTCEngine::default_device_policy() noexcept;
+```
+
+The platform's default device backends — one plugin id per device
+class. An **empty string** means "this platform has no default for this
+class", which is a fact about the platform and not a failure.
+
+The table used to live in `examples/remote-desktop/rd_device.cpp`. That
+was the wrong place for it: a table only the example can read is a
+table the *library* cannot honour, and a host that wrote its own
+application had no way to ask "what does this platform capture with by
+default?".
+
+The host asks this static function to learn what it *would* get, and
+the engine applies the same table when it resolves the `"auto"` value
+below — so the two cannot disagree.
+
+### 9.4.1 The three meanings of `video_capture_name`
+
+`EngineConfig::video_capture_name` keeps its existing meanings and
+gains exactly one:
+
+| Value | Meaning |
+|---|---|
+| `""` | the host feeds frames itself — **unchanged** |
+| a concrete plugin id | the host named a backend — always wins over the policy |
+| `"auto"` | **new**: use the platform policy |
+
+The empty string deliberately does *not* mean "the policy". A lot of
+existing hosts and tests use `""` to mean "no capture device", and
+silently changing that would open a real camera on every one of them.
+The profile system can use "empty = the policy" because an empty
+profile key has no other meaning; this field does, so `"auto"` has to
+be said out loud.
+
+### 9.4.2 Screen or camera
+
+The policy names one backend per device *class*, so something has to
+say which class the host wants. The **content hint** says it, because
+the product intent already lives in the profile:
+
+- `video_content_hint == kText` → the **screen** backend (a terminal, a
+  spreadsheet — the remote-desktop shape);
+- anything else, including `kUnspecified` → the **camera** backend (the
+  conference shape).
+
+### 9.4.3 A policy that does not hold is not an error
+
+If the policy names a backend this build does not have, the engine
+continues with **no capture device** and warns once. That is
+deliberately different from an unknown *explicit* id, which is reported
+as `kVideoCapturePluginMissing`:
+
+- an explicit id that does not resolve is a **typo**, and a typo that
+  silently produced no video would be a session that quietly never
+  shows a picture;
+- a policy id that does not resolve is a **suggestion**, and the
+  platform may simply not have that device.
+
+### 9.5 Camera hot-plug (v1.4 D4)
+
+The engine watches the capture device list and recovers when the device
+comes and goes.
+
+**What it watches.** Two sources:
+
+1. the **seam's** own change notifications, when the device implements
+   the optional `plugins::ICaptureDeviceEventSource` — a backend that
+   can watch the OS's device notifications tells the engine the moment
+   something is unplugged;
+2. the engine's **own enumeration**, every tick — the fallback for a
+   device that does not implement the optional interface, and the safety
+   net for a device that disappeared *without* saying so (a yanked USB
+   cable on a hub that does not report).
+
+The enumeration is authoritative: the seam's events say *when*, the list
+says *what*.
+
+The optional interface lives in
+`nimrtc/plugins/capture_device_events.hpp` and is **separate** from
+`plugins::IVideoCapture` on purpose — `IVideoCapture` is a STABLE
+public header, and adding a pure virtual function to it would break
+every host that implemented it themselves. The engine probes with a
+`dynamic_cast`.
+
+**The reopen is backoff-bounded.** A device that stayed gone is not
+reopened on every tick:
+
+- the interval starts at 1 s and doubles, capped at 8 s;
+- there are at most 20 attempts;
+- after that the engine stops and reports `kVideoCaptureOpenFailed`
+  **once** — not on every tick;
+- a reopen that *succeeds* resets the budget, because a device that
+  recovered deserves a fresh set of attempts if it fails again.
+
+**The counters** are in `Stats`:
+
+| Counter | What it says |
+|---|---|
+| `video_capture_device_changes` | how many times the **device list** changed (a device appeared or vanished) |
+| `video_capture_device_errors` | how many times the **device itself** reported an error |
+| `video_capture_restarts` | how many times the engine **reopened** the device |
+
+The three are deliberately *not* related by a fixed ratio: one "unplug
+and plug back in" produces one change, one error and one restart, but a
+device that vanishes without reporting produces a change and a restart
+and *no* error.
+
+The polling runs on the existing **tick** path — the engine starts no
+new thread for it (RD-6).
+
 ---
 
 ## 10. DataChannel control plane

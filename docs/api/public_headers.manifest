@@ -9,7 +9,7 @@
 #
 # Regenerate with: python scripts/check_api_manifest.py --write
 #
-# count: 197
+# count: 198
 
 src/core/include/nimrtc/core/api_version.hpp
 src/core/include/nimrtc/core/bytes.hpp
@@ -181,6 +181,7 @@ src/plugins/include/nimrtc/plugins/audio_sink.hpp
 src/plugins/include/nimrtc/plugins/audio_source.hpp
 src/plugins/include/nimrtc/plugins/base.hpp
 src/plugins/include/nimrtc/plugins/bwe.hpp
+src/plugins/include/nimrtc/plugins/capture_device_events.hpp
 src/plugins/include/nimrtc/plugins/codec.hpp
 src/plugins/include/nimrtc/plugins/control_channel.hpp
 src/plugins/include/nimrtc/plugins/datachannel.hpp

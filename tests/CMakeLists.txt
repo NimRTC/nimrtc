@@ -1038,6 +1038,32 @@ nimrtc_copy_msquic_dll(test_engine_capture_pump)
 endif()
 
 # ----------------------------------------------------------------------------
+# v1.4 D3 / D4 — the default device policy and camera hot-plug.
+#
+# The test pins the *resolution rule* directly, by including the
+# engine's private `engine_device_policy.hpp` (the same way the cadence
+# rule is pinned by `engine_rate_window.hpp` and the feedback bound by
+# `engine_feedback_guard.hpp`), and then tests the engine's own
+# behaviour through the public surface with a fake capture device.
+#
+# The fake device implements the optional `plugins::ICaptureDeviceEventSource`
+# — the separate interface the engine probes with a `dynamic_cast` — so
+# the hot-plug path the acceptance criteria name is the one under test.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_SOURCE
+   AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
+nimrtc_add_engine_video_test(test_engine_device_policy
+                              test_engine_device_policy.cpp
+                              PRE_TEST)
+target_link_libraries(test_engine_device_policy PRIVATE nimrtc::video_capture)
+# The device-policy collaborator is private to the engine; the engine's
+# implementation directory is the include root for it (`src/engine/src`).
+target_include_directories(test_engine_device_policy PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+nimrtc_copy_msquic_dll(test_engine_device_policy)
+endif()
+
+# ----------------------------------------------------------------------------
 # v1.1 Q3 — engine-level RTCP feedback loop.
 #
 # The module-level loop lives in `test_video_feedback_loop.cpp` and the

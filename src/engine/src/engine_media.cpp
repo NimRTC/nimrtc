@@ -22,6 +22,11 @@
 // translation unit's anonymous namespace.
 #include "engine_video_staging.hpp"
 
+// v1.4 D3: the default device policy -- *which* capture backend a host
+// gets when it asked for the policy ("auto") rather than for a named
+// backend.  The table used to live in `examples/remote-desktop/`.
+#include "engine_device_policy.hpp"
+
 // ADR-025 Decision 4: the RTP packet building is concentrated in the
 // `detail::RtpPacketizer` collaborator, so this file never names a
 // concrete `rtp::` type.
@@ -548,7 +553,28 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // The engine hands the device to the host through video_capture();
     // turning a device into a frame stream is an adapter's job, and the
     // automatic capture → encoder pump is remote-desktop plan item A10.
-    if (!config_.video_capture_name.empty() && !video_capture_) {
+    //
+    // But *which* device is a policy question when the host asked for
+    // the policy ("auto") rather than for a named backend (v1.4 D3).
+    //
+    // The resolution happens here, before the plugin is made, so that
+    // the rest of the engine keeps talking about one id.  The empty
+    // string means "the host feeds frames itself" and stays empty; a
+    // concrete id stays concrete; "auto" becomes the platform's
+    // default for the *class* the content hint asks for.
+    const std::string capture_backend_id = detail::resolve_capture_backend(
+        config_.video_capture_name,
+        detail::default_device_policy(),
+        !detail::content_hint_wants_screen(
+            static_cast<int>(config_.video_content_hint)));
+
+    // A policy that names a backend this build does not have is not an
+    // error -- the platform may simply not have that device.  The
+    // engine continues with no capture device and says so once.  An
+    // *explicit* id that does not resolve is a typo, and stays an error.
+    const bool capture_is_policy = config_.video_capture_name == "auto";
+
+    if (!capture_backend_id.empty() && !video_capture_) {
         // The capture request comes from the host (`EngineConfig::
         // video_capture_config`).  It is handed to the device verbatim:
         // the device owns the negotiation, and the engine must not
@@ -567,13 +593,19 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         }
 
         (void)pal::make_plugin<&pal::resolve_video_capture>(
-            config_.video_capture_name,
+            capture_backend_id,
             video_capture_,
             std::move(capture_cfg),
             {.err_open_failed = core::kVideoCaptureOpenFailed,
              .err_missing = core::kVideoCapturePluginMissing,
              .open_fail_mode = pal::PluginFailureMode::Error,
-             .missing_mode = pal::PluginFailureMode::Error,
+             // A *policy* backend that this build does not have is a
+             // fact about the platform, not a typo: the engine
+             // continues with no capture device and warns.  An
+             // explicit id that does not resolve is still an error.
+             .missing_mode = capture_is_policy
+                                ? pal::PluginFailureMode::Warn
+                                : pal::PluginFailureMode::Error,
              .on_error = on_error_,
              // The capture device knows *why* it refused -- another
              // program holds the desktop-duplication slot, the display
@@ -3536,6 +3568,8 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_capture_restarts       = impl_->video_state.video_capture_restarts;
     out.video_capture_format_changes = impl_->video_state.video_capture_format_changes;
     out.video_capture_bytes_copied   = impl_->video_state.video_capture_bytes_copied;
+    // v1.4 D4: the device-list changes (a device appeared or vanished).
+    out.video_capture_device_changes = impl_->video_state.video_capture_device_changes;
 
     // ---- Codec telemetry (remote-desktop plan B15) ------------------------
     //

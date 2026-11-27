@@ -26,6 +26,10 @@
 // Behaviour unchanged; see engine_impl.hpp.
 #include "engine_impl.hpp"
 
+// v1.4 D3: the default device policy (the public view of the private
+// table).
+#include "engine_device_policy.hpp"
+
 #include <mutex>
 
 namespace nimrtc::engine {
@@ -927,6 +931,24 @@ void NimRTCEngine::default_on_error(uint32_t err, std::string_view msg) noexcept
             std::snprintf(hex, sizeof(hex), "%04X", static_cast<unsigned>(err));
             return std::string(hex) + ": " + std::string(msg);
         })());
+}
+
+
+// v1.4 D3: the platform's default device backends.
+//
+// The public view of the private policy table.  The two shapes have to
+// stay in step, and the way to keep them in step is for this function
+// to *be* the conversion rather than to re-state the table: the private
+// `detail::DevicePolicy` is the single owner of the ids, and this
+// function is the only place they cross into the public type.
+DevicePolicyInfo NimRTCEngine::default_device_policy() noexcept {
+    const detail::DevicePolicy policy = detail::default_device_policy();
+    DevicePolicyInfo info;
+    info.screen_capture_backend = policy.screen_capture_backend;
+    info.camera_capture_backend = policy.camera_capture_backend;
+    info.audio_capture_backend  = policy.audio_capture_backend;
+    info.audio_playback_backend = policy.audio_playback_backend;
+    return info;
 }
 
 

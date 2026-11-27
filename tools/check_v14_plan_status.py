@@ -173,12 +173,32 @@ PROBES: list[tuple[str, str, str, str, str]] = [
      "src/engine", "video_sink_name"),
 
     # -- D3: the default device policy ---------------------------------
-    ("D3", "the default capture policy lives in an example", "present",
-     "examples/remote-desktop", "windows-wgc|macos-screencapturekit"),
+    #
+    # D3 closed on 2026-11-27: the per-platform default table moved out
+    # of `examples/remote-desktop/rd_device.cpp` and into the engine
+    # (`src/engine/src/engine_device_policy.{hpp,cpp}`), so the claim
+    # flipped the way N5's and D2's did.  The old row asserted that
+    # the policy *lives in an example* -- it was written that way so it
+    # would fire on D3's landing.  Now it asserts the opposite: the
+    # policy is in the engine, and the example only *reads* it.
+    ("D3", "the default capture policy lives in the engine", "present",
+     "src/engine", "default_device_policy"),
+    ("D3", "the engine resolves a capture backend from the policy",
+     "present", "src/engine", "resolve_capture_backend"),
 
     # -- D4: hot-plug ---------------------------------------------------
-    ("D4", "there is no hot-plug in the capture module", "absent",
-     "src/modules/video_capture", "device_added|device_removed|hot.?plug"),
+    #
+    # D4 closed on 2026-11-27: the engine watches the capture device
+    # list on its tick path and re-opens a device that went away, with
+    # a bounded backoff.  The row therefore asks for the engine-side
+    # change detection rather than for the capture module's absence of
+    # one.
+    ("D4", "the engine detects capture device changes", "present",
+     "src/engine", "poll_capture_device_changes"),
+    ("D4", "the engine re-opens a capture device", "present",
+     "src/engine", "reopen_capture_device"),
+    ("D4", "the device-change seam exists", "present",
+     "src/plugins", "ICaptureDeviceEventSource"),
 
     # -- D5: DTX coupling ----------------------------------------------
     ("D5", "DTX is not coupled to concealment", "absent",

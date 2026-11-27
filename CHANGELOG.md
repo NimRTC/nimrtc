@@ -206,6 +206,77 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server is a *reported fact*, not a failure — the session simply has
   no server-reflexive candidate and N4's `ice_failure_reason` says so.
 
+- **The engine now knows what this platform captures with by default
+  (v1.4 D3).**
+  The per-platform default capture table lived in
+  `examples/remote-desktop/rd_device.cpp` — a function called
+  `default_capture_name()` with an `#ifdef` per platform.  That is the
+  wrong place for it, and not for tidiness: a table only the *example*
+  can read is a table the *library* cannot honour.  A host that linked
+  NimRTC and wrote its own application had no way to ask "what does
+  this platform capture with by default?", because the answer was in an
+  example it did not copy.
+
+  The table is now in the engine, as **policy** — the same shape the
+  profile system already uses, with the same override rule.  The host
+  asks `NimRTCEngine::default_device_policy()` and gets a
+  `DevicePolicyInfo` (one plugin id per device class).
+
+  `EngineConfig::video_capture_name` keeps its existing meanings and
+  gains exactly one:
+
+  | Value | Meaning |
+  |---|---|
+  | `""` | the host feeds frames itself — **unchanged** |
+  | a concrete plugin id | the host named a backend — always wins |
+  | `"auto"` | **new**: use the platform policy |
+
+  The empty string deliberately does *not* mean "the policy": a lot of
+  existing hosts and tests write `""` to mean "no capture device", and
+  silently changing that would open a real camera on every one of them.
+
+  The **content hint** picks the class — `kText` is screen content (the
+  remote-desktop shape), anything else is a camera (the conference
+  shape) — because the product intent already lives in the profile.
+
+  **A policy that cannot be honoured is not an error.**  If the platform
+  has no such backend, the engine continues with no capture device and
+  warns once.  That is deliberately different from an unknown
+  *explicit* id, which is reported as `kVideoCapturePluginMissing`: an
+  explicit id that does not resolve is a typo, and a typo must not
+  produce a session that quietly never shows a picture.
+
+- **The engine now survives a camera being unplugged (v1.4 D4).**
+  A camera that vanished mid-session was noticed only if the device
+  itself reported an error — and a device that disappeared *without*
+  saying so (a yanked USB cable on a hub that does not report) was
+  not noticed at all.  The engine now watches the **device list** as
+  well, and reopens the device when it comes back.
+
+  The watch has two sources: the **seam's** own change notifications,
+  when the device implements the new optional
+  `plugins::ICaptureDeviceEventSource` (a separate interface, so that
+  `plugins::IVideoCapture` — a STABLE public header — does not gain a
+  pure virtual function and break every host that implemented it), and
+  the engine's **own enumeration**, every tick.  The enumeration is
+  authoritative; the seam's events say *when*, the list says *what*.
+
+  The reopen is **backoff-bounded**: the interval starts at 1 s and
+  doubles to a cap of 8 s, there are at most 20 attempts, and after
+  that the engine stops and reports `kVideoCaptureOpenFailed` **once**
+  — not on every tick.  A reopen that succeeds resets the budget.
+
+  The polling runs on the existing **tick** path — the engine starts no
+  new thread for it.
+
+  Two new counters make it observable:
+  `Stats::video_capture_device_changes` (the device list changed) and
+  `Stats::video_capture_restarts` (the engine reopened the device).
+  They are deliberately *not* related by a fixed ratio: one "unplug and
+  plug back in" produces one change, one error and one restart, but a
+  device that vanishes without reporting produces a change and a
+  restart and *no* error.
+
 ### Changed
 
 - **The v1.4 plan's drift detector reported two rows as stale forever,

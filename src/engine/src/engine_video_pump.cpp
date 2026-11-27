@@ -37,6 +37,11 @@
  */
 #include "engine_impl.hpp"
 
+// v1.4 D4: the optional device-change seam.  The engine probes the
+// capture device with a `dynamic_cast`, so the header is included here
+// rather than in the public engine header.
+#include <nimrtc/plugins/capture_device_events.hpp>
+
 namespace nimrtc::engine {
 
 namespace {
@@ -75,7 +80,6 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     //   2. **Did the device renegotiate?**  A resolution change or a
     //      format switch is legal, and it is *visible* in the stats
     //      instead of being invisible.
-    recover_capture_device();
     publish_capture_device_counters();
 
     // ---- The zero-copy path (remote-desktop plan B10) -------------------
@@ -267,7 +271,41 @@ bool NimRTCEngine::pump_video_capture() noexcept {
 
 // ---------------------------------------------------------------------------
 // The device's health (remote-desktop plan A11)
+//
+// v1.4 D4 added two things to this function:
+//
+//   1. a **backoff** on the reopen, with a cap on the interval and a cap
+//      on the number of attempts.  Before D4 a device that stayed gone
+//      was reopened on *every* tick -- which is a busy loop, and a
+//      laptop with a closed lid should not spend a core on it for the
+//      rest of the session;
+//
+//   2. the **device-list** watch, which notices a device that
+//      disappeared *without* reporting an error (a yanked USB cable on
+//      a hub that does not report, a camera the driver forgot about).
+//      The device's own error counter cannot see that case.
+//
+// The two paths converge on the same reopen, and the reopen counter
+// (`video_capture_restarts`) counts both.
 // ---------------------------------------------------------------------------
+
+namespace {
+
+// The reopen backoff (v1.4 D4, plan §5 D4-1).
+//
+// The first retry waits a short while -- a device that is being
+// re-enumerated usually reappears within a second or two -- and each
+// further attempt waits longer, up to a cap.
+constexpr std::uint32_t kCaptureReopenBackoffBaseMs = 1000;
+constexpr std::uint32_t kCaptureReopenBackoffCapMs  = 8000;
+
+// The attempt cap.  After this many tries the engine stops and reports
+// the failure: a device that has not come back by now is not coming
+// back, and a session that silently retries forever is worse than one
+// that says "the camera is gone".
+constexpr std::uint32_t kCaptureReopenMaxAttempts = 20;
+
+} // anonymous namespace
 
 void NimRTCEngine::recover_capture_device() noexcept {
     if (!video_capture_) return;
@@ -286,6 +324,52 @@ void NimRTCEngine::recover_capture_device() noexcept {
     core::log::Logger::instance().warn(
         "engine: the video capture device reported an error; reopening it");
 
+    reopen_capture_device("the video capture device reported an error");
+}
+
+void NimRTCEngine::reopen_capture_device(const char* reason) noexcept {
+    if (!video_capture_) return;
+
+    auto& vstate = impl_->video_state;
+
+    // The reason is logged with the *first* attempt of a burst, so a
+    // long absence does not produce one log line per attempt.
+    if (vstate.capture_reopen_attempts == 0) {
+        core::log::Logger::instance().warn(
+            std::string("engine: reopening the video capture device (") +
+            (reason != nullptr ? reason : "unspecified") + ")");
+    }
+
+    // The backoff gate.  A reopen is *not* attempted on every tick: the
+    // interval grows with each attempt and is capped, and the number of
+    // attempts is capped too.
+    const auto now = std::chrono::steady_clock::now();
+    if (vstate.capture_reopen_not_before !=
+            std::chrono::steady_clock::time_point{} &&
+        now < vstate.capture_reopen_not_before) {
+        return;
+    }
+
+    if (vstate.capture_reopen_attempts >= kCaptureReopenMaxAttempts) {
+        // Already exhausted: the failure was reported once, and the
+        // engine does not report it again on every tick.
+        return;
+    }
+
+    ++vstate.capture_reopen_attempts;
+
+    // The interval doubles up to the cap.  The first attempt waits the
+    // base interval; the growth is what makes a long absence cheap.
+    vstate.capture_reopen_backoff_ms =
+        vstate.capture_reopen_backoff_ms == 0
+            ? kCaptureReopenBackoffBaseMs
+            : (vstate.capture_reopen_backoff_ms * 2 >
+               kCaptureReopenBackoffCapMs
+                   ? kCaptureReopenBackoffCapMs
+                   : vstate.capture_reopen_backoff_ms * 2);
+    vstate.capture_reopen_not_before =
+        now + std::chrono::milliseconds(vstate.capture_reopen_backoff_ms);
+
     // A device that is reopened restarts its counters from zero, so the
     // baselines have to follow -- otherwise the next delta would be a
     // huge underflowed number.
@@ -297,16 +381,30 @@ void NimRTCEngine::recover_capture_device() noexcept {
     video_capture_->close();
     const plugins::Status rc = video_capture_->open();
     if (rc != plugins::kOk) {
+        // The attempt was counted, the backoff grew, and the next tick
+        // will try again -- but only when the backoff says so.
         core::log::Logger::instance().error(
-            "engine: the video capture device could not be reopened; "
-            "the capture pump is stopped");
-        if (on_error_) {
-            on_error_(core::kVideoCaptureOpenFailed,
-                      "engine: the video capture device could not be "
-                      "reopened; the capture pump is stopped");
+            "engine: the video capture device could not be reopened");
+        if (vstate.capture_reopen_attempts >= kCaptureReopenMaxAttempts) {
+            vstate.capture_reopen_exhausted = true;
+            core::log::Logger::instance().error(
+                "engine: the video capture device did not come back; "
+                "the capture pump is stopped");
+            if (on_error_) {
+                on_error_(core::kVideoCaptureOpenFailed,
+                          "engine: the video capture device could not be "
+                          "reopened; the capture pump is stopped");
+            }
         }
         return;
     }
+
+    // It came back.  The budget resets -- a device that recovers is a
+    // device that deserves a fresh set of attempts if it fails again.
+    vstate.capture_reopen_attempts   = 0;
+    vstate.capture_reopen_backoff_ms = 0;
+    vstate.capture_reopen_not_before = {};
+    vstate.capture_reopen_exhausted  = false;
 
     ++vstate.video_capture_restarts;
 
@@ -321,6 +419,107 @@ void NimRTCEngine::recover_capture_device() noexcept {
     vstate.capture_negotiated_width  = again.format.width;
     vstate.capture_negotiated_height = again.format.height;
     vstate.capture_negotiated_tag    = again.format.tag;
+
+    core::log::Logger::instance().warn(
+        "engine: the video capture device was reopened");
+}
+
+// ---------------------------------------------------------------------------
+// The device list (v1.4 D4)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::poll_capture_device_changes() noexcept {
+    if (!video_capture_) return;
+
+    auto& vstate = impl_->video_state;
+
+    // Two sources, and the seam's events are the *fast* one:
+    //
+    //   1. the **seam's** own change notifications, when the device
+    //      implements `ICaptureDeviceEventSource` -- a backend that can
+    //      watch the OS's device notifications tells us the moment
+    //      something is unplugged;
+    //   2. the engine's **own enumeration**, every time -- the fallback
+    //      for a device that does not implement the optional interface,
+    //      and the safety net for a device that disappeared without
+    //      saying so (a yanked cable on a hub that does not report).
+    //
+    // The enumeration is the authoritative one: the seam's events are
+    // a hint about *when*, and the list is the truth about *what*.
+    std::vector<plugins::CaptureDeviceChangeEvent> hinted;
+
+    if (auto* source = dynamic_cast<plugins::ICaptureDeviceEventSource*>(
+            video_capture_.get())) {
+        hinted = source->take_device_changes();
+    }
+
+    // The device list is compared against the **snapshot** the engine
+    // took when it opened the device.  A snapshot rather than "the id
+    // the engine holds", because the engine does not always know which
+    // device it holds: the backend picks its own default when the host
+    // leaves `device_id` empty, and that default is not necessarily
+    // the first entry in the list.
+    //
+    // The snapshot is seeded on the first poll, so the *first*
+    // enumeration is a baseline and not a change -- otherwise every
+    // session would open by reporting a spurious "added".
+    std::vector<std::string> ids;
+    for (const plugins::CaptureDevice& device :
+         video_capture_->enumerate_devices()) {
+        ids.push_back(device.id);
+    }
+    std::sort(ids.begin(), ids.end());
+
+    if (!vstate.capture_device_list_seeded) {
+        vstate.capture_device_list_seeded = true;
+        vstate.capture_device_list = ids;
+        // The seam's events on the very first poll are also a baseline:
+        // they describe changes that happened before the engine looked.
+        return;
+    }
+
+    // The diff.  A device that was there and is not now is *gone*; a
+    // device that was not there and is now is *new*.  Both count: a
+    // camera that is plugged in is a change the operator wants to see
+    // just as much as one that was unplugged.
+    std::uint64_t changes = 0;
+
+    for (const std::string& id : ids) {
+        if (std::find(vstate.capture_device_list.begin(),
+                      vstate.capture_device_list.end(),
+                      id) == vstate.capture_device_list.end()) {
+            ++changes;
+        }
+    }
+    for (const std::string& id : vstate.capture_device_list) {
+        if (std::find(ids.begin(), ids.end(), id) == ids.end()) {
+            ++changes;
+        }
+    }
+
+    // The seam's events are counted as well: a device that reports "I
+    // was removed" is a change even when the enumeration has not caught
+    // up yet (the OS list is updated asynchronously, and the backend
+    // may know first).
+    changes += hinted.size();
+
+    // The snapshot always advances -- even when nothing changed, and
+    // even when the reopen below fails.  Otherwise the same change
+    // would be counted again on every tick.
+    vstate.capture_device_list = ids;
+
+    if (changes == 0) return;
+
+    vstate.video_capture_device_changes += changes;
+
+    core::log::Logger::instance().warn(
+        "engine: the capture device list changed; the capture device is "
+        "being reopened");
+
+    // A device list that changed may mean the device the engine holds
+    // is gone.  The reopen path is the same one the error path uses:
+    // one reopen, one backoff budget, one counter.
+    reopen_capture_device("the capture device list changed");
 }
 
 void NimRTCEngine::publish_capture_device_counters() noexcept {

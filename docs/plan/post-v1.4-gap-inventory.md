@@ -154,8 +154,12 @@ src/modules/CMakeLists.txt:389:    add_subdirectory(audio_device)
 | 1.2.2 | 引擎不创建/持有 `IAudioSource` / `IAudioSink` 实例 | `src/engine/src/engine_impl.hpp` + 新协作类 | v1.4 D1 的核心工作量。**注意行数预算**：`engine_impl.hpp` 现为 399/400 行，加成员必然超——见 D1 拆解 §6.4 |
 | 1.2.3 | 引擎不从设备读帧喂给 `send_audio()` | `src/engine/src/engine_audio_frames.cpp` | 现状是宿主调用 `send_audio()`，PCM 契约不变（见 `audio_source.hpp` 的说明）。**出站路径已过 3A**（`engine_media.cpp:1780-1793`），设备 pump 只需「读帧 → 调 `send_audio()`」 |
 | 1.2.4 | 引擎不把接收到的音频送到设备播放 | `src/engine/src/engine_render_state.cpp` | 现状是引擎在 tick() 里调宿主的 `set_on_audio_frame()` / `set_on_audio_frame_info()` 回调（`engine.hpp:2727-2744`），**不推设备**。这两个回调是 STABLE，设备路径是**新增的并行路径**，不取代它们 |
-| 1.2.5 | 设备枚举 / 热插拔未暴露给宿主 | `EngineConfig` / `Engine` 公共 API | 与 v1.4 D4「camera and hot-plug」同类。枚举走 `IAudioSource::enumerate_devices()` 实例方法，**不进注册表**（ADR-028 已决）。**热插拔属 D4**：D1 只留 `recover_audio_device()` 与 `audio_capture_restarts` 的形状（恒为 0），D4 填实现 |
+| 1.2.5 | 设备枚举 / 热插拔未暴露给宿主 | `EngineConfig` / `Engine` 公共 API | 与 v1.4 D4「camera and hot-plug」同类。枚举走 `IAudioSource::enumerate_devices()` 实例方法，**不进注册表**（ADR-028 已决）。**热插拔属 D4**：D1 只留 `recover_audio_device()` 与 `audio_capture_restarts` 的形状（恒为 0），D4 填实现。**视频侧已落地**（2026-11-27）：引擎自己监听采集设备列表（tick 阶段），并以有界退避重开；**音频侧仍是缺口** — 下面说明 |
 | 1.2.6 | 后端发现走**模块自有查找函数**，不经 `core::PluginRegistry` | `src/modules/audio_device/src/audio_device.cpp` 的 `available_source_backends()` / `source_factory(id)` / `sink_factory(id)` | 见下 |
+
+> **1.2.5 的视频侧已关闭（2026-11-27，v1.4 D4）。** 引擎侧的变更检测是已经做到的事：`src/engine/src/engine_video_pump.cpp` 的 `poll_capture_device_changes()` 每个 tick 扫一次设备列表（优先用新增的可选接缝 `plugins::ICaptureDeviceEventSource`，没有就自己枚举），`recover_capture_device()` 用有界退避重开（1 s 基础、倍增到 8 s 上限、最多 20 次）。统计里有 `video_capture_device_changes` / `video_capture_restarts` / `video_capture_device_errors` 三个独立计数器。
+>
+> **但音频侧仍是缺口。** D4 解决的是**视频采集设备**（摄像头）；`IAudioSource` / `IAudioSink` 的枚举与热插拔仍是宿主的事（音频硬件的热插拔与视频侧不同：音频设备通常固定，少有拔出的场景）。
 
 > **1.2.1–1.2.6 的实施落点**统一见
 > `docs/plan/d1-device-layer-implementation.md` §2（缺口 → 落点映射）与

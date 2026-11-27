@@ -132,19 +132,20 @@ struct Options {
     std::string turn_pass;
 };
 
-/** The platform's default screen-capture backend. */
+/** The platform's default screen-capture backend.
+ *
+ *  v1.4 D3: the table moved into the engine, where a host that writes
+ *  its own application can reach it too.  This function is now a thin
+ *  reader of `NimRTCEngine::default_device_policy()` -- it exists so
+ *  the example can *print* which backend it is about to use, and so
+ *  `--help` can show the default.
+ *
+ *  The example no longer carries a platform table of its own: a second
+ *  copy of that table is a second thing that can be wrong. */
 std::string default_capture_name() {
-#ifdef _WIN32
-    // Windows Graphics Capture composites the cursor and works for a
-    // window as well as a display, so it is the better default.
-    return "windows-wgc";
-#elif defined(__APPLE__)
-    return "macos-screencapturekit";
-#elif defined(__linux__)
-    return "linux-x11";
-#else
-    return "synthetic";
-#endif
+    const nimrtc::engine::DevicePolicyInfo policy =
+        nimrtc::engine::NimRTCEngine::default_device_policy();
+    return policy.screen_capture_backend;
 }
 
 void print_usage(const char* prog) {
@@ -310,8 +311,18 @@ bool DeviceSession::start() {
         cfg.video_height = cfg.video_capture_config.format.height;
         cfg.video_fps    = opts_.game_fps;
     } else {
+        // v1.4 D3: the default backend comes from the **engine's**
+        // policy, not from a table in this example.  The example used
+        // to carry its own `#ifdef`-per-platform table, which meant the
+        // library could not honour "the default for this platform" --
+        // only this example could.
+        //
+        // The engine applies the same table when it resolves the value
+        // `"auto"`, so the two paths cannot disagree.  This example
+        // resolves it itself only to *print* which backend it is
+        // about to use.
         cfg.video_capture_name = opts_.capture_name.empty()
-                                     ? default_capture_name()
+                                     ? "auto"
                                      : opts_.capture_name;
         if (opts_.width != 0 || opts_.height != 0) {
             cfg.video_capture_config.format.width  = opts_.width;
@@ -377,6 +388,21 @@ bool DeviceSession::start() {
                      "[rd_device] engine open failed (rc=0x%04X, state=%s)\n",
                      engine_->last_open_rc(), engine_->ice_state_string());
         return false;
+    }
+
+    // ---- Which capture backend is actually in effect (v1.4 D3) -----------
+    //
+    // The example asks the *engine* which backend it resolved, rather
+    // than reporting what it asked for.  That is the difference that
+    // matters when the policy and the host disagree: the host asked for
+    // "auto", and this line says what that turned into.
+    {
+        const np::IVideoCapture* device = engine_->video_capture();
+        const std::string backend =
+            device != nullptr ? std::string(device->name())
+                              : std::string("(none)");
+        std::fprintf(stderr, "[rd_device] capture backend: %s\n",
+                     backend.c_str());
     }
 
     // ---- The injector ------------------------------------------------------

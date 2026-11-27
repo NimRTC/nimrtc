@@ -103,6 +103,13 @@ add_library(nimrtc_engine STATIC
     # own private collaborator so the policy table has ONE visible
     # owner and the transport setup does not grow a vocabulary.
     src/engine_connectivity_profile.cpp
+    # v1.4 plan D3: the default device policy -- the per-platform table
+    # of "which capture backend does this platform use by default".  The
+    # table used to live in `examples/remote-desktop/rd_device.cpp`,
+    # where a host that wrote its own application could not reach it.
+    # It lives in its own TU so the policy has ONE visible owner and
+    # the media setup does not grow a vocabulary.
+    src/engine_device_policy.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and

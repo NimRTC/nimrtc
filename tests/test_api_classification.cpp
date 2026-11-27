@@ -679,11 +679,19 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   out through the deprecated `Engine::video_codec()` accessor:
     //     - plugins/video_codec_view.hpp (the borrowed encoder+decoder view)
     //
+    // v1.4 D3/D4 bump: +1 public header (197 -> 198) for the *optional*
+    //   capture device-change seam:
+    //     - plugins/capture_device_events.hpp (the optional
+    //       ICaptureDeviceEventSource -- a separate interface so that
+    //       plugins/video_capture.hpp, a STABLE public header, does not
+    //       gain a pure virtual function and break every host that
+    //       implemented it)
+    //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 197;
+    constexpr std::size_t kBaselineHeaderCount = 198;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -181,6 +181,22 @@ struct VideoState {
     std::uint64_t video_capture_format_changes = 0; // negotiated format changed
     std::uint64_t video_capture_bytes_copied  = 0;  // CPU<->GPU bytes (0 = zero-copy)
 
+    // ---- The device-list changes (v1.4 D4) ------------------------------
+    //
+    // `video_capture_device_changes` counts the *device-list* changes
+    // the engine saw -- a device appeared or disappeared.  It is a
+    // **different** thing from `video_capture_device_errors` (the
+    // device itself reported an error) and from
+    // `video_capture_restarts` (the engine reopened the device): one
+    // "unplug and plug back in" produces one change and one restart,
+    // and the two counters are deliberately not related by a fixed
+    // ratio.
+    //
+    // The counter is what makes the hot-plug path *observable*.  A
+    // device that comes back without a line in the stats looks exactly
+    // like a device that never went away.
+    std::uint64_t video_capture_device_changes = 0;
+
     // ---- Zero-copy rejection (remote-desktop plan B10) -----------------
     //
     // `video_zero_copy_frames` counts the frames that reached the encoder
@@ -474,6 +490,57 @@ struct VideoState {
     std::uint32_t capture_negotiated_width  = 0;
     std::uint32_t capture_negotiated_height = 0;
     std::string   capture_negotiated_tag;
+
+    // ---- The reopen backoff (v1.4 D4) ----------------------------------
+    //
+    // A device that is gone does not come back by being asked again
+    // every tick.  The reopen is therefore **backoff-bounded**: the
+    // interval grows, it is capped, and the number of attempts is
+    // capped too -- after which the engine stops trying and reports
+    // the failure.  An unbounded retry loop is how a laptop with a
+    // closed lid burns a core for the rest of the session.
+    //
+    // The numbers (5 s / 1-2-4-8 s / 20 attempts) are the plan's
+    // §5 D4-1.
+
+    /** How many times the engine has tried to reopen the device. */
+    std::uint32_t capture_reopen_attempts = 0;
+
+    /** The instant before which no reopen is attempted.  A default
+     *  constructed point means "no wait pending". */
+    std::chrono::steady_clock::time_point capture_reopen_not_before{};
+
+    /** The current backoff interval (ms).  Grows with each attempt and
+     *  is capped by the pump's cap. */
+    std::uint32_t capture_reopen_backoff_ms = 0;
+
+    /** True once the backoff gave up: the attempt cap was reached and
+     *  the engine reported `kVideoCaptureOpenFailed`. */
+    bool capture_reopen_exhausted = false;
+
+    /** The device id the engine believes it holds, so a "removed" event
+     *  about *this* device can be recognised. */
+    std::string capture_device_id;
+
+    /** The device-list snapshot the engine took when it opened the
+     *  device, so the next enumeration can be diffed against it.
+     *
+     *  A snapshot rather than "the id the engine holds", because the
+     *  engine does not always know which device it holds: the backend
+     *  picks its own default when the host leaves `device_id` empty,
+     *  and that default is not necessarily the first entry in the
+     *  list. */
+    std::vector<std::string> capture_device_list;
+
+    /** True once `capture_device_list` holds a real snapshot.  The
+     *  first poll seeds it and reports nothing: otherwise every session
+     *  would open by reporting a spurious "a device appeared". */
+    bool capture_device_list_seeded = false;
+
+    /** The device-list changes the engine has seen since the last
+     *  drain -- the seam's events plus the engine's own enumeration
+     *  diff, merged. */
+    std::uint64_t capture_seen_device_changes = 0;
 
     // ---- The GPU-frame mailbox (remote-desktop plan B10) ----------------
     //

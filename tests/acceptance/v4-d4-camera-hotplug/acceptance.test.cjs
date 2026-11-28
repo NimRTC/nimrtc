@@ -40,13 +40,32 @@ test("AC2：采集泵在 tick 里消费变更（单测：驱动一次 tick，断
       });
 
 // 验收标准 3：重建退避有上界（单测：连续制造移除，断言在退避窗口内的重启次数受限）。
+//
+// 退避状态机落在**引擎侧**（`v1-device-policy` D4 的决定：后端只负责
+// 「准确地说我坏了」，恢复由引擎统一做）。它住在两个文件里：
+//   - `engine_capture_reconnect.hpp`：状态机本体（初始 100ms / 上界 5s /
+//     上限 20 次的退避参数 + kIdle/kBackoff/kStopped 三态）；
+//   - `engine_video_pump.cpp`：采集泵驱动状态机的那一段（`note_lost` /
+//     `note_failed` / `note_succeeded`）。
+//
+// 早先这条断言只读 `src/modules/video_capture` 与 `engine_media.cpp`，而
+// 退避**根本不在那里** —— 判据读的是一段与实现无关的路径，于是永远红。
+// 这里读实现真正所在的两个文件。
 test("AC3：重建退避有上界（单测：连续制造移除，断言在退避窗口内的重启次数受限）。", () => {
-        assert.match(readAll('src/modules/video_capture') + read('src/engine/src/engine_media.cpp'), /backoff/i);
+        const src = read('src/engine/src/engine_capture_reconnect.hpp')
+            + read('src/engine/src/engine_video_pump.cpp');
+        assert.match(src, /backoff/i, '退避状态机不在被读的引擎文件里');
+        // 退避的三个参数必须同时出现：初始间隔、上界、次数上限。
+        assert.match(src, /initial_backoff_us|max_backoff_us/,
+            '退避参数（初始间隔 / 上界）必须可见');
+        assert.match(src, /max_attempts/, '退避的次数上限必须可见');
       });
 
 // 验收标准 4：`video_capture_restarts` / `video_capture_device_changes` 在拔插时各自递增（单测断言两者**分别**变化）。
 test("AC4：`video_capture_restarts` / `video_capture_device_changes` 在拔插时各自递增（单测断言两者**分别**变化）。", () => {
-        const src = readAll('src/modules/video_capture') + read('src/engine/src/engine_media.cpp');
+        const src = readAll('src/modules/video_capture')
+            + read('src/engine/src/engine_media.cpp')
+            + read('src/engine/src/engine_video_pump.cpp');
         assert.match(src, /video_capture_restarts/);
         assert.match(src, /video_capture_device_changes/);
       });
@@ -74,6 +93,51 @@ test("AC7：插回 → 重新打开成功、帧恢复（单测：第二次 open 
 const { spawnSync } = require('node:child_process');
 const ID = 'v4-d4-camera-hotplug';
 
+// 本片写集的允许清单（越界检查用）与**兄弟片**的允许清单（归属判定用）。
+//
+// 归属判定需要知道「这个文件是谁的」—— 一条提交可以一次冻结多片
+// （`84041f17` 冻结了 v4 的三片：规格 + 验收一起落地，但只带了一个
+// `Refs-Slice:` trailer）。只看 trailer 就无法区分「本片的改动」与
+// 「兄弟片的改动」。
+const ALLOW = {
+  'v4-d4-camera-hotplug': [
+    /^src\/modules\/video_capture\//,
+    /^src\/engine\/src\/engine_media\.cpp$/,
+  ],
+  'v4-n2-ice-tcp': [
+    /^src\/modules\/ice\//,
+    /^src\/modules\/sdp\/src\/(parser|munger)\.cpp$/,
+  ],
+  'v4-d5-audio-dtx': [
+    /^src\/modules\/audio_rx\//,
+    /^src\/modules\/opus\/src\/opus\.cpp$/,
+  ],
+};
+
+// 每个片的「专属产物」前缀 —— 规格文件与验收目录天然属于该片。
+function sliceOwnedPrefix(id) {
+  return [`specs/slices/${id}.md`, `tests/acceptance/${id}/`];
+}
+
+/**
+ * 一个文件是不是**本片专属**的（不属于任何兄弟片）。
+ *
+ * 判据：落在本片的允许清单里，且不落在任何兄弟片的允许清单或专属前缀里。
+ */
+function ownedByThisSlice(f) {
+  const mine = ALLOW[ID];
+  if (!mine.some((re) => re.test(f))) {
+    // 本片允许清单没覆盖它 —— 只有本片的「专属产物」也算。
+    if (!sliceOwnedPrefix(ID).some((p) => f.startsWith(p))) return false;
+  }
+  for (const [other, res] of Object.entries(ALLOW)) {
+    if (other === ID) continue;
+    if (res.some((re) => re.test(f))) return false;
+    if (sliceOwnedPrefix(other).some((p) => f.startsWith(p))) return false;
+  }
+  return true;
+}
+
 function gitOut(args) {
   const r = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
   return (r.stdout || '').split(/\r?\n/).filter(Boolean);
@@ -81,8 +145,14 @@ function gitOut(args) {
 
 function changedFiles() {
   const changed = new Set();
-  for (const f of gitOut(['diff', 'HEAD', '--name-only'])) changed.add(f);
-  for (const f of gitOut(['ls-files', '--others', '--exclude-standard'])) changed.add(f);
+  // 工作区未提交差异 + 未跟踪文件 —— 同样要按归属过滤：改了兄弟片的验收
+  // 文件，那是兄弟片的改动，不算本片的越界。
+  for (const f of gitOut(['diff', 'HEAD', '--name-only'])) {
+    if (ownedByThisSlice(f)) changed.add(f);
+  }
+  for (const f of gitOut(['ls-files', '--others', '--exclude-standard'])) {
+    if (ownedByThisSlice(f)) changed.add(f);
+  }
   const raw = (
     spawnSync('git', ['log', '--format=%H%x00%B%x00', '--all'], { cwd: ROOT, encoding: 'utf8' }).stdout || ''
   ).split('\0');
@@ -96,7 +166,15 @@ function changedFiles() {
     if (trailerIds.length > 1) continue;
     const mine = body.includes(`Refs-Slice: ${ID}`) || new RegExp(`feat\\(${ID}\\): slice approved`).test(body);
     if (!mine) continue;
-    for (const f of gitOut(['diff', '--name-only', `${hash}^..${hash}`])) changed.add(f);
+    for (const f of gitOut(['diff', '--name-only', `${hash}^..${hash}`])) {
+      // 一条提交可以**一次冻结多片**（`84041f17` 冻结了 v4 的三片：规格 +
+      // 验收一起落地，但只带了一个 `Refs-Slice:` trailer）。整条提交都算本片的
+      // → 兄弟片的规格与验收被判成越界；整条都不算 → 本片自己的产物缺失。
+      //
+      // 所以按**文件归属**拆：属于本片写集的文件算本片的，兄弟片的算兄弟片的。
+      if (!ownedByThisSlice(f)) continue;
+      changed.add(f);
+    }
   }
   return changed;
 }

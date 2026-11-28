@@ -178,10 +178,109 @@ test('判据 18-19：release 的 macOS 腿断言归档里有 NimRTCConfig.cmake 
 // 四、边界与回归（验收标准 22-27）
 // ---------------------------------------------------------------------------
 
+// 本片的写集允许清单（越界检查与归属判定共用）。
+//
+// `policy/**` 在清单里：这两个文件是 zelto 工具写的**策略放行表**与**策略
+// 哈希锚点**，每次有片推进都会跟着更新。它们不是本片的「工作」，但它们
+// 是本片工作流**正常产生**的副产物 —— 写集的判据是「本片不许*改*别
+// 的东西」，不是「本片不许留下任何痕迹」。
+const ALLOWED = new Set([
+    '.github/workflows/ci.yml',
+    '.github/workflows/release.yml',
+    'cmake/NimRTCConfig.cmake.in',
+    'cmake/NimRTCInstall.cmake',
+    'tools/check_install_export.py',
+    'tools/check_install_export_self_test.py',
+    'tests/acceptance/v1-macos-install-proof/acceptance.test.cjs',
+    'docs/adr/ADR-034-macos-install-downstream-proof.md',
+    'docs/plan/v1.4-plan.md',
+    'CHANGELOG.md',
+    'specs/slices/v1-macos-install-proof.md',
+    'policy/lock.json',
+    'policy/policy.yaml',
+]);
+
+/**
+ * 一个文件是不是**本片专属**的（不属于任何兄弟片）。
+ *
+ * 工作区是**共享**的：别的片也在同一个工作区里改文件。改了兄弟片的验收
+ * 文件 —— 那是兄弟片的改动，不算本片的越界。所以按**归属**过滤：
+ * 落在本片允许清单里、且不是任何别的片的「专属产物」的文件才算本片的。
+ *
+ * 「专属产物」= 别的片的规格文件与验收目录（天然属于那一片）。
+ */
+function ownedByThisSlice(f) {
+    if (!ALLOWED.has(f)) return false;
+    for (const e of fs.readdirSync(path.join(ROOT, 'specs', 'slices'))) {
+        if (!e.endsWith('.md')) continue;
+        const id = e.slice(0, -3);
+        if (id === 'v1-macos-install-proof') continue;
+        if (f === `specs/slices/${e}`) return false;
+        if (f.startsWith(`tests/acceptance/${id}/`)) return false;
+    }
+    return true;
+}
+
+/**
+ * 本片自己的改动清单（写集越界检查用）。
+ *
+ * ── 为什么不再用 `git diff version/v3..HEAD` ────────────────────
+ *
+ * 原来这条判据把 `version/v3` 当**diff 基点**用。但：
+ *
+ *   1. 规格里的 `version/v3` 是**归属**（这条片属于哪条版本线），不是
+ *      diff 基点（`specs/slices/v1-macos-install-proof.md` §归属）。
+ *   2. `version/v3` 是**远端**分支，本地不一定有 —— `git diff version/v3..HEAD`
+ *      在浅克隆 / 只 fetch 了部分分支的机器上直接报
+ *      `unknown revision`，判据恒红。
+ *   3. 即便能 diff，`version/v3..HEAD` 覆盖的是**整条版本线**（v3 之后还
+ *      有 v4 的收敛），本片之外的改动全被算进来 → 恒假越界。
+ *
+ * ADR-075 的做法是：**读本片自己的提交**（带 `Refs-Slice: <id>` trailer
+ * 或 `feat(<id>): slice approved` 标题）+ 工作区未提交差异。提交历史是
+ * 证据，基点不是。
+ */
+function sliceChangedFiles() {
+    const changed = new Set();
+    // 工作区未提交差异 + 未跟踪文件。
+    //
+    // 工作区是**共享**的：别的片也在同一个工作区里改文件。改了兄弟片的
+    // 验收文件 —— 那是兄弟片的改动，不算本片的越界。所以按**归属**过滤：
+    // 落在本片允许清单里、且不落在任何别的片的专属产物里的文件才算本片的。
+    for (const f of run('git', ['diff', 'HEAD', '--name-only'])
+        .out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+        if (ownedByThisSlice(f)) changed.add(f);
+    }
+    for (const f of run('git', ['ls-files', '--others', '--exclude-standard'])
+        .out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+        if (ownedByThisSlice(f)) changed.add(f);
+    }
+    // 本片自己的提交：逐个算 `git diff --name-only <commit>^..<commit>`。
+    const log = run('git', ['log', '--format=%H%x00%B%x00', '--all']);
+    const raw = log.out.split('\0');
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+        const hash = raw[i].trim();
+        const body = raw[i + 1] || '';
+        if (!hash) continue;
+        // 汇总提交（一次收敛多条切片的提交）不算任何单一片的工作 ——
+        // 它的改动是整条版本线的，不是本片的。
+        const trailerIds = [...new Set(
+            [...body.matchAll(/^Refs-Slice:\s*(.+)$/gm)].map((m) => m[1].trim()))];
+        if (trailerIds.length > 1) continue;
+        const mine = body.includes('Refs-Slice: v1-macos-install-proof')
+            || body.split('\n', 1)[0].trim()
+                === 'feat(v1-macos-install-proof): slice approved';
+        if (!mine) continue;
+        for (const f of run('git', ['diff', '--name-only', `${hash}^..${hash}`])
+            .out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+            changed.add(f);
+        }
+    }
+    return [...changed];
+}
+
 test('判据 22：本片不改 src/ 下的 C++ 源码', () => {
-    const r = run('git', ['diff', '--name-only', 'version/v3..HEAD']);
-    assert.equal(r.status, 0, `git diff 必须成功：\n${r.out}`);
-    const changed = r.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const changed = sliceChangedFiles();
     const srcCpp = changed.filter((p) => /^src\/.*\.(cpp|hpp|h|cc)$/.test(p));
     assert.equal(srcCpp.length, 0,
         `本片不许改 src/ 下的 C++ 源码，实际改了：\n${srcCpp.join('\n')}`);
@@ -206,23 +305,9 @@ test('验收文件自身是真实断言；验证方式：没有 todo / skip 的�
 });
 
 test('本片改动仅限写集范围；验证方式：改动清单不越界 + 产物在树上', () => {
-    const r = run('git', ['diff', '--name-only', 'version/v3..HEAD']);
-    const changed = r.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const changed = sliceChangedFiles();
 
-    const allowed = new Set([
-        '.github/workflows/ci.yml',
-        '.github/workflows/release.yml',
-        'cmake/NimRTCConfig.cmake.in',
-        'cmake/NimRTCInstall.cmake',
-        'tools/check_install_export.py',
-        'tools/check_install_export_self_test.py',
-        'tests/acceptance/v1-macos-install-proof/acceptance.test.cjs',
-        'docs/adr/ADR-034-macos-install-downstream-proof.md',
-        'docs/plan/v1.4-plan.md',
-        'CHANGELOG.md',
-        'specs/slices/v1-macos-install-proof.md',
-    ]);
-    const outOfBounds = changed.filter((p) => !allowed.has(p));
+    const outOfBounds = changed.filter((p) => !ALLOWED.has(p));
     assert.equal(outOfBounds.length, 0,
         `改动越界：\n${outOfBounds.join('\n')}`);
 

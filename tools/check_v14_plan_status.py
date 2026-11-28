@@ -209,12 +209,46 @@ PROBES: list[tuple[str, str, str, str, str]] = [
      "src/engine", "video_sink_name"),
 
     # -- D3: the default device policy ---------------------------------
-    ("D3", "the default capture policy lives in an example", "present",
-     "examples/remote-desktop", "windows-wgc|macos-screencapturekit"),
+    #
+    # D3 closed with slice `v1-device-policy` (ADR-040), so the claim
+    # flipped the way N5's and D2's did: the per-platform default table
+    # now lives in the **engine**, and the probe asks for the thing
+    # that replaced it rather than for its absence.
+    #
+    # The wording below is the *historical* claim -- the plan's §1 still
+    # reads this way -- and what the row asserts now is that the tree
+    # carries the thing the claim said was missing.  Two rows, because
+    # the slice did two things: the table moved, and the engine learned
+    # to resolve a backend out of it.
+    #
+    # The table's *home* is the engine's private collaborator
+    # (`src/engine/src/engine_device_policy.{hpp,cpp}`); the public
+    # surface (`NimRTCEngine::default_device_policy()`) is what a host
+    # reads, so the probe looks for both names.
+    ("D3", "the default capture policy lives in the engine", "present",
+     "src/engine", "default_device_policy"),
+    ("D3", "the engine resolves a capture backend from the policy",
+     "present", "src/engine", "resolve_capture_backend"),
 
     # -- D4: hot-plug ---------------------------------------------------
-    ("D4", "there is no hot-plug in the capture module", "absent",
-     "src/modules/video_capture", "device_added|device_removed|hot.?plug"),
+    #
+    # D4 closed with the same slice, so its claim flipped on the same
+    # principle: the engine now watches the capture device list and
+    # re-opens a device that went away, and the optional capability
+    # seam (`ICaptureDeviceEventSource`) lets a device report the change
+    # itself instead of waiting for the engine's poll.
+    #
+    # The three rows are the three things the slice added: the poll, the
+    # re-open, and the seam.  They are probed in the engine and in the
+    # plugin seam separately, because the seam is a *public* header and
+    # the engine's use of it is private -- one of the two can be lost
+    # without the other noticing.
+    ("D4", "the engine detects capture device changes", "present",
+     "src/engine", "poll_capture_device_changes"),
+    ("D4", "the engine re-opens a capture device", "present",
+     "src/engine/src", "engine_capture_reconnect"),
+    ("D4", "the device-change seam exists", "present",
+     "src/plugins", "ICaptureDeviceEventSource"),
 
     # -- D5: DTX coupling ----------------------------------------------
     ("D5", "DTX is not coupled to concealment", "present",

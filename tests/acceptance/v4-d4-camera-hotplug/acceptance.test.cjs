@@ -90,6 +90,10 @@ function changedFiles() {
     const hash = raw[i].trim();
     const body = raw[i + 1] || '';
     if (!hash) continue;
+    // 汇总提交（一条提交带两个以上不同的 Refs-Slice id）不算本片的工作 ——
+    // 它的改动是整条版本线的（一次收敛多条切片的提交）。
+    const trailerIds = [...new Set([...body.matchAll(/^Refs-Slice:\s*(.+)$/gm)].map(m => m[1].trim()))];
+    if (trailerIds.length > 1) continue;
     const mine = body.includes(`Refs-Slice: ${ID}`) || new RegExp(`feat\\(${ID}\\): slice approved`).test(body);
     if (!mine) continue;
     for (const f of gitOut(['diff', '--name-only', `${hash}^..${hash}`])) changed.add(f);

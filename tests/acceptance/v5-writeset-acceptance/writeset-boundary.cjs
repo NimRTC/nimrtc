@@ -154,6 +154,51 @@ function gitLogRecords(root, args) {
     return records;
 }
 
+/**
+ * 一条提交带的 `Refs-Slice:` trailer 集合（去重、去空白）。
+ *
+ * @param {string} body 提交正文
+ * @returns {string[]} trailer 里提到的切片 id
+ */
+function sliceTrailerIds(body) {
+    const ids = [];
+    for (const m of (body || '').matchAll(/^Refs-Slice:\s*(.+)$/gm)) {
+        const id = m[1].trim();
+        if (id) ids.push(id);
+    }
+    return [...new Set(ids)];
+}
+
+/**
+ * 一条提交是不是「**汇总提交**」—— 一条提交同时带了**两个以上**不同切片的
+ * `Refs-Slice:` trailer。
+ *
+ * ## 为什么需要这条
+ *
+ * 一次把整条版本线收敛进主干的提交（squash / 汇总提交）会把**所有**被收敛
+ * 切片的 trailer 堆进一条提交里（本仓库的 v1.4 收敛提交带了 22 个不同的
+ * `Refs-Slice:` id）。那条提交的正文里还有每个切片的 `feat(<id>): slice
+ * approved` 标题（带 `* ` 前缀）。
+ *
+ * 如果把它当成本片的提交，它的 `git diff --name-only <commit>^..<commit>`
+ * 就是**整条版本线的全部改动** —— 本片写集外的文件全被算进来 → 判据报
+ * 假越界；而它的正文里的 `feat(<id>): slice approved` 行又会让边界阶梯
+ * 落在**这条汇总提交**上，而不是本片真正的签收提交。
+ *
+ * 判断「汇总」用**trailer 个数**而不是标题形状：标题形状在 squash 时会变
+ * （GitHub 生成的标题是 `feat(v1.4): ...`），而 trailer 是每片自己的标记，
+ * 一条提交带了两个以上不同切片的 trailer 就说明它是汇总提交。
+ *
+ * 真正的切片提交只带**一个** trailer —— 本仓库历史上**没有**任何一条提交
+ * 带两个以上不同的 `Refs-Slice:` id（实测：除汇总提交外为 0）。
+ *
+ * @param {string} body 提交正文
+ * @returns {boolean} true = 汇总提交（不算任何单一片的工作）
+ */
+function isAggregateCommit(body) {
+    return sliceTrailerIds(body).length > 1;
+}
+
 function escapeRegExp(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -163,6 +208,9 @@ function escapeRegExp(s) {
 // ---------------------------------------------------------------------------
 /** 一条提交是否是本片的（带 Refs-Slice trailer 或 feat(<id>): slice approved 标题）。 */
 function isSliceMarker(body, sliceId) {
+    // 汇总提交（一次收敛多条切片的提交）不算任何单一片的工作 ——
+    // 它的改动是整条版本线的，不是本片的。见 isAggregateCommit。
+    if (isAggregateCommit(body)) return false;
     const subject = (body || '').split('\n', 1)[0].trim();
     if (subject === `feat(${sliceId}): slice approved`) return true;
     const trailerRe = new RegExp(
@@ -236,13 +284,28 @@ function sliceBoundaryCommit(root, sliceId, headRef = 'HEAD') {
         '--fixed-strings', '-1']);
     if (merge.length) return merge[0].hash;
     // 阶梯 2：签收提交。
+    //
+    // `--grep` 匹配的是**整条正文**，所以一条汇总提交（一次收敛多条切片的
+    // 提交，正文里堆了每个切片的 `feat(<id>): slice approved` 行）也会被
+    // 命中 —— 但那条提交**不是**本片的签收提交，它的改动是整条版本线的。
+    // 所以阶梯 2/3 都要求**标题行**就是本片的签收标题，且排除汇总提交。
     const approved = gitLogRecords(root, [headRef, '--grep',
         `feat(${sliceId}): slice approved`, '--fixed-strings', '-1']);
-    if (approved.length) return approved[0].hash;
+    for (const rec of approved) {
+        const s = (rec.body || '').split('\n', 1)[0].trim();
+        if (s !== `feat(${sliceId}): slice approved`) continue;
+        if (isAggregateCommit(rec.body)) continue;
+        return rec.hash;
+    }
     // 阶梯 3：最早的 feat(<id>): ... 提交（git log 是新→旧，最后一条最早）。
     const feats = gitLogRecords(root, [headRef, '--grep', `feat(${sliceId}):`,
         '--fixed-strings']);
-    if (feats.length) return feats[feats.length - 1].hash;
+    const own = feats.filter(rec => {
+        if (isAggregateCommit(rec.body)) return false;
+        const s = (rec.body || '').split('\n', 1)[0].trim();
+        return s.startsWith(`feat(${sliceId}):`);
+    });
+    if (own.length) return own[own.length - 1].hash;
     return null;
 }
 
@@ -437,4 +500,6 @@ module.exports = {
     sliceAncestors,
     isAllowed,
     isSliceMarker,
+    isAggregateCommit,
+    sliceTrailerIds,
 };

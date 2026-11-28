@@ -52,8 +52,60 @@ PLAN = ROOT / "docs" / "plan" / "v1.5-plan.md"
 # and a cell that *is* CLOSED.  The id class needs two uppercase
 # characters after the first so `RTP` is not an id.  (The cell class
 # excludes `*`, so a bold id's `**` cannot be mistaken for a cell.)
-CLOSED_ROW = (r"\|\s*\*{0,2}([A-Z][A-Z0-9]+)\*{0,2}\s*\|"
-              r"(?:[^|\n]*\|){1,}\s*CLOSED\s*\|")
+#
+# The id cell is followed by *optional prose* before the cell ends, and
+# the prose may carry a second id: the plan writes rows like
+#
+#     | **R5** (the multi-encoding ladder split) · **R6** (the second receive) | ...
+#
+# -- so the cell is matched up to its closing pipe, and every id in it
+# is extracted.  A guard that only understood a bare id cell would not
+# see R5 or R6 as closed, and so would not protect their rows: the very
+# check that keeps a landed item's row flipped to "present" would go
+# blind on exactly the rows the plan writes in its own shape.
+#
+# The id class is `[A-Z][A-Z0-9]+` -- two uppercase characters after the
+# first -- so `RTP` is not an id.
+#
+# The id is **bold** in the plan's own rows (`**R5**`), and only the id
+# itself is bold -- the prose that follows it in the same cell is not.
+# The cell is therefore matched up to its closing pipe, and the ids are
+# the **bold** tokens inside it.  Requiring the bold markers is what
+# keeps a prose word out: `RED` in `**R1** (RED + the redundancy seam)`
+# is not bold, so it is not an id.
+CLOSED_ROW = (r"\|\s*((?:\s*\*{0,2}[A-Z][A-Z0-9]+\*{0,2}"
+              r"[^\n|]*?)+)\|"
+              r"(?:[^|\n]*\|){1,}\s*\*{0,2}CLOSED\.?\*{0,2}\s*\|")
+
+# An id inside a cell, with its optional bold markers.
+_ITEM_ID = r"\*{0,2}([A-Z][A-Z0-9]+)\*{0,2}"
+
+
+def closed_items(text: str) -> set[str]:
+    """The items the plan's tables declare CLOSED.
+
+    A row's id cell may name one item or several, and it may carry
+    prose around them.  Every id in the cell of a row that marks CLOSED
+    is returned, so a slice that closes two items at once protects both
+    of their rows.
+
+    An id is a **bold** token in the plan's own rows.  Requiring the
+    bold markers is what keeps a prose word out of the result:
+    `**R1** (RED + the redundancy seam)` names **R1**, not `RED`.
+    A cell that carries no bold token at all is a bare id cell
+    (`| R6 | ... |`), and that one is taken whole.
+    """
+    found: set[str] = set()
+    for match in re.finditer(CLOSED_ROW, text):
+        cell = match.group(1)
+        bold = re.findall(r"\*\*{1,2}([A-Z][A-Z0-9]+)\*{1,2}", cell)
+        if bold:
+            found.update(bold)
+            continue
+        bare = cell.strip().strip("*").strip()
+        if re.fullmatch(r"[A-Z][A-Z0-9]+", bare):
+            found.add(bare)
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -255,16 +307,25 @@ def self_test() -> int:
     # section is matched anywhere in the row.  The class deliberately
     # requires two uppercase letters after the first, so `RTP` is not an
     # id.
+    #
+    # The other two shapes are the ones the plan actually writes:
+    # the id cell carries prose after the id, and one row carries two
+    # ids separated by a middle dot.  A guard that missed either would
+    # not protect that row's items.
     synthetic = (
         "| **R4** | some claim | CLOSED |\n"
         "| R6 | some claim | CLOSED |\n"
+        "| **R1** (RED + the redundancy seam) | some claim | **CLOSED.** | x |\n"
+        "| **R5** (the ladder split) \xc2\xb7 **R6** (the second receive) "
+        "| some claim | **CLOSED.** | x |\n"
         "| R5 | still open | absent |\n"
     )
-    closed = set(re.findall(
-        CLOSED_ROW, synthetic))
-    check(closed == {"R4", "R6"},
-          "the CLOSED extraction must find exactly R4 and R6 in the "
-          "synthetic plan, but found %s" % sorted(closed))
+    closed = closed_items(synthetic)
+    check(closed == {"R1", "R4", "R5", "R6"},
+          "the CLOSED extraction must find R1, R4, R5 and R6 in the "
+          "synthetic plan -- an id cell with prose after the id and a "
+          "cell with two ids must both yield their ids -- but found %s"
+          % sorted(closed))
     # The rule is *corpus-shaped*: stale rows for closed items, per the
     # clause.  Today's R4 / R6 rows expect "absent" (their items are not
     # closed), so the synthetic plan must be judged against a synthetic
@@ -276,6 +337,7 @@ def self_test() -> int:
                ("R4", "no simulcast (engine)", "present", "e", "x")],
         "R6": [("R6", "no spatial layers", "absent", "vp9", "x")],
         "R5": [("R5", "no share", "absent", "e", "x")],
+        "R1": [("R1", "no redundancy seam", "absent", "e", "x")],
     }
     clause_failures: list[str] = []
     for item in sorted(closed):
@@ -285,7 +347,8 @@ def self_test() -> int:
         for _, _, expect, _, _ in rows:
             if expect != "present":
                 clause_failures.append("%s: %s" % (item, expect))
-    check(clause_failures == ["R4: absent", "R6: absent"],
+    check(clause_failures == ["R1: absent", "R4: absent", "R5: absent",
+                              "R6: absent"],
           "the CLOSED clause must flag every row of a closed item that "
           "does not expect 'present', and only those; it flagged %s"
           % clause_failures)
@@ -302,7 +365,7 @@ def self_test() -> int:
     # it first matters.
     if PLAN.exists():
         text = PLAN.read_text(encoding="utf-8")
-        for item in re.findall(CLOSED_ROW, text):
+        for item in sorted(closed_items(text)):
             rows = [p for p in PROBES if p[0] == item]
             check(bool(rows),
                   "the real plan declares %s CLOSED, but the checker has "

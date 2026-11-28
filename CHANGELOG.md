@@ -294,6 +294,49 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Both plan drift detectors could not see a CLOSED item whose id cell
+  carried prose, or two ids in one cell (2026-11-28).**
+  The two checkers (`tools/check_v14_plan_status.py` and
+  `tools/check_v15_plan_status.py`) each carry a self-test clause that
+  reads the plan's own tables and requires **every item the plan marks
+  CLOSED to have its rows expecting "present"**.  That clause is the
+  thing that keeps a landed item's row from asserting the *absence* of
+  the feature that closed it — a row left at "absent" reports STALE
+  forever, and a permanent false alarm is how a checker teaches people
+  to ignore it.
+
+  Both clauses extracted the closed ids with a regex that only matched
+  a **bare** id cell.  Neither plan writes its rows that way:
+
+  - The v1.4 plan closes two items in one row —
+    `| **D3 + D4** default device policy, camera + hot-plug | … |
+    **CLOSED.** … |`.  The regex matched `**D3**` or `**D4**` but
+    never `**D3 + D4**`, so **neither D3 nor D4 was seen as closed** —
+    and the clause that is supposed to protect their rows went blind on
+    exactly the two items that share a slice.
+  - The v1.5 plan writes prose after the id (`**R1** (RED + the
+    redundancy seam)`) and puts two ids in one cell
+    (`**R5** (the multi-encoding ladder split) · **R6** (the second
+    receive)`).  The old regex matched **2 of the 5** shapes that plan
+    actually uses.
+
+  The v1.5 clause was vacuous until this fix — nothing in that plan is
+  closed yet, so it was silently protecting nothing, and it would have
+  started misfiring the day its first item landed.
+
+  The extraction now reads the id cell up to its closing pipe and takes
+  the **bold** ids inside it (the plan bolds the ids and not the prose,
+  which is what keeps `RED` in `**R1** (RED + the redundancy seam)` from
+  being read as an id).  A cell that carries two ids yields both, so a
+  slice that closes two items protects both of their rows.
+
+  The behaviour is pinned against a **synthetic** plan rather than
+  against either real one — the real plans' wording will change, and a
+  guard pinned to today's wording would rot the day it does.  The
+  synthetic case covers the grouped cell, the prose-after-id cell, the
+  two-ids-in-one cell and the bare cell; reverting the grouped-id
+  handling makes the v1.4 self-test fail.
+
 - **The v1.4 plan's drift detector was reading D3 and D4's *old*
   claims, and the plan's own prose contradicted its own script
   (2026-11-28).**

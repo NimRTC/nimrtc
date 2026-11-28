@@ -310,7 +310,8 @@ std::string NimRTCEngine::create_offer() noexcept {
     if (!config_.audio_codec.fmtp.empty()) {
         audio.fmtp[pt] = config_.audio_codec.fmtp;
     } else if (detail::decoder_id_for_encoding(config_.audio_codec.encoding) == "opus") {
-        audio.fmtp[pt] = detail::build_local_opus_fmtp(config_.pcm_channels);
+        audio.fmtp[pt] = detail::build_local_opus_fmtp(config_.pcm_channels,
+                                                       config_.audio_use_dtx);
     }
 
     // ---- a=rtpmap:<pt> telephone-event/8000 (RFC 4733 §2.3.2) --------
@@ -2168,7 +2169,8 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                 // needs to recover a lost frame (B-8).
                 const std::string negotiated =
                     impl_->audio_state.negotiated_opus_fmtp_text.empty()
-                        ? detail::build_local_opus_fmtp(config_.pcm_channels)
+                        ? detail::build_local_opus_fmtp(config_.pcm_channels,
+                                                       config_.audio_use_dtx)
                         : impl_->audio_state.negotiated_opus_fmtp_text;
                 if (!negotiated.empty()) am.fmtp[selected] = negotiated;
 

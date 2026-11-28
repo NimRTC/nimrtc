@@ -416,7 +416,7 @@ TEST(synthetic_audio_sink, write_on_a_closed_device_is_refused) {
 // 5. The module surface
 // ---------------------------------------------------------------------------
 //
-// The four lookup functions are **deprecated** (ADR-028): the registry
+// The four lookup functions are **deprecated** (ADR-040): the registry
 // is the authority now.  The tests below therefore drive the *registry*
 // — and the deprecated shims are exercised separately, under a
 // suppression pragma, to pin the ADR's core constraint: the two entry
@@ -452,7 +452,7 @@ TEST(audio_device_module, an_unknown_backend_resolves_to_null) {
     EXPECT_EQ(reg.get_audio_sink("no-such-backend"), nullptr);
 }
 
-// ADR-028's core constraint: the deprecated free functions and the
+// ADR-040's core constraint: the deprecated free functions and the
 // registry must agree.  A backend registered by a third party has to
 // be visible through *both* — otherwise the two entry points answer
 // the same question with two different answers.

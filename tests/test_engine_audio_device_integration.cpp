@@ -1,6 +1,6 @@
 /**
  * @file tests/test_engine_audio_device.cpp
- * @brief v1.4 D1 (ADR-028) -- the engine's audio-device plane.
+ * @brief v1.4 D1 (ADR-040) -- the engine's audio-device plane.
  *
  * The audio-device module (`src/modules/audio_device/`) has existed for
  * a long time: it has the PortAudio / system-audio / synthetic
@@ -413,34 +413,32 @@ TEST_F(EngineAudioDevice, AnUnknownDevicePluginIsReportedNotIgnored) {
     EngineConfig cfg = shell_config();
     cfg.audio_source_name = "no-such-audio-device";
 
-    // A missing device is reported as a **warning**, not as an error.
+    // An **explicit** device name is a promise: the host named a
+    // backend, and a backend that does not exist (or refuses to open)
+    // is a configuration error.  So `open()` fails, and the host is
+    // told through `on_error` with the audio-source error code.
     //
-    // The plan (§6) is explicit about this: a machine with no sound
-    // card, or a microphone permission that was revoked, must not take
-    // down a video call.  So the failure is *logged* and the engine
-    // keeps running — it does not fire `on_error`, which would read as
-    // "the session is broken".
-    std::atomic<bool> saw_missing{false};
-    nimrtc::core::log::Logger::instance().set_sink(
-        std::make_shared<WarningCapture>(
-            [&saw_missing](std::string_view msg) {
-                if (msg.find("no-such-audio-device") != std::string_view::npos) {
-                    saw_missing.store(true);
-                }
-            }));
+    // This is the counterpart of the `"auto"` rule (ADR-029 §2.4): an
+    // `"auto"` backend that cannot be opened *degrades* with a warning
+    // (a machine with no sound card is a normal machine), while an
+    // explicit id is a hard error -- exactly like the video side's
+    // non-empty `video_capture_name`.
+    std::atomic<std::uint32_t> saw_error{0};
 
     NimRTCEngine engine(cfg);
-    ASSERT_EQ(engine.open(), 0u);
+    engine.set_on_error(
+        [&saw_error](std::uint32_t err, std::string_view) {
+            saw_error.store(err);
+        });
+    EXPECT_NE(engine.open(), 0u)
+        << "an explicit device id that cannot be resolved is a promise: "
+           "open() must fail";
+    EXPECT_EQ(saw_error.load(), nimrtc::core::kAudioSourcePluginMissing)
+        << "the host must be told which failure it was";
 
-    // The engine still opens (a missing microphone is not fatal for
-    // the rest of the session), and there is no device.
+    // No device was created, and the Stats say so.
     EXPECT_EQ(engine.audio_source(), nullptr);
     EXPECT_TRUE(engine.stats().audio_source_device_id.empty());
-
-    // But the host is *told* — through the log, which is where a
-    // non-fatal failure belongs.
-    EXPECT_TRUE(saw_missing.load())
-        << "the missing device must be visible in the log";
 
     engine.close();
 }

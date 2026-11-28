@@ -148,6 +148,9 @@ namespace nimrtc::engine::detail {
     X(video_capture_restarts, core::StatSemantics::kCumulative)                      \
     X(video_capture_format_changes, core::StatSemantics::kCumulative)                \
     X(video_capture_bytes_copied, core::StatSemantics::kCumulative)                  \
+    /* v1-device-policy D4: device-list changes (each removed/added
+       event counts once).  Cumulative since open(). */                              \
+    X(video_capture_device_changes, core::StatSemantics::kCumulative)                \
     /* ---- The codec ---- */                                                        \
     X(video_codec_bitrate_bps, core::StatSemantics::kGauge)                          \
     X(video_codec_actual_bps, core::StatSemantics::kGauge)                           \
@@ -228,6 +231,9 @@ namespace nimrtc::engine::detail {
     X(video_capture_pumped_metadata, core::StatSemantics::kCumulative)               \
     X(video_capture_gpu_frames, core::StatSemantics::kCumulative)                    \
     X(video_capture_gpu_errors, core::StatSemantics::kCumulative)                    \
+    /* ---- The audio-device pump (remote-desktop plan D1) ---- */                   \
+    X(audio_device_pumped_frames, core::StatSemantics::kCumulative)                  \
+    X(audio_device_pump_errors, core::StatSemantics::kCumulative)                    \
     /* ---- The format normalisation ---- */                                         \
     X(video_format_conversions, core::StatSemantics::kCumulative)                    \
     X(video_format_copies, core::StatSemantics::kCumulative)                         \

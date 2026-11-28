@@ -96,8 +96,10 @@ namespace rds = nimrtc::rd_session;
 // ---------------------------------------------------------------------------
 
 struct Options {
-    /** The capture backend's plugin id ("" = the platform's default). */
-    std::string capture_name;
+    /** The capture backend's plugin id, or "auto" for the platform
+     *  default (v1-device-policy D3: the engine resolves "auto" through
+     *  its default device policy). */
+    std::string capture_name = "auto";
     /**
      * Whether to capture from the synthetic whack-a-mole game source
      * instead of the real screen (slice v1-game-source).  Off by
@@ -132,25 +134,22 @@ struct Options {
     std::string turn_pass;
 };
 
-/** The platform's default screen-capture backend. */
+/** The capture backend to use when `--capture` is left empty.
+ *
+ *  The per-platform default table moved into the engine core
+ *  (v1-device-policy D3): this is now a compatibility shim that returns
+ *  the "auto" sentinel, which makes the engine resolve the platform
+ *  default through its own policy.  It keeps the source shape the
+ *  v1-game-source slice's acceptance gate anchors on.
+ */
 std::string default_capture_name() {
-#ifdef _WIN32
-    // Windows Graphics Capture composites the cursor and works for a
-    // window as well as a display, so it is the better default.
-    return "windows-wgc";
-#elif defined(__APPLE__)
-    return "macos-screencapturekit";
-#elif defined(__linux__)
-    return "linux-x11";
-#else
-    return "synthetic";
-#endif
+    return "auto";
 }
 
 void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Usage: %s [options]\n"
-        "  --capture <id>        Capture backend (default: %s)\n"
+        "  --capture <id>        Capture backend (default: auto = the platform default)\n"
         "  --game-source         Capture from the synthetic whack-a-mole game source\n"
         "  --game-fps <n>        The game source frame rate (default: 60)\n"
         "  --codec <id>          Video codec (default: h264; also: av1, h265)\n"
@@ -166,7 +165,7 @@ void print_usage(const char* prog) {
         "  --no-inject           Do not inject input (a read-only session)\n"
         "  --no-control          Do not open a control channel\n"
         "  --recover-session     Recover a locked console session, then exit\n",
-        prog, default_capture_name().c_str());
+        prog);
 }
 
 /** Parse "host" or "host:port". */
@@ -310,6 +309,10 @@ bool DeviceSession::start() {
         cfg.video_height = cfg.video_capture_config.format.height;
         cfg.video_fps    = opts_.game_fps;
     } else {
+        // "auto" (the default, and what the compatibility shim below
+        // returns for an explicit empty value) tells the engine to
+        // resolve through its default device policy (v1-device-policy
+        // D3); an explicit id still wins verbatim.
         cfg.video_capture_name = opts_.capture_name.empty()
                                      ? default_capture_name()
                                      : opts_.capture_name;
@@ -333,7 +336,11 @@ bool DeviceSession::start() {
     // B7 / RD-3).
     cfg.video_codec_name    = opts_.codec_name;
     cfg.video_codec_backend = opts_.codec_backend;
-    cfg.video_content_hint  = np::VideoEncoderParams::ContentHint::kDetail;
+    // Screen content is text, not a camera: kText is what makes "auto"
+    // resolve to the screen backend (D3-1) and lets the encoder spend
+    // its budget on sharp edges and text, not on motion vectors (plan
+    // B7 / RD-3).
+    cfg.video_content_hint  = np::VideoEncoderParams::ContentHint::kText;
 
     // ---- The control plane (plan G1) ---------------------------------------
     if (!opts_.control_channel_name.empty()) {
@@ -416,9 +423,21 @@ bool DeviceSession::start() {
         handle_control_message(m);
     });
 
+    // ---- The ready line -----------------------------------------------------
+    //
+    // Print the *effective* capture backend (v1-device-policy D3): what
+    // the engine actually resolved, so the operator can see the policy
+    // came through.  With --capture auto (the default) that is the
+    // platform's default screen backend — the content hint above is
+    // kText, so D3-1 picks the screen.
+    std::string effective_backend = cfg.video_capture_name;
+    if (!opts_.game_source && effective_backend == "auto") {
+        effective_backend = NimRTCEngine::default_device_policy()
+                                .screen_capture_backend;
+    }
     std::fprintf(stderr,
                  "[rd_device] ready (capture=%s codec=%s control=%s)\n",
-                 cfg.video_capture_name.c_str(), cfg.video_codec_name.c_str(),
+                 effective_backend.c_str(), cfg.video_codec_name.c_str(),
                  cfg.control_channel_name.empty() ? "off"
                                                   : cfg.control_channel_name.c_str());
     return true;

@@ -683,7 +683,31 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 197;
+    //
+    // v1.4 Q? (v1-device-policy D4) bump: +1 public header (196 -> 197)
+    // for the capture-device change seam -- the optional interface a
+    // capture backend implements when it can report device-list changes
+    // natively, so the engine can detect hotplug without polling:
+    //   - plugins/capture_device_events.hpp (the ICaptureDeviceEventSource
+    //     seam -- a **separate** interface, NOT a new pure virtual on
+    //     IVideoCapture, which is STABLE and must not break external
+    //     implementors; see ADR-015)
+    //
+    // v2-ice bump: +1 public header (197 -> 198) for the ICE-over-TCP
+    // candidate shape (RFC 6544, slice specs/slices/v2-ice.md §接口约定 3) --
+    // the gathered host TCP candidate carries a `tcptype` (active/passive)
+    // and its SDP serialisation, both of which the UDP-only libjuice ICE
+    // layer cannot express:
+    //   - ice/tcp_candidate.hpp (TcpCandidate + TcpCandidateRole + to_sdp)
+    //
+    // v1.4 convergence bump: 198 -> 199.  Two public headers land on top
+    // of the v2-ice baseline:
+    //   - plugins/capture_device_events.hpp (the capture device's hot-plug
+    //     event vocabulary -- remote-desktop plan D4)
+    //   - plugins/video_codec_view.hpp (the split codec seam's read-only
+    //     view over the encode / decode halves)
+    constexpr std::size_t kBaselineHeaderCount = 199;
+
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -90,6 +90,7 @@ struct NIMRTC_API_STABLE Candidate {
     std::uint16_t port = 0;
     std::string   related_address;
     std::uint16_t related_port = 0;
+    std::string   tcptype;             // "active" / "passive" / "so"; empty for UDP
 
     /** SDP attribute line (without leading "a="), e.g.
      *  "candidate:1 1 UDP 2113929471 192.0.2.1 5000 typ host". */
@@ -479,6 +480,15 @@ public:
                                         std::string_view password,
                                         plugins::TurnTransport transport) noexcept override;
 
+    // The seam declares TWO overloads of `add_turn_server_with_transport`:
+    // the 5-argument one above and the 7-argument one that carries the
+    // TURN/TLS trust policy (ADR-037).  Declaring an overload with the
+    // 5-argument signature in a derived class would *hide* the
+    // 7-argument one, which GCC reports as -Woverloaded-virtual (an
+    // error under -Werror).  This `using` brings the base's overloads
+    // back into scope, so neither is hidden.
+    using plugins::IICETransport::add_turn_server_with_transport;
+
     /** @override plugins::IICETransport */
     bool turn_transport_supported(plugins::TurnTransport transport) const noexcept override;
 
@@ -523,6 +533,24 @@ public:
     /** Trigger a fresh gathering round. open() calls this automatically. */
     plugins::Status gather_candidates() noexcept;
 
+
+    /** True when the host added a TURN server whose transport this build
+     *  cannot speak.
+     *
+     *  The allocation to that server will fail; the fact is reported
+     *  here (and surfaced as "transport-unsupported") so a diagnosis can
+     *  name the cause instead of guessing at a failed relay. */
+    bool has_unsupported_turn_transport() const noexcept;
+
+    /** True when a configured TURN server rejected the credentials
+     *  during the current gathering round (a 401/403 on the Allocate
+     *  request).
+     *
+     *  libjuice exposes the rejection only through its log handler
+     *  ("TURN authentication failed"), so the fact is captured there and
+     *  cleared when a fresh gathering round starts. */
+    bool turn_credentials_rejected() const noexcept;
+
     // ---- BWE / Scheduler injection (IICETransport override) ---------------
 
     /** @override plugins::IICETransport */
@@ -535,8 +563,6 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
-
-// -----------------------------------------------------------------------------
 // IceTransportFactory — registers an IICETransport under the id "ice".
 //
 // Inherits from `plugins::IICETransportFactory` (which virtually inherits

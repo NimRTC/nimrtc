@@ -50,7 +50,7 @@ add_library(nimrtc_engine STATIC
     # host ever calling send_video().  RD-6: no new thread — the
     # capture device owns its own, the engine only polls it.
     src/engine_video_pump.cpp
-    # v1.4 D1 (ADR-028): the audio device plane — the capture pump, the
+    # v1.4 D1 (ADR-040): the audio device plane — the capture pump, the
     # playback write and the AEC reference alignment.  The engine pulls
     # PCM from the capture device's bounded queue ON THE TICK THREAD and
     # hands it to `send_audio()`, so the 3A, the encoder and the RTP
@@ -103,6 +103,42 @@ add_library(nimrtc_engine STATIC
     # own private collaborator so the policy table has ONE visible
     # owner and the transport setup does not grow a vocabulary.
     src/engine_connectivity_profile.cpp
+    # v1-device-policy D3: the per-platform default device policy.  The
+    # platform backend table that used to live in the remote-desktop
+    # example now lives here, in the engine core (private TU — the table
+    # is a list of plugin ids, which the public engine header must not
+    # grow).
+    src/engine_device_policy.cpp
+    # v1-video-render-engine D2: the per-platform default render policy.
+    # The "auto" sink-backend table lives here, private to the engine (the
+    # table is a list of plugin ids, which the public engine header must
+    # not grow).  It is the render-side sibling of engine_device_policy.cpp.
+    src/engine_render_policy.cpp
+    # v1.4 (v3-n4-d6, D6): the connectivity profile.  A private TU — the
+    # profile's policy defaults are engine-internal knowledge that must
+    # not leak into the public engine header (Layout Invariant 4).
+    # v1.4 (v1-ice-recovery, N3): the ICE-recovery state machine.  A
+    # private TU — the engine's reconnection policy (grace window, backoff,
+    # restart budget, terminal state) is engine-internal knowledge driven
+    # by the tick thread through `plugins::IceState` / `IICETransport`.
+    src/engine_ice_recovery.cpp
+    # v1.4 (v1-turn-credentials, N7): the TURN-credentials provider seam.
+    # A private TU — the pull bookkeeping (consecutive failures, the
+    # rejection latch, change detection) is engine-internal knowledge that
+    # must not leak into the public engine header (Layout Invariant 4).
+    src/engine_turn_credentials.cpp
+    # v1.4 (v1-path-change-report, N8): the path-change ledger.  A private
+    # TU — the "which pair was the previous one" bookkeeping and the pure
+    # reason classification live here, so the three report points (N3
+    # restart, manual restart, peer restart) share one judgment instead of
+    # each carrying its own.
+    src/engine_path_change.cpp
+    # v1.4 (v1-call-state-surface, D7): the call-state machine.  A private
+    # TU — the "translate engine events into one state migration" machine
+    # and the `failure_from_reason()` N4-vocabulary mapping live here, so
+    # the call-state confluence point has ONE visible owner and the enum /
+    # string mapping cannot drift (spec §风险).
+    src/engine_call_state.cpp
 
     # Remote-desktop plan A10: the capture -> engine pump.  The engine
     # pops the capture device's bounded queue on its tick thread and
@@ -204,6 +240,28 @@ if(NIMRTC_MODULE_AUDIO_RX)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::audio_rx)
 endif()
 
+# v1.4 (remote-desktop plan D1): the audio *device* module.
+#
+# The engine reaches the devices only through `plugins::IAudioSource` /
+# `plugins::IAudioSink` and the registry's audio-source / audio-sink
+# slots — it never includes this module's header (Layout Invariant 4).
+# The link dependency exists so the module is part of the engine's
+# composition and its registrar symbol is resolvable by every consumer:
+# `pal_default_registrars.cpp` carries the guarded
+# `&nimrtc::audio_device::register_default_plugins` entry (the
+# `kDefaultRegistrars[]` table), which materialises once the
+# `NIMRTC_HAS_AUDIO_DEVICE` mirror lands in `src/core/CMakeLists.txt`.
+# Until then hosts / tests register the backends explicitly by calling
+# `nimrtc::audio_device::register_default_plugins()` (the documented
+# "call the module-specific entry point directly" pattern, registry.hpp).
+#
+# When the module is not built, "auto" audio resolution degrades to "no
+# device" (spec §五) and an explicit audio device id reports
+# `kEngineInternal` — there is no audio-device fallback backend.
+if(NIMRTC_MODULE_AUDIO_DEVICE)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::audio_device)
+endif()
+
 # Network-feedback collector seam (v1.2.0 M1, F2): the engine routes the
 # receiver-side RTCP (RR / REMB / transport-cc) into the collector and
 # hands the aggregated snapshot to the bandwidth estimator.  The engine
@@ -281,7 +339,7 @@ endif()
 if(NIMRTC_MODULE_VIDEO_SINK)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_sink)
 endif()
-# v1.4 D1 (ADR-028): the audio-device module.  The engine reaches the
+# v1.4 D1 (ADR-040): the audio-device module.  The engine reaches the
 # capture / playback devices through the `plugins::IAudioSource` /
 # `IAudioSink` seams — it never includes this module's headers
 # (Layout Invariant 4).  The link exists so the module's registrar entry
@@ -403,3 +461,12 @@ target_include_directories(nimrtc_engine
         ${CMAKE_BINARY_DIR}/include)
 
 add_library(nimrtc::engine ALIAS nimrtc_engine)
+
+# v1-device-policy (D3 / D4): the engine's own deterministic tests — the
+# device-policy resolution rules and the capture-reconnect backoff machine
+# are engine-private, so their tests live inside the engine rather than in
+# the top-level tests/ directory.
+if(NIMRTC_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    enable_testing()
+    add_subdirectory(tests)
+endif()

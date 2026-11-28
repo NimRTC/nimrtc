@@ -196,6 +196,14 @@ jobs:
         # needs the actual list, not its cardinality.
         run: python scripts/check_api_manifest.py
 
+      # The installed package config is hand-written
+      # (cmake/NimRTCConfig.cmake.in), and a placeholder that reaches the
+      # installed file as an empty string only breaks find_package() after
+      # the merge.  Pure static check (no build), run on every leg; the
+      # self-test pins that a dropped placeholder is reported and a normal
+      # template is not.
+      - name: Install export check (NimRTCConfig.cmake.in)
+        run: python tools/check_install_export.py
       - name: Deployment-bundle packaging self-test
         # The packaging script has two guards that protect the operator
         # from a bundle that ships the wrong code: it refuses to mix
@@ -283,6 +291,29 @@ jobs:
       # codecs (remote-desktop plan WP-B).  They are vendored source
       # builds, so the leg proves that the wrappers compile and that the
       # software round-trip tests pass on this platform too.
+      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
+      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
+      # (`.gitignore:227`).  A fresh checkout therefore has neither
+      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
+      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
+      # unconditionally -- so without this step the build fails with
+      # "Error copying file (if different) from .../ecc-key.pem".
+      #
+      # It used to work in CI because the pair came from wolfSSL's own cert
+      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
+      # out of the vendored submodule -- a build artefact must not dirty a
+      # vendored dependency's tracked files.
+      #
+      # `cryptography<42` on purpose: 42+ ships a Rust-backed Windows wheel
+      # whose `cryptography_rust.dll` is not bundled in the PyPI artefact,
+      # so `import cryptography` fails with "DLL load failed while
+      # importing _rust".  41.x is the last pure-C line.
+      - name: Generate the DTLS test certificate pair
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade "cryptography<42"
+          python scripts/build_dtls_cert.py
+
       - name: Configure
         run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
@@ -335,6 +366,19 @@ jobs:
           if (-not $exe) { throw "downstream_proof.exe was not produced" }
           & $exe.FullName
           if ($LASTEXITCODE -ne 0) { throw "downstream proof exited $LASTEXITCODE" }
+
+      # v1.4 N6: the SDK sample -- two processes on one host, behind a
+      # simulated NAT that only relays over TLS.  The sample's line
+      # budget is re-measured on every run; a limit that drifts is a
+      # claim that drifted (plan §5 N6).
+      - name: SDK sample -- line budget
+        run: python3 tools/check_sample_line_budget.py
+
+      - name: SDK sample -- self-test
+        run: python3 tools/check_sample_line_budget_self_test.py
+
+      - name: SDK sample -- two-process call behind the TLS relay
+        run: node --test tests/acceptance/v1-sdk-sample/acceptance.test.cjs
 
       - name: Loopback smoke
         shell: cmd
@@ -1333,6 +1377,15 @@ jobs:
         # needs the actual list, not its cardinality.
         run: python3 scripts/check_api_manifest.py
 
+      # The installed package config is hand-written
+      # (cmake/NimRTCConfig.cmake.in), and a placeholder that reaches the
+      # installed file as an empty string only breaks find_package() after
+      # the merge.  Pure static check (no build), run on every leg; the
+      # self-test pins that a dropped placeholder is reported and a normal
+      # template is not.
+      - name: Install export check (NimRTCConfig.cmake.in)
+        run: python3 tools/check_install_export.py
+
       # Ubuntu 22.04 ships CMake 3.22.3; CMakePresets.json uses preset
       # schema v6 which requires CMake ≥ 3.25. Pin a recent cmake via pip.
       - name: Install ninja + Python + X11/PipeWire/EGL dev packages (CMake via pip)
@@ -1412,6 +1465,28 @@ jobs:
       # codecs (remote-desktop plan WP-B).  They are vendored source
       # builds, so the leg proves that the wrappers compile and that the
       # software round-trip tests pass on this platform too.
+      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
+      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
+      # (`.gitignore:227`).  A fresh checkout therefore has neither
+      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
+      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
+      # unconditionally -- so without this step the build fails with
+      # "Error copying file (if different) from .../ecc-key.pem".
+      #
+      # It used to work in CI because the pair came from wolfSSL's own cert
+      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
+      # out of the vendored submodule -- a build artefact must not dirty a
+      # vendored dependency's tracked files.
+      #
+      # `cryptography<42` on purpose: 42+ ships a Rust-backed Windows wheel
+      # whose `cryptography_rust.dll` is not bundled in the PyPI artefact,
+      # so `import cryptography` fails with "DLL load failed while
+      # importing _rust".  41.x is the last pure-C line.
+      - name: Generate the DTLS test certificate pair
+        run: |
+          python3 -m pip install --upgrade "cryptography<42"
+          python3 scripts/build_dtls_cert.py
+
       - name: Configure
         run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
@@ -2053,6 +2128,15 @@ jobs:
         # needs the actual list, not its cardinality.
         run: python3 scripts/check_api_manifest.py
 
+      # The installed package config is hand-written
+      # (cmake/NimRTCConfig.cmake.in), and a placeholder that reaches the
+      # installed file as an empty string only breaks find_package() after
+      # the merge.  Pure static check (no build), run on every leg; the
+      # self-test pins that a dropped placeholder is reported and a normal
+      # template is not.
+      - name: Install export check (NimRTCConfig.cmake.in)
+        run: python3 tools/check_install_export.py
+
       - name: Unused-const gate self-test
         # The gate below only reports what its scanner recognizes.  The
         # self-test pins that behavior: an unused internal-linkage
@@ -2133,14 +2217,91 @@ jobs:
       # codecs (remote-desktop plan WP-B).  They are vendored source
       # builds, so the leg proves that the wrappers compile and that the
       # software round-trip tests pass on this platform too.
+      # The Chrome-friendly DTLS cert pair is a BUILD ARTEFACT, not a
+      # checked-in file: `tests/wolfssl_dtls/certs/` is gitignored
+      # (`.gitignore:227`).  A fresh checkout therefore has neither
+      # `server-ecc.pem` nor `ecc-key.pem`, and CMake's
+      # `nimrtc_copy_wolfssl_certs()` POST_BUILD step copies them
+      # unconditionally -- so without this step the build fails with
+      # "Error copying file (if different) from .../ecc-key.pem".
+      #
+      # It used to work in CI because the pair came from wolfSSL's own cert
+      # tree (upstream tracks `certs/ecc-key.pem`), but the pair has moved
+      # out of the vendored submodule -- a build artefact must not dirty a
+      # vendored dependency's tracked files.
+      #
+      # `cryptography<42` on purpose: 42+ ships a Rust-backed Windows wheel
+      # whose `cryptography_rust.dll` is not bundled in the PyPI artefact,
+      # so `import cryptography` fails with "DLL load failed while
+      # importing _rust".  41.x is the last pure-C line.
+      - name: Generate the DTLS test certificate pair
+        run: |
+          python3 -m pip install --upgrade "cryptography<42"
+          python3 scripts/build_dtls_cert.py
+
       - name: Configure
-        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
+        # NIMRTC_INSTALL=ON: the "Install + downstream proof" step below
+        # installs this tree and builds a find_package(NimRTC) consumer
+        # against it.  Without the flag the install rules are not
+        # generated at all (cmake/NimRTCInstall.cmake is guarded by it),
+        # so `cmake --install` installs only the vendored dependencies
+        # and the consumer's find_package(NimRTC) fails with "Could not
+        # find a package configuration file provided by NimRTC".  The
+        # Windows and Linux legs already pass the flag for the same
+        # reason.
+        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
       - name: Build
         run: cmake --build --preset debug.macos -j 2
 
       - name: Test
         run: ctest --preset tests.macos --output-on-failure -j 2
+
+      # Track D downstream proof (macOS / Apple Clang): install into a
+      # staging dir and build a minimal find_package(NimRTC) consumer
+      # against it.  Without this leg the macOS export path has **no**
+      # automated evidence: Windows (MSVC) and Linux prove theirs on
+      # every push, and macOS only ever built in-tree.  A macOS-only
+      # export defect (a wrong CMAKE_INSTALL_* path, a config template
+      # that assumes GNU, a target that forgets its INTERFACE_* props)
+      # would ship green until a host tried to consume the SDK on a
+      # Mac — the one platform where v1.4.0's own claims (D2's Metal
+      # renderer, D3's default table, D4's AVFoundation camera) live.
+      #
+      # The consumer includes the engine public header (not just
+      # <nimrtc/core/api_version.hpp> like the Linux leg): including it is
+      # the real host shape and exposes "a third-party header the engine
+      # header depends on was never installed".  It pins no
+      # CMAKE_CXX_STANDARD (the package config has to declare the standard,
+      # the same reason the Windows leg's comment gives) and no
+      # CMAKE_OSX_ARCHITECTURES (the runner and the build machine are both
+      # arm64; universal binaries are the release side's job).
+      - name: Install + downstream proof
+        shell: bash
+        run: |
+          cmake --install build --prefix build/_install/macos-arm64
+          found="$(find build/_install/macos-arm64 -name NimRTCConfig.cmake -print -quit)"
+          test -n "$found" && test -f "$found"
+          mkdir -p build/downstream-proof
+          cat > build/downstream-proof/main.cpp <<'EOF'
+          #include <nimrtc/engine/engine.hpp>
+          #include <cstdio>
+          int main() {
+            std::printf("nimrtc %s\n", NIMRTC_API_VERSION_STRING);
+            return 0;
+          }
+          EOF
+          cat > build/downstream-proof/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.20)
+          project(nimrtc_downstream_proof LANGUAGES CXX)
+          find_package(NimRTC 1.0 REQUIRED)
+          add_executable(downstream_proof main.cpp)
+          target_link_libraries(downstream_proof PRIVATE nimrtc::engine)
+          EOF
+          cmake -S build/downstream-proof -B build/downstream-proof/build \
+            -DCMAKE_PREFIX_PATH="$PWD/build/_install/macos-arm64"
+          cmake --build build/downstream-proof/build
+          ./build/downstream-proof/build/downstream_proof
 
       - name: Upload build directory on failure
         if: failure()

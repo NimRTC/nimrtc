@@ -73,8 +73,9 @@ inline constexpr NIMRTC_API_UNSTABLE std::uint32_t kEngineConfig = 0x1010;
 // ---------------------------------------------------------------------------
 // 0x1FFF is the catch-all "internal" used by the plugin layer; transport-
 // specific failures reuse that value but with different human-readable
-// strings.  No transport-only codes are defined yet — add them here when
-// the transport layer grows a richer error vocabulary.
+// strings.  The first transport-only code: the ICE-recovery budget is spent
+// and the engine has stopped restarting ICE (v1.4 N3, ADR-031 §2.4).
+inline constexpr NIMRTC_API_STABLE std::uint32_t kIceRecoveryExhausted = 0x1F01;
 
 // ---------------------------------------------------------------------------
 // DTLS — 0x2000..0x20FF

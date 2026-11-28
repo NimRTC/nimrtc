@@ -61,121 +61,134 @@ header, so it cannot go stale.
 | 49 | `video_capture_restarts` | `std::uint64_t` | times the device was reopened |
 | 50 | `video_capture_format_changes` | `std::uint64_t` | negotiated format changed |
 | 51 | `video_capture_bytes_copied` | `std::uint64_t` | CPU<->GPU bytes (0 = zero-copy) |
-| 52 | `video_codec_backend_id` | `std::string` | e.g. "nvenc", "h264" |
-| 53 | `video_codec_hardware` | `bool` | a hardware encoder |
-| 54 | `video_codec_zero_copy` | `bool` | the last frame skipped the CPU |
-| 55 | `video_codec_bitrate_bps` | `std::uint32_t` | the bitrate it was asked for |
-| 56 | `video_codec_actual_bps` | `std::uint32_t` | the bitrate it produced |
-| 57 | `video_codec_encode_latency_us` | `std::uint32_t` | average encode latency |
-| 58 | `video_codec_frames_encoded` | `std::uint64_t` | -- |
-| 59 | `video_codec_bytes_encoded` | `std::uint64_t` | -- |
-| 60 | `video_codec_encode_errors` | `std::uint64_t` | -- |
-| 61 | `video_codec_zero_copy_frames` | `std::uint64_t` | frames that skipped the CPU |
-| 62 | `video_codec_staged_frames` | `std::uint64_t` | frames staged through the CPU |
-| 63 | `video_freeze_count` | `std::uint64_t` | Number of freezes detected (a gap > `freeze_threshold_ms` between two rendered frames). |
-| 64 | `video_freeze_total_ms` | `std::uint64_t` | Total frozen time in milliseconds (sum of the freeze gaps). |
-| 65 | `video_last_freeze_ms` | `std::uint64_t` | Duration of the most recent freeze in milliseconds. |
-| 66 | `video_keyframe_interval_avg_ms` | `double` | Running mean of the inter-keyframe distance, in milliseconds (EMA). Zero when fewer than two keyframes were seen. |
-| 67 | `video_qp_sum` | `std::uint64_t` | Sum of the per-frame QP samples (0 = best quality). These are the *outbound* samples — the QP the encoder chose for the frames we sent. The average QP is `video_qp_sum / video_qp_count`. |
-| 68 | `video_qp_count` | `std::uint64_t` | Number of per-frame QP samples (i.e. frames with a known QP). Zero means the codec does not report a QP — not that the quality was perfect. |
-| 69 | `video_frames_dropped_jb` | `std::uint64_t` | Frames dropped at the jitter buffer (never assembled). |
-| 70 | `video_frames_dropped_decoder` | `std::uint64_t` | Frames dropped by the decoder (corrupt / undecodable). |
-| 71 | `video_frames_dropped_dependency` | `std::uint64_t` | Frames dropped because a reference frame was lost. This is a subset of `video_frames_dropped_decoder`. |
-| 72 | `video_current_bitrate_bps` | `std::uint32_t` | The current inbound video bitrate, in bits per second (EMA over a one-second window). |
-| 73 | `video_avg_bitrate_bps` | `std::uint32_t` | The session-average inbound video bitrate, in bits per second. |
-| 74 | `video_bytes_received` | `std::uint64_t` | Bytes of encoded video received since open(). |
-| 75 | `video_frames_decoded` | `std::uint64_t` | Frames successfully decoded by the codec. |
-| 76 | `video_frames_rendered` | `std::uint64_t` | Frames handed to the video sink (rendered). |
-| 77 | `video_tx_frames_encoded` | `std::uint64_t` | -- |
-| 78 | `video_tx_bytes_encoded` | `std::uint64_t` | -- |
-| 79 | `video_tx_frames_dropped_dependency` | `std::uint64_t` | Dependency losses the *peer* reported about our stream. A PLI / FIR the peer sends is the peer saying "a reference frame of yours never arrived, so I cannot decode what follows". This is our *transmit* side losing a reference frame — the counterpart of the inbound `video_frames_dropped_dependency`. It is counted here rather than as an inbound drop because the two describe opposite directions: the inbound counter says "we could not decode what the peer sent", this one says "the peer could not decode what we sent". |
-| 80 | `audio_frames_sent` | `std::uint64_t` | RTP packets emitted |
-| 81 | `audio_bytes_sent` | `std::uint64_t` | RTP bytes (hdr+payload) |
-| 82 | `audio_encode_errors` | `std::uint64_t` | frames that failed to encode |
-| 83 | `audio_samples_in` | `std::uint64_t` | PCM samples handed to send_audio() |
-| 84 | `audio_samples_pending` | `std::uint64_t` | samples still in the accumulator |
-| 85 | `audio_packets_sent` | `std::uint64_t` | RTP packets emitted |
-| 86 | `audio_frames_received` | `std::uint64_t` | decoded frames delivered |
-| 87 | `audio_samples_received` | `std::uint64_t` | samples per channel delivered |
-| 88 | `audio_concealed_frames` | `std::uint64_t` | PLC frames delivered |
-| 89 | `audio_fec_recovered_frames` | `std::uint64_t` | frames rebuilt from in-band FEC |
-| 90 | `audio_packets_lost` | `std::uint64_t` | inbound packets inferred lost |
-| 91 | `audio_decode_errors` | `std::uint64_t` | decoder errors |
-| 92 | `audio_packets_dropped` | `std::uint64_t` | The packets the receive jitter buffer dropped to stay inside its memory bound (v1.3 plan Q2 / video plan R4). A non-zero value says "the receiver could not keep up with the sender"; it is not an error count. It is the buffer's own counter, republished unchanged. packets the jitter buffer dropped to stay bounded |
-| 93 | `audio_jitter_ms` | `std::uint32_t` | current interarrival jitter |
-| 94 | `audio_playout_delay_ms` | `std::uint32_t` | current playout delay |
-| 95 | `audio_encoder_bitrate_bps` | `std::uint32_t` | -- |
-| 96 | `audio_capture_frames` | `std::uint64_t` | frames pulled from the device |
-| 97 | `audio_capture_frames_sent` | `std::uint64_t` | frames handed to the encoder |
-| 98 | `audio_capture_dropped` | `std::uint64_t` | queue-overflow drops |
-| 99 | `audio_capture_device_errors` | `std::uint64_t` | device-lost / read errors |
-| 100 | `audio_capture_restarts` | `std::uint64_t` | times the device was reopened |
-| 101 | `audio_playback_frames_written` | `std::uint64_t` | frames handed to the sink |
-| 102 | `audio_playback_frames_dropped` | `std::uint64_t` | sink-queue overflow drops |
-| 103 | `audio_playback_samples_played` | `std::uint64_t` | samples the device consumed |
-| 104 | `audio_source_device_id` | `std::string` | The id of the capture device the engine resolved ("" = none). |
-| 105 | `audio_sink_device_id` | `std::string` | The id of the playback device the engine resolved ("" = none). |
-| 106 | `ice_send_blocked_events` | `std::uint32_t` | How many times the engine has stopped sending because the transport died. The Q5 soak found the failure mode this counts: the ICE consent freshness expired, libjuice moved the agent to `failed`, and the engine kept offering media at full rate anyway — 26 627 refused sends in the remaining 21 minutes of a 24 h run. The value is a count of **outages**, not of packets: one outage that lasts an hour is one, and a link that flaps is several. The engine reports each one once, rather than once per packet. |
-| 107 | `net_feedback_blocks` | `std::uint64_t` | RTCP blocks routed to the collector |
-| 108 | `bwe_feedback_samples` | `std::uint64_t` | samples handed to IBwe::on_feedback() |
-| 109 | `bandwidth_estimate_bps` | `std::uint32_t` | current BWE target, in bit/s |
-| 110 | `dtmf_packets_sent` | `std::uint64_t` | outbound event packets |
-| 111 | `dtmf_packets_received` | `std::uint64_t` | inbound event packets decoded |
-| 112 | `dtmf_packets_malformed` | `std::uint64_t` | inbound packets that failed to decode |
-| 113 | `dtmf_events_delivered` | `std::uint64_t` | completed events reported to the host |
-| 114 | `dtmf_payload_type` | `std::uint8_t` | the negotiated telephone-event PT |
-| 115 | `xr_report_blocks` | `std::uint64_t` | XR blocks routed to the consumer |
-| 116 | `video_capture_device_frames_captured` | `std::uint64_t` | -- |
-| 117 | `video_capture_device_frames_dropped` | `std::uint64_t` | -- |
-| 118 | `video_capture_device_error_count` | `std::uint64_t` | -- |
-| 119 | `video_capture_device_restarts` | `std::uint64_t` | -- |
-| 120 | `video_capture_device_format_changes` | `std::uint64_t` | -- |
-| 121 | `video_capture_device_bytes_copied` | `std::uint64_t` | -- |
-| 122 | `video_capture_device_frames_zero_copy` | `std::uint64_t` | -- |
-| 123 | `video_capture_device_frames_cpu_staged` | `std::uint64_t` | -- |
-| 124 | `video_capture_pumped_frames` | `std::uint64_t` | -- |
-| 125 | `video_capture_pump_errors` | `std::uint64_t` | -- |
-| 126 | `video_capture_pumped_metadata` | `std::uint64_t` | -- |
-| 127 | `video_capture_gpu_frames` | `std::uint64_t` | -- |
-| 128 | `video_capture_gpu_errors` | `std::uint64_t` | -- |
-| 129 | `video_capture_gpu_wired` | `bool` | -- |
-| 130 | `video_format_conversions` | `std::uint64_t` | -- |
-| 131 | `video_format_copies` | `std::uint64_t` | The frames that were copied without a colour conversion. |
-| 132 | `video_format_zero_copy` | `std::uint64_t` | The frames that reached the encoder as a native GPU surface (so no format work happened at all). |
-| 133 | `video_format_canonical` | `std::string` | The canonical format the encoder is fed (e.g. "i420"). |
-| 134 | `video_format_source` | `std::string` | The format the capture device most recently delivered (e.g. "bgra"). A host compares it with the canonical format to see whether a conversion is happening. |
-| 135 | `video_codec_backend` | `std::string` | The codec backend's id ("nvenc", "openh264", "stub_h264", ...). "unknown" when the codec does not name its backend. |
-| 136 | `video_codec_hardware_accelerated` | `bool` | True iff the codec runs on a hardware accelerator. |
-| 137 | `video_codec_backend_preference` | `std::string` | The backend class the host asked for (plan B2). "auto" / "hardware" / "software" — the value of `EngineConfig::video_codec_backend`. Read this together with `video_codec_backend`: a host that asked for "hardware" and got "openh264_h264" has a problem the engine would otherwise hide, and this field makes the mismatch visible without parsing a log. |
-| 138 | `video_codec_frames_zero_copy` | `std::uint64_t` | Frames the codec encoded through the GPU zero-copy path. |
-| 139 | `video_codec_frames_staged` | `std::uint64_t` | Frames the codec encoded through the CPU staging path. |
-| 140 | `video_codec_keyframes` | `std::uint64_t` | Keyframes (IDR) the codec produced. |
-| 141 | `video_codec_bytes_copied` | `std::uint64_t` | Bytes the codec copied CPU↔GPU (0 on a pure hardware path). |
-| 142 | `video_codec_encode_latency_avg_us` | `std::uint64_t` | The mean encode latency, in microseconds. |
-| 143 | `video_codec_encode_latency_max_us` | `std::uint64_t` | The largest single encode duration, in microseconds. |
-| 144 | `video_tx_bitrate_bps` | `std::uint32_t` | The current outbound video bitrate, in bits per second. Derived from the encoded byte count over the last second. |
-| 145 | `video_sink_frames_rendered` | `std::uint64_t` | -- |
-| 146 | `video_sink_frames_dropped` | `std::uint64_t` | -- |
-| 147 | `video_sink_frames_dropped_present` | `std::uint64_t` | -- |
-| 148 | `video_sink_frames_presented` | `std::uint64_t` | -- |
-| 149 | `video_sink_render_errors` | `std::uint64_t` | -- |
-| 150 | `video_sink_present_fps` | `std::uint32_t` | -- |
-| 151 | `video_sync` | `VideoSyncStats` | -- |
-| 152 | `video_streams` | `std::vector<VideoStreamStats>` | -- |
-| 153 | `inbound_rtp_streams` | `std::vector<InboundRtpStats>` | -- |
-| 154 | `audio_streams` | `std::vector<AudioStreamStats>` | -- |
-| 155 | `transport` | `TransportStats` | The ICE / DTLS / SRTP path the session runs over. |
-| 156 | `data_channels` | `std::vector<DataChannelStats>` | ---- The per-channel data-channel entries (v1.2 plan Track S / S6) One entry per **data channel the host opened** with `create_data_channel()`, each with its own identity (the engine-assigned id and the label) and its own counters. The list is empty when the host never opened a channel, so a host that does not use the data plane sees no change in its telemetry. It is a list rather than a single struct so that the *shape* survives the arrival of a second channel — the alternative is to redraw the whole surface then, and every caller with it. |
-| 157 | `video_stage_capture` | `StageTiming` | The time spent popping the frame from the capture device. |
-| 158 | `video_stage_convert` | `StageTiming` | The time spent converting the picture (colour / format / scale). |
-| 159 | `video_stage_encode` | `StageTiming` | The time spent inside the codec's encode call. |
-| 160 | `video_stage_packetize` | `StageTiming` | The time spent packetizing (RTP header, STAP-A / FU-A, SRTP). |
-| 161 | `video_stage_decode` | `StageTiming` | The time spent inside the codec's decode call. |
-| 162 | `video_stage_render` | `StageTiming` | The time spent in the sink's render call. |
-| 163 | `video_stage_total_us` | `std::uint64_t` | The summed cost of the outbound path, in microseconds. This is the number §B.6's budget is written against: the capture → convert → encode → packetize chain. It is the sum of the four stage means above, so a host can compare it with the budget directly: ``` const auto s = engine.stats(); const auto frame_cost_us = s.video_stage_capture.mean_us + s.video_stage_convert.mean_us + s.video_stage_encode.mean_us + s.video_stage_packetize.mean_us; ``` The p95 variant (`video_stage_total_p95_us`) sums the p95s instead — an upper bound on the *typical* worst frame, which is the number to compare with the frame interval (33 333 µs at 30 fps). |
-| 164 | `video_stage_total_p95_us` | `std::uint64_t` | The summed p95 of the four outbound stages, in microseconds. |
-| 165 | `qoe` | `plugins::QoeSnapshot` | The quality-of-experience metrics (plan J3 / J6). The freeze count, the end-to-end latency percentiles, the viewer's frame rate, the sharpness proxy and the input-to-photon latency. The metrics are measured whenever a QoE collector is resolved -- which, by default, is the built-in `"rd-qoe"` (see `EngineConfig::qoe_collector_name`). A host that turns the metrics off says so with `EngineConfig::qoe_collector_enabled` (or with an empty name). Without a collector this snapshot carries the **frame counters** -- the presented and dropped frame counts, which the engine keeps anyway -- and zeroes for the metrics, which is the honest answer to "what was the latency percentile?" when it was not measured. |
-| 166 | `remote_desktop` | `RemoteDesktopStats` | The remote-desktop pipeline breakdown (v1.2 plan **S7**). The QoE block above answers "how did the session *feel*"; this block answers "**where did the time go**". It is a remote-desktop-shaped view of the per-stage instrumentation (`video_stage_*`): the capture / encode / decode means in milliseconds, the frame rates they imply, and the count of frames that were captured but never encoded (the gap between two stages is a frame that was dropped in between). The shape follows the pipeline: `capture`, `encode` and `decode`, each with its own rate, cost and count — so a host compares the halves ("the capture ran at 30 fps and the encoder only at 24") instead of guessing which prefix carries which half. Every value here is **derived** from a measurement that already exists — nothing is timed a second time. The definitions are in `RemoteDesktopStats` above. |
+| 52 | `video_capture_device_changes` | `std::uint64_t` | v1-device-policy D4: device-list changes (each "removed" or "added" event counts once, cumulative since open()). |
+| 53 | `video_codec_backend_id` | `std::string` | e.g. "nvenc", "h264" |
+| 54 | `video_codec_hardware` | `bool` | a hardware encoder |
+| 55 | `video_codec_zero_copy` | `bool` | the last frame skipped the CPU |
+| 56 | `video_codec_bitrate_bps` | `std::uint32_t` | the bitrate it was asked for |
+| 57 | `video_codec_actual_bps` | `std::uint32_t` | the bitrate it produced |
+| 58 | `video_codec_encode_latency_us` | `std::uint32_t` | average encode latency |
+| 59 | `video_codec_frames_encoded` | `std::uint64_t` | -- |
+| 60 | `video_codec_bytes_encoded` | `std::uint64_t` | -- |
+| 61 | `video_codec_encode_errors` | `std::uint64_t` | -- |
+| 62 | `video_codec_zero_copy_frames` | `std::uint64_t` | frames that skipped the CPU |
+| 63 | `video_codec_staged_frames` | `std::uint64_t` | frames staged through the CPU |
+| 64 | `video_freeze_count` | `std::uint64_t` | Number of freezes detected (a gap > `freeze_threshold_ms` between two rendered frames). |
+| 65 | `video_freeze_total_ms` | `std::uint64_t` | Total frozen time in milliseconds (sum of the freeze gaps). |
+| 66 | `video_last_freeze_ms` | `std::uint64_t` | Duration of the most recent freeze in milliseconds. |
+| 67 | `video_keyframe_interval_avg_ms` | `double` | Running mean of the inter-keyframe distance, in milliseconds (EMA). Zero when fewer than two keyframes were seen. |
+| 68 | `video_qp_sum` | `std::uint64_t` | Sum of the per-frame QP samples (0 = best quality). These are the *outbound* samples — the QP the encoder chose for the frames we sent. The average QP is `video_qp_sum / video_qp_count`. |
+| 69 | `video_qp_count` | `std::uint64_t` | Number of per-frame QP samples (i.e. frames with a known QP). Zero means the codec does not report a QP — not that the quality was perfect. |
+| 70 | `video_frames_dropped_jb` | `std::uint64_t` | Frames dropped at the jitter buffer (never assembled). |
+| 71 | `video_frames_dropped_decoder` | `std::uint64_t` | Frames dropped by the decoder (corrupt / undecodable). |
+| 72 | `video_frames_dropped_dependency` | `std::uint64_t` | Frames dropped because a reference frame was lost. This is a subset of `video_frames_dropped_decoder`. |
+| 73 | `video_current_bitrate_bps` | `std::uint32_t` | The current inbound video bitrate, in bits per second (EMA over a one-second window). |
+| 74 | `video_avg_bitrate_bps` | `std::uint32_t` | The session-average inbound video bitrate, in bits per second. |
+| 75 | `video_bytes_received` | `std::uint64_t` | Bytes of encoded video received since open(). |
+| 76 | `video_frames_decoded` | `std::uint64_t` | Frames successfully decoded by the codec. |
+| 77 | `video_frames_rendered` | `std::uint64_t` | Frames handed to the video sink (rendered). |
+| 78 | `video_tx_frames_encoded` | `std::uint64_t` | -- |
+| 79 | `video_tx_bytes_encoded` | `std::uint64_t` | -- |
+| 80 | `video_tx_frames_dropped_dependency` | `std::uint64_t` | Dependency losses the *peer* reported about our stream. A PLI / FIR the peer sends is the peer saying "a reference frame of yours never arrived, so I cannot decode what follows". This is our *transmit* side losing a reference frame — the counterpart of the inbound `video_frames_dropped_dependency`. It is counted here rather than as an inbound drop because the two describe opposite directions: the inbound counter says "we could not decode what the peer sent", this one says "the peer could not decode what we sent". |
+| 81 | `audio_frames_sent` | `std::uint64_t` | RTP packets emitted |
+| 82 | `audio_bytes_sent` | `std::uint64_t` | RTP bytes (hdr+payload) |
+| 83 | `audio_encode_errors` | `std::uint64_t` | frames that failed to encode |
+| 84 | `audio_samples_in` | `std::uint64_t` | PCM samples handed to send_audio() |
+| 85 | `audio_samples_pending` | `std::uint64_t` | samples still in the accumulator |
+| 86 | `audio_packets_sent` | `std::uint64_t` | RTP packets emitted |
+| 87 | `audio_frames_received` | `std::uint64_t` | decoded frames delivered |
+| 88 | `audio_samples_received` | `std::uint64_t` | samples per channel delivered |
+| 89 | `audio_concealed_frames` | `std::uint64_t` | PLC frames delivered |
+| 90 | `audio_fec_recovered_frames` | `std::uint64_t` | frames rebuilt from in-band FEC |
+| 91 | `audio_packets_lost` | `std::uint64_t` | inbound packets inferred lost |
+| 92 | `audio_decode_errors` | `std::uint64_t` | decoder errors |
+| 93 | `audio_packets_dropped` | `std::uint64_t` | The packets the receive jitter buffer dropped to stay inside its memory bound (v1.3 plan Q2 / video plan R4). A non-zero value says "the receiver could not keep up with the sender"; it is not an error count. It is the buffer's own counter, republished unchanged. packets the jitter buffer dropped to stay bounded |
+| 94 | `audio_jitter_ms` | `std::uint32_t` | current interarrival jitter |
+| 95 | `audio_playout_delay_ms` | `std::uint32_t` | current playout delay |
+| 96 | `audio_encoder_bitrate_bps` | `std::uint32_t` | -- |
+| 97 | `audio_capture_frames` | `std::uint64_t` | frames pulled from the device |
+| 98 | `audio_capture_frames_sent` | `std::uint64_t` | frames handed to the encoder |
+| 99 | `audio_capture_dropped` | `std::uint64_t` | queue-overflow drops |
+| 100 | `audio_capture_device_errors` | `std::uint64_t` | device-lost / read errors |
+| 101 | `audio_capture_restarts` | `std::uint64_t` | times the device was reopened |
+| 102 | `audio_playback_frames_written` | `std::uint64_t` | frames handed to the sink |
+| 103 | `audio_playback_frames_dropped` | `std::uint64_t` | sink-queue overflow drops |
+| 104 | `audio_playback_samples_played` | `std::uint64_t` | samples the device consumed |
+| 105 | `ice_send_blocked_events` | `std::uint32_t` | How many times the engine has stopped sending because the transport died. The Q5 soak found the failure mode this counts: the ICE consent freshness expired, libjuice moved the agent to `failed`, and the engine kept offering media at full rate anyway — 26 627 refused sends in the remaining 21 minutes of a 24 h run. The value is a count of **outages**, not of packets: one outage that lasts an hour is one, and a link that flaps is several. The engine reports each one once, rather than once per packet. |
+| 106 | `net_feedback_blocks` | `std::uint64_t` | RTCP blocks routed to the collector |
+| 107 | `bwe_feedback_samples` | `std::uint64_t` | samples handed to IBwe::on_feedback() |
+| 108 | `bandwidth_estimate_bps` | `std::uint32_t` | current BWE target, in bit/s |
+| 109 | `dtmf_packets_sent` | `std::uint64_t` | outbound event packets |
+| 110 | `dtmf_packets_received` | `std::uint64_t` | inbound event packets decoded |
+| 111 | `dtmf_packets_malformed` | `std::uint64_t` | inbound packets that failed to decode |
+| 112 | `dtmf_events_delivered` | `std::uint64_t` | completed events reported to the host |
+| 113 | `dtmf_payload_type` | `std::uint8_t` | the negotiated telephone-event PT |
+| 114 | `xr_report_blocks` | `std::uint64_t` | XR blocks routed to the consumer |
+| 115 | `video_capture_device_frames_captured` | `std::uint64_t` | -- |
+| 116 | `video_capture_device_frames_dropped` | `std::uint64_t` | -- |
+| 117 | `video_capture_device_error_count` | `std::uint64_t` | -- |
+| 118 | `video_capture_device_restarts` | `std::uint64_t` | -- |
+| 119 | `video_capture_device_format_changes` | `std::uint64_t` | -- |
+| 120 | `video_capture_device_bytes_copied` | `std::uint64_t` | -- |
+| 121 | `video_capture_device_frames_zero_copy` | `std::uint64_t` | -- |
+| 122 | `video_capture_device_frames_cpu_staged` | `std::uint64_t` | -- |
+| 123 | `video_capture_pumped_frames` | `std::uint64_t` | -- |
+| 124 | `video_capture_pump_errors` | `std::uint64_t` | -- |
+| 125 | `video_capture_pumped_metadata` | `std::uint64_t` | -- |
+| 126 | `audio_source_device_id` | `std::string` | The id of the capture device the engine negotiated ("" = none). The plugin reports what it actually opened after `open()`, so this may differ from the host's request. |
+| 127 | `audio_source_backend` | `std::string` | The id of the capture backend the engine resolved ("" = none). |
+| 128 | `audio_sink_device_id` | `std::string` | The id of the playback device the engine negotiated ("" = none). The plugin reports what it actually opened after `open()`, so this may differ from the host's request. |
+| 129 | `audio_sink_backend` | `std::string` | The id of the playback backend the engine resolved ("" = none). |
+| 130 | `audio_device_pumped_frames` | `std::uint64_t` | The pump's own counters — the analog of `video_capture_pumped_frames` / `video_capture_pump_errors`. `audio_device_pumped_frames` moving is the proof that the automatic path works: a capture source plus the outbound audio path produce an RTP stream with no `send_audio()` call from the host. |
+| 131 | `audio_device_pump_errors` | `std::uint64_t` | -- |
+| 132 | `video_capture_gpu_frames` | `std::uint64_t` | -- |
+| 133 | `video_capture_gpu_errors` | `std::uint64_t` | -- |
+| 134 | `video_capture_gpu_wired` | `bool` | -- |
+| 135 | `video_format_conversions` | `std::uint64_t` | -- |
+| 136 | `video_format_copies` | `std::uint64_t` | The frames that were copied without a colour conversion. |
+| 137 | `video_format_zero_copy` | `std::uint64_t` | The frames that reached the encoder as a native GPU surface (so no format work happened at all). |
+| 138 | `video_format_canonical` | `std::string` | The canonical format the encoder is fed (e.g. "i420"). |
+| 139 | `video_format_source` | `std::string` | The format the capture device most recently delivered (e.g. "bgra"). A host compares it with the canonical format to see whether a conversion is happening. |
+| 140 | `video_codec_backend` | `std::string` | The codec backend's id ("nvenc", "openh264", "stub_h264", ...). "unknown" when the codec does not name its backend. |
+| 141 | `video_codec_hardware_accelerated` | `bool` | True iff the codec runs on a hardware accelerator. |
+| 142 | `video_codec_backend_preference` | `std::string` | The backend class the host asked for (plan B2). "auto" / "hardware" / "software" — the value of `EngineConfig::video_codec_backend`. Read this together with `video_codec_backend`: a host that asked for "hardware" and got "openh264_h264" has a problem the engine would otherwise hide, and this field makes the mismatch visible without parsing a log. |
+| 143 | `video_codec_frames_zero_copy` | `std::uint64_t` | Frames the codec encoded through the GPU zero-copy path. |
+| 144 | `video_codec_frames_staged` | `std::uint64_t` | Frames the codec encoded through the CPU staging path. |
+| 145 | `video_codec_keyframes` | `std::uint64_t` | Keyframes (IDR) the codec produced. |
+| 146 | `video_codec_bytes_copied` | `std::uint64_t` | Bytes the codec copied CPU↔GPU (0 on a pure hardware path). |
+| 147 | `video_codec_encode_latency_avg_us` | `std::uint64_t` | The mean encode latency, in microseconds. |
+| 148 | `video_codec_encode_latency_max_us` | `std::uint64_t` | The largest single encode duration, in microseconds. |
+| 149 | `video_tx_bitrate_bps` | `std::uint32_t` | The current outbound video bitrate, in bits per second. Derived from the encoded byte count over the last second. |
+| 150 | `video_sink_frames_rendered` | `std::uint64_t` | -- |
+| 151 | `video_sink_frames_dropped` | `std::uint64_t` | -- |
+| 152 | `video_sink_frames_dropped_present` | `std::uint64_t` | -- |
+| 153 | `video_sink_frames_presented` | `std::uint64_t` | -- |
+| 154 | `video_sink_render_errors` | `std::uint64_t` | -- |
+| 155 | `video_sink_present_fps` | `std::uint32_t` | -- |
+| 156 | `video_sink_backend` | `std::string` | -- |
+| 157 | `video_sink_backend_reason` | `std::string` | -- |
+| 158 | `video_sync` | `VideoSyncStats` | -- |
+| 159 | `video_streams` | `std::vector<VideoStreamStats>` | -- |
+| 160 | `inbound_rtp_streams` | `std::vector<InboundRtpStats>` | -- |
+| 161 | `audio_streams` | `std::vector<AudioStreamStats>` | -- |
+| 162 | `transport` | `TransportStats` | The ICE / DTLS / SRTP path the session runs over. |
+| 163 | `data_channels` | `std::vector<DataChannelStats>` | ---- The per-channel data-channel entries (v1.2 plan Track S / S6) One entry per **data channel the host opened** with `create_data_channel()`, each with its own identity (the engine-assigned id and the label) and its own counters. The list is empty when the host never opened a channel, so a host that does not use the data plane sees no change in its telemetry. It is a list rather than a single struct so that the *shape* survives the arrival of a second channel — the alternative is to redraw the whole surface then, and every caller with it. |
+| 164 | `video_stage_capture` | `StageTiming` | The time spent popping the frame from the capture device. |
+| 165 | `video_stage_convert` | `StageTiming` | The time spent converting the picture (colour / format / scale). |
+| 166 | `video_stage_encode` | `StageTiming` | The time spent inside the codec's encode call. |
+| 167 | `video_stage_packetize` | `StageTiming` | The time spent packetizing (RTP header, STAP-A / FU-A, SRTP). |
+| 168 | `video_stage_decode` | `StageTiming` | The time spent inside the codec's decode call. |
+| 169 | `video_stage_render` | `StageTiming` | The time spent in the sink's render call. |
+| 170 | `video_stage_total_us` | `std::uint64_t` | The summed cost of the outbound path, in microseconds. This is the number §B.6's budget is written against: the capture → convert → encode → packetize chain. It is the sum of the four stage means above, so a host can compare it with the budget directly: ``` const auto s = engine.stats(); const auto frame_cost_us = s.video_stage_capture.mean_us + s.video_stage_convert.mean_us + s.video_stage_encode.mean_us + s.video_stage_packetize.mean_us; ``` The p95 variant (`video_stage_total_p95_us`) sums the p95s instead — an upper bound on the *typical* worst frame, which is the number to compare with the frame interval (33 333 µs at 30 fps). |
+| 171 | `video_stage_total_p95_us` | `std::uint64_t` | The summed p95 of the four outbound stages, in microseconds. |
+| 172 | `qoe` | `plugins::QoeSnapshot` | The quality-of-experience metrics (plan J3 / J6). The freeze count, the end-to-end latency percentiles, the viewer's frame rate, the sharpness proxy and the input-to-photon latency. The metrics are measured whenever a QoE collector is resolved -- which, by default, is the built-in `"rd-qoe"` (see `EngineConfig::qoe_collector_name`). A host that turns the metrics off says so with `EngineConfig::qoe_collector_enabled` (or with an empty name). Without a collector this snapshot carries the **frame counters** -- the presented and dropped frame counts, which the engine keeps anyway -- and zeroes for the metrics, which is the honest answer to "what was the latency percentile?" when it was not measured. |
+| 173 | `remote_desktop` | `RemoteDesktopStats` | The remote-desktop pipeline breakdown (v1.2 plan **S7**). The QoE block above answers "how did the session *feel*"; this block answers "**where did the time go**". It is a remote-desktop-shaped view of the per-stage instrumentation (`video_stage_*`): the capture / encode / decode means in milliseconds, the frame rates they imply, and the count of frames that were captured but never encoded (the gap between two stages is a frame that was dropped in between). The shape follows the pipeline: `capture`, `encode` and `decode`, each with its own rate, cost and count — so a host compares the halves ("the capture ran at 30 fps and the encoder only at 24") instead of guessing which prefix carries which half. Every value here is **derived** from a measurement that already exists — nothing is timed a second time. The definitions are in `RemoteDesktopStats` above. |
+| 174 | `ice_recovery_state` | `std::string` | The reconnection-policy state (v1.4 N3): "idle" / "grace" / "backoff" / "terminal" / "disabled". "disabled" means `ice_recovery_policy` is not "auto" — the engine is not managing reconnection. "terminal" means the budget is spent and no more automatic restarts happen. |
+| 175 | `ice_recovery_restarts` | `std::uint32_t` | Restarts spent in the current sliding window (v1.4 N3). |
+| 176 | `ice_recovery_terminal_reason` | `std::string` | Terminal reason (v1.4 N3) — empty when not terminal: "budget-exhausted" / "restart-failed" / "manual-blocked". |
+| 177 | `turn_credentials_state` | `std::string` | The turn-credentials state (v1.4 N7): "" / "idle" / "ok" / "unavailable" / "rejected". "" — no provider configured (the static `add_turn_server()` path is in use). "idle" — a provider is configured but no credentials were pulled yet. "ok" / "unavailable" — the last pull produced / failed to produce a credential set (a failed pull never configures TURN; the session keeps going direct). "rejected" — the transport reported a 401/403 on the applied credentials. Sticky for the engine's lifetime. |
+| 178 | `last_path_change_reason` | `std::string` | Reason of the last path change (v1.4 N8). Empty = no path change has happened yet. Same closed vocabulary as `IceRecoveryReport::reason`: "local-address-changed" / "peer-restart" / "relay-fallback" / "manual" / "ice-failed". |
+| 179 | `last_path_change_new_pair` | `std::optional<IceCandidatePairInfo>` | The pair the session is on after the last path change (v1.4 N8). Empty = no path change yet, or the new pair was not selected at the time. |
 
-**166 fields.**
+**179 fields.**
 

@@ -82,6 +82,25 @@ std::string_view default_stun_server() noexcept;
 /** The default STUN port (the IANA-assigned STUN port, RFC 8489 §9). */
 std::uint16_t default_stun_port() noexcept;
 
+/** The STUN server the engine should configure.
+ *
+ *  An explicit host STUN server always wins (the profile carries policy
+ *  defaults, not seam values); the profile's default is used only when
+ *  the host set none and the profile turns STUN on.  An empty host means
+ *  "no STUN" -- only possible when the profile turns STUN off, and no
+ *  built-in profile does.
+ *
+ *  This is the single place that decides the answer, so the engine
+ *  applies the profile and the host's explicit key in one step. */
+struct StunResolution {
+    std::string host;
+    std::uint16_t port = 0;
+};
+
+StunResolution resolve_stun_server(std::string_view profile,
+                                   std::string_view explicit_host,
+                                   std::uint16_t explicit_port) noexcept;
+
 }  // namespace nimrtc::engine::detail
 
 #endif  // NIMRTC_ENGINE_ENGINE_CONNECTIVITY_PROFILE_HPP

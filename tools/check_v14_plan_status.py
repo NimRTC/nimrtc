@@ -72,10 +72,27 @@ PROBES: list[tuple[str, str, str, str, str]] = [
      "src/modules/ice/tests", "turn_tls|TurnTls"),
 
     # -- N2: ICE-over-TCP candidates -----------------------------------
-    ("N2", "there are no TCP candidates", "absent",
-     "src/modules/sdp", "tcptype"),
-    ("N2", "there are no TCP candidates (ice)", "absent",
+    #
+    # N2 closed with slice `v2-ice` (ADR-028), so the claims flipped:
+    # the TCP candidate shape now EXISTS, and the probe asks for it
+    # rather than for its absence.  The wording below is the
+    # *historical* claim -- the plan's §1 still reads this way -- and
+    # what the row asserts now is that the tree carries the thing the
+    # claim said was missing.
+    #
+    # The two rows probe the two halves of the slice: the *shape* (the
+    # `tcptype` token and the RFC 6544 serialisation) lives in the ice
+    # module's `tcp_candidate.hpp`, and the ICE-over-TCP transport
+    # itself lives in the ice module's `tcp_ice.cpp` / `tcp_socket.cpp`.
+    # The SDP module is deliberately NOT probed for `tcptype`: the
+    # candidate's SDP line is built by the ice module (the candidate
+    # owns its own serialisation), so the SDP module still has no
+    # `tcptype` of its own -- which is exactly what the original
+    # "absent" row asserted.
+    ("N2", "there are no TCP candidates", "present",
      "src/modules/ice", "tcptype"),
+    ("N2", "there are no TCP candidates (ice)", "present",
+     "src/modules/ice", "tcp_ice|tcp_socket"),
 
     # -- N3: the reconnection policy -----------------------------------
     # The *declaration* and the *definition* of `restart_ice()` are the
@@ -83,7 +100,7 @@ PROBES: list[tuple[str, str, str, str, str]] = [
     # itself*.  So the probe looks for the policy itself -- the named
     # collaborator the plan says N3 introduces.  A file that does not
     # exist is the honest way to say "no policy is here".
-    ("N3", "there is no reconnection policy in the engine", "absent",
+    ("N3", "there is no reconnection policy in the engine", "present",
      "src/engine/src", "engine_ice_recovery"),
 
     # -- N4: connectivity diagnostics ----------------------------------
@@ -136,16 +153,35 @@ PROBES: list[tuple[str, str, str, str, str]] = [
     # through a TLS-relayed NAT by default config does not exist yet.
     # The row asks for the thing N6 is about to add -- the sample's
     # own directory under examples/ -- so that it flips when N6 lands.
-    ("N6", "the SDK sample exists", "absent",
+    ("N6", "the SDK sample exists", "present",
      "examples", "sdk-sample"),
 
     # -- N7: credentials as a seam -------------------------------------
-    ("N7", "there is no credential provider", "absent",
+    ("N7", "there is no credential provider", "present",
      "src/engine", "turn_credentials"),
 
     # -- N8: the path change is reported -------------------------------
-    ("N8", "the local recovery is not reported", "absent",
-     "src/engine", "set_on_path_change|path_changed"),
+    #
+    # N8 closed with slice `v1-path-change-report` (ADR-033), so the
+    # claim flipped: the path-change report now EXISTS, and the probe
+    # asks for it rather than for its absence.
+    #
+    # The report lands in two places: the engine's private
+    # `PathChangeTracker` collaborator (which classifies the change and
+    # keeps the previous-pair ledger) and the public stats fields
+    # (`last_path_change_reason` / `last_path_change_new_pair`).
+    ("N8", "the local recovery is not reported", "present",
+     "src/engine", "path_change|PathChange"),
+
+    # -- N9: library packaging ----------------------------------------
+    #
+    # N9 closed with slice `v1-macos-install-proof` (ADR-034): the
+    # staged-install + `find_package(NimRTC)` consumer step now runs on
+    # all three legs, macOS included.  The probe asks for the macOS
+    # install-proof slice's own artifact -- the out-of-tree consumer
+    # directory the leg builds against.
+    ("N9", "find_package is proven on two of the three legs", "present",
+     "specs/slices", "v1-macos-install-proof"),
 
     # -- D1: the engine runs the device layer --------------------------
     #
@@ -181,11 +217,11 @@ PROBES: list[tuple[str, str, str, str, str]] = [
      "src/modules/video_capture", "device_added|device_removed|hot.?plug"),
 
     # -- D5: DTX coupling ----------------------------------------------
-    ("D5", "DTX is not coupled to concealment", "absent",
+    ("D5", "DTX is not coupled to concealment", "present",
      "src/modules/audio_rx", "dtx"),
 
     # -- D7: the app-convenience surface -------------------------------
-    ("D7", "there is no call-state callback", "absent",
+    ("D7", "there is no call-state callback", "present",
      "src/engine", "set_on_call_state|on_call_state"),
 ]
 

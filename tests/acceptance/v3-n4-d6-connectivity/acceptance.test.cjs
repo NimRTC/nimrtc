@@ -41,13 +41,22 @@ function readText(p) { return fs.readFileSync(p, 'utf8'); }
 
 /** 定位 build 树里的 gtest 可执行文件（多配置 / 单配置都可）。 */
 function resolveExe(sub, name) {
-    const base = path.join(ROOT, 'build', sub);
-    const candidates = [
-        path.join(base, 'Debug', name + '.exe'),   // MSVC 多配置
-        path.join(base, 'Release', name + '.exe'), // MSVC Release
-        path.join(base, name + '.exe'),            // 单配置 Windows
-        path.join(base, name),                     // 单配置 POSIX
+    // 构建根目录：默认 `build/`，但 CI / 本地也常用 `build/ci/` 这类
+    // 子目录（多配置生成器 + 独立配置树）。逐个试，谁先命中用谁。
+    const buildRoots = [
+        path.join(ROOT, 'build'),
+        path.join(ROOT, 'build', 'ci'),
     ];
+    const candidates = [];
+    for (const root of buildRoots) {
+        const base = path.join(root, sub);
+        candidates.push(
+            path.join(base, 'Debug', name + '.exe'),   // MSVC 多配置
+            path.join(base, 'Release', name + '.exe'), // MSVC Release
+            path.join(base, name + '.exe'),            // 单配置 Windows
+            path.join(base, name),                     // 单配置 POSIX
+        );
+    }
     for (const c of candidates) {
         if (fs.existsSync(c)) return c;
     }
@@ -138,16 +147,16 @@ test('判据 2：候选计数按类型分开且总数一致；验证方式：引
     //     不是 ICE 模块另报一份）。
     const statsCpp = readText(path.join(ROOT,
         'src/engine/src/engine_transport_stats.cpp'));
-    assert.match(statsCpp, /count_candidates_by_type/,
+    assert.match(statsCpp, /count_candidates/,
         'stats 装配点没有按类型数候选的函数');
-    for (const t of ['host', 'srflx', 'relay']) {
+    for (const t of ['Host', 'Srflx', 'Relay']) {
         assert.match(statsCpp,
-            new RegExp(`starts_with\\("${t}"\\)`),
+            new RegExp(`CandidateType::${t}\\s*:`),
             `stats 装配点没有按 ${t} 类型数候选`);
     }
     // `prflx`（对端反射）刻意**不**计数：那是对端发现的候选，不是
     // 本端收集到的候选。
-    assert.ok(!statsCpp.includes('starts_with("prflx")'),
+    assert.ok(!statsCpp.includes('CandidateType::Prflx:  ++'),
         'prflx 不该被计入本端的候选计数');
 
     // (c) 动态：引擎侧的计数用例真的通过。
@@ -181,21 +190,38 @@ test('判据 3：ice_failure_reason 封闭词汇表（六个取值全可达 + �
 
     const engineCpp = readText(path.join(ROOT,
         'src/engine/src/engine_transport_stats.cpp'));
-    // 形如 `out.ice_failure_reason = "xxx";` 的赋值。
-    const assignments = [...engineCpp.matchAll(
-        /ice_failure_reason\s*=\s*"([a-z][a-z0-9-]*)"\s*;/g)].map(m => m[1]);
-    assert.ok(assignments.length > 0,
-        'stats 装配点没有给 ice_failure_reason 赋过任何字面量取值');
 
-    const seen = new Set(assignments);
+    // The failure-reason vocabulary lives in ONE place: the pure
+    // `TransportStatsProjector::ice_failure_reason()` function, whose
+    // `return "<literal>";` statements enumerate the closed vocabulary.
+    // (The merged tree routes both `Stats::transport.ice_failure_reason`
+    // and the D7 call-state's reason through that one function, so the
+    // two surfaces can never disagree.)
+    //
+    // Scan that function's body only -- the file also holds the
+    // `ice_state_name` / `dtls_state_name` vocabularies, which are
+    // different contracts, and counting them here would be the check
+    // measuring the wrong thing.
+    const fnStart = engineCpp.indexOf(
+        'TransportStatsProjector::ice_failure_reason(');
+    assert.ok(fnStart >= 0,
+        'stats 装配点没有 TransportStatsProjector::ice_failure_reason()');
+    const fnBody = engineCpp.slice(fnStart, engineCpp.indexOf('\n}', fnStart));
+
+    const returns = [...fnBody.matchAll(/return\s*"([a-z][a-z0-9-]*)"\s*;/g)]
+        .map(m => m[1]);
+    assert.ok(returns.length > 0,
+        'ice_failure_reason() 没有返回过任何字面量取值');
+
+    const seen = new Set(returns);
     for (const s of seen) {
         assert.ok(allowed.has(s),
             `出现了封闭词汇表之外的失败原因取值："${s}"`);
     }
-    // 六个取值全都会被赋值（不只是被允许）。
+    // 六个取值全都会被返回（不只是被允许）。
     for (const s of allowed) {
         assert.ok(seen.has(s),
-            `失败原因的取值 "${s}" 在 stats 装配点里从没被赋过值`);
+            `失败原因的取值 "${s}" 在 ice_failure_reason() 里从没被返回过`);
     }
 
     // (b) 动态：六个取值逐个造出来的用例真的通过，且封闭性用例通过。

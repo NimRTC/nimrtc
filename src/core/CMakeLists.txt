@@ -192,7 +192,7 @@ endif()
 if(NIMRTC_MODULE_VIDEO_CAPTURE)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VIDEO_CAPTURE=1)
 endif()
-# v1.4 D1 (ADR-028): the audio-device module's registrar entry
+# v1.4 D1 (ADR-040): the audio-device module's registrar entry
 # materialises only when the module is built.  Same shape as the
 # video_capture entry above.
 if(NIMRTC_MODULE_AUDIO_DEVICE)

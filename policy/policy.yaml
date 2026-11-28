@@ -119,6 +119,15 @@ rules:
     action: allow
     basis: "policy.yaml#allow-write-changelog"
     reason: "Root-level changelog — agents may append release notes"
+  - id: allow-write-github-workflows
+    match:
+      path: ".github/workflows/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-github-workflows"
+    reason: "CI workflow definitions — agents may add install / downstream-proof legs"
+
+
 
 
 # 策略哈希锚点不在这里 —— 它独立存放在 policy/lock.json（C5）。

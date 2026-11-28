@@ -20,6 +20,7 @@
 
 #include <nimrtc/ice/ice.hpp>
 
+#include "tcp_ice.hpp"
 #include "turn_tls.hpp"
 
 #include <algorithm>
@@ -101,6 +102,15 @@ namespace {
 
 std::atomic<bool> g_log_hooked{false};
 
+// Process-wide latch: a configured TURN server rejected the credentials
+// during some gathering round.  libjuice exposes the rejection *only*
+// through its log handler (agent.c `agent_process_turn_allocate`:
+// "TURN authentication failed" once the realm is known), so the fact is
+// captured here and each IceTransport clears it when it starts a fresh
+// gathering round — see `turn_credentials_rejected()`.  With several
+// transports in one process the latch reports the *latest* rejection,
+// which is exactly what the sequential acceptance scenarios need.
+std::atomic<bool> g_turn_auth_rejected{false};
 /// True when the developer asked for libjuice's per-datagram trace.
 bool juice_verbose_requested() noexcept {
     static const bool requested = [] {
@@ -120,6 +130,16 @@ void hook_libjuice_logging_once() noexcept {
                                                    : JUICE_LOG_LEVEL_INFO);
 
     juice_set_log_handler([](juice_log_level_t level, const char* message) {
+        // The one failure libjuice has no public callback for: a TURN
+        // server rejecting the credentials.  agent.c logs "TURN
+        // authentication failed" (after receiving a 401/403 with a known
+        // realm) before failing the allocation entry — see
+        // `turn_credentials_rejected()`.
+        if (level == JUICE_LOG_LEVEL_ERROR && message != nullptr &&
+            std::strstr(message, "TURN authentication failed") != nullptr) {
+            g_turn_auth_rejected.store(true, std::memory_order_release);
+        }
+
         auto& logger = core::log::Logger::instance();
         switch (level) {
             case JUICE_LOG_LEVEL_ERROR:
@@ -250,6 +270,22 @@ std::string extract_sdp_attr(const std::string& sdp, const std::string& name) {
 
 } // namespace sdp_util
 
+/** Project a gathered TCP candidate (RFC 6544) onto the concrete
+ *  Candidate shape, so the TCP winner flows through the same
+ *  selected_pair() projection as the UDP one. */
+Candidate tcp_to_candidate(const TcpCandidate& c) {
+    Candidate out;
+    out.type         = CandidateType::Host;
+    out.foundation   = c.foundation;
+    out.component_id = c.component_id;
+    out.transport    = "TCP";
+    out.priority     = c.priority();
+    out.host         = c.host;
+    out.port         = c.port;
+    out.tcptype      = to_string(c.tcptype);
+    return out;
+}
+
 } // anonymous namespace
 
 // =============================================================================
@@ -289,8 +325,17 @@ std::optional<Candidate> parse_candidate(std::string_view sdp) {
     else if (type_str == "relay") c.type = CandidateType::Relay;
     else return std::nullopt;
 
-    // Optional "raddr ... rport ..."
-    if (iss >> tok && tok == "raddr") {
+    // Optional "tcptype active|passive|so" (RFC 6544 §4.1).  Comes after
+    // the "typ <type>" pair — never confuse it with "typ" itself.
+    if (iss >> tok && tok == "tcptype") {
+        iss >> c.tcptype;
+        iss >> tok;  // step past the value; tok may now be "raddr"
+    }
+
+    // Optional "raddr ... rport ..." — when tcptype was absent, the first
+    // read above already consumed "raddr" into tok; when present, the read
+    // above did.  Either way tok holds the token to inspect now.
+    if (tok == "raddr") {
         iss >> c.related_address;
         iss >> tok; // "rport"
         iss >> c.related_port;
@@ -308,6 +353,9 @@ std::string Candidate::to_sdp() const {
         << ' ' << host
         << ' ' << port
         << " typ " << kTypeNames[static_cast<int>(type)];
+    if (!tcptype.empty()) {
+        oss << " tcptype " << tcptype;
+    }
     if (!related_address.empty()) {
         oss << " raddr " << related_address << " rport " << related_port;
     }
@@ -379,6 +427,19 @@ struct IceTransport::Impl {
     std::uint16_t                        host_port = 0;
     std::string                          srflx_addr;
     std::uint16_t                        srflx_port = 0;
+
+    // ---- Connectivity diagnostics (v1.4 plan Track N / N4) ----------------
+    //
+    // The gathering phase is derived from `agent` and `gathering_done`
+    // (above).  The three TURN facts are recorded here because libjuice
+    // exposes none of them through a public callback: the relayed-candidate
+    // attribution uses the configured-server order (agent.h has no
+    // server identity on `agent_add_local_relayed_candidate`), and a
+    // credentials rejection is only observable through the module's log
+    // hook (the process-wide `g_turn_auth_rejected` latch).
+    bool                                 unsupported_turn_transport_ = false;
+    unsigned                             relay_candidates_seen_ = 0;
+    std::optional<TurnTransport>         turn_transport_used_;
 
     plugins::IceState                             state = plugins::IceState::Disconnected;
     std::deque<Packet>                   rx_queue;
@@ -489,6 +550,30 @@ struct IceTransport::Impl {
     // cost memory and load the trust store for nothing.
     std::unique_ptr<TurnTlsClient>  turn_tls_;
 
+    // ---- ICE over TCP (RFC 6544) -------------------------------------------
+    //
+    // libjuice's ICE layer is UDP-only: it drops every candidate whose
+    // transport is not "UDP" on arrival.  The TCP path is therefore
+    // NimRTC's own driver (ADR-028, Option A), entered only when the UDP
+    // agent has failed (Decision 3).  The seam publishes the driver's
+    // gathered candidates alongside libjuice's, intercepts remote TCP
+    // candidates, and reports the driver's nominated pair through
+    // selected_pair() before libjuice's (Decision 6).
+    std::unique_ptr<TcpIceDriver>       tcp_driver_;
+    /// Gathered TCP candidates in SDP-body form ("candidate:tcp-1 1 TCP
+    /// <pri> <host> <port> typ host tcptype active"), appended to
+    /// local_description() / gathered_local_candidates().
+    std::vector<std::string>            tcp_local_candidates_;
+    /// Remote TCP candidates trickled in through add_remote_candidate()
+    /// (RFC 8838).  They can arrive before the UDP path fails, so they
+    /// are kept and re-fed to the driver when it is created.
+    std::vector<TcpCandidate>           tcp_remote_candidates_;
+
+    /// Enter the TCP path after the UDP agent failed (ADR-028 Decision 3).
+    /// Idempotent; caller holds mu_.  Re-runs after a restart once the new
+    /// UDP agent fails again.
+    void start_tcp_fallback();
+
     // ---- libjuice static callbacks ---------------------------------------
 
     static void on_state(juice_agent_t*, juice_state_t st, void* user) {
@@ -504,6 +589,13 @@ struct IceTransport::Impl {
                 self->selected_local_str  = local;
                 self->selected_remote_str = remote;
             }
+        }
+
+        // The UDP agent gave up (no pair was nominated before the
+        // connectivity timer expired, RFC 8863 §7.2.1.3).  Fall back to
+        // the TCP driver (RFC 6544) — see start_tcp_fallback().
+        if (st == JUICE_STATE_FAILED) {
+            self->start_tcp_fallback();
         }
     }
 
@@ -547,6 +639,20 @@ struct IceTransport::Impl {
                     patch_related_address(line, self->host_addr, self->host_port);
                 } else {
                     patch_related_address(line, self->srflx_addr, self->srflx_port);
+                }
+                // Attribute the relayed candidate to its configured TURN
+                // server.  libjuice reports relayed candidates in the order
+                // the servers produced allocations, which is the config
+                // order, so the k-th relayed candidate comes from the k-th
+                // configured server.  With a single configured server —
+                // every acceptance scenario — the attribution is exact.
+                if (!self->config.turn_servers.empty()) {
+                    const std::size_t idx =
+                        std::min<std::size_t>(self->relay_candidates_seen_,
+                                              self->config.turn_servers.size() - 1);
+                    self->turn_transport_used_ =
+                        self->config.turn_servers[idx].transport;
+                    ++self->relay_candidates_seen_;
                 }
                 break;
 
@@ -728,6 +834,11 @@ struct IceTransport::Impl {
             std::lock_guard<std::mutex> lk(mu);
             local_candidates.clear();
             gathering_done = false;
+            // A fresh gathering round starts with the credentials latch
+            // and the TURN facts cleared (same as open()).
+            g_turn_auth_rejected.store(false, std::memory_order_release);
+            turn_transport_used_.reset();
+            relay_candidates_seen_ = 0;
             state = plugins::IceState::Disconnected;
             selected_local_str.clear();
             selected_remote_str.clear();
@@ -737,6 +848,15 @@ struct IceTransport::Impl {
             host_port = 0;
             srflx_addr.clear();
             srflx_port = 0;
+            // The TCP fallback belongs to the old session too: a restart
+            // mints new local credentials, so the old driver's checks are
+            // stale.  The remote TCP candidates survive — they are re-fed
+            // to the next driver by start_tcp_fallback().
+            if (tcp_driver_) {
+                tcp_driver_->stop();
+                tcp_driver_.reset();
+            }
+            tcp_local_candidates_.clear();
         }
         cv_gather.notify_all();
 
@@ -905,6 +1025,57 @@ struct IceTransport::Impl {
     }
 };
 
+/** Enter the TCP path (RFC 6544) once the UDP agent has failed.
+ *
+ *  ADR-028 Decision 3: the TCP fallback runs after UDP fails — here,
+ *  when libjuice reports Failed (the remote check list was empty, so the
+ *  connectivity timer expired and no pair was nominated).  The driver
+ *  gathers fresh host TCP candidates (active + passive), publishes them
+ *  through tcp_local_candidates_, and starts its check thread.  Caller
+ *  holds mu_; idempotent. */
+void IceTransport::Impl::start_tcp_fallback() {
+    if (tcp_driver_ || state != plugins::IceState::Failed) return;
+
+    char buf[JUICE_MAX_SDP_STRING_LEN] = {0};
+    if (!agent || juice_get_local_description(agent, buf, sizeof(buf))
+                      != JUICE_ERR_SUCCESS) {
+        return;
+    }
+    const std::string local_ufrag = sdp_util::extract_sdp_attr(buf, "ice-ufrag:");
+    const std::string local_pwd   = sdp_util::extract_sdp_attr(buf, "ice-pwd:");
+
+    TcpIceDriver::Config dcfg;
+    dcfg.bind_host      = config.bind_address.empty() ? "127.0.0.1" : config.bind_address;
+    dcfg.local_ufrag    = local_ufrag;
+    dcfg.local_password = local_pwd;
+
+    auto driver = std::make_unique<TcpIceDriver>(std::move(dcfg));
+
+    std::vector<TcpCandidate> gathered;
+    if (!driver->gather(gathered)) {
+        core::log::Logger::instance().error(
+            "nimrtc::ice: TCP candidate gathering failed; staying on the "
+            "UDP failure");
+        return;
+    }
+    for (const auto& c : gathered) {
+        tcp_local_candidates_.push_back(c.to_sdp());
+    }
+
+    // The peer's credentials were cached from set_remote_description();
+    // the driver needs them to authenticate its connectivity checks.
+    driver->set_remote_credentials(remote_ufrag_str, remote_pwd_str);
+    for (const auto& c : tcp_remote_candidates_) {
+        driver->add_remote(c);
+    }
+    driver->start();
+
+    tcp_driver_ = std::move(driver);
+    core::log::Logger::instance().info(
+        "nimrtc::ice: UDP failed; TCP fallback gathered " +
+        std::to_string(gathered.size()) + " candidate(s)");
+}
+
 // =============================================================================
 // IceTransport — public interface
 // =============================================================================
@@ -959,6 +1130,13 @@ void IceTransport::add_turn_server(const TurnServer& server) noexcept {
     // else, so say so instead.  Both TURN over TCP (RFC 8656 section 12)
     // and TURN over TLS (RFC 6062) are implemented.
     if (!turn_transport_supported(server.transport)) {
+        {
+            std::lock_guard<std::mutex> lk(impl_->mu);
+            // Remember the unsupported transport: the allocation to this
+            // server will fail, and the N4 diagnostics surface it as
+            // "transport-unsupported" instead of a mysterious no-relay.
+            impl_->unsupported_turn_transport_ = true;
+        }
         core::log::Logger::instance().warn(
             std::string("ice: TURN transport ") +
             (server.transport == TurnTransport::Tls ? "TLS" : "TCP") +
@@ -1023,6 +1201,15 @@ void IceTransport::add_turn_server_with_transport(std::string_view host,
     ts.password = std::string(password);
     ts.transport = static_cast<TurnTransport>(transport);
     add_turn_server(ts);
+
+    // v1-turn-tls-trust (ADR-037): the trust policy a host expressed through
+    // the additive 7-argument plugin overload lives in the interface's own
+    // members — the concrete class does not override that overload, so this
+    // existing seam is where the policy is picked up and copied into the
+    // agent config.  `create_agent()` (called by open() *after* this) reads
+    // these two fields when it builds the TURN/TLS client.
+    impl_->config.turn_tls_verify_peer = turn_tls_verify_peer_;
+    impl_->config.turn_tls_ca_file = turn_tls_ca_file_;
 }
 
 bool IceTransport::turn_transport_supported(plugins::TurnTransport transport) const noexcept {
@@ -1033,6 +1220,7 @@ IceConfig::Mode IceTransport::resolved_mode() const noexcept {
     return resolve_mode(impl_->config);
 }
 
+// ---------------------------------------------------------------------------
 void IceTransport::set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept {
     impl_->config.local_port_range_begin = begin;
     impl_->config.local_port_range_end   = end;
@@ -1062,6 +1250,16 @@ plugins::Status IceTransport::open() noexcept {
         return plugins::kOk;   // already open
     }
     impl_->restart_count_ = 0;
+    {
+        // A fresh gathering round starts from a clean slate: the
+        // process-wide credentials latch and the per-transport TURN facts
+        // belong to the session being opened, not the previous one.
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        g_turn_auth_rejected.store(false, std::memory_order_release);
+        impl_->gathering_done = false;
+        impl_->turn_transport_used_.reset();
+        impl_->relay_candidates_seen_ = 0;
+    }
     if (!impl_->create_agent()) {
         return plugins::kErrInternal;
     }
@@ -1093,6 +1291,22 @@ void IceTransport::close() noexcept {
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->rx_queue.clear();
     impl_->state = plugins::IceState::Disconnected;
+
+    // The diagnostics state belongs to the session being closed.  The
+    // gathering phase resets to New (agent is gone above), and the TURN
+    // facts start over on the next open().
+    impl_->gathering_done = false;
+    impl_->turn_transport_used_.reset();
+    impl_->relay_candidates_seen_ = 0;
+
+    // The TCP fallback (RFC 6544) is torn down with the UDP agent: its
+    // sockets are retired and its check thread joined.
+    if (impl_->tcp_driver_) {
+        impl_->tcp_driver_->stop();
+        impl_->tcp_driver_.reset();
+    }
+    impl_->tcp_local_candidates_.clear();
+    impl_->tcp_remote_candidates_.clear();
 
     // ---- Reset the ICE restart state ----------------------------------------
     //
@@ -1206,7 +1420,16 @@ std::string IceTransport::local_description() const {
             != JUICE_ERR_SUCCESS) {
         return {};
     }
-    return std::string{buf};
+    std::string out{buf};
+    // libjuice terminates every line with \r\n; append the TCP candidates
+    // gathered after UDP failed the same way so the SDP stays uniform.
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    for (const auto& line : impl_->tcp_local_candidates_) {
+        out += "a=";
+        out += line;
+        out += "\r\n";
+    }
+    return out;
 }
 
 plugins::Status IceTransport::set_remote_description(std::string_view sdp) noexcept {
@@ -1299,12 +1522,47 @@ plugins::Status IceTransport::set_remote_description(std::string_view sdp) noexc
     if (!ufrag.empty()) impl_->remote_ufrag_str = ufrag;
     if (!pwd.empty())   impl_->remote_pwd_str = pwd;
     impl_->applied_remote_sdp_ = tmp;
+
+    // The TCP driver (RFC 6544), if the UDP agent already failed, needs
+    // the peer credentials to authenticate its connectivity checks.
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (impl_->tcp_driver_) {
+            impl_->tcp_driver_->set_remote_credentials(ufrag, pwd);
+        }
+    }
     return plugins::kOk;
 }
 
 plugins::Status IceTransport::add_remote_candidate(std::string_view sdp) noexcept {
     if (!impl_->agent) return plugins::kErrNotReady;
     std::string tmp{sdp};
+
+    // A TCP candidate (RFC 6544) belongs to the NimRTC TCP driver, not to
+    // libjuice: libjuice's ICE layer is UDP-only and drops it on arrival
+    // (ADR-028, Option A).  Trickled TCP candidates (RFC 8838) can arrive
+    // before the UDP path fails — remember them and feed the driver when
+    // it is created.
+    const auto parsed = parse_candidate(tmp);
+    if (parsed && !parsed->tcptype.empty()) {
+        TcpCandidate c;
+        c.foundation   = parsed->foundation;
+        c.component_id = parsed->component_id;
+        c.host         = parsed->host;
+        c.port         = parsed->port;
+        // "so" (simultaneous-open) is not gathered by this slice; treat it
+        // as active so the driver still attempts the connection.
+        c.tcptype      = (parsed->tcptype == "passive")
+                             ? TcpCandidateRole::Passive
+                             : TcpCandidateRole::Active;
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->tcp_remote_candidates_.push_back(c);
+        if (impl_->tcp_driver_) {
+            impl_->tcp_driver_->add_remote(c);
+        }
+        return plugins::kOk;
+    }
+
     const int rc = juice_add_remote_candidate(impl_->agent, tmp.c_str());
     if (rc != JUICE_ERR_SUCCESS) return plugins::kErrInvalidParam;
     // Remember it so an ICE restart can re-apply it to the new agent.
@@ -1392,6 +1650,16 @@ std::string IceTransport::remote_password() const noexcept {
 }
 
 std::optional<Candidate> IceTransport::selected_local() const noexcept {
+    // The TCP driver nominates independently of libjuice (ADR-028 Decision
+    // 6); report its winner first so the two sources never disagree.
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (impl_->tcp_driver_) {
+            if (const auto nom = impl_->tcp_driver_->nominated()) {
+                return tcp_to_candidate(nom->first);
+            }
+        }
+    }
     if (!impl_->agent) return std::nullopt;
     char buf[JUICE_MAX_CANDIDATE_SDP_STRING_LEN] = {0};
     if (juice_get_selected_candidates(impl_->agent, buf, sizeof(buf),
@@ -1402,6 +1670,14 @@ std::optional<Candidate> IceTransport::selected_local() const noexcept {
 }
 
 std::optional<Candidate> IceTransport::selected_remote() const noexcept {
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (impl_->tcp_driver_) {
+            if (const auto nom = impl_->tcp_driver_->nominated()) {
+                return tcp_to_candidate(nom->second);
+            }
+        }
+    }
     if (!impl_->agent) return std::nullopt;
     char buf[JUICE_MAX_CANDIDATE_SDP_STRING_LEN] = {0};
     if (juice_get_selected_candidates(impl_->agent, nullptr, 0,
@@ -1451,6 +1727,11 @@ plugins::IceCandidate to_seam_candidate(const Candidate& c) {
         case CandidateType::Prflx: out.type = "prflx"; break;
         case CandidateType::Relay: out.type = "relay"; break;
     }
+
+    // The tcptype half is already lowercase per RFC 6544 §4.1; pass it
+    // through so a host can tell a TCP pair ("active"/"passive") from a
+    // UDP one (empty).
+    out.tcptype = c.tcptype;
     return out;
 }
 
@@ -1458,6 +1739,20 @@ plugins::IceCandidate to_seam_candidate(const Candidate& c) {
 
 std::optional<plugins::IceCandidatePair>
 IceTransport::selected_pair() const noexcept {
+    // The TCP driver (RFC 6544) nominates its winner independently of
+    // libjuice (ADR-028 Decision 6).  Report it first so selected_pair()
+    // never flaps between "udp" and "tcp" as the two sources settle.
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (impl_->tcp_driver_) {
+            if (const auto nom = impl_->tcp_driver_->nominated()) {
+                plugins::IceCandidatePair pair;
+                pair.local  = to_seam_candidate(tcp_to_candidate(nom->first));
+                pair.remote = to_seam_candidate(tcp_to_candidate(nom->second));
+                return pair;
+            }
+        }
+    }
     if (!impl_->agent) return std::nullopt;
 
     char local_buf[JUICE_MAX_CANDIDATE_SDP_STRING_LEN] = {0};
@@ -1495,7 +1790,12 @@ plugins::Status IceTransport::gather_candidates() noexcept {
 std::vector<std::string>
 IceTransport::gathered_local_candidates() const noexcept {
     std::lock_guard<std::mutex> lk(impl_->mu);
-    return impl_->local_candidates;
+    auto out = impl_->local_candidates;
+    // The TCP candidates gathered after UDP failed (RFC 6544) are part of
+    // the local candidate set; the host can trickle them to the peer.
+    out.insert(out.end(), impl_->tcp_local_candidates_.begin(),
+               impl_->tcp_local_candidates_.end());
+    return out;
 }
 
 std::string_view IceTransport::gathering_state() const noexcept {
@@ -1559,6 +1859,7 @@ plugins::IICETransport* IceTransportFactory::create_ice() const {
     return new IceTransport(default_config_);
 }
 
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Public registration entry point — replaces the anonymous-namespace static
 // registrar that MSVC strips from static libraries (same workaround as

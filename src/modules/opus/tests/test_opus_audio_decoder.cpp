@@ -326,6 +326,101 @@ TEST(OpusAudioDecoder, RecoversTheLostFrameFromTheNextPacket) {
 }
 
 // ---------------------------------------------------------------------------
+// D5: DTX suppression (RFC 6716 §3.4)
+// ---------------------------------------------------------------------------
+
+/** A TOC-only packet — one byte, no frame body — for a 20 ms full-band
+ *  mono CELT frame: config 31, stereo bit 0, code 0. */
+constexpr std::uint8_t kDtxPacket[1] = {0xF8};
+
+TEST(OpusAudioDecoder, DtxSilenceFrameIsFlagged) {
+    auto dec = make_decoder();
+    ASSERT_NE(dec, nullptr);
+
+    // The peer negotiated DTX: the decoder is told the stream carries
+    // suppressed frames.
+    nimrtc::plugins::AudioDecodeFormat fmt = dec->format();
+    fmt.use_dtx = true;
+    ASSERT_EQ(dec->update_format(fmt), nimrtc::plugins::kOk);
+
+    nimrtc::plugins::AudioDecodedFrame frames[4];
+    const std::size_t n = dec->decode_packet(kDtxPacket, 1,
+                                              /*rtp_timestamp=*/1000, frames, 4);
+    ASSERT_EQ(n, 1u);
+
+    EXPECT_TRUE(frames[0].dtx_silence);
+    EXPECT_FALSE(frames[0].concealed);
+    EXPECT_FALSE(frames[0].fec_recovered);
+    EXPECT_EQ(frames[0].rtp_timestamp, 1000u);
+    EXPECT_EQ(frames[0].samples_per_channel, kFrameSamples);  // a full slot of silence
+    EXPECT_EQ(frames[0].duration_ms, 20);
+    // The slot is digital silence, not synthetic audio.
+    EXPECT_EQ(rms(frames[0].pcm, frames[0].samples_per_channel), 0.0);
+
+    const auto stats = dec->stats();
+    EXPECT_EQ(stats.frames_decoded, 1u);
+    EXPECT_EQ(stats.bytes_decoded, 1u);
+    EXPECT_EQ(stats.decode_errors, 0u);
+}
+
+TEST(OpusAudioDecoder, TheDtxCriterionIsStructuralAndDoesNotDependOnTheNegotiation) {
+    // Decision D5-1: the criterion is the wire shape (the frame body
+    // length is 0), never the decoded PCM.  The flag is therefore set
+    // even when the decoder was not told DTX was negotiated.
+    auto dec = make_decoder();
+    ASSERT_NE(dec, nullptr);
+
+    nimrtc::plugins::AudioDecodedFrame frames[4];
+    const std::size_t n = dec->decode_packet(kDtxPacket, 1, 0, frames, 4);
+    ASSERT_EQ(n, 1u);
+    EXPECT_TRUE(frames[0].dtx_silence);
+    EXPECT_FALSE(frames[0].concealed);
+}
+
+TEST(OpusAudioDecoder, ANormalFrameIsNotDtxSilence) {
+    auto dec = make_decoder();
+    ASSERT_NE(dec, nullptr);
+
+    const auto payload = encode_one_payload(1);
+    nimrtc::plugins::AudioDecodedFrame frames[4];
+    ASSERT_EQ(dec->decode_packet(payload.data(), payload.size(), 0, frames, 4), 1u);
+    EXPECT_FALSE(frames[0].dtx_silence);
+    EXPECT_FALSE(frames[0].concealed);
+    EXPECT_FALSE(frames[0].fec_recovered);
+}
+
+TEST(OpusAudioDecoder, ADtxPacketAfterALossIsNotMisclassifiedByFec) {
+    // Decision D5-2: the DTX check runs before the FEC attempt.  A
+    // TOC-only packet carries no in-band redundancy — had FEC run first,
+    // the silence would be read as "a gap with no redundancy to recover"
+    // and the slot lost instead of played out as silence.
+    auto dec = make_decoder();
+    ASSERT_NE(dec, nullptr);
+
+    // A normal frame first: it gives the plugin its timeline.
+    const auto payload0 = encode_one_payload(1);
+    nimrtc::plugins::AudioDecodedFrame frames[4];
+    ASSERT_EQ(dec->decode_packet(payload0.data(), payload0.size(), 0, frames, 4), 1u);
+
+    // The slot at 960 is lost; the packet that follows (at 1920) is a
+    // DTX packet.  It must decode as a silence frame — no FEC recovery,
+    // no decode error.
+    const std::size_t n = dec->decode_packet(kDtxPacket, 1,
+                                             /*rtp_timestamp=*/2 * kFrameSamples,
+                                             frames, 4);
+    ASSERT_EQ(n, 1u);
+    EXPECT_TRUE(frames[0].dtx_silence);
+    EXPECT_FALSE(frames[0].fec_recovered);
+    EXPECT_FALSE(frames[0].concealed);
+    EXPECT_EQ(frames[0].rtp_timestamp, 2u * kFrameSamples);
+
+    const auto stats = dec->stats();
+    EXPECT_EQ(stats.frames_decoded, 2u);
+    EXPECT_EQ(stats.decode_errors, 0u);
+    EXPECT_EQ(stats.fec_recovered_frames, 0u);
+}
+
+// ---------------------------------------------------------------------------
 // Format negotiation
 // ---------------------------------------------------------------------------
 

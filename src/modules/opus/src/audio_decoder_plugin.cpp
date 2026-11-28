@@ -6,8 +6,14 @@
  *
  *   1. `opus::depacketise()` splits the RFC 7587 payload into its Opus
  *      frames (RFC 6716 §3.2 codes 0..3);
- *   2. every frame is decoded with the module's concrete `opus::Decoder`;
- *   3. a gap — either signalled by the caller through `decode_plc()` or
+ *   2. a TOC-only frame (1-byte packet, no body) is the sender's DTX
+ *      suppression of that media slot (RFC 6716 §3.4) and is emitted as
+ *      a full slot of digital silence, flagged `dtx_silence` — before
+ *      any FEC attempt, because a suppressed frame carries no in-band
+ *      redundancy (D5);
+ *   3. every other frame is decoded with the module's concrete
+ *      `opus::Decoder`;
+ *   4. a gap — either signalled by the caller through `decode_plc()` or
  *      detected from a jump in the RTP timestamp — makes the next packet
  *      be decoded in FEC mode first, which reconstructs the **lost** frame
  *      from the redundancy the peer embedded in that packet.  The
@@ -106,7 +112,8 @@ struct AudioDecoderPlugin::Impl {
                                       std::uint32_t ts,
                                       std::uint16_t duration_ms,
                                       bool concealed,
-                                      bool fec_recovered) {
+                                      bool fec_recovered,
+                                      bool dtx_silence = false) {
         if (out.size() >= max_frames) return nullptr;
         const std::size_t ch = fmt.channels ? fmt.channels : 1;
         frame_pcm.emplace_back(pcm, pcm + samples * ch);
@@ -120,6 +127,7 @@ struct AudioDecoderPlugin::Impl {
         f.duration_ms        = duration_ms;
         f.concealed          = concealed;
         f.fec_recovered      = fec_recovered;
+        f.dtx_silence        = dtx_silence;
         return &f;
     }
 };
@@ -212,6 +220,54 @@ std::size_t AudioDecoderPlugin::decode_packet(const std::uint8_t* payload,
     std::uint32_t ts = rtp_timestamp;
     for (std::size_t i = 0; i < num_views; ++i) {
         const PacketView& v = views[i];
+
+        // ---- DTX suppression (D5) -------------------------------------
+        //
+        // A TOC-only packet — one byte, no frame body — is the sender
+        // suppressing this media slot under DTX (RFC 6716 §3.4).  The
+        // criterion is **structural** (the frame body length is 0),
+        // never "the decoded PCM is all zero": a real silence frame
+        // decodes to a full body and must not be confused with a
+        // suppression.  `depacketise()` on a 1-byte payload yields a
+        // code-0 view with `size == 0`.
+        //
+        // The check runs **before** the FEC attempt: a suppressed frame
+        // carries no in-band redundancy, so running FEC first would
+        // misclassify the silence as an unrecoverable loss (decision
+        // D5-2).  The suppressed frame is emitted as a full slot of
+        // digital silence — the sample count comes from the frame's own
+        // duration, so the media timeline advances exactly as if the
+        // frame had arrived (decision D5-1: the silence is sender-side
+        // suppression, never a loss to conceal).
+        if (v.size == 0) {
+            gap = false;
+            impl_->pending_fec = false;
+            if (!impl_->fmt.use_dtx) {
+                NIMRTC_LOG_DEBUG("opus::AudioDecoderPlugin: TOC-only (DTX) "
+                                 "packet from a peer that did not negotiate "
+                                 "usedtx");
+            }
+            const auto dtx_ms = v.frame_size_ms
+                                ? v.frame_size_ms
+                                : static_cast<std::uint16_t>(20);
+            const std::uint32_t n =
+                (static_cast<std::uint32_t>(dtx_ms) * rate) / 1000u;
+            if (n == 0 || n > impl_->scratch.size() / channels) {
+                impl_->stats.decode_errors++;
+                break;
+            }
+            std::fill(impl_->scratch.begin(),
+                      impl_->scratch.begin() + static_cast<std::size_t>(n) * channels,
+                      0.0f);
+            if (!impl_->emit(frames, max_frames, impl_->scratch.data(), n,
+                             ts, dtx_ms, /*concealed=*/false,
+                             /*fec_recovered=*/false, /*dtx_silence=*/true)) {
+                break;  // the caller's array is full
+            }
+            ts += n;
+            impl_->stats.frames_decoded++;
+            continue;
+        }
 
         // ---- Rebuild the complete Opus packet -------------------------
         //

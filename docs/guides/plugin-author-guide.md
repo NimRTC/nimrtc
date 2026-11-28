@@ -64,7 +64,7 @@ a **registration macro**, and — for the seams the engine resolves — an
 
 Two facts in that table deserve to be read twice:
 
-1. **The audio device seams ARE registry slots** (v1.4 D1, ADR-028).  They
+1. **The audio device seams ARE registry slots** (v1.4 D1, ADR-040).  They
    used to resolve through the module's own lookup functions
    (`nimrtc::audio_device::source_factory(id)`), because a device backend
    was a *module* concern; that made the engine unable to resolve a

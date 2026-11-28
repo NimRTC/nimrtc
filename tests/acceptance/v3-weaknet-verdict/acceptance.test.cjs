@@ -111,8 +111,11 @@ test(
       '缺少 5% 丢包 + 100ms 抖动档位常量');
     // 缺省关闭：默认跑数集合必须排除恶劣档。
     assert.match(bench, /HARSH_TIER_ID = "harsh-5pct-100ms"/, '缺少恶劣档 id 常量');
+    // 缺省集合用「排除清单」而不是「排除单个常量」——`DEFAULT_TIERS` 排除的
+    // 档位不止恶劣档（重排档同样是 opt-in 的，见工具里的注释）。所以断言要
+    // 认「`not in (...)`」这个形状，而不是硬编「`!= HARSH_TIER_ID`」一个。
     assert.match(bench,
-      /DEFAULT_TIERS = tuple\(t for t in TIERS if t\["id"\] != HARSH_TIER_ID\)/,
+      /DEFAULT_TIERS = tuple\(\s*t for t in TIERS if t\["id"\] not in \([^)]*HARSH_TIER_ID[^)]*\)/s,
       '缺省集合必须排除恶劣档');
     assert.match(bench, /tiers = DEFAULT_TIERS/,
       '不传 --tier 时应用缺省档位集合');

@@ -348,21 +348,52 @@ TEST(IceConsentFreshness, T4_NullCallbackDoesNotCrash) {
     t.force_consent_armed_for_testing();
     t.notify_binding_received();
 
-    // Wait long enough that the timer would fire if there were a callback.
-    std::this_thread::sleep_for(3 * kConsentTimeoutMs * 1ms);
+    // Wait until the tracker has actually observed the loss.  "The timer
+    // fired" and "the tracker noticed" are two different moments: the
+    // tracker publishes `consent_lost_fired_` under the lock and then runs
+    // the (null) callback outside it, so the flag can lag the tick by a
+    // whole tick interval.
+    //
+    // A fixed sleep is not enough.  The tracker's tick is 100 ms, the
+    // timeout is 200 ms, and the runner may deschedule the tracker for
+    // longer than that; a sleep of 3× the timeout therefore says nothing
+    // about whether the tick happened yet.
+    constexpr auto budget = 5 * kConsentTimeoutMs * 1ms + 500ms;
+    const bool fired = WaitFor([&] { return t.consent_lost_pending(); }, budget);
+    ASSERT_TRUE(fired)
+        << "the tracker never observed the consent loss within " << budget.count()
+        << "ms with timeout=" << kConsentTimeoutMs << "ms";
 
     // The flag is set whether or not a callback exists — it documents that
     // "consent lost" was observed, not that the callback ran.
     EXPECT_TRUE(t.consent_lost_pending());
 
-    // Set a non-null callback AFTER expiry — must be safe; calling it now
-    // would re-fire only after another full timeout (we don't wait that
-    // long in the test, but verify the registration path is still alive).
-    int later_count = 0;
-    t.set_on_consent_lost([&] { ++later_count; });
+    // Re-arm *before* installing the counting callback.
+    //
+    // The tracker copies the callback under `consent_mu_` and invokes the
+    // copy *outside* it (so a user callback may call back into the
+    // transport without deadlocking).  `set_on_consent_lost()` takes the
+    // same mutex, so the copy and the registration are serialized -- but
+    // only with respect to each other.  If the registration wins the race,
+    // an expiry branch that is already in flight picks up the *new*
+    // callback and calls it, so `later_count` becomes 1 even though no
+    // fresh loss event happened.
+    //
+    // Re-arming first closes that window.  The re-arm resets the clock, so
+    // the tracker needs another full timeout before it can expire; the
+    // tick that is already in flight sees the fresh clock and does not
+    // fire; and the copy it takes (if it is still in the expiry branch)
+    // is the *old* one -- the null callback.
     t.notify_binding_received();              // clear pending + rearm
     EXPECT_FALSE(t.consent_lost_pending());
-    EXPECT_EQ(later_count, 0);
+
+    // Now installing the callback is safe: the re-arm just opened a fresh
+    // timeout window, so no tick can fire in the microseconds between here
+    // and the assertion below.
+    int later_count = 0;
+    t.set_on_consent_lost([&] { ++later_count; });
+    EXPECT_EQ(later_count, 0)
+        << "installing a callback must not call it — the re-arm opened the window";
 
     t.close();
 }
@@ -384,7 +415,16 @@ TEST(IceConsentFreshness, T5_NotifyDuringCallbackClearsPendingFlag) {
     //
     // The callback blocks until the test has issued its notify, which pins
     // the ordering deterministically (no reliance on scheduler luck).
-    IceConfig cfg = MakeConfig();
+    //
+    // The consent timeout is 1000 ms, not the suite default of 200 ms, for
+    // the same reason T3 uses 1000 ms: the tracker rearms itself when it
+    // fires, so with a short timeout the tracker can expire a *second*
+    // time and publish the pending flag again while the test is still
+    // arranging its notify. The long window gives the test a full second
+    // to issue the notify before the tracker's own auto-rearm can fire.
+    constexpr std::int64_t kTimeoutMs  = 1000;
+    constexpr std::int64_t kIntervalMs = 100;
+    IceConfig cfg = MakeConfig({kTimeoutMs, kIntervalMs});
     IceTransport t{cfg};
     ASSERT_EQ(t.open(), nimrtc::plugins::kOk);
 

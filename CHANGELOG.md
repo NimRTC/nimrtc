@@ -294,6 +294,46 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The v1.4 plan's drift detector was reading D3 and D4's *old*
+  claims, and the plan's own prose contradicted its own script
+  (2026-11-28).**
+  `tools/check_v14_plan_status.py` executes the v1.4 plan's §10
+  verification table against the tree.  Each row asserts either the
+  **absence** of a thing or its **presence**, and a row's expectation
+  has to *flip* when its item lands — otherwise it reports STALE
+  forever, and a permanent false alarm is how a checker teaches people
+  to ignore it.
+
+  Slice `v1-device-policy` closed **D3** (the per-platform default
+  capture table moves out of the remote-desktop example and into the
+  engine) and **D4** (the engine watches the capture device list and
+  re-opens a device that went away).  Their rows were never flipped.
+  D3's row still probed `examples/remote-desktop` for the literal
+  backend ids — which the example still *prints* in its `--help` text,
+  so the row kept reporting `ok` **for the wrong reason** — and D4's
+  row still asserted that `src/modules/video_capture` contains no
+  hot-plug at all, which is true but is not what D4 was about: the
+  hot-plug story lives in the *engine*, and the optional capability
+  seam lives in `src/plugins/`.
+
+  Both rows now ask for the thing that replaced the claim, and the
+  report is clean: **26 of 26 `ok`, no STALE** (it was 23 rows before,
+  and D3 / D4 contributed three more).
+
+  The plan's §0a and §10 prose said **"all 22 rows"** while the script
+  said 23 — the prose had been left behind by the N4 / D6 flip and
+  nobody reconciled the two.  Both now say 26, and the D3 / D4 rows
+  in §10's table carry the commands the probes actually run.  The gap
+  inventory's two references to the report's size are updated with
+  them.
+
+  What this changes: **nothing in the tree's behaviour.**  The
+  per-platform default table, the resolution rule that reads it, the
+  device-change poll, the re-open, and the `ICaptureDeviceEventSource`
+  seam were all already in the tree — D3 and D4 landed in slice
+  `v1-device-policy` (`db2dc0de`) and the rows were the only thing
+  that never caught up.
+
 - **The macOS CI leg could not prove its own export path: it configured
   without `NIMRTC_INSTALL=ON` (2026-11-28).**
   The macOS leg gained an "Install + downstream proof" step — install

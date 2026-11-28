@@ -270,6 +270,35 @@ def search(where: str, pattern: str) -> list[str]:
     return [ln for ln in proc.stdout.splitlines() if ln.strip()]
 
 
+def closed_items(text: str) -> set[str]:
+    """The items the plan's tables declare CLOSED.
+
+    A row in the plan's §0a looks like::
+
+        | **D3 + D4** default device policy, camera + hot-plug | ... | **CLOSED.** ... |
+
+    -- the item id may be **one** id or a **group** of them, because a
+    slice can close two items at once.  A guard that only understood
+    the single-id form would not see D3 and D4 as closed, and would
+    therefore not protect their rows: the very check that is supposed
+    to keep a landed item's row flipped to "present" would go blind on
+    exactly the items that share a slice with another.
+
+    So the id cell is split on "+" and every part is returned.  The
+    cell is the *first* column, and the CLOSED marker is in the third,
+    which is why the pattern has to skip one column between them.
+    """
+    found: set[str] = set()
+    for match in re.finditer(
+        r"\|\s*\*\*([A-Z]\d+(?:\s*\+\s*[A-Z]\d+)*)\*\*[^|]*\|[^|]*\|"
+        r"\s*\*\*CLOSED",
+        text,
+    ):
+        for part in re.split(r"\s*\+\s*", match.group(1)):
+            found.add(part)
+    return found
+
+
 def report_lines(
     probes: list[tuple[str, str, str, str, str]] | None = None,
 ) -> tuple[list[str], list[str]]:
@@ -371,6 +400,35 @@ def self_test() -> int:
               "the printed marker and the stale list must agree "
               "(expect=%s, pattern=%r)" % (expect, pattern))
 
+    # The CLOSED extraction must understand a **grouped** id cell.
+    # A slice can close two items at once, and the plan writes that as
+    # one row whose id cell is `**D3 + D4**`.  A guard that only
+    # understood the single-id form would not see D3 and D4 as closed,
+    # and so would not protect their rows -- the check that is supposed
+    # to keep a landed item's row flipped to "present" would go blind
+    # on exactly the items that share a slice with another.
+    #
+    # This is pinned against a synthetic plan, not the real one, so it
+    # keeps holding whatever the real plan's rows look like.
+    synthetic = (
+        "| **D3 + D4** default device policy, camera + hot-plug "
+        "| §1.2: \"the default policy lives in an example\" "
+        "| **CLOSED.**  the slice landed "
+        "| slice `v1-device-policy` (`db2dc0de`) |\n"
+        "| **N1** TURN/TLS | §1.1: \"silently degraded\" "
+        "| **CLOSED.**  the slice landed "
+        "| slice `v1-turn-tls` |\n"
+        "| **N6** the SDK sample | §1.1: \"does not exist\" "
+        "| not done yet | slice `v1-sdk-sample` |\n"
+    )
+    closed = closed_items(synthetic)
+    check(closed == {"D3", "D4", "N1"},
+          "the CLOSED extraction must find D3, D4 and N1 in the "
+          "synthetic plan -- a grouped id cell must yield every id in "
+          "the group -- but found %s" % sorted(closed))
+    check("N6" not in closed,
+          "an item that is not CLOSED must not be reported as closed")
+
     # The table must agree with the plan.  This is the check that
     # catches the failure mode the checker exists for: an item the plan
     # declares CLOSED but whose row still asserts the *absence* of the
@@ -378,9 +436,7 @@ def self_test() -> int:
     plan = ROOT / "docs" / "plan" / "v1.4-plan.md"
     if plan.exists():
         text = plan.read_text(encoding="utf-8")
-        closed = set(re.findall(
-            r"\|\s*\*\*([A-Z]\d+)\*\*[^|]*\|[^|]*\|\s*\*\*CLOSED",
-            text))
+        closed = closed_items(text)
         for item in sorted(closed):
             rows = [p for p in PROBES if p[0] == item]
             check(bool(rows),

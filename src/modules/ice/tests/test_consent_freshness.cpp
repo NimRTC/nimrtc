@@ -415,7 +415,16 @@ TEST(IceConsentFreshness, T5_NotifyDuringCallbackClearsPendingFlag) {
     //
     // The callback blocks until the test has issued its notify, which pins
     // the ordering deterministically (no reliance on scheduler luck).
-    IceConfig cfg = MakeConfig();
+    //
+    // The consent timeout is 1000 ms, not the suite default of 200 ms, for
+    // the same reason T3 uses 1000 ms: the tracker rearms itself when it
+    // fires, so with a short timeout the tracker can expire a *second*
+    // time and publish the pending flag again while the test is still
+    // arranging its notify. The long window gives the test a full second
+    // to issue the notify before the tracker's own auto-rearm can fire.
+    constexpr std::int64_t kTimeoutMs  = 1000;
+    constexpr std::int64_t kIntervalMs = 100;
+    IceConfig cfg = MakeConfig({kTimeoutMs, kIntervalMs});
     IceTransport t{cfg};
     ASSERT_EQ(t.open(), nimrtc::plugins::kOk);
 

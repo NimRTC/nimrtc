@@ -969,8 +969,6 @@ struct IceTransport::Impl {
                 }
             }
 
-            const std::int64_t now = now_us();
-
             // ---- Expiry check + fire + rearm (one critical section) --------
             //
             // Everything that touches the timer state is serialized by
@@ -978,9 +976,22 @@ struct IceTransport::Impl {
             // this tick can never be lost: it either completes before the
             // check (and is seen by it) or after the rearm (and clears the
             // flag set below).
+            //
+            // The clock is read *inside* the critical section, and so is
+            // the rearm.  Reading it outside would open a window: a
+            // notify_binding_received() that lands between the read and
+            // the lock acquisition would set the clock to T1 and clear the
+            // pending flag, and the tracker would then rearm to the *older*
+            // T0 and re-publish `consent_lost_fired_ = true`.  The clock
+            // would move backwards and the pending flag would come back up
+            // -- which is exactly the failure
+            // IceConsentFreshness.T5_NotifyDuringCallbackClearsPendingFlag
+            // exists to catch, and it is what made that test fail on the
+            // macOS arm64 runner (PR #195, run 46095260527).
             plugins::OnConsentLost cb_copy;
             {
                 std::lock_guard<std::mutex> lk(consent_mu_);
+                const std::int64_t now = now_us();
                 const std::int64_t last_us = last_binding_received_us_;
                 if (last_us == 0) continue;   // not yet primed
                 const std::int64_t age_us = now - last_us;
